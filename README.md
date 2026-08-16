@@ -1,0 +1,2 @@
+# BotAFKKingMC
+bot afk
