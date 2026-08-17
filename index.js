@@ -1209,7 +1209,7 @@ function showToast(message){
 
 function route(){
   const match =
-    location.hash.match(/^#\/bot\/(1|2|3)$/);
+    location.hash.match(/^#\\/bot\\/(1|2|3)$/);
 
   if (match){
     currentBotId = Number(match[1]);
