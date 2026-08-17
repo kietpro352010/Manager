@@ -480,7 +480,7 @@ function startAfkRoutine(state) {
         return;
     }
 
-    clearAfkTimers();
+    clearAfkTimers(state);
 
     state.ready = false;
     state.status = 'entering';
