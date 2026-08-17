@@ -306,8 +306,8 @@ function connectBot(state) {
         return;
     }
 
-    clearAfkTimers();
-    clearReconnectTimer();
+    clearAfkTimers(state);
+    clearReconnectTimer(state);
 
     state.ready = false;
     state.status = 'connecting';
