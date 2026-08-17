@@ -967,25 +967,25 @@ function renderHome(){
     const [color, label] = statusMeta(bot.status);
     const ping = bot.ping == null ? '--' : bot.ping + ' ms';
 
-    return `
-      <div class="card" onclick="openBot(${bot.id})">
+    return \`
+      <div class="card" onclick="openBot(\${bot.id})">
         <div class="card-head">
-          <div class="bot-name">BOT ${bot.id}</div>
+          <div class="bot-name">BOT \${bot.id}</div>
           <div class="status">
-            <span class="dot ${color}"></span>${label}
+            <span class="dot \${color}"></span>\${label}
           </div>
         </div>
 
         <div class="card-user">
-          ${escapeHtml(bot.username || 'Chưa đặt')}
+          \${escapeHtml(bot.username || 'Chưa đặt')}
         </div>
 
         <div class="card-meta">
-          <span>${escapeHtml(bot.host)}:${bot.port}</span>
-          <span>${ping}</span>
+          <span>\${escapeHtml(bot.host)}:\${bot.port}</span>
+          <span>\${ping}</span>
         </div>
       </div>
-    `;
+    \`;
   }).join('');
 }
 
