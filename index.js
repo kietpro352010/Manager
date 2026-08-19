@@ -275,11 +275,6 @@ function startBot(state) {
         state.manuallyStopped = false;
     }
 
-    addLog(
-        state,
-        'Bắt đầu bot từ đầu.'
-    );
-
     connectBot(state);
 
     return true;
@@ -348,10 +343,6 @@ function registerEvents(state, bot) {
         state.ready = false;
         state.connectedAt = Date.now();
 
-        addLog(
-            state,
-            'Đã spawn vào server.'
-        );
     });
 
     bot.on('message', jsonMsg => {
@@ -363,20 +354,51 @@ function registerEvents(state, bot) {
     });
 
     bot.on('windowOpen', window => {
-        const title =
-            window && window.title
-                ? cleanMinecraftText(
-                    window.title.toString()
-                )
-                : '';
+        let title = '';
 
-        addLog(
-            state,
-            `GUI mở: ${title || 'unknown'}`
-        );
+        try {
+            const rawTitle =
+                window && window.title
+                    ? window.title
+                    : '';
+
+            if (typeof rawTitle === 'string') {
+                title =
+                    cleanMinecraftText(
+                        rawTitle
+                    );
+            } else if (
+                rawTitle &&
+                typeof rawTitle === 'object'
+            ) {
+                title =
+                    cleanMinecraftText(
+                        rawTitle.text ||
+                        rawTitle.toString()
+                    );
+            } else if (rawTitle) {
+                title =
+                    cleanMinecraftText(
+                        rawTitle.toString()
+                    );
+            }
+        } catch (_) {
+            title = '';
+        }
+
+        if (title) {
+            addLog(
+                state,
+                `Đã mở GUI ${title}.`
+            );
+        } else {
+            addLog(
+                state,
+                'Đã mở GUI.'
+            );
+        }
     });
 }
-
 function connectBot(state) {
     if (state.manuallyStopped) {
         return;
@@ -439,6 +461,7 @@ function connectBot(state) {
         bot
     );
 }
+
 function handleServerMessage(
     state,
     bot,
@@ -450,10 +473,35 @@ function handleServerMessage(
     const lowerMsg =
         cleanMsg.toLowerCase();
 
-    addLog(
-        state,
-        `[MC] ${cleanMsg}`
-    );
+    // Giữ toàn bộ [MC] message trên web,
+    // chỉ bỏ những message spam/không cần thiết.
+    const blockedMcLogPatterns = [
+        'đăng nhập bằng lệnh',
+        'đăng nhập thành công',
+        'phiên đăng nhập đã được kết nối trở lại',
+        'bạn đã đăng nhập!',
+        'kingmc.vn',
+        'nếu phát hiện người chơi khác có',
+        'hành vi gian lận',
+        'và gửi cho admin'
+    ];
+
+    const shouldShowMcLog =
+        !blockedMcLogPatterns.some(
+            pattern =>
+                lowerMsg.includes(pattern)
+        );
+
+    if (shouldShowMcLog) {
+        addLog(
+            state,
+            `[MC] ${cleanMsg}`
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Lobby detection + /dn
+    // -------------------------------------------------------------------------
 
     if (
         lowerMsg.includes('kingmc.vn')
@@ -497,9 +545,10 @@ function handleServerMessage(
                 state.status =
                     'authenticating';
 
+                // Log ngắn gọn, thay cho message server spam.
                 addLog(
                     state,
-                    'Xác nhận đang ở Lobby KingMC.'
+                    'Đã nhận diện Lobby KingMC.'
                 );
 
                 if (!state.password) {
@@ -526,11 +575,8 @@ function handleServerMessage(
                             !state.manuallyStopped &&
                             state.bot === bot
                         ) {
-                            addLog(
-                                state,
-                                'Đã chờ /dn. ' +
-                                'Bắt đầu routine /menu.'
-                            );
+                            // Không log:
+                            // "Đã chờ /dn. Bắt đầu routine /menu."
 
                             startAfkRoutine(
                                 state
@@ -546,6 +592,10 @@ function handleServerMessage(
 
         return;
     }
+
+    // -------------------------------------------------------------------------
+    // Fallback /register
+    // -------------------------------------------------------------------------
 
     if (
         state.password &&
@@ -569,6 +619,7 @@ function handleServerMessage(
             now - state.lastAuthTime > 3000
         ) {
             state.lastAuthTime = now;
+
             state.status =
                 'authenticating';
 
@@ -584,6 +635,10 @@ function handleServerMessage(
 
         return;
     }
+
+    // -------------------------------------------------------------------------
+    // Fallback /login
+    // -------------------------------------------------------------------------
 
     if (
         state.password &&
@@ -607,6 +662,7 @@ function handleServerMessage(
             now - state.lastAuthTime > 3000
         ) {
             state.lastAuthTime = now;
+
             state.status =
                 'authenticating';
 
@@ -635,11 +691,6 @@ function startAfkRoutine(state) {
     state.ready = false;
     state.status = 'entering';
 
-    addLog(
-        state,
-        'Bắt đầu AFK routine. /menu sau 6 giây...'
-    );
-
     const menuTimer =
         setTimeout(() => {
             if (
@@ -648,11 +699,6 @@ function startAfkRoutine(state) {
             ) {
                 return;
             }
-
-            addLog(
-                state,
-                'Gửi /menu...'
-            );
 
             state.bot.chat('/menu');
 
@@ -664,11 +710,6 @@ function startAfkRoutine(state) {
                     ) {
                         return;
                     }
-
-                    addLog(
-                        state,
-                        'Đợi GUI /menu rồi click slot 24...'
-                    );
 
                     const currentWindow =
                         state.bot.currentWindow;
@@ -708,7 +749,6 @@ function startAfkRoutine(state) {
                     } catch (err) {
                         state.ready = false;
                         state.status = 'online';
-
                         addLog(
                             state,
                             `Lỗi click slot 24: ${err.message}`
@@ -1190,7 +1230,7 @@ label{
         <input
           id="usernameInput"
           autocomplete="off"
-          placeholder="Nhập username mới"
+          placeholder="Username mới (có thể để trống)"
         >
 
       </div>
@@ -1205,7 +1245,7 @@ label{
           id="passwordInput"
           type="password"
           autocomplete="new-password"
-          placeholder="Nhập password mới"
+          placeholder="Password mới (có thể để trống)"
         >
 
       </div>
@@ -1218,8 +1258,8 @@ label{
       </button>
 
       <div class="note">
-        Thay đổi được lưu vào runtime hiện tại.
-        Bấm "Chạy lại" để bot kết nối lại bằng thông tin mới.
+        Có thể đổi username hoặc password riêng lẻ.
+        Bấm "Chạy lại" để áp dụng tài khoản mới.
       </div>
 
     </div>
@@ -1460,7 +1500,6 @@ async function loadLogs(force = false) {
 
     const keepAtBottom =
       isNearLogBottom(box);
-
     if (!data.logs.length) {
 
       box.innerHTML = '';
@@ -1675,27 +1714,20 @@ async function sendMessage(event) {
 async function saveAccount() {
 
   const username =
-    document.getElementById(
-      'usernameInput'
-    )
-    .value
-    .trim();
+    document
+      .getElementById('usernameInput')
+      .value
+      .trim();
 
   const password =
-    document.getElementById(
-      'passwordInput'
-    )
-    .value;
+    document
+      .getElementById('passwordInput')
+      .value;
 
-  if (
-    !username ||
-    !password
-  ) {
-
+  if (!username && !password) {
     showToast(
-      'Cần nhập username và password.'
+      'Nhập username hoặc password cần thay đổi.'
     );
-
     return;
   }
 
@@ -1705,18 +1737,17 @@ async function saveAccount() {
       await fetch(
         '/api/bot/account',
         {
-          method:'POST',
+          method: 'POST',
 
-          headers:{
+          headers: {
             'Content-Type':
               'application/json'
           },
 
-          body:
-            JSON.stringify({
-              username,
-              password
-            })
+          body: JSON.stringify({
+            username,
+            password
+          })
         }
       );
 
@@ -1724,12 +1755,10 @@ async function saveAccount() {
       await response.json();
 
     if (!response.ok) {
-
       showToast(
         data.error ||
         'Lưu thất bại.'
       );
-
       return;
     }
 
@@ -1746,7 +1775,8 @@ async function saveAccount() {
       .value = '';
 
     showToast(
-      'Đã lưu. Bấm "Chạy lại" để áp dụng.'
+      data.message ||
+      'Đã lưu thay đổi. Bấm "Chạy lại" để áp dụng.'
     );
 
     await refresh();
@@ -1799,6 +1829,7 @@ setInterval(
 
 </body>
 </html>`;
+
 // -----------------------------------------------------------------------------
 // API: current bot state
 // -----------------------------------------------------------------------------
@@ -1870,7 +1901,6 @@ app.post(
         });
     }
 );
-
 // -----------------------------------------------------------------------------
 // Stop bot
 // -----------------------------------------------------------------------------
@@ -2011,42 +2041,45 @@ app.post(
     (req, res) => {
 
         const username =
-            typeof req.body?.username ===
-            'string'
+            typeof req.body?.username === 'string'
                 ? req.body.username.trim()
                 : '';
 
         const password =
-            typeof req.body?.password ===
-            'string'
+            typeof req.body?.password === 'string'
                 ? req.body.password
                 : '';
 
-        if (
-            !username ||
-            !password
-        ) {
+        if (!username && !password) {
             return res.status(400).json({
                 error:
-                    'Username và password không được trống.'
+                    'Nhập username hoặc password cần thay đổi.'
             });
         }
 
-        botState.username =
-            username;
+        const changed = [];
 
-        botState.password =
-            password;
+        if (username) {
+            botState.username =
+                username;
+            changed.push('username');
+        }
+
+        if (password) {
+            botState.password =
+                password;
+            changed.push('password');
+        }
 
         addLog(
             botState,
-            'Đã thay đổi username/password từ web.'
+            `Đã thay đổi ${changed.join(' + ')} từ web.`
         );
 
         res.json({
             ok: true,
             message:
-                'Đã lưu thay đổi.'
+                `Đã lưu ${changed.join(' + ')}.`
         });
     }
 );
@@ -2107,15 +2140,6 @@ const server = app.listen(
     }
 );
 
-// -----------------------------------------------------------------------------
-// Startup
-//
-// IMPORTANT:
-// Credentials from ENV are loaded into runtime,
-// BUT the bot NEVER connects automatically.
-//
-// The user must press "Chạy" from the web.
-// -----------------------------------------------------------------------------
 // -----------------------------------------------------------------------------
 // Extra lightweight status endpoint
 //
@@ -2227,3 +2251,36 @@ if (
         'Bot đang OFFLINE: chưa có username/password. Nhập tài khoản trên web rồi bấm Chạy.'
     );
 }
+// ============================================================================
+// END OF FILE
+// ============================================================================
+//
+// File này là bản 1-bot hoàn chỉnh.
+//
+// Chức năng giữ lại:
+// - Mineflayer
+// - Express dashboard
+// - Login /dn
+// - Fallback /register
+// - Fallback /login
+// - Lobby detection
+// - /menu
+// - Click slot 24
+// - AFK state
+// - Start / Stop / Restart
+// - Reconnect + host fallback
+// - Chat / command
+// - Runtime username/password
+// - Health endpoint
+// - Lightweight status endpoint
+// - Manual start only
+// - UTC+7 log time
+// - Log filtering
+// - Log scroll position preservation
+// - View distance tuning
+// - Graceful shutdown
+//
+// Lưu ý:
+// Phần này chỉ là marker kết thúc file.
+// Không cần thêm code khác sau đây.
+// ============================================================================
