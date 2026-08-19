@@ -72,6 +72,11 @@ function createBotState() {
         manuallyStopped: true,
         connectedAt: null,
 
+        // Session statistics.
+        // Reset only when "Chạy lại" is pressed.
+        uptimeStartedAt: null,
+        reconnectCount: 0,
+
         reconnectTimer: null,
         afkTimers: [],
         lastAuthTime: 0,
@@ -152,6 +157,47 @@ function getPing(state) {
     return null;
 }
 
+function getUptimeSeconds(state) {
+    if (!state.uptimeStartedAt) {
+        return 0;
+    }
+
+    const elapsed =
+        Math.floor(
+            (Date.now() - state.uptimeStartedAt) / 1000
+        );
+
+    // Maximum display: 998h 59m 59s.
+    return Math.min(
+        elapsed,
+        (999 * 60 * 60) - 1
+    );
+}
+
+function formatUptime(state) {
+    const totalSeconds =
+        getUptimeSeconds(state);
+
+    const hours =
+        Math.floor(
+            totalSeconds / 3600
+        );
+
+    const minutes =
+        Math.floor(
+            (totalSeconds % 3600) / 60
+        );
+
+    const seconds =
+        totalSeconds % 60;
+
+    return (
+        `${hours}h ` +
+        `${minutes}m ` +
+        `${seconds}s`
+    );
+}
+
 function publicBotState(state) {
     return {
         id: state.id,
@@ -161,10 +207,21 @@ function publicBotState(state) {
         ping: getPing(state),
         host: currentHost(state),
         port: PORT,
-        version: MC_VERSION,
-        viewDistance: VIEW_DISTANCE,
-        connectedAt: state.connectedAt,
-        logRevision: state.logRevision
+
+        uptimeSeconds:
+            getUptimeSeconds(state),
+
+        uptime:
+            formatUptime(state),
+
+        reconnectCount:
+            state.reconnectCount,
+
+        connectedAt:
+            state.connectedAt,
+
+        logRevision:
+            state.logRevision
     };
 }
 
@@ -329,6 +386,15 @@ function registerEvents(state, bot) {
             'Mất kết nối.'
         );
 
+        // Unexpected disconnect: count reconnect.
+        // Uptime is intentionally preserved.
+        state.reconnectCount++;
+
+        addLog(
+            state,
+            `Reconnect #${state.reconnectCount}.`
+        );
+
         if (HOSTS.length > 1) {
             state.hostIndex =
                 (state.hostIndex + 1) %
@@ -337,12 +403,16 @@ function registerEvents(state, bot) {
 
         scheduleReconnect(state);
     });
-
     bot.once('spawn', () => {
         state.status = 'online';
         state.ready = false;
         state.connectedAt = Date.now();
 
+        // Start uptime only once per "Chạy lại" session.
+        // Normal reconnects keep the existing uptime.
+        if (!state.uptimeStartedAt) {
+            state.uptimeStartedAt = Date.now();
+        }
     });
 
     bot.on('message', jsonMsg => {
@@ -399,6 +469,7 @@ function registerEvents(state, bot) {
         }
     });
 }
+
 function connectBot(state) {
     if (state.manuallyStopped) {
         return;
@@ -736,7 +807,6 @@ function startAfkRoutine(state) {
 
                         state.ready = true;
                         state.status = 'afk';
-
                         addLog(
                             state,
                             'Đã click slot 24.'
@@ -1120,30 +1190,29 @@ label{
 
         <div class="info-item">
           <div class="info-label">
-            VERSION
+            UPTIME
           </div>
 
           <div
-            id="detailVersion"
+            id="detailUptime"
             class="info-value"
           >
-            -
+            0h 0m 0s
           </div>
         </div>
 
         <div class="info-item">
           <div class="info-label">
-            VIEW DISTANCE
+            RECONNECTS
           </div>
 
           <div
-            id="detailViewDistance"
+            id="detailReconnects"
             class="info-value"
           >
-            -
+            0
           </div>
         </div>
-
       </div>
 
       <div class="controls">
@@ -1283,6 +1352,8 @@ let lastLogRevision = -1;
 
 let logRequestInFlight = false;
 
+let uptimeSyncAt = Date.now();
+
 function statusMeta(status) {
 
   const map = {
@@ -1349,6 +1420,9 @@ async function getBot() {
   bot =
     await response.json();
 
+  uptimeSyncAt =
+    Date.now();
+
   return bot;
 }
 
@@ -1402,17 +1476,19 @@ function renderDetail() {
 
   document
     .getElementById(
-      'detailVersion'
+      'detailUptime'
     )
     .textContent =
-      bot.version || '-';
+      bot.uptime || '0h 0m 0s';
 
   document
     .getElementById(
-      'detailViewDistance'
+      'detailReconnects'
     )
     .textContent =
-      bot.viewDistance || '-';
+      String(
+        bot.reconnectCount ?? 0
+      );
 
   // Intentionally do not pre-fill usernameInput.
   // This prevents refresh() from rolling back what the user is typing.
@@ -1500,6 +1576,7 @@ async function loadLogs(force = false) {
 
     const keepAtBottom =
       isNearLogBottom(box);
+
     if (!data.logs.length) {
 
       box.innerHTML = '';
@@ -1565,7 +1642,6 @@ function escapeHtml(value) {
       '&#039;'
     );
 }
-
 async function refresh() {
 
   try {
@@ -1825,6 +1901,67 @@ setInterval(
   ${STATUS_POLL_MS}
 );
 
+function updateUptimeDisplay() {
+  if (!bot) {
+    return;
+  }
+
+  const syncedSeconds =
+    Number(
+      bot.uptimeSeconds || 0
+    );
+
+  const elapsedSinceSync =
+    Math.floor(
+      (Date.now() - uptimeSyncAt) / 1000
+    );
+
+  const uptimeSeconds =
+    Math.min(
+      syncedSeconds + elapsedSinceSync,
+      (999 * 60 * 60) - 1
+    );
+
+  const hours =
+    Math.floor(
+      uptimeSeconds / 3600
+    );
+
+  const minutes =
+    Math.floor(
+      (uptimeSeconds % 3600) / 60
+    );
+
+  const seconds =
+    uptimeSeconds % 60;
+
+  const hoursText =
+    hours + 'h ';
+
+  const minutesText =
+    minutes + 'm ';
+
+  const secondsText =
+    seconds + 's';
+
+  const element =
+    document.getElementById(
+      'detailUptime'
+    );
+
+  if (element) {
+    element.textContent =
+      hoursText +
+      minutesText +
+      secondsText;
+  }
+}
+
+setInterval(
+  updateUptimeDisplay,
+  1000
+);
+
 </script>
 
 </body>
@@ -1940,6 +2077,10 @@ app.post(
                     'Bot chưa có username/password.'
             });
         }
+
+        // Only "Chạy lại" resets session statistics.
+        botState.uptimeStartedAt = null;
+        botState.reconnectCount = 0;
 
         botState.manuallyStopped = true;
 
@@ -2251,6 +2392,7 @@ if (
         'Bot đang OFFLINE: chưa có username/password. Nhập tài khoản trên web rồi bấm Chạy.'
     );
 }
+
 // ============================================================================
 // END OF FILE
 // ============================================================================
