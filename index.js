@@ -2116,27 +2116,6 @@ const server = app.listen(
 //
 // The user must press "Chạy" from the web.
 // -----------------------------------------------------------------------------
-
-botState.manuallyStopped = true;
-
-if (
-    botState.username &&
-    botState.password
-) {
-
-    addLog(
-        botState,
-        'Có credential. Bot đang OFFLINE và chờ bấm Chạy từ web.'
-    );
-
-} else {
-
-    addLog(
-        botState,
-        'Bot 1 đang OFFLINE (chưa có credential). Bấm Chạy sau khi nhập tài khoản.'
-    );
-
-}
 // -----------------------------------------------------------------------------
 // Extra lightweight status endpoint
 //
