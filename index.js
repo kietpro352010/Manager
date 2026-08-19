@@ -6,7 +6,8 @@ const HTTP_PORT = Number(process.env.PORT || 10000);
 
 const MAX_LOGS = 100;
 const RECONNECT_DELAY = 10000;
-const STATUS_POLL_MS = 3000;
+const STATUS_POLL_MS = 1000;
+const UPTIME_UPDATE_MS = 250;
 
 const MC_VERSION = '1.20.1';
 const HOSTS = (process.env.MC_SERVER_HOSTS || 'sgp.kingmc.vn,kingmc.vn')
@@ -72,9 +73,10 @@ function createBotState() {
         manuallyStopped: true,
         connectedAt: null,
 
-        // Session statistics.
-        // Reset only when "Chạy lại" is pressed.
-        uptimeStartedAt: null,
+        // AFK uptime statistics.
+        // Uptime counts only while status === 'afk'.
+        afkElapsedSeconds: 0,
+        afkStartedAt: null,
         reconnectCount: 0,
 
         reconnectTimer: null,
@@ -157,19 +159,56 @@ function getPing(state) {
     return null;
 }
 
-function getUptimeSeconds(state) {
-    if (!state.uptimeStartedAt) {
-        return 0;
+function updateAfkUptime(state) {
+    if (
+        state.afkStartedAt &&
+        state.status === 'afk'
+    ) {
+        state.afkElapsedSeconds +=
+            Math.floor(
+                (Date.now() - state.afkStartedAt) / 1000
+            );
+
+        state.afkStartedAt =
+            Date.now();
+    }
+}
+
+function setBotStatus(state, status) {
+    if (
+        state.status === 'afk' &&
+        status !== 'afk'
+    ) {
+        updateAfkUptime(state);
+        state.afkStartedAt = null;
     }
 
-    const elapsed =
-        Math.floor(
-            (Date.now() - state.uptimeStartedAt) / 1000
-        );
+    if (
+        status === 'afk' &&
+        state.status !== 'afk'
+    ) {
+        state.afkStartedAt = Date.now();
+    }
 
-    // Maximum display: 998h 59m 59s.
+    state.status = status;
+}
+
+function getUptimeSeconds(state) {
+    let total =
+        state.afkElapsedSeconds || 0;
+
+    if (
+        state.status === 'afk' &&
+        state.afkStartedAt
+    ) {
+        total +=
+            Math.floor(
+                (Date.now() - state.afkStartedAt) / 1000
+            );
+    }
+
     return Math.min(
-        elapsed,
+        Math.max(total, 0),
         (999 * 60 * 60) - 1
     );
 }
@@ -236,7 +275,7 @@ function scheduleReconnect(state) {
     clearAfkTimers(state);
 
     state.ready = false;
-    state.status = 'connecting';
+    setBotStatus(state, 'connecting');
 
     state.reconnectTimer = setTimeout(() => {
         state.reconnectTimer = null;
@@ -259,7 +298,7 @@ function disconnectBot(
     clearAllTimers(state);
 
     state.ready = false;
-    state.status = 'offline';
+    setBotStatus(state, 'offline');
     state.connectedAt = null;
 
     const currentBot = state.bot;
@@ -309,7 +348,7 @@ function startBot(state) {
             'Không thể chạy: thiếu username hoặc password.'
         );
 
-        state.status = 'offline';
+        setBotStatus(state, 'offline');
 
         return false;
     }
@@ -321,7 +360,7 @@ function startBot(state) {
     state.hostIndex = 0;
     state.ready = false;
     state.connectedAt = null;
-    state.status = 'connecting';
+    setBotStatus(state, 'connecting');
 
     if (state.bot) {
         disconnectBot(
@@ -336,7 +375,6 @@ function startBot(state) {
 
     return true;
 }
-
 function registerEvents(state, bot) {
     bot.on('error', err => {
         addLog(
@@ -351,7 +389,7 @@ function registerEvents(state, bot) {
                 ? reason
                 : JSON.stringify(reason);
 
-        state.status = 'kicked';
+        setBotStatus(state, 'kicked');
         state.ready = false;
 
         addLog(
@@ -369,7 +407,7 @@ function registerEvents(state, bot) {
         state.connectedAt = null;
 
         if (state.manuallyStopped) {
-            state.status = 'offline';
+            setBotStatus(state, 'offline');
 
             addLog(
                 state,
@@ -379,7 +417,7 @@ function registerEvents(state, bot) {
             return;
         }
 
-        state.status = 'offline';
+        setBotStatus(state, 'offline');
 
         addLog(
             state,
@@ -387,7 +425,7 @@ function registerEvents(state, bot) {
         );
 
         // Unexpected disconnect: count reconnect.
-        // Uptime is intentionally preserved.
+        // AFK uptime is frozen because status is no longer AFK.
         state.reconnectCount++;
 
         addLog(
@@ -403,16 +441,11 @@ function registerEvents(state, bot) {
 
         scheduleReconnect(state);
     });
+
     bot.once('spawn', () => {
-        state.status = 'online';
+        setBotStatus(state, 'online');
         state.ready = false;
         state.connectedAt = Date.now();
-
-        // Start uptime only once per "Chạy lại" session.
-        // Normal reconnects keep the existing uptime.
-        if (!state.uptimeStartedAt) {
-            state.uptimeStartedAt = Date.now();
-        }
     });
 
     bot.on('message', jsonMsg => {
@@ -479,7 +512,7 @@ function connectBot(state) {
     clearReconnectTimer(state);
 
     state.ready = false;
-    state.status = 'connecting';
+    setBotStatus(state, 'connecting');
 
     const host = currentHost(state);
 
@@ -513,7 +546,7 @@ function connectBot(state) {
             defaultChatPatterns: true
         });
     } catch (err) {
-        state.status = 'offline';
+        setBotStatus(state, 'offline');
 
         addLog(
             state,
@@ -613,10 +646,8 @@ function handleServerMessage(
                 state.lastAuthTime = now;
 
                 state.ready = false;
-                state.status =
-                    'authenticating';
+                setBotStatus(state, 'authenticating');
 
-                // Log ngắn gọn, thay cho message server spam.
                 addLog(
                     state,
                     'Đã nhận diện Lobby KingMC.'
@@ -646,9 +677,6 @@ function handleServerMessage(
                             !state.manuallyStopped &&
                             state.bot === bot
                         ) {
-                            // Không log:
-                            // "Đã chờ /dn. Bắt đầu routine /menu."
-
                             startAfkRoutine(
                                 state
                             );
@@ -691,8 +719,7 @@ function handleServerMessage(
         ) {
             state.lastAuthTime = now;
 
-            state.status =
-                'authenticating';
+            setBotStatus(state, 'authenticating');
 
             bot.chat(
                 `/register ${state.password} ${state.password}`
@@ -734,8 +761,7 @@ function handleServerMessage(
         ) {
             state.lastAuthTime = now;
 
-            state.status =
-                'authenticating';
+            setBotStatus(state, 'authenticating');
 
             bot.chat(
                 `/login ${state.password}`
@@ -760,7 +786,7 @@ function startAfkRoutine(state) {
     clearAfkTimers(state);
 
     state.ready = false;
-    state.status = 'entering';
+    setBotStatus(state, 'entering');
 
     const menuTimer =
         setTimeout(() => {
@@ -781,7 +807,6 @@ function startAfkRoutine(state) {
                     ) {
                         return;
                     }
-
                     const currentWindow =
                         state.bot.currentWindow;
 
@@ -806,7 +831,8 @@ function startAfkRoutine(state) {
                         );
 
                         state.ready = true;
-                        state.status = 'afk';
+                        setBotStatus(state, 'afk');
+
                         addLog(
                             state,
                             'Đã click slot 24.'
@@ -818,7 +844,8 @@ function startAfkRoutine(state) {
                         );
                     } catch (err) {
                         state.ready = false;
-                        state.status = 'online';
+                        setBotStatus(state, 'online');
+
                         addLog(
                             state,
                             `Lỗi click slot 24: ${err.message}`
@@ -1615,7 +1642,6 @@ async function loadLogs(force = false) {
 
   }
 }
-
 function escapeHtml(value) {
 
   return String(
@@ -1642,6 +1668,7 @@ function escapeHtml(value) {
       '&#039;'
     );
 }
+
 async function refresh() {
 
   try {
@@ -1912,9 +1939,11 @@ function updateUptimeDisplay() {
     );
 
   const elapsedSinceSync =
-    Math.floor(
-      (Date.now() - uptimeSyncAt) / 1000
-    );
+    bot.status === 'afk'
+      ? Math.floor(
+          (Date.now() - uptimeSyncAt) / 1000
+        )
+      : 0;
 
   const uptimeSeconds =
     Math.min(
@@ -1959,7 +1988,7 @@ function updateUptimeDisplay() {
 
 setInterval(
   updateUptimeDisplay,
-  1000
+  ${UPTIME_UPDATE_MS}
 );
 
 </script>
@@ -2038,6 +2067,7 @@ app.post(
         });
     }
 );
+
 // -----------------------------------------------------------------------------
 // Stop bot
 // -----------------------------------------------------------------------------
@@ -2078,8 +2108,10 @@ app.post(
             });
         }
 
-        // Only "Chạy lại" resets session statistics.
-        botState.uptimeStartedAt = null;
+        // "Chạy lại" resets AFK uptime and reconnect count.
+        updateAfkUptime(botState);
+        botState.afkElapsedSeconds = 0;
+        botState.afkStartedAt = null;
         botState.reconnectCount = 0;
 
         botState.manuallyStopped = true;
@@ -2107,7 +2139,6 @@ app.post(
         });
     }
 );
-
 // -----------------------------------------------------------------------------
 // Chat / command
 // -----------------------------------------------------------------------------
@@ -2375,7 +2406,7 @@ process.on(
 
 botState.manuallyStopped = true;
 botState.ready = false;
-botState.status = 'offline';
+setBotStatus(botState, 'offline');
 botState.connectedAt = null;
 
 if (
