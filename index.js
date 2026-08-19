@@ -6,14 +6,22 @@ const HTTP_PORT = Number(process.env.PORT || 10000);
 
 const MAX_LOGS = 100;
 const RECONNECT_DELAY = 10000;
+const STATUS_POLL_MS = 3000;
 
-// Giữ đúng protocol/host/port đang chạy ổn trong bản cũ.
 const MC_VERSION = '1.20.1';
 const HOSTS = (process.env.MC_SERVER_HOSTS || 'sgp.kingmc.vn,kingmc.vn')
     .split(',')
     .map(host => host.trim())
     .filter(Boolean);
 const PORT = Number(process.env.MC_SERVER_PORT || 25565);
+
+// Network / client-load tuning.
+// Mineflayer officially supports far / normal / short / tiny / numeric view distance.
+// tiny is the lowest named setting and is appropriate for an AFK bot.
+const VIEW_DISTANCE = process.env.MC_VIEW_DISTANCE || 'tiny';
+const CHECK_TIMEOUT_INTERVAL = Number(
+    process.env.MC_CHECK_TIMEOUT_MS || 30000
+);
 
 app.use(express.json({ limit: '8kb' }));
 
@@ -35,8 +43,15 @@ function cleanMinecraftText(text) {
 
 function getEnvCredentials() {
     return {
-        username: process.env.BOT1_USERNAME || process.env.MC_USERNAME || '',
-        password: process.env.BOT1_PASSWORD || process.env.MC_PASSWORD || ''
+        username:
+            process.env.BOT1_USERNAME ||
+            process.env.MC_USERNAME ||
+            '',
+
+        password:
+            process.env.BOT1_PASSWORD ||
+            process.env.MC_PASSWORD ||
+            ''
     };
 }
 
@@ -45,6 +60,7 @@ function createBotState() {
 
     return {
         id: 1,
+
         username: credentials.username,
         password: credentials.password,
 
@@ -60,20 +76,29 @@ function createBotState() {
         afkTimers: [],
         lastAuthTime: 0,
 
-        logs: []
+        logs: [],
+        logRevision: 0
     };
 }
 
 const botState = createBotState();
 
 function addLog(state, message) {
-    const time = new Date().toLocaleTimeString('en-GB');
+    const time = new Date().toLocaleTimeString('vi-VN', {
+        timeZone: 'Asia/Ho_Chi_Minh',
+        hour12: false
+    });
+
     const line = `${time} ${message}`;
 
     state.logs.push(line);
+    state.logRevision++;
 
     if (state.logs.length > MAX_LOGS) {
-        state.logs.splice(0, state.logs.length - MAX_LOGS);
+        state.logs.splice(
+            0,
+            state.logs.length - MAX_LOGS
+        );
     }
 
     console.log(`[BOT ${state.id}] ${message}`);
@@ -100,13 +125,20 @@ function clearAllTimers(state) {
 }
 
 function currentHost(state) {
-    return HOSTS[state.hostIndex] || HOSTS[0] || 'sgp.kingmc.vn';
+    return (
+        HOSTS[state.hostIndex] ||
+        HOSTS[0] ||
+        'sgp.kingmc.vn'
+    );
 }
 
 function getPing(state) {
     if (!state.bot) return null;
 
-    if (state.bot.player && Number.isFinite(state.bot.player.ping)) {
+    if (
+        state.bot.player &&
+        Number.isFinite(state.bot.player.ping)
+    ) {
         return state.bot.player.ping;
     }
 
@@ -130,12 +162,17 @@ function publicBotState(state) {
         host: currentHost(state),
         port: PORT,
         version: MC_VERSION,
-        connectedAt: state.connectedAt
+        viewDistance: VIEW_DISTANCE,
+        connectedAt: state.connectedAt,
+        logRevision: state.logRevision
     };
 }
 
 function scheduleReconnect(state) {
-    if (state.manuallyStopped || state.reconnectTimer) {
+    if (
+        state.manuallyStopped ||
+        state.reconnectTimer
+    ) {
         return;
     }
 
@@ -152,10 +189,16 @@ function scheduleReconnect(state) {
         }
     }, RECONNECT_DELAY);
 
-    addLog(state, `Sẽ reconnect sau ${RECONNECT_DELAY / 1000}s.`);
+    addLog(
+        state,
+        `Sẽ reconnect sau ${RECONNECT_DELAY / 1000}s.`
+    );
 }
 
-function disconnectBot(state, reason = 'Stopped') {
+function disconnectBot(
+    state,
+    reason = 'Stopped'
+) {
     clearAllTimers(state);
 
     state.ready = false;
@@ -163,6 +206,7 @@ function disconnectBot(state, reason = 'Stopped') {
     state.connectedAt = null;
 
     const currentBot = state.bot;
+
     state.bot = null;
 
     if (!currentBot) {
@@ -172,7 +216,9 @@ function disconnectBot(state, reason = 'Stopped') {
     try {
         currentBot.removeAllListeners();
 
-        if (typeof currentBot.quit === 'function') {
+        if (
+            typeof currentBot.quit === 'function'
+        ) {
             currentBot.quit(reason);
         }
     } catch (err) {
@@ -184,17 +230,30 @@ function disconnectBot(state, reason = 'Stopped') {
 
 function stopBot(state) {
     state.manuallyStopped = true;
-    addLog(state, 'Dừng bot từ web.');
-    disconnectBot(state, 'Stopped from web panel');
+
+    addLog(
+        state,
+        'Dừng bot từ web.'
+    );
+
+    disconnectBot(
+        state,
+        'Stopped from web panel'
+    );
 }
 
 function startBot(state) {
-    if (!state.username || !state.password) {
+    if (
+        !state.username ||
+        !state.password
+    ) {
         addLog(
             state,
             'Không thể chạy: thiếu username hoặc password.'
         );
+
         state.status = 'offline';
+
         return false;
     }
 
@@ -202,29 +261,39 @@ function startBot(state) {
 
     clearAllTimers(state);
 
-    // Khi bấm Chạy/Chạy lại, luôn bắt đầu lại flow từ đầu.
     state.hostIndex = 0;
     state.ready = false;
     state.connectedAt = null;
     state.status = 'connecting';
 
     if (state.bot) {
-        disconnectBot(state, 'Restart from web panel');
+        disconnectBot(
+            state,
+            'Restart from web panel'
+        );
+
         state.manuallyStopped = false;
     }
 
-    addLog(state, 'Bắt đầu bot từ đầu.');
+    addLog(
+        state,
+        'Bắt đầu bot từ đầu.'
+    );
+
     connectBot(state);
 
     return true;
 }
 
 function registerEvents(state, bot) {
-    bot.on('error', (err) => {
-        addLog(state, `Lỗi kết nối: ${err.message}`);
+    bot.on('error', err => {
+        addLog(
+            state,
+            `Lỗi kết nối: ${err.message}`
+        );
     });
 
-    bot.on('kicked', (reason) => {
+    bot.on('kicked', reason => {
         const reasonText =
             typeof reason === 'string'
                 ? reason
@@ -249,16 +318,26 @@ function registerEvents(state, bot) {
 
         if (state.manuallyStopped) {
             state.status = 'offline';
-            addLog(state, 'Đã ngắt kết nối.');
+
+            addLog(
+                state,
+                'Đã ngắt kết nối.'
+            );
+
             return;
         }
 
         state.status = 'offline';
-        addLog(state, 'Mất kết nối.');
+
+        addLog(
+            state,
+            'Mất kết nối.'
+        );
 
         if (HOSTS.length > 1) {
             state.hostIndex =
-                (state.hostIndex + 1) % HOSTS.length;
+                (state.hostIndex + 1) %
+                HOSTS.length;
         }
 
         scheduleReconnect(state);
@@ -269,17 +348,26 @@ function registerEvents(state, bot) {
         state.ready = false;
         state.connectedAt = Date.now();
 
-        addLog(state, 'Đã spawn vào server.');
+        addLog(
+            state,
+            'Đã spawn vào server.'
+        );
     });
 
-    bot.on('message', (jsonMsg) => {
-        handleServerMessage(state, bot, jsonMsg);
+    bot.on('message', jsonMsg => {
+        handleServerMessage(
+            state,
+            bot,
+            jsonMsg
+        );
     });
 
-    bot.on('windowOpen', (window) => {
+    bot.on('windowOpen', window => {
         const title =
             window && window.title
-                ? cleanMinecraftText(window.title.toString())
+                ? cleanMinecraftText(
+                    window.title.toString()
+                )
                 : '';
 
         addLog(
@@ -304,7 +392,9 @@ function connectBot(state) {
 
     addLog(
         state,
-        `Đang kết nối tới ${host}:${PORT} | Minecraft ${MC_VERSION}`
+        `Đang kết nối tới ${host}:${PORT} | ` +
+        `Minecraft ${MC_VERSION} | ` +
+        `ViewDistance ${VIEW_DISTANCE}`
     );
 
     let bot;
@@ -315,7 +405,19 @@ function connectBot(state) {
             port: PORT,
             username: state.username,
             version: MC_VERSION,
-            auth: 'offline'
+            auth: 'offline',
+
+            keepAlive: true,
+            checkTimeoutInterval:
+                CHECK_TIMEOUT_INTERVAL,
+
+            viewDistance:
+                VIEW_DISTANCE,
+
+            logErrors: false,
+
+            chat: 'enabled',
+            defaultChatPatterns: true
         });
     } catch (err) {
         state.status = 'offline';
@@ -326,31 +428,52 @@ function connectBot(state) {
         );
 
         scheduleReconnect(state);
+
         return;
     }
 
     state.bot = bot;
-    registerEvents(state, bot);
+
+    registerEvents(
+        state,
+        bot
+    );
 }
-function handleServerMessage(state, bot, jsonMsg) {
+function handleServerMessage(
+    state,
+    bot,
+    jsonMsg
+) {
     const text = jsonMsg.toString();
-    const cleanMsg = cleanMinecraftText(text);
-    const lowerMsg = cleanMsg.toLowerCase();
+    const cleanMsg =
+        cleanMinecraftText(text);
+    const lowerMsg =
+        cleanMsg.toLowerCase();
 
-    addLog(state, `[MC] ${cleanMsg}`);
+    addLog(
+        state,
+        `[MC] ${cleanMsg}`
+    );
 
-    // Giữ nguyên lobby detection từ bản cũ.
-    if (lowerMsg.includes('kingmc.vn')) {
-        const pos = bot && bot.entity
-            ? bot.entity.position
-            : null;
+    if (
+        lowerMsg.includes('kingmc.vn')
+    ) {
+        const pos =
+            bot && bot.entity
+                ? bot.entity.position
+                : null;
 
         let isLobby = false;
 
         if (pos) {
-            const dx = Math.abs(pos.x - 0.50);
-            const dy = Math.abs(pos.y - 41.00);
-            const dz = Math.abs(pos.z - 0.80);
+            const dx =
+                Math.abs(pos.x - 0.50);
+
+            const dy =
+                Math.abs(pos.y - 41.00);
+
+            const dz =
+                Math.abs(pos.z - 0.80);
 
             if (
                 dx <= 2.0 &&
@@ -369,8 +492,10 @@ function handleServerMessage(state, bot, jsonMsg) {
                 now - state.lastAuthTime > 5000
             ) {
                 state.lastAuthTime = now;
+
                 state.ready = false;
-                state.status = 'authenticating';
+                state.status =
+                    'authenticating';
 
                 addLog(
                     state,
@@ -382,42 +507,59 @@ function handleServerMessage(state, bot, jsonMsg) {
                         state,
                         'Thiếu password, không thể gửi /dn.'
                     );
+
                     return;
                 }
 
-                // Giữ nguyên logic /dn đang chạy tốt.
-                bot.chat(`/dn ${state.password}`);
-                addLog(state, 'Đã gửi /dn.');
+                bot.chat(
+                    `/dn ${state.password}`
+                );
 
-                const timer = setTimeout(() => {
-                    if (
-                        !state.manuallyStopped &&
-                        state.bot === bot
-                    ) {
-                        addLog(
-                            state,
-                            'Đã chờ /dn. Bắt đầu routine /menu.'
-                        );
+                addLog(
+                    state,
+                    'Đã gửi /dn.'
+                );
 
-                        startAfkRoutine(state);
-                    }
-                }, 2500);
+                const timer =
+                    setTimeout(() => {
+                        if (
+                            !state.manuallyStopped &&
+                            state.bot === bot
+                        ) {
+                            addLog(
+                                state,
+                                'Đã chờ /dn. ' +
+                                'Bắt đầu routine /menu.'
+                            );
 
-                state.afkTimers.push(timer);
+                            startAfkRoutine(
+                                state
+                            );
+                        }
+                    }, 2500);
+
+                state.afkTimers.push(
+                    timer
+                );
             }
         }
 
         return;
     }
 
-    // Giữ nguyên fallback login/register.
     if (
         state.password &&
         (
             lowerMsg.includes('/dk') ||
-            lowerMsg.includes('dang ky bang lenh') ||
-            lowerMsg.includes('dang ky') ||
-            lowerMsg.includes('/register')
+            lowerMsg.includes(
+                'dang ky bang lenh'
+            ) ||
+            lowerMsg.includes(
+                'dang ky'
+            ) ||
+            lowerMsg.includes(
+                '/register'
+            )
         )
     ) {
         const now = Date.now();
@@ -427,13 +569,17 @@ function handleServerMessage(state, bot, jsonMsg) {
             now - state.lastAuthTime > 3000
         ) {
             state.lastAuthTime = now;
-            state.status = 'authenticating';
+            state.status =
+                'authenticating';
 
             bot.chat(
                 `/register ${state.password} ${state.password}`
             );
 
-            addLog(state, 'Đã gửi /register.');
+            addLog(
+                state,
+                'Đã gửi /register.'
+            );
         }
 
         return;
@@ -443,9 +589,15 @@ function handleServerMessage(state, bot, jsonMsg) {
         state.password &&
         (
             lowerMsg.includes('/dn') ||
-            lowerMsg.includes('vui long') ||
-            lowerMsg.includes('dang nhap') ||
-            lowerMsg.includes('/login')
+            lowerMsg.includes(
+                'vui long'
+            ) ||
+            lowerMsg.includes(
+                'dang nhap'
+            ) ||
+            lowerMsg.includes(
+                '/login'
+            )
         )
     ) {
         const now = Date.now();
@@ -455,16 +607,26 @@ function handleServerMessage(state, bot, jsonMsg) {
             now - state.lastAuthTime > 3000
         ) {
             state.lastAuthTime = now;
-            state.status = 'authenticating';
+            state.status =
+                'authenticating';
 
-            bot.chat(`/login ${state.password}`);
-            addLog(state, 'Đã gửi /login.');
+            bot.chat(
+                `/login ${state.password}`
+            );
+
+            addLog(
+                state,
+                'Đã gửi /login.'
+            );
         }
     }
 }
 
 function startAfkRoutine(state) {
-    if (state.manuallyStopped || !state.bot) {
+    if (
+        state.manuallyStopped ||
+        !state.bot
+    ) {
         return;
     }
 
@@ -478,18 +640,8 @@ function startAfkRoutine(state) {
         'Bắt đầu AFK routine. /menu sau 6 giây...'
     );
 
-    const menuTimer = setTimeout(() => {
-        if (
-            state.manuallyStopped ||
-            !state.bot
-        ) {
-            return;
-        }
-
-        addLog(state, 'Gửi /menu...');
-        state.bot.chat('/menu');
-
-        const clickTimer = setTimeout(() => {
+    const menuTimer =
+        setTimeout(() => {
             if (
                 state.manuallyStopped ||
                 !state.bot
@@ -499,63 +651,91 @@ function startAfkRoutine(state) {
 
             addLog(
                 state,
-                'Đợi GUI /menu rồi click slot 24...'
+                'Gửi /menu...'
             );
 
-            const currentWindow = state.bot.currentWindow;
+            state.bot.chat('/menu');
 
-            if (!currentWindow) {
-                addLog(
-                    state,
-                    'Không có GUI /menu. Thử lại routine.'
-                );
+            const clickTimer =
+                setTimeout(() => {
+                    if (
+                        state.manuallyStopped ||
+                        !state.bot
+                    ) {
+                        return;
+                    }
 
-                startAfkRoutine(state);
-                return;
-            }
+                    addLog(
+                        state,
+                        'Đợi GUI /menu rồi click slot 24...'
+                    );
 
-            try {
-                state.bot.clickWindow(24, 0, 0);
+                    const currentWindow =
+                        state.bot.currentWindow;
 
-                state.ready = true;
-                state.status = 'afk';
+                    if (!currentWindow) {
+                        addLog(
+                            state,
+                            'Không có GUI /menu. Thử lại routine.'
+                        );
 
-                addLog(
-                    state,
-                    'Đã click slot 24.'
-                );
+                        startAfkRoutine(
+                            state
+                        );
 
-                addLog(
-                    state,
-                    '✅ Đã vào trạng thái AFK.'
-                );
-            } catch (err) {
-                state.ready = false;
-                state.status = 'online';
+                        return;
+                    }
 
-                addLog(
-                    state,
-                    `Lỗi click slot 24: ${err.message}`
-                );
-            }
-        }, 4000);
+                    try {
+                        state.bot.clickWindow(
+                            24,
+                            0,
+                            0
+                        );
 
-        state.afkTimers.push(clickTimer);
-    }, 6000);
+                        state.ready = true;
+                        state.status = 'afk';
 
-    state.afkTimers.push(menuTimer);
+                        addLog(
+                            state,
+                            'Đã click slot 24.'
+                        );
+
+                        addLog(
+                            state,
+                            '✅ Đã vào trạng thái AFK.'
+                        );
+                    } catch (err) {
+                        state.ready = false;
+                        state.status = 'online';
+
+                        addLog(
+                            state,
+                            `Lỗi click slot 24: ${err.message}`
+                        );
+                    }
+                }, 4000);
+
+            state.afkTimers.push(
+                clickTimer
+            );
+        }, 6000);
+
+    state.afkTimers.push(
+        menuTimer
+    );
 }
-
-// -----------------------------------------------------------------------------
-// Dashboard UI
-// -----------------------------------------------------------------------------
 
 const HTML = `<!doctype html>
 <html lang="vi">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+>
 <title>KingMC Bot Manager</title>
+
 <style>
 :root{
   color-scheme:dark;
@@ -571,18 +751,26 @@ const HTML = `<!doctype html>
   --blue:#4da3ff;
 }
 
-*{box-sizing:border-box}
+*{
+  box-sizing:border-box
+}
 
 body{
   margin:0;
   min-height:100vh;
   background:var(--bg);
   color:var(--text);
-  font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  font-family:
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif
 }
 
-button,input{
-  font:inherit;
+button,
+input{
+  font:inherit
 }
 
 button{
@@ -591,26 +779,26 @@ button{
   background:#1a2530;
   color:var(--text);
   padding:9px 13px;
-  cursor:pointer;
+  cursor:pointer
 }
 
 button:hover{
-  background:#22313f;
+  background:#22313f
 }
 
 button.primary{
   background:#1769aa;
-  border-color:#2588d2;
+  border-color:#2588d2
 }
 
 button.danger{
   background:#3a1717;
-  border-color:#682525;
+  border-color:#682525
 }
 
 button:disabled{
   opacity:.45;
-  cursor:not-allowed;
+  cursor:not-allowed
 }
 
 input{
@@ -620,57 +808,64 @@ input{
   border:1px solid var(--border);
   background:#0d1319;
   color:var(--text);
-  outline:none;
+  outline:none
 }
 
 input:focus{
-  border-color:#3d88c7;
+  border-color:#3d88c7
 }
 
 .app{
-  width:min(1080px,calc(100% - 28px));
+  width:min(
+    1080px,
+    calc(100% - 28px)
+  );
   margin:0 auto;
-  padding:28px 0 42px;
+  padding:28px 0 42px
 }
 
-h1,h2,h3,p{
-  margin:0;
+h1,
+h2,
+h3,
+p{
+  margin:0
 }
 
 .topbar{
   display:flex;
   align-items:center;
   gap:12px;
-  margin-bottom:18px;
+  margin-bottom:18px
 }
 
 .detail-title{
   font-size:22px;
-  font-weight:750;
+  font-weight:750
 }
 
 .detail-subtitle{
   color:var(--muted);
   font-size:12px;
-  margin-top:3px;
+  margin-top:3px
 }
 
 .grid{
   display:grid;
-  grid-template-columns:1.1fr .9fr;
-  gap:16px;
+  grid-template-columns:
+    1.1fr .9fr;
+  gap:16px
 }
 
 .panel{
   border:1px solid var(--border);
   border-radius:16px;
   background:var(--card);
-  padding:17px;
+  padding:17px
 }
 
 .panel h3{
   font-size:14px;
-  margin-bottom:14px;
+  margin-bottom:14px
 }
 
 .big-status{
@@ -679,53 +874,57 @@ h1,h2,h3,p{
   gap:8px;
   font-size:18px;
   font-weight:750;
-  margin-bottom:13px;
+  margin-bottom:13px
 }
 
 .info{
   display:grid;
-  grid-template-columns:repeat(2,minmax(0,1fr));
-  gap:9px;
+  grid-template-columns:
+    repeat(
+      2,
+      minmax(0,1fr)
+    );
+  gap:9px
 }
 
 .info-item{
   padding:10px 11px;
   border-radius:10px;
-  background:var(--card2);
+  background:var(--card2)
 }
 
 .info-label{
   color:var(--muted);
   font-size:10px;
-  margin-bottom:4px;
+  margin-bottom:4px
 }
 
 .info-value{
   font-size:14px;
-  word-break:break-all;
+  word-break:break-all
 }
 
 .controls{
   display:flex;
   gap:8px;
   flex-wrap:wrap;
-  margin-top:14px;
+  margin-top:14px
 }
 
 .form-row{
   display:grid;
   gap:7px;
-  margin-bottom:11px;
+  margin-bottom:11px
 }
 
 label{
   color:var(--muted);
-  font-size:12px;
+  font-size:12px
 }
 
 .chat-row{
   display:flex;
-  gap:8px;
+  gap:8px
 }
 
 .log{
@@ -735,20 +934,25 @@ label{
   border:1px solid var(--border);
   border-radius:10px;
   padding:10px;
-  font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;
+  font:
+    12px/1.55
+    ui-monospace,
+    SFMono-Regular,
+    Consolas,
+    monospace;
   white-space:pre-wrap;
-  word-break:break-word;
+  word-break:break-word
 }
 
 .line{
-  padding:2px 0;
+  padding:2px 0
 }
 
 .note{
   margin-top:8px;
   color:var(--muted);
   font-size:12px;
-  line-height:1.45;
+  line-height:1.45
 }
 
 .toast{
@@ -760,7 +964,7 @@ label{
   padding:11px 13px;
   border:1px solid var(--border);
   border-radius:10px;
-  background:#18222d;
+  background:#18222d
 }
 
 .dot{
@@ -768,638 +972,1279 @@ label{
   height:9px;
   border-radius:50%;
   display:inline-block;
-  background:#697582;
+  background:#697582
 }
 
 .dot.green{
-  background:var(--green);
+  background:var(--green)
 }
 
 .dot.red{
-  background:var(--red);
+  background:var(--red)
 }
 
 .dot.yellow{
-  background:var(--yellow);
+  background:var(--yellow)
 }
 
 .dot.blue{
-  background:var(--blue);
+  background:var(--blue)
 }
 
 @media(max-width:820px){
   .grid{
-    grid-template-columns:1fr;
+    grid-template-columns:1fr
   }
 }
 </style>
 </head>
+
 <body>
+
 <div class="app">
 
-<section id="detail" class="detail active">
+<section class="detail active">
+
   <div class="topbar">
+
     <div>
-      <div id="detailTitle" class="detail-title">BOT 1</div>
-      <div class="detail-subtitle">Quản lý và theo dõi bot</div>
+
+      <div
+        id="detailTitle"
+        class="detail-title"
+      >
+        BOT 1
+      </div>
+
+      <div
+        class="detail-subtitle"
+      >
+        Quản lý và theo dõi bot
+      </div>
+
     </div>
+
   </div>
 
   <div class="grid">
 
     <div class="panel">
+
       <h3>Trạng thái</h3>
-      <div id="detailStatus" class="big-status"></div>
+
+      <div
+        id="detailStatus"
+        class="big-status"
+      ></div>
 
       <div class="info">
+
         <div class="info-item">
-          <div class="info-label">USERNAME</div>
-          <div id="detailUsername" class="info-value">-</div>
+          <div class="info-label">
+            USERNAME
+          </div>
+
+          <div
+            id="detailUsername"
+            class="info-value"
+          >
+            -
+          </div>
         </div>
 
         <div class="info-item">
-          <div class="info-label">SERVER</div>
-          <div id="detailHost" class="info-value">-</div>
+          <div class="info-label">
+            SERVER
+          </div>
+
+          <div
+            id="detailHost"
+            class="info-value"
+          >
+            -
+          </div>
         </div>
 
         <div class="info-item">
-          <div class="info-label">PING</div>
-          <div id="detailPing" class="info-value">-</div>
+          <div class="info-label">
+            PING
+          </div>
+
+          <div
+            id="detailPing"
+            class="info-value"
+          >
+            -
+          </div>
         </div>
 
         <div class="info-item">
-          <div class="info-label">VERSION</div>
-          <div id="detailVersion" class="info-value">-</div>
+          <div class="info-label">
+            VERSION
+          </div>
+
+          <div
+            id="detailVersion"
+            class="info-value"
+          >
+            -
+          </div>
         </div>
+
+        <div class="info-item">
+          <div class="info-label">
+            VIEW DISTANCE
+          </div>
+
+          <div
+            id="detailViewDistance"
+            class="info-value"
+          >
+            -
+          </div>
+        </div>
+
       </div>
 
       <div class="controls">
-        <button id="startButton" class="primary" onclick="startBot()">
+
+        <button
+          id="startButton"
+          class="primary"
+          onclick="startBot()"
+        >
           ▶ Chạy
         </button>
 
-        <button id="stopButton" class="danger" onclick="stopBot()">
+        <button
+          id="stopButton"
+          class="danger"
+          onclick="stopBot()"
+        >
           ■ Dừng
         </button>
 
-        <button onclick="restartBot()">
+        <button
+          id="restartButton"
+          onclick="restartBot()"
+        >
           ↻ Chạy lại
         </button>
+
       </div>
+
     </div>
 
     <div class="panel">
+
       <h3>Chat / Command</h3>
 
-      <form class="chat-row" onsubmit="sendMessage(event)">
+      <form
+        class="chat-row"
+        onsubmit="sendMessage(event)"
+      >
+
         <input
           id="messageInput"
           autocomplete="off"
           placeholder="Nhập gì gửi y nguyên lên Minecraft..."
         >
 
-        <button class="primary" type="submit">
+        <button
+          class="primary"
+          type="submit"
+        >
           Gửi
         </button>
+
       </form>
 
       <div class="note">
-        Không phân biệt chat hay command. Nhập gì sẽ gửi nguyên văn bằng Mineflayer.
+        Không phân biệt chat hay command.
+        Nhập gì sẽ gửi nguyên văn bằng Mineflayer.
       </div>
+
     </div>
 
     <div class="panel">
+
       <h3>Log</h3>
-      <div id="logs" class="log"></div>
+
+      <div
+        id="logs"
+        class="log"
+      ></div>
+
     </div>
 
     <div class="panel">
+
       <h3>Tài khoản</h3>
 
       <div class="form-row">
-        <label>Username</label>
-        <input id="usernameInput" autocomplete="off">
+
+        <label>
+          Username
+        </label>
+
+        <input
+          id="usernameInput"
+          autocomplete="off"
+          placeholder="Nhập username mới"
+        >
+
       </div>
 
       <div class="form-row">
-        <label>Password</label>
+
+        <label>
+          Password
+        </label>
+
         <input
           id="passwordInput"
           type="password"
           autocomplete="new-password"
-          placeholder="Chỉ nhập khi đổi mật khẩu"
+          placeholder="Nhập password mới"
         >
+
       </div>
 
-      <button class="primary" onclick="saveAccount()">
+      <button
+        class="primary"
+        onclick="saveAccount()"
+      >
         Lưu thay đổi
       </button>
 
       <div class="note">
-        Thay đổi được lưu vào runtime hiện tại. Bấm "Chạy lại" để bot kết nối lại bằng thông tin mới.
+        Thay đổi được lưu vào runtime hiện tại.
+        Bấm "Chạy lại" để bot kết nối lại bằng thông tin mới.
       </div>
+
     </div>
 
   </div>
+
 </section>
 
 </div>
 
-<div id="toast" class="toast"></div>
+<div
+  id="toast"
+  class="toast"
+></div>
 
 <script>
+
 let bot = null;
 
+let lastLogRevision = -1;
+
+let logRequestInFlight = false;
+
 function statusMeta(status) {
+
   const map = {
-    online: ['green', 'ONLINE'],
-    afk: ['green', 'AFK'],
-    connecting: ['yellow', 'CONNECTING'],
-    authenticating: ['blue', 'AUTH'],
-    entering: ['blue', 'ENTERING SERVER'],
-    kicked: ['red', 'KICKED'],
-    offline: ['red', 'OFFLINE']
+
+    online:[
+      'green',
+      'ONLINE'
+    ],
+
+    afk:[
+      'green',
+      'AFK'
+    ],
+
+    connecting:[
+      'yellow',
+      'CONNECTING'
+    ],
+
+    authenticating:[
+      'blue',
+      'AUTH'
+    ],
+
+    entering:[
+      'blue',
+      'ENTERING SERVER'
+    ],
+
+    kicked:[
+      'red',
+      'KICKED'
+    ],
+
+    offline:[
+      'red',
+      'OFFLINE'
+    ]
+
   };
 
-  return map[status] || ['red', 'OFFLINE'];
+  return (
+    map[status] ||
+    ['red','OFFLINE']
+  );
 }
 
 async function getBot() {
-  const response = await fetch('/api/bot');
+
+  const response =
+    await fetch(
+      '/api/bot',
+      {
+        cache:'no-store'
+      }
+    );
 
   if (!response.ok) {
-    throw new Error('Không lấy được trạng thái bot.');
+    throw new Error(
+      'Không lấy được trạng thái bot.'
+    );
   }
 
-  bot = await response.json();
+  bot =
+    await response.json();
+
   return bot;
 }
 
 function renderDetail() {
+
   if (!bot) return;
 
-  const [color, label] = statusMeta(bot.status);
+  const [
+    color,
+    label
+  ] = statusMeta(
+    bot.status
+  );
 
-  document.getElementById('detailTitle').textContent = 'BOT 1';
+  document
+    .getElementById(
+      'detailStatus'
+    )
+    .innerHTML =
+      '<span class="dot ' +
+      color +
+      '"></span>' +
+      label;
 
-  document.getElementById('detailStatus').innerHTML =
-    '<span class="dot ' + color + '"></span>' + label;
+  document
+    .getElementById(
+      'detailUsername'
+    )
+    .textContent =
+      bot.username ||
+      'Chưa đặt';
 
-  document.getElementById('detailUsername').textContent =
-    bot.username || 'Chưa đặt';
+  document
+    .getElementById(
+      'detailHost'
+    )
+    .textContent =
+      (bot.host || '-') +
+      ':' +
+      bot.port;
 
-  document.getElementById('detailHost').textContent =
-    (bot.host || '-') + ':' + bot.port;
+  document
+    .getElementById(
+      'detailPing'
+    )
+    .textContent =
+      bot.ping == null
+        ? '--'
+        : bot.ping +
+          ' ms';
 
-  document.getElementById('detailPing').textContent =
-    bot.ping == null ? '--' : bot.ping + ' ms';
+  document
+    .getElementById(
+      'detailVersion'
+    )
+    .textContent =
+      bot.version || '-';
 
-  document.getElementById('detailVersion').textContent =
-    bot.version || '-';
+  document
+    .getElementById(
+      'detailViewDistance'
+    )
+    .textContent =
+      bot.viewDistance || '-';
 
-  document.getElementById('usernameInput').value =
-    bot.username || '';
+  // Intentionally do not pre-fill usernameInput.
+  // This prevents refresh() from rolling back what the user is typing.
 
-  document.getElementById('startButton').disabled =
-    !['offline', 'kicked'].includes(bot.status);
+  document
+    .getElementById(
+      'startButton'
+    )
+    .disabled =
+      ![
+        'offline',
+        'kicked'
+      ].includes(
+        bot.status
+      );
 
-  document.getElementById('stopButton').disabled =
-    bot.status === 'offline';
+  document
+    .getElementById(
+      'stopButton'
+    )
+    .disabled =
+      bot.status ===
+      'offline';
+
+  document
+    .getElementById(
+      'restartButton'
+    )
+    .disabled =
+      bot.status ===
+      'offline';
 }
 
-async function loadLogs() {
+function isNearLogBottom(box) {
+
+  return (
+    box.scrollHeight -
+    box.scrollTop -
+    box.clientHeight
+  ) < 24;
+}
+
+async function loadLogs(force = false) {
+
+  if (logRequestInFlight) {
+    return;
+  }
+
+  if (
+    !force &&
+    bot &&
+    bot.logRevision ===
+      lastLogRevision
+  ) {
+    return;
+  }
+
+  logRequestInFlight = true;
+
   try {
-    const response = await fetch('/api/bot/logs');
 
-    if (!response.ok) return;
+    const response =
+      await fetch(
+        '/api/bot/logs?revision=' +
+        (
+          bot?.logRevision ??
+          -1
+        ),
+        {
+          cache:'no-store'
+        }
+      );
 
-    const data = await response.json();
-    const box = document.getElementById('logs');
-
-    if (!data.logs.length) {
-      box.innerHTML = '';
+    if (!response.ok) {
       return;
     }
 
-    box.innerHTML = data.logs
-      .map(line =>
-        '<div class="line">' + escapeHtml(line) + '</div>'
-      )
-      .join('');
+    const data =
+      await response.json();
 
-    box.scrollTop = box.scrollHeight;
-  } catch (_) {}
+    const box =
+      document.getElementById(
+        'logs'
+      );
+
+    const keepAtBottom =
+      isNearLogBottom(box);
+
+    if (!data.logs.length) {
+
+      box.innerHTML = '';
+
+      lastLogRevision =
+        data.revision ?? 0;
+
+      return;
+    }
+
+    box.innerHTML =
+      data.logs
+        .map(
+          line =>
+            '<div class="line">' +
+            escapeHtml(line) +
+            '</div>'
+        )
+        .join('');
+
+    lastLogRevision =
+      data.revision ??
+      lastLogRevision;
+
+    if (keepAtBottom) {
+      box.scrollTop =
+        box.scrollHeight;
+    }
+
+  } catch (_) {
+
+  } finally {
+
+    logRequestInFlight =
+      false;
+
+  }
 }
 
 function escapeHtml(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
+
+  return String(
+    value ?? ''
+  )
+    .replace(
+      /&/g,
+      '&amp;'
+    )
+    .replace(
+      /</g,
+      '&lt;'
+    )
+    .replace(
+      />/g,
+      '&gt;'
+    )
+    .replace(
+      /"/g,
+      '&quot;'
+    )
+    .replace(
+      /'/g,
+      '&#039;'
+    );
 }
+
 async function refresh() {
+
   try {
+
     await getBot();
+
     renderDetail();
+
     await loadLogs();
-  } catch (_) {}
+
+  } catch (_) {
+
+  }
+}
+
+async function postAction(
+  url,
+  fallback
+) {
+
+  try {
+
+    const response =
+      await fetch(
+        url,
+        {
+          method:'POST'
+        }
+      );
+
+    const data =
+      await response.json();
+
+    showToast(
+      data.message ||
+      data.error ||
+      fallback
+    );
+
+    await refresh();
+
+  } catch (_) {
+
+    showToast(
+      'Không thể kết nối tới server web.'
+    );
+
+  }
 }
 
 async function startBot() {
-  const response = await fetch(
+
+  await postAction(
     '/api/bot/start',
-    { method: 'POST' }
-  );
-
-  const data = await response.json();
-
-  showToast(
-    data.message ||
-    data.error ||
     'Done'
   );
 
-  await refresh();
 }
 
 async function stopBot() {
-  const response = await fetch(
+
+  await postAction(
     '/api/bot/stop',
-    { method: 'POST' }
-  );
-
-  const data = await response.json();
-
-  showToast(
-    data.message ||
-    data.error ||
     'Done'
   );
 
-  await refresh();
 }
 
 async function restartBot() {
-  const response = await fetch(
+
+  await postAction(
     '/api/bot/restart',
-    { method: 'POST' }
-  );
-
-  const data = await response.json();
-
-  showToast(
-    data.message ||
-    data.error ||
     'Done'
   );
 
-  await refresh();
 }
 
 async function sendMessage(event) {
+
   event.preventDefault();
 
   const input =
-    document.getElementById('messageInput');
+    document.getElementById(
+      'messageInput'
+    );
 
-  const text = input.value;
+  const text =
+    input.value;
 
   if (!text.trim()) {
     return;
   }
 
-  const response = await fetch(
-    '/api/bot/send',
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ text })
+  try {
+
+    const response =
+      await fetch(
+        '/api/bot/send',
+        {
+          method:'POST',
+
+          headers:{
+            'Content-Type':
+              'application/json'
+          },
+
+          body:
+            JSON.stringify({
+              text
+            })
+        }
+      );
+
+    const data =
+      await response.json();
+
+    if (!response.ok) {
+
+      showToast(
+        data.error ||
+        'Gửi thất bại.'
+      );
+
+      return;
     }
-  );
 
-  const data = await response.json();
+    input.value = '';
 
-  if (!response.ok) {
     showToast(
-      data.error ||
-      'Gửi thất bại.'
+      'Đã gửi.'
     );
-    return;
+
+    await getBot();
+
+    await loadLogs(true);
+
+  } catch (_) {
+
+    showToast(
+      'Không thể kết nối tới server web.'
+    );
+
   }
-
-  input.value = '';
-
-  showToast('Đã gửi.');
-
-  await loadLogs();
 }
 
 async function saveAccount() {
+
   const username =
-    document.getElementById('usernameInput')
-      .value
-      .trim();
+    document.getElementById(
+      'usernameInput'
+    )
+    .value
+    .trim();
 
   const password =
-    document.getElementById('passwordInput')
-      .value;
+    document.getElementById(
+      'passwordInput'
+    )
+    .value;
 
-  if (!username || !password) {
+  if (
+    !username ||
+    !password
+  ) {
+
     showToast(
       'Cần nhập username và password.'
     );
+
     return;
   }
 
-  const response = await fetch(
-    '/api/bot/account',
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        username,
-        password
-      })
+  try {
+
+    const response =
+      await fetch(
+        '/api/bot/account',
+        {
+          method:'POST',
+
+          headers:{
+            'Content-Type':
+              'application/json'
+          },
+
+          body:
+            JSON.stringify({
+              username,
+              password
+            })
+        }
+      );
+
+    const data =
+      await response.json();
+
+    if (!response.ok) {
+
+      showToast(
+        data.error ||
+        'Lưu thất bại.'
+      );
+
+      return;
     }
-  );
 
-  const data = await response.json();
+    document
+      .getElementById(
+        'usernameInput'
+      )
+      .value = '';
 
-  if (!response.ok) {
+    document
+      .getElementById(
+        'passwordInput'
+      )
+      .value = '';
+
     showToast(
-      data.error ||
-      'Lưu thất bại.'
+      'Đã lưu. Bấm "Chạy lại" để áp dụng.'
     );
-    return;
+
+    await refresh();
+
+  } catch (_) {
+
+    showToast(
+      'Không thể kết nối tới server web.'
+    );
+
   }
-
-  document.getElementById('passwordInput').value = '';
-
-  showToast(
-    'Đã lưu. Bấm "Chạy lại" để áp dụng.'
-  );
-
-  await refresh();
 }
 
 function showToast(message) {
+
   const toast =
-    document.getElementById('toast');
+    document.getElementById(
+      'toast'
+    );
 
-  toast.textContent = message;
-  toast.style.display = 'block';
+  toast.textContent =
+    message;
 
-  clearTimeout(showToast.timer);
+  toast.style.display =
+    'block';
 
-  showToast.timer = setTimeout(() => {
-    toast.style.display = 'none';
-  }, 2200);
+  clearTimeout(
+    showToast.timer
+  );
+
+  showToast.timer =
+    setTimeout(() => {
+      toast.style.display =
+        'none';
+    }, 2200);
 }
 
 (async function init() {
+
   await refresh();
+
 })();
 
-// Poll nhẹ mỗi 3 giây.
-setInterval(refresh, 3000);
+setInterval(
+  refresh,
+  ${STATUS_POLL_MS}
+);
+
 </script>
 
 </body>
 </html>`;
+// -----------------------------------------------------------------------------
+// API: current bot state
+// -----------------------------------------------------------------------------
 
-//
-// API
-//
-
-app.get('/api/bot', (req, res) => {
-    res.json(
-        publicBotState(botState)
-    );
-});
-
-app.get('/api/bot/logs', (req, res) => {
-    res.json({
-        id: botState.id,
-        logs: botState.logs
-    });
-});
-
-//
-// Start bot
-//
-
-app.post('/api/bot/start', (req, res) => {
-    if (!botState.username || !botState.password) {
-        return res.status(400).json({
-            error: 'Bot chưa có username/password.'
-        });
-    }
-
-    if (
-        botState.status !== 'offline' &&
-        botState.status !== 'kicked'
-    ) {
-        return res.json({
-            ok: true,
-            message: 'Bot 1 đang chạy.'
-        });
-    }
-
-    startBot(botState);
-
-    res.json({
-        ok: true,
-        message: 'Đã chạy Bot 1.'
-    });
-});
-
-//
-// Stop bot
-//
-
-app.post('/api/bot/stop', (req, res) => {
-    stopBot(botState);
-
-    res.json({
-        ok: true,
-        message: 'Đã dừng Bot 1.'
-    });
-});
-
-//
-// Restart bot
-// Luôn chạy lại flow từ đầu:
-// connect -> /dn -> /menu -> slot 24
-//
-
-app.post('/api/bot/restart', (req, res) => {
-    if (!botState.username || !botState.password) {
-        return res.status(400).json({
-            error: 'Bot chưa có username/password.'
-        });
-    }
-
-    botState.manuallyStopped = true;
-
-    disconnectBot(
-        botState,
-        'Restart from web panel'
-    );
-
-    setTimeout(() => {
-        botState.manuallyStopped = false;
-        startBot(botState);
-    }, 500);
-
-    res.json({
-        ok: true,
-        message: 'Đã chạy lại Bot 1 từ đầu.'
-    });
-});
-//
-// Chat / command
-//
-
-app.post('/api/bot/send', (req, res) => {
-    const text =
-        typeof req.body?.text === 'string'
-            ? req.body.text
-            : '';
-
-    if (!text.trim()) {
-        return res.status(400).json({
-            error: 'Nội dung không được trống.'
-        });
-    }
-
-    if (!botState.bot || !botState.bot.player) {
-        return res.status(409).json({
-            error: 'Bot 1 chưa online.'
-        });
-    }
-
-    botState.bot.chat(text);
-
-    addLog(
-        botState,
-        `[WEB] → ${text}`
-    );
-
-    res.json({
-        ok: true,
-        message: 'Đã gửi.'
-    });
-});
-
-//
-// Update account
-//
-
-app.post('/api/bot/account', (req, res) => {
-    const username =
-        typeof req.body?.username === 'string'
-            ? req.body.username.trim()
-            : '';
-
-    const password =
-        typeof req.body?.password === 'string'
-            ? req.body.password
-            : '';
-
-    if (!username || !password) {
-        return res.status(400).json({
-            error: 'Username và password không được trống.'
-        });
-    }
-
-    botState.username = username;
-    botState.password = password;
-
-    addLog(
-        botState,
-        'Đã thay đổi username/password từ web.'
-    );
-
-    res.json({
-        ok: true,
-        message: 'Đã lưu thay đổi.'
-    });
-});
-
-//
-// Health endpoint
-// Render + Google Apps Script keep-alive
-//
-
-app.get('/health', (req, res) => {
-    const online =
-        botState.status !== 'offline'
-            ? 1
-            : 0;
-
-    res.status(200).json({
-        status: 'ok',
-        online,
-        bot: publicBotState(botState)
-    });
-});
-
-//
-// Dashboard root
-//
-
-app.get('/', (req, res) => {
-    res.type('html').send(HTML);
-});
-
-//
-// Start HTTP server
-//
-
-app.listen(
-    HTTP_PORT,
-    '0.0.0.0',
-    () => {
-        console.log(
-            `[HTTP] Dashboard listening on ${HTTP_PORT}`
+app.get(
+    '/api/bot',
+    (req, res) => {
+        res.json(
+            publicBotState(
+                botState
+            )
         );
     }
 );
 
-//
+// -----------------------------------------------------------------------------
+// API: logs
+// Revision allows the web client to skip unnecessary log re-renders.
+// -----------------------------------------------------------------------------
+
+app.get(
+    '/api/bot/logs',
+    (req, res) => {
+        res.json({
+            id: botState.id,
+            revision: botState.logRevision,
+            logs: botState.logs
+        });
+    }
+);
+
+// -----------------------------------------------------------------------------
+// Start bot
+// -----------------------------------------------------------------------------
+
+app.post(
+    '/api/bot/start',
+    (req, res) => {
+
+        if (
+            !botState.username ||
+            !botState.password
+        ) {
+            return res.status(400).json({
+                error:
+                    'Bot chưa có username/password.'
+            });
+        }
+
+        if (
+            botState.status !== 'offline' &&
+            botState.status !== 'kicked'
+        ) {
+            return res.json({
+                ok: true,
+                message:
+                    'Bot 1 đang chạy.'
+            });
+        }
+
+        startBot(
+            botState
+        );
+
+        res.json({
+            ok: true,
+            message:
+                'Đã chạy Bot 1.'
+        });
+    }
+);
+
+// -----------------------------------------------------------------------------
+// Stop bot
+// -----------------------------------------------------------------------------
+
+app.post(
+    '/api/bot/stop',
+    (req, res) => {
+
+        stopBot(
+            botState
+        );
+
+        res.json({
+            ok: true,
+            message:
+                'Đã dừng Bot 1.'
+        });
+    }
+);
+
+// -----------------------------------------------------------------------------
+// Restart bot
+// Luôn chạy lại flow:
+// connect -> /dn -> /menu -> slot 24
+// -----------------------------------------------------------------------------
+
+app.post(
+    '/api/bot/restart',
+    (req, res) => {
+
+        if (
+            !botState.username ||
+            !botState.password
+        ) {
+            return res.status(400).json({
+                error:
+                    'Bot chưa có username/password.'
+            });
+        }
+
+        botState.manuallyStopped = true;
+
+        disconnectBot(
+            botState,
+            'Restart from web panel'
+        );
+
+        setTimeout(() => {
+
+            botState.manuallyStopped =
+                false;
+
+            startBot(
+                botState
+            );
+
+        }, 500);
+
+        res.json({
+            ok: true,
+            message:
+                'Đã chạy lại Bot 1 từ đầu.'
+        });
+    }
+);
+
+// -----------------------------------------------------------------------------
+// Chat / command
+// -----------------------------------------------------------------------------
+
+app.post(
+    '/api/bot/send',
+    (req, res) => {
+
+        const text =
+            typeof req.body?.text ===
+            'string'
+                ? req.body.text
+                : '';
+
+        if (!text.trim()) {
+
+            return res.status(400).json({
+                error:
+                    'Nội dung không được trống.'
+            });
+
+        }
+
+        if (
+            !botState.bot ||
+            !botState.bot.player
+        ) {
+
+            return res.status(409).json({
+                error:
+                    'Bot 1 chưa online.'
+            });
+
+        }
+
+        try {
+
+            botState.bot.chat(
+                text
+            );
+
+            addLog(
+                botState,
+                `[WEB] → ${text}`
+            );
+
+            res.json({
+                ok: true,
+                message:
+                    'Đã gửi.'
+            });
+
+        } catch (err) {
+
+            res.status(500).json({
+                error:
+                    `Gửi thất bại: ${err.message}`
+            });
+
+        }
+    }
+);
+
+// -----------------------------------------------------------------------------
+// Update account
+// Runtime only.
+// ENV variables are not changed.
+// -----------------------------------------------------------------------------
+
+app.post(
+    '/api/bot/account',
+    (req, res) => {
+
+        const username =
+            typeof req.body?.username ===
+            'string'
+                ? req.body.username.trim()
+                : '';
+
+        const password =
+            typeof req.body?.password ===
+            'string'
+                ? req.body.password
+                : '';
+
+        if (
+            !username ||
+            !password
+        ) {
+            return res.status(400).json({
+                error:
+                    'Username và password không được trống.'
+            });
+        }
+
+        botState.username =
+            username;
+
+        botState.password =
+            password;
+
+        addLog(
+            botState,
+            'Đã thay đổi username/password từ web.'
+        );
+
+        res.json({
+            ok: true,
+            message:
+                'Đã lưu thay đổi.'
+        });
+    }
+);
+
+// -----------------------------------------------------------------------------
+// Health endpoint
+// Render / Google Apps Script can call /health.
+// -----------------------------------------------------------------------------
+
+app.get(
+    '/health',
+    (req, res) => {
+
+        const online =
+            botState.status !==
+            'offline'
+                ? 1
+                : 0;
+
+        res.status(200).json({
+            status: 'ok',
+            online,
+
+            bot:
+                publicBotState(
+                    botState
+                )
+        });
+    }
+);
+
+// -----------------------------------------------------------------------------
+// Dashboard root
+// -----------------------------------------------------------------------------
+
+app.get(
+    '/',
+    (req, res) => {
+        res
+            .type('html')
+            .send(HTML);
+    }
+);
+
+// -----------------------------------------------------------------------------
+// HTTP server
+// -----------------------------------------------------------------------------
+
+const server = app.listen(
+    HTTP_PORT,
+    '0.0.0.0',
+    () => {
+
+        console.log(
+            `[HTTP] Dashboard listening on ${HTTP_PORT}`
+        );
+
+    }
+);
+
+// -----------------------------------------------------------------------------
 // Startup
 //
-// Bot 1:
-// giữ tương thích với ENV cũ:
-// MC_USERNAME / MC_PASSWORD
+// IMPORTANT:
+// Credentials from ENV are loaded into runtime,
+// BUT the bot NEVER connects automatically.
 //
-// Hoặc:
-// BOT1_USERNAME / BOT1_PASSWORD
-//
-// Nếu không có credential -> OFFLINE.
-//
+// The user must press "Chạy" from the web.
+// -----------------------------------------------------------------------------
+
+botState.manuallyStopped = true;
 
 if (
     botState.username &&
     botState.password
 ) {
-    botState.manuallyStopped = false;
 
     addLog(
         botState,
-        'Có credential. Tự động khởi động Bot 1.'
+        'Có credential. Bot đang OFFLINE và chờ bấm Chạy từ web.'
     );
 
-    connectBot(botState);
+} else {
+
+    addLog(
+        botState,
+        'Bot 1 đang OFFLINE (chưa có credential). Bấm Chạy sau khi nhập tài khoản.'
+    );
+
+}
+// -----------------------------------------------------------------------------
+// Extra lightweight status endpoint
+//
+// Trả về trạng thái tối thiểu cho các request kiểm tra nhanh.
+// Không thay thế /api/bot.
+// -----------------------------------------------------------------------------
+
+app.get(
+    '/api/status',
+    (req, res) => {
+        res.json({
+            status: botState.status,
+            ready: botState.ready,
+            ping: getPing(botState),
+            connectedAt: botState.connectedAt
+        });
+    }
+);
+
+// -----------------------------------------------------------------------------
+// Graceful process shutdown
+// -----------------------------------------------------------------------------
+
+function shutdownProcess(signal) {
+    console.log(
+        `[PROCESS] Nhận ${signal}, đang shutdown...`
+    );
+
+    botState.manuallyStopped = true;
+
+    clearAllTimers(
+        botState
+    );
+
+    if (botState.bot) {
+        try {
+            botState.bot.removeAllListeners();
+
+            if (
+                typeof botState.bot.quit ===
+                'function'
+            ) {
+                botState.bot.quit(
+                    `Process ${signal}`
+                );
+            }
+        } catch (err) {
+            console.log(
+                `[PROCESS] Shutdown bot error: ${err.message}`
+            );
+        }
+
+        botState.bot = null;
+    }
+
+    if (server) {
+        server.close(() => {
+            console.log(
+                '[PROCESS] HTTP server closed.'
+            );
+
+            process.exit(0);
+        });
+
+        setTimeout(() => {
+            process.exit(0);
+        }, 5000);
+    } else {
+        process.exit(0);
+    }
+}
+
+process.on(
+    'SIGTERM',
+    () => shutdownProcess('SIGTERM')
+);
+
+process.on(
+    'SIGINT',
+    () => shutdownProcess('SIGINT')
+);
+
+// -----------------------------------------------------------------------------
+// FINAL STARTUP STATE
+//
+// Quan trọng:
+// - Load credential từ ENV.
+// - KHÔNG tự connect.
+// - Bot luôn OFFLINE sau khi Render khởi động.
+// - Chỉ bấm "▶ Chạy" trên web mới kết nối.
+// -----------------------------------------------------------------------------
+
+botState.manuallyStopped = true;
+botState.ready = false;
+botState.status = 'offline';
+botState.connectedAt = null;
+
+if (
+    botState.username &&
+    botState.password
+) {
+    addLog(
+        botState,
+        'Đã đọc credential từ ENV. Bot đang OFFLINE và chờ lệnh Chạy từ web.'
+    );
 } else {
     addLog(
         botState,
-        'Bot 1 đang OFFLINE (chưa có credential).'
+        'Bot đang OFFLINE: chưa có username/password. Nhập tài khoản trên web rồi bấm Chạy.'
     );
 }
