@@ -5,9 +5,19 @@ const app = express();
 const HTTP_PORT = Number(process.env.PORT || 10000);
 
 const MAX_LOGS = 100;
-const RECONNECT_DELAY = 10000;
+const RECONNECT_DELAY = 3000;
 const STATUS_POLL_MS = 1000;
 const UPTIME_UPDATE_MS = 250;
+
+// KingMC AFK flow timing.
+const DN_TO_AFK_DELAY = 1000;
+const AFK_MENU_DELAY = 1800;
+const AFK_MENU_CLICK_DELAY = 700;
+
+// Background inventory / survival managers.
+const AUTO_EAT_INTERVAL_MS = 2000;
+const AUTO_TOTEM_INTERVAL_MS = 1500;
+const INVENTORY_SCAN_INTERVAL_MS = 5000;
 
 const MC_VERSION = '1.20.1';
 const HOSTS = (process.env.MC_SERVER_HOSTS || 'sgp.kingmc.vn,kingmc.vn')
@@ -83,6 +93,30 @@ function createBotState() {
         afkTimers: [],
         lastAuthTime: 0,
 
+        inventoryState: {
+            health: 20,
+            food: 20,
+            saturation: 20,
+            foodCount: 0,
+            goldenAppleCount: 0,
+            totemCount: 0,
+            offhand: null,
+            selectedHotbar: 0,
+            selectedSlot: 0,
+            hotbar: [],
+            inventory: []
+        },
+
+        isEating: false,
+        inventoryScanTimer: null,
+        totemTimer: null,
+        eatTimer: null,
+
+        inventoryLogSignature: '',
+        foodMissingLogged: false,
+        totemLogState: null,
+        isEquippingTotem: false,
+
         logs: [],
         logRevision: 0
     };
@@ -126,9 +160,640 @@ function clearReconnectTimer(state) {
     }
 }
 
+function clearManagerTimers(state) {
+    if (state.eatTimer) {
+        clearInterval(state.eatTimer);
+        state.eatTimer = null;
+    }
+
+    if (state.totemTimer) {
+        clearInterval(state.totemTimer);
+        state.totemTimer = null;
+    }
+
+    if (state.inventoryScanTimer) {
+        clearInterval(state.inventoryScanTimer);
+        state.inventoryScanTimer = null;
+    }
+
+    state.isEating = false;
+    state.isEquippingTotem = false;
+}
+
 function clearAllTimers(state) {
     clearAfkTimers(state);
     clearReconnectTimer(state);
+    clearManagerTimers(state);
+}
+
+const FOOD_PRIORITY = [
+    'golden_apple',
+    'steak',
+    'cooked_porkchop',
+    'cooked_beef',
+    'cooked_chicken',
+    'baked_potato',
+    'bread',
+    'cooked_mutton',
+    'cooked_salmon'
+];
+
+function rememberSelectedSlot(state) {
+    if (
+        !state.bot ||
+        !Number.isInteger(state.bot.quickBarSlot)
+    ) {
+        return 0;
+    }
+
+    const slot = state.bot.quickBarSlot;
+
+    if (slot < 0 || slot > 8) {
+        return 0;
+    }
+
+    return slot;
+}
+
+function restoreSelectedSlot(state, slot) {
+    if (
+        !state.bot ||
+        !Number.isInteger(slot) ||
+        slot < 0 ||
+        slot > 8 ||
+        typeof state.bot.setQuickBarSlot !== 'function'
+    ) {
+        return false;
+    }
+
+    try {
+        state.bot.setQuickBarSlot(slot);
+        return true;
+    } catch (err) {
+        addLog(
+            state,
+            `[HOTBAR] Không thể khôi phục slot ${slot}: ${err.message}`
+        );
+        return false;
+    }
+}
+
+function selectHotbarSlot(state, slot) {
+    if (
+        !state.bot ||
+        !Number.isInteger(slot) ||
+        slot < 0 ||
+        slot > 8 ||
+        typeof state.bot.setQuickBarSlot !== 'function'
+    ) {
+        return false;
+    }
+
+    try {
+        state.bot.setQuickBarSlot(slot);
+        return true;
+    } catch (err) {
+        addLog(
+            state,
+            `[HOTBAR] Không thể chọn slot ${slot}: ${err.message}`
+        );
+        return false;
+    }
+}
+
+function resetInventoryState(state) {
+    state.inventoryState = {
+        health: 20,
+        food: 20,
+        saturation: 20,
+        foodCount: 0,
+        goldenAppleCount: 0,
+        totemCount: 0,
+        offhand: null,
+        selectedHotbar: 0,
+        selectedSlot: 0,
+        hotbar: [],
+        inventory: []
+    };
+
+    state.inventoryLogSignature = '';
+    state.foodMissingLogged = false;
+    state.totemLogState = null;
+    state.isEquippingTotem = false;
+}
+
+function getOffhandSlot(bot) {
+    if (
+        bot &&
+        typeof bot.getEquipmentDestSlot === 'function'
+    ) {
+        try {
+            return bot.getEquipmentDestSlot('off-hand');
+        } catch (_) {
+        }
+    }
+
+    return 45;
+}
+
+function itemToInventoryData(item, slot = null) {
+    if (!item) {
+        return null;
+    }
+
+    return {
+        slot:
+            Number.isInteger(slot)
+                ? slot
+                : Number.isInteger(item.slot)
+                    ? item.slot
+                    : null,
+        name: item.name || '',
+        displayName:
+            item.displayName ||
+            item.name ||
+            '',
+        count:
+            Number(item.count || 0),
+        metadata:
+            item.metadata ?? null
+    };
+}
+
+function scanInventory(state, bot = state.bot, forceLog = false) {
+    if (
+        !bot ||
+        state.bot !== bot ||
+        !bot.inventory ||
+        !Array.isArray(bot.inventory.slots)
+    ) {
+        return false;
+    }
+
+    const slots = bot.inventory.slots;
+    const offhandSlot = getOffhandSlot(bot);
+    const allMainItems = [];
+
+    for (let slot = 9; slot <= 35; slot++) {
+        const item = slots[slot];
+
+        if (item) {
+            allMainItems.push(
+                itemToInventoryData(item, slot)
+            );
+        }
+    }
+
+    const hotbar = [];
+
+    for (let quickSlot = 0; quickSlot < 9; quickSlot++) {
+        const inventorySlot = 36 + quickSlot;
+        const item = slots[inventorySlot];
+
+        hotbar.push(
+            itemToInventoryData(
+                item,
+                inventorySlot
+            )
+        );
+    }
+
+    const offhandItem =
+        slots[offhandSlot] || null;
+
+    let foodCount = 0;
+    let goldenAppleCount = 0;
+    let totemCount = 0;
+
+    for (let slot = 9; slot <= 44; slot++) {
+        const item = slots[slot];
+
+        if (!item || !item.name) {
+            continue;
+        }
+
+        if (FOOD_PRIORITY.includes(item.name)) {
+            foodCount += Number(item.count || 0);
+        }
+
+        if (item.name === 'golden_apple') {
+            goldenAppleCount += Number(item.count || 0);
+        }
+
+        if (item.name === 'totem_of_undying') {
+            totemCount += Number(item.count || 0);
+        }
+    }
+
+    const selectedSlot =
+        Number.isInteger(bot.quickBarSlot) &&
+        bot.quickBarSlot >= 0 &&
+        bot.quickBarSlot <= 8
+            ? bot.quickBarSlot
+            : 0;
+
+    const nextState = {
+        health:
+            Number.isFinite(bot.health)
+                ? Math.max(0, Math.min(Number(bot.health), 20))
+                : 20,
+        food:
+            Number.isFinite(bot.food)
+                ? Math.max(0, Math.min(Number(bot.food), 20))
+                : 20,
+        saturation:
+            Number.isFinite(bot.foodSaturation)
+                ? Math.max(0, Number(bot.foodSaturation))
+                : 20,
+        foodCount,
+        goldenAppleCount,
+        totemCount,
+        offhand:
+            offhandItem && offhandItem.name
+                ? offhandItem.name
+                : null,
+        selectedHotbar: selectedSlot,
+        selectedSlot,
+        hotbar,
+        inventory: allMainItems
+    };
+
+    const signature = JSON.stringify(nextState);
+
+    state.inventoryState = nextState;
+
+    if (forceLog || signature !== state.inventoryLogSignature) {
+        state.inventoryLogSignature = signature;
+
+        addLog(
+            state,
+            '[INV] Inventory cập nhật.'
+        );
+    }
+
+    return true;
+}
+
+function findFoodItem(bot) {
+    if (
+        !bot ||
+        !bot.inventory ||
+        !Array.isArray(bot.inventory.slots)
+    ) {
+        return null;
+    }
+
+    const slots = bot.inventory.slots;
+
+    for (const foodName of FOOD_PRIORITY) {
+        for (let slot = 9; slot <= 44; slot++) {
+            const item = slots[slot];
+
+            if (item && item.name === foodName) {
+                return item;
+            }
+        }
+    }
+
+    return null;
+}
+
+function findTotemItem(bot) {
+    if (
+        !bot ||
+        !bot.inventory ||
+        !Array.isArray(bot.inventory.slots)
+    ) {
+        return null;
+    }
+
+    const offhandSlot = getOffhandSlot(bot);
+
+    for (let slot = 9; slot <= 44; slot++) {
+        if (slot === offhandSlot) {
+            continue;
+        }
+
+        const item = bot.inventory.slots[slot];
+
+        if (item && item.name === 'totem_of_undying') {
+            return item;
+        }
+    }
+
+    return null;
+}
+
+async function autoEatTick(state) {
+    const bot = state.bot;
+
+    if (
+        state.manuallyStopped ||
+        !bot ||
+        state.bot !== bot ||
+        !bot.player ||
+        state.isEating
+    ) {
+        return;
+    }
+
+    if (
+        state.status === 'offline' ||
+        state.status === 'connecting' ||
+        state.status === 'authenticating' ||
+        state.status === 'entering'
+    ) {
+        return;
+    }
+
+    if (bot.currentWindow || bot.usingHeldItem) {
+        return;
+    }
+
+    const food =
+        Number.isFinite(bot.food)
+            ? Number(bot.food)
+            : 20;
+
+    if (food >= 18) {
+        state.foodMissingLogged = false;
+        return;
+    }
+
+    const foodItem = findFoodItem(bot);
+
+    if (!foodItem) {
+        if (!state.foodMissingLogged) {
+            addLog(state, '[FOOD] Không tìm thấy thức ăn.');
+            state.foodMissingLogged = true;
+        }
+        return;
+    }
+
+    state.foodMissingLogged = false;
+    state.isEating = true;
+
+    const oldBot = bot;
+    const oldSelectedSlot = rememberSelectedSlot(state);
+    const oldHeldItem =
+        bot.heldItem ||
+        (bot.inventory && Array.isArray(bot.inventory.slots)
+            ? bot.inventory.slots[36 + oldSelectedSlot] || null
+            : null);
+
+    try {
+        addLog(
+            state,
+            `[FOOD] Bắt đầu ăn ${foodItem.displayName || foodItem.name}.`
+        );
+
+        if (!selectHotbarSlot(state, oldSelectedSlot)) {
+            return;
+        }
+
+        await bot.equip(
+            foodItem,
+            'hand'
+        );
+
+        if (
+            state.manuallyStopped ||
+            state.bot !== oldBot ||
+            !oldBot.player ||
+            oldBot.currentWindow
+        ) {
+            return;
+        }
+
+        await bot.consume();
+
+        if (state.bot === oldBot) {
+            addLog(
+                state,
+                '[FOOD] Đã ăn xong.'
+            );
+        }
+    } catch (err) {
+        if (state.bot === oldBot) {
+            addLog(
+                state,
+                `[FOOD] Lỗi khi ăn: ${err.message}`
+            );
+        }
+    } finally {
+        state.isEating = false;
+
+        if (state.bot !== oldBot || state.manuallyStopped) {
+            return;
+        }
+
+        try {
+            if (
+                oldHeldItem &&
+                bot.inventory &&
+                Array.isArray(bot.inventory.slots)
+            ) {
+                let oldItemStillExists = false;
+
+                for (const item of bot.inventory.slots) {
+                    if (item === oldHeldItem) {
+                        oldItemStillExists = true;
+                        break;
+                    }
+                }
+
+                if (oldItemStillExists) {
+                    await bot.equip(
+                        oldHeldItem,
+                        'hand'
+                    );
+                }
+            }
+        } catch (err) {
+            addLog(
+                state,
+                `[HOTBAR] Không thể restore item cũ: ${err.message}`
+            );
+        }
+
+        restoreSelectedSlot(
+            state,
+            oldSelectedSlot
+        );
+    }
+}
+
+async function autoTotemTick(state) {
+    const bot = state.bot;
+
+    if (
+        state.manuallyStopped ||
+        !bot ||
+        state.bot !== bot ||
+        !bot.player ||
+        !bot.entity ||
+        state.isEating ||
+        state.isEquippingTotem
+    ) {
+        return;
+    }
+
+    if (
+        state.status === 'offline' ||
+        state.status === 'connecting' ||
+        state.status === 'authenticating' ||
+        state.status === 'entering'
+    ) {
+        return;
+    }
+
+    if (bot.currentWindow || bot.usingHeldItem) {
+        return;
+    }
+
+    const offhandSlot = getOffhandSlot(bot);
+    const offhandItem =
+        bot.inventory && Array.isArray(bot.inventory.slots)
+            ? bot.inventory.slots[offhandSlot]
+            : null;
+
+    if (offhandItem && offhandItem.name === 'totem_of_undying') {
+        if (state.totemLogState !== 'has') {
+            addLog(state, '[TOTEM] Offhand đã có Totem.');
+            state.totemLogState = 'has';
+        }
+        return;
+    }
+
+    const totem = findTotemItem(bot);
+
+    if (!totem) {
+        if (state.totemLogState !== 'empty') {
+            addLog(state, '[TOTEM] Hết Totem.');
+            state.totemLogState = 'empty';
+        }
+        return;
+    }
+
+    state.isEquippingTotem = true;
+    state.totemLogState = 'equipping';
+
+    const oldBot = bot;
+
+    try {
+        await bot.equip(
+            totem,
+            'off-hand'
+        );
+
+        if (state.bot === oldBot && !state.manuallyStopped) {
+            addLog(state, '[TOTEM] Đã trang bị Totem.');
+            state.totemLogState = 'has';
+        }
+    } catch (err) {
+        if (state.bot === oldBot) {
+            addLog(
+                state,
+                `[TOTEM] Lỗi trang bị Totem: ${err.message}`
+            );
+            state.totemLogState = null;
+        }
+    } finally {
+        state.isEquippingTotem = false;
+    }
+}
+
+function startBackgroundManagers(state, bot) {
+    clearManagerTimers(state);
+
+    scanInventory(
+        state,
+        bot,
+        true
+    );
+
+    state.inventoryScanTimer =
+        setInterval(
+            () => {
+                if (
+                    state.manuallyStopped ||
+                    state.bot !== bot
+                ) {
+                    return;
+                }
+
+                scanInventory(
+                    state,
+                    bot,
+                    false
+                );
+            },
+            INVENTORY_SCAN_INTERVAL_MS
+        );
+
+    state.eatTimer =
+        setInterval(
+            () => {
+                if (
+                    state.manuallyStopped ||
+                    state.bot !== bot
+                ) {
+                    return;
+                }
+
+                autoEatTick(state)
+                    .catch(err => {
+                        if (state.bot === bot) {
+                            addLog(
+                                state,
+                                `[FOOD] Lỗi manager: ${err.message}`
+                            );
+                        }
+                    });
+            },
+            AUTO_EAT_INTERVAL_MS
+        );
+
+    state.totemTimer =
+        setInterval(
+            () => {
+                if (
+                    state.manuallyStopped ||
+                    state.bot !== bot
+                ) {
+                    return;
+                }
+
+                autoTotemTick(state)
+                    .catch(err => {
+                        if (state.bot === bot) {
+                            addLog(
+                                state,
+                                `[TOTEM] Lỗi manager: ${err.message}`
+                            );
+                        }
+                    });
+            },
+            AUTO_TOTEM_INTERVAL_MS
+        );
+}
+
+function publicInventoryState(state) {
+    const inventory = state.inventoryState || {};
+
+    return {
+        health: Number(inventory.health ?? 20),
+        food: Number(inventory.food ?? 20),
+        saturation: Number(inventory.saturation ?? 20),
+        foodCount: Number(inventory.foodCount ?? 0),
+        goldenAppleCount: Number(inventory.goldenAppleCount ?? 0),
+        totemCount: Number(inventory.totemCount ?? 0),
+        offhand: inventory.offhand ?? null,
+        selectedHotbar: Number(inventory.selectedHotbar ?? 0),
+        selectedSlot: Number(inventory.selectedSlot ?? 0),
+        hotbar: Array.isArray(inventory.hotbar) ? inventory.hotbar : [],
+        inventory: Array.isArray(inventory.inventory) ? inventory.inventory : []
+    };
 }
 
 function currentHost(state) {
@@ -304,6 +969,7 @@ function disconnectBot(
     const currentBot = state.bot;
 
     state.bot = null;
+    resetInventoryState(state);
 
     if (!currentBot) {
         return;
@@ -375,6 +1041,7 @@ function startBot(state) {
 
     return true;
 }
+
 function registerEvents(state, bot) {
     bot.on('error', err => {
         addLog(
@@ -446,6 +1113,11 @@ function registerEvents(state, bot) {
         setBotStatus(state, 'online');
         state.ready = false;
         state.connectedAt = Date.now();
+
+        startBackgroundManagers(
+            state,
+            bot
+        );
     });
 
     bot.on('message', jsonMsg => {
@@ -696,7 +1368,7 @@ function handleServerMessage(
                                 state
                             );
                         }
-                    }, 2500);
+                    }, DN_TO_AFK_DELAY);
 
                 state.afkTimers.push(
                     timer
@@ -822,6 +1494,7 @@ function startAfkRoutine(state) {
                     ) {
                         return;
                     }
+
                     const currentWindow =
                         state.bot.currentWindow;
 
@@ -866,12 +1539,12 @@ function startAfkRoutine(state) {
                             `Lỗi click slot 24: ${err.message}`
                         );
                     }
-                }, 4000);
+                }, AFK_MENU_CLICK_DELAY);
 
             state.afkTimers.push(
                 clickTimer
             );
-        }, 6000);
+        }, AFK_MENU_DELAY);
 
     state.afkTimers.push(
         menuTimer
@@ -1143,6 +1816,127 @@ label{
   background:var(--blue)
 }
 
+.inventory-grid{
+   display:grid;
+   grid-template-columns:repeat(2,minmax(0,1fr));
+   gap:9px;
+   margin-bottom:13px
+}
+
+.inventory-stat{
+   padding:10px 11px;
+   border-radius:10px;
+   background:var(--card2)
+}
+
+.inventory-stat .info-label{
+   margin-bottom:4px
+}
+
+.inventory-stat .info-value{
+   font-size:14px
+}
+
+.bar{
+   width:100%;
+   height:9px;
+   border-radius:999px;
+   background:#26313b;
+   overflow:hidden;
+   margin-top:6px
+}
+
+.bar > span{
+   display:block;
+   height:100%;
+   width:0%;
+   transition:width .2s ease
+}
+
+.health-bar > span{
+   background:var(--red)
+}
+
+.hunger-bar > span{
+   background:var(--yellow)
+}
+
+.hotbar{
+   display:grid;
+   grid-template-columns:repeat(9,minmax(0,1fr));
+   gap:5px;
+   margin-top:10px
+}
+
+.hotbar-slot{
+   min-width:0;
+   min-height:54px;
+   padding:6px 4px;
+   border:1px solid var(--border);
+   border-radius:8px;
+   background:#0d1319;
+   display:flex;
+   flex-direction:column;
+   align-items:center;
+   justify-content:center;
+   text-align:center;
+   overflow:hidden
+}
+
+.hotbar-slot.selected{
+   border-color:var(--green);
+   box-shadow:0 0 0 1px var(--green) inset
+}
+
+.hotbar-slot .slot-index{
+   color:var(--muted);
+   font-size:9px;
+   margin-bottom:3px
+}
+
+.hotbar-slot .slot-name{
+   font-size:9px;
+   line-height:1.2;
+   word-break:break-word
+}
+
+.hotbar-slot .slot-count{
+   font-size:10px;
+   margin-top:3px
+}
+
+.inventory-list{
+   display:grid;
+   gap:5px;
+   max-height:180px;
+   overflow:auto;
+   margin-top:9px
+}
+
+.inventory-item-row{
+   display:flex;
+   align-items:center;
+   justify-content:space-between;
+   gap:10px;
+   padding:7px 9px;
+   border-radius:8px;
+   background:var(--card2);
+   font-size:11px
+}
+
+.inventory-item-name{
+   min-width:0;
+   overflow:hidden;
+   text-overflow:ellipsis;
+   white-space:nowrap
+}
+
+@media(max-width:520px){
+   .inventory-grid{
+     grid-template-columns:1fr
+   }
+}
+
 @media(max-width:820px){
   .grid{
     grid-template-columns:1fr
@@ -1330,6 +2124,54 @@ label{
 
     <div class="panel">
 
+      <h3>Inventory</h3>
+
+      <div class="inventory-grid">
+
+        <div class="inventory-stat">
+          <div class="info-label">HEALTH</div>
+          <div id="inventoryHealth" class="info-value">20 / 20</div>
+          <div class="bar health-bar"><span id="inventoryHealthBar"></span></div>
+        </div>
+
+        <div class="inventory-stat">
+          <div class="info-label">HUNGER</div>
+          <div id="inventoryFood" class="info-value">20 / 20</div>
+          <div class="bar hunger-bar"><span id="inventoryFoodBar"></span></div>
+        </div>
+
+        <div class="inventory-stat">
+          <div class="info-label">GOLDEN APPLE</div>
+          <div id="inventoryGoldenApple" class="info-value">0</div>
+        </div>
+
+        <div class="inventory-stat">
+          <div class="info-label">TOTEM</div>
+          <div id="inventoryTotem" class="info-value">0</div>
+        </div>
+
+        <div class="inventory-stat">
+          <div class="info-label">OFFHAND</div>
+          <div id="inventoryOffhand" class="info-value">-</div>
+        </div>
+
+        <div class="inventory-stat">
+          <div class="info-label">FOOD COUNT</div>
+          <div id="inventoryFoodCount" class="info-value">0</div>
+        </div>
+
+      </div>
+
+      <div class="info-label">HOTBAR</div>
+      <div id="inventoryHotbar" class="hotbar"></div>
+
+      <div class="info-label" style="margin-top:12px;">INVENTORY SUMMARY</div>
+      <div id="inventoryList" class="inventory-list"></div>
+
+    </div>
+
+    <div class="panel">
+
       <h3>Tài khoản</h3>
 
       <div class="form-row">
@@ -1389,6 +2231,7 @@ label{
 <script>
 
 let bot = null;
+let inventory = null;
 
 let lastLogRevision = -1;
 
@@ -1466,6 +2309,146 @@ async function getBot() {
     Date.now();
 
   return bot;
+}
+
+async function getInventory() {
+  const response =
+    await fetch(
+      '/api/inventory',
+      {
+        cache:'no-store'
+      }
+    );
+
+  if (!response.ok) {
+    throw new Error(
+      'Không lấy được inventory.'
+    );
+  }
+
+  inventory =
+    await response.json();
+
+  return inventory;
+}
+
+function formatInventoryName(name) {
+  if (!name) {
+    return '-';
+  }
+
+  return String(name)
+    .replace(/_/g, ' ');
+}
+
+function renderInventory() {
+  if (!inventory) {
+    return;
+  }
+
+  const health =
+    Math.max(
+      0,
+      Math.min(20, Number(inventory.health || 0))
+    );
+
+  const food =
+    Math.max(
+      0,
+      Math.min(20, Number(inventory.food || 0))
+    );
+
+  document.getElementById('inventoryHealth').textContent =
+    health.toFixed(1) + ' / 20';
+
+  document.getElementById('inventoryFood').textContent =
+    String(food) + ' / 20';
+
+  document.getElementById('inventoryHealthBar').style.width =
+    String((health / 20) * 100) + '%';
+
+  document.getElementById('inventoryFoodBar').style.width =
+    String((food / 20) * 100) + '%';
+
+  document.getElementById('inventoryGoldenApple').textContent =
+    String(inventory.goldenAppleCount || 0);
+
+  document.getElementById('inventoryTotem').textContent =
+    String(inventory.totemCount || 0);
+
+  document.getElementById('inventoryFoodCount').textContent =
+    String(inventory.foodCount || 0);
+
+  document.getElementById('inventoryOffhand').textContent =
+    formatInventoryName(inventory.offhand);
+
+  const hotbar =
+    Array.isArray(inventory.hotbar)
+      ? inventory.hotbar
+      : [];
+
+  const selected =
+    Number(
+      inventory.selectedHotbar ??
+      inventory.selectedSlot ??
+      0
+    );
+
+  document.getElementById('inventoryHotbar').innerHTML =
+    Array.from({ length: 9 }, function(_, index) {
+      const item =
+        hotbar[index] || null;
+
+      const selectedClass =
+        index === selected
+          ? ' selected'
+          : '';
+
+      const name =
+        item && item.displayName
+          ? item.displayName
+          : item && item.name
+            ? item.name
+            : '-';
+
+      const count =
+        item && Number(item.count || 0) > 0
+          ? String(item.count)
+          : '';
+
+      return
+        '<div class="hotbar-slot' + selectedClass + '">' +
+          '<div class="slot-index">' +
+            String(index + 1) +
+          '</div>' +
+          '<div class="slot-name">' +
+            escapeHtml(formatInventoryName(name)) +
+          '</div>' +
+          '<div class="slot-count">' +
+            escapeHtml(count) +
+          '</div>' +
+        '</div>';
+    }).join('');
+
+  const items =
+    Array.isArray(inventory.inventory)
+      ? inventory.inventory
+      : [];
+
+  document.getElementById('inventoryList').innerHTML =
+    items.length
+      ? items.map(function(item) {
+          return
+            '<div class="inventory-item-row">' +
+              '<span class="inventory-item-name">' +
+                escapeHtml(formatInventoryName(item.displayName || item.name)) +
+              '</span>' +
+              '<span>x' +
+                escapeHtml(String(item.count || 0)) +
+              '</span>' +
+            '</div>';
+        }).join('')
+      : '<div class="note">Inventory đang trống hoặc bot chưa online.</div>';
 }
 
 function renderDetail() {
@@ -1657,6 +2640,7 @@ async function loadLogs(force = false) {
 
   }
 }
+
 function escapeHtml(value) {
 
   return String(
@@ -1691,6 +2675,9 @@ async function refresh() {
     await getBot();
 
     renderDetail();
+
+    await getInventory();
+    renderInventory();
 
     await loadLogs();
 
@@ -2154,6 +3141,7 @@ app.post(
         });
     }
 );
+
 // -----------------------------------------------------------------------------
 // Chat / command
 // -----------------------------------------------------------------------------
@@ -2268,6 +3256,21 @@ app.post(
             message:
                 `Đã lưu ${changed.join(' + ')}.`
         });
+    }
+);
+
+// -----------------------------------------------------------------------------
+// Inventory API
+// -----------------------------------------------------------------------------
+
+app.get(
+    '/api/inventory',
+    (req, res) => {
+        res.json(
+            publicInventoryState(
+                botState
+            )
+        );
     }
 );
 
@@ -2423,6 +3426,7 @@ botState.manuallyStopped = true;
 botState.ready = false;
 setBotStatus(botState, 'offline');
 botState.connectedAt = null;
+resetInventoryState(botState);
 
 if (
     botState.username &&
