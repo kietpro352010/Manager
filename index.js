@@ -49,28 +49,20 @@ const CHECK_TIMEOUT_INTERVAL = Number(
 
 app.use(express.json({ limit: '8kb' }));
 
-// Cross-origin support for the future central 3-bot dashboard.
-// Existing same-origin dashboard behavior is unchanged.
+// API responses should not be cached. The central dashboard communicates
+// with child bots server-to-server, so wildcard CORS is intentionally disabled.
 app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader(
-        'Access-Control-Allow-Methods',
-        'GET,POST,OPTIONS'
-    );
-    res.setHeader(
-        'Access-Control-Allow-Headers',
-        'Content-Type'
-    );
-    res.setHeader(
-        'Access-Control-Expose-Headers',
-        'X-Bot-ID,X-Bot-Protocol'
-    );
-    res.setHeader('X-Bot-ID', BOT_ID);
-    res.setHeader('X-Bot-Protocol', '1');
-
-    if (req.method === 'OPTIONS') {
-        return res.sendStatus(204);
+    if (req.path.startsWith('/api/') || req.path === '/health') {
+        res.setHeader(
+            'Cache-Control',
+            'no-store, no-cache, must-revalidate, proxy-revalidate'
+        );
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
     }
+
+    res.setHeader('X-Bot-ID', BOT_ID);
+    res.setHeader('X-Bot-Protocol', '2');
 
     next();
 });
@@ -254,6 +246,8 @@ function addChatLog(
     state.recentChatMessages.push({
         key:
             `${cleanRole}|${cleanUsername}|${cleanMessage}`,
+        role: cleanRole,
+        username: cleanUsername,
         text: cleanMessage,
         at: Date.now()
     });
@@ -272,19 +266,44 @@ function addChatLog(
 
 function isRecentChatMessage(
     state,
-    cleanMsg
+    cleanMsg,
+    username = '',
+    role = ''
 ) {
     const now = Date.now();
+    const wantedText = cleanMinecraftText(cleanMsg);
+    const wantedUsername = cleanMinecraftText(username);
+    const wantedRole = cleanMinecraftText(role);
 
     state.recentChatMessages =
         state.recentChatMessages.filter(
-            entry =>
-                now - entry.at <= 2500
+            entry => now - entry.at <= 2500
         );
 
     return state.recentChatMessages.some(
-        entry =>
-            entry.text === cleanMsg
+        entry => {
+            if (entry.text !== wantedText) {
+                return false;
+            }
+
+            if (
+                wantedUsername &&
+                entry.username &&
+                entry.username !== wantedUsername
+            ) {
+                return false;
+            }
+
+            if (
+                wantedRole &&
+                entry.role &&
+                entry.role !== wantedRole
+            ) {
+                return false;
+            }
+
+            return true;
+        }
     );
 }
 
@@ -850,12 +869,6 @@ function buildInventorySignature(
     }
 
     return [
-        snapshot.health,
-        snapshot.food,
-        snapshot.saturation,
-        snapshot.foodCount,
-        snapshot.goldenAppleCount,
-        snapshot.totemCount,
         snapshot.selectedSlot,
         slotParts.join(';')
     ].join('|');
@@ -875,19 +888,12 @@ function scanInventory(
         return false;
     }
 
-    const slots =
-        bot.inventory.slots;
-
-    const offhandSlot =
-        getOffhandSlot(bot);
+    const slots = bot.inventory.slots;
+    const offhandSlot = getOffhandSlot(bot);
 
     const allMainItems = [];
 
-    for (
-        let slot = 9;
-        slot <= 35;
-        slot++
-    ) {
+    for (let slot = 9; slot <= 35; slot++) {
         allMainItems.push(
             itemToInventoryData(
                 slots[slot] || null,
@@ -898,14 +904,8 @@ function scanInventory(
 
     const hotbar = [];
 
-    for (
-        let quickSlot = 0;
-        quickSlot < 9;
-        quickSlot++
-    ) {
-        const inventorySlot =
-            36 + quickSlot;
-
+    for (let quickSlot = 0; quickSlot < 9; quickSlot++) {
+        const inventorySlot = 36 + quickSlot;
         hotbar.push(
             itemToInventoryData(
                 slots[inventorySlot] || null,
@@ -915,235 +915,112 @@ function scanInventory(
     }
 
     const armor = {
-        head:
-            itemToInventoryData(
-                slots[5] || null,
-                5
-            ),
-
-        torso:
-            itemToInventoryData(
-                slots[6] || null,
-                6
-            ),
-
-        legs:
-            itemToInventoryData(
-                slots[7] || null,
-                7
-            ),
-
-        feet:
-            itemToInventoryData(
-                slots[8] || null,
-                8
-            )
+        head: itemToInventoryData(slots[5] || null, 5),
+        torso: itemToInventoryData(slots[6] || null, 6),
+        legs: itemToInventoryData(slots[7] || null, 7),
+        feet: itemToInventoryData(slots[8] || null, 8)
     };
 
-    const offhandItem =
-        slots[offhandSlot] || null;
+    const offhandItem = slots[offhandSlot] || null;
 
     let foodCount = 0;
     let goldenAppleCount = 0;
     let totemCount = 0;
 
-    for (
-        let slot = 9;
-        slot <= 45;
-        slot++
-    ) {
-        const item =
-            slots[slot];
+    for (let slot = 9; slot <= 45; slot++) {
+        const item = slots[slot];
 
-        if (
-            !item ||
-            !item.name
-        ) {
+        if (!item || !item.name) {
             continue;
         }
 
-        const count =
-            Number(item.count || 0);
-
-        if (
-            FOOD_PRIORITY.includes(
-                item.name
-            )
-        ) {
-            foodCount += count;
+        if (FOOD_PRIORITY.includes(item.name)) {
+            foodCount += Number(item.count || 0);
         }
 
-        if (
-            item.name ===
-            'golden_apple'
-        ) {
-            goldenAppleCount += count;
+        if (item.name === 'golden_apple') {
+            goldenAppleCount += Number(item.count || 0);
         }
 
-        if (
-            item.name ===
-            'totem_of_undying'
-        ) {
-            totemCount += count;
+        if (item.name === 'totem_of_undying') {
+            totemCount += Number(item.count || 0);
         }
     }
 
     const selectedSlot =
-        Number.isInteger(
-            bot.quickBarSlot
-        ) &&
+        Number.isInteger(bot.quickBarSlot) &&
         bot.quickBarSlot >= 0 &&
         bot.quickBarSlot <= 8
             ? bot.quickBarSlot
             : 0;
 
     const nextState = {
-        revision:
-            state.inventoryRevision,
-
-        health:
-            Number.isFinite(bot.health)
-                ? Math.max(
-                    0,
-                    Math.min(
-                        Number(bot.health),
-                        20
-                    )
-                )
-                : 20,
-
-        food:
-            Number.isFinite(bot.food)
-                ? Math.max(
-                    0,
-                    Math.min(
-                        Number(bot.food),
-                        20
-                    )
-                )
-                : 20,
-
-        saturation:
-            Number.isFinite(
-                bot.foodSaturation
-            )
-                ? Math.max(
-                    0,
-                    Number(bot.foodSaturation)
-                )
-                : 20,
-
+        revision: state.inventoryRevision,
+        health: Number.isFinite(bot.health)
+            ? Math.max(0, Math.min(Number(bot.health), 20))
+            : 20,
+        food: Number.isFinite(bot.food)
+            ? Math.max(0, Math.min(Number(bot.food), 20))
+            : 20,
+        saturation: Number.isFinite(bot.foodSaturation)
+            ? Math.max(0, Number(bot.foodSaturation))
+            : 20,
         foodCount,
         goldenAppleCount,
         totemCount,
-
-        offhand:
-            offhandItem &&
-            offhandItem.name
-                ? offhandItem.name
-                : null,
-
-        selectedHotbar:
-            selectedSlot,
-
+        offhand: offhandItem && offhandItem.name
+            ? offhandItem.name
+            : null,
+        selectedHotbar: selectedSlot,
         selectedSlot,
-
         armor,
-
         hotbar,
-
-        inventory:
-            allMainItems,
-
-        slots:
-            buildSlotState(slots)
+        inventory: allMainItems,
+        slots: buildSlotState(slots)
     };
 
-    const nextSnapshot =
-        buildInventorySnapshot(
-            nextState
-        );
+    const nextSnapshot = buildInventorySnapshot(nextState);
+    const previous = state.previousInventorySnapshot;
 
-    const previous =
-        state.previousInventorySnapshot;
+    const nextSignature = buildInventorySignature(nextSnapshot);
+    const previousSignature = previous
+        ? buildInventorySignature(previous)
+        : '';
 
-    let changed =
-        false;
+    const slotOrSelectionChanged =
+        !previous ||
+        previousSignature !== nextSignature;
 
-    if (!previous) {
-        changed = true;
+    const displayStateChanged =
+        !previous ||
+        previous.health !== nextSnapshot.health ||
+        previous.food !== nextSnapshot.food ||
+        previous.saturation !== nextSnapshot.saturation;
+
+    if (slotOrSelectionChanged) {
+        state.inventoryRevision++;
+        nextState.revision = state.inventoryRevision;
     } else {
-        changed =
-            previous.health !==
-                nextSnapshot.health ||
-            previous.food !==
-                nextSnapshot.food ||
-            previous.saturation !==
-                nextSnapshot.saturation ||
-            previous.foodCount !==
-                nextSnapshot.foodCount ||
-            previous.goldenAppleCount !==
-                nextSnapshot.goldenAppleCount ||
-            previous.totemCount !==
-                nextSnapshot.totemCount ||
-            previous.selectedSlot !==
-                nextSnapshot.selectedSlot;
-
-        if (!changed) {
-            const previousSignatures =
-                previous.slotSignatures || {};
-
-            const nextSignatures =
-                nextSnapshot.slotSignatures || {};
-
-            for (
-                let slot = 5;
-                slot <= 45;
-                slot++
-            ) {
-                const key =
-                    String(slot);
-
-                if (
-                    previousSignatures[key] !==
-                    nextSignatures[key]
-                ) {
-                    changed = true;
-                    break;
-                }
-            }
-        }
+        nextState.revision = state.inventoryRevision;
     }
 
-    if (changed) {
-        state.inventoryRevision++;
+    state.inventoryState = nextState;
 
-        nextState.revision =
-            state.inventoryRevision;
-
-        state.inventoryState =
-            nextState;
-
+    if (slotOrSelectionChanged || displayStateChanged) {
         logInventoryDifferences(
             state,
             previous,
             nextSnapshot
         );
-
-        state.inventoryLogSignature =
-            buildInventorySignature(
-                nextSnapshot
-            );
-
-        state.previousInventorySnapshot =
-            nextSnapshot;
-    } else {
-        nextState.revision =
-            state.inventoryRevision;
-
-        state.inventoryState.revision =
-            state.inventoryRevision;
+    } else if (forceLog) {
+        addLog(
+            state,
+            '[INV] Inventory đã đồng bộ.'
+        );
     }
+
+    state.inventoryLogSignature = nextSignature;
+    state.previousInventorySnapshot = nextSnapshot;
 
     return true;
 }
@@ -1216,7 +1093,8 @@ async function autoEatTick(state) {
         state.status === 'offline' ||
         state.status === 'connecting' ||
         state.status === 'authenticating' ||
-        state.status === 'entering'
+        state.status === 'entering' ||
+        state.status === 'kicked'
     ) {
         return;
     }
@@ -1403,7 +1281,8 @@ async function autoTotemTick(state) {
         state.status === 'offline' ||
         state.status === 'connecting' ||
         state.status === 'authenticating' ||
-        state.status === 'entering'
+        state.status === 'entering' ||
+        state.status === 'kicked'
     ) {
         return;
     }
@@ -1999,7 +1878,9 @@ function registerEvents(state, bot) {
         if (
             isRecentChatMessage(
                 state,
-                cleanMessage
+                cleanMessage,
+                username,
+                ''
             )
         ) {
             return;
@@ -2027,6 +1908,7 @@ function registerEvents(state, bot) {
 
         setBotStatus(state, 'kicked');
         state.ready = false;
+        clearManagerTimers(state);
 
         addLog(
             state,
@@ -2035,9 +1917,13 @@ function registerEvents(state, bot) {
     });
 
     bot.on('end', () => {
-        if (state.bot === bot) {
+        const isCurrentBot = state.bot === bot;
+
+        if (isCurrentBot) {
             state.bot = null;
         }
+
+        clearManagerTimers(state);
 
         state.ready = false;
         state.connectedAt = null;
@@ -2233,11 +2119,22 @@ function handleServerMessage(
             cleanMsg
         );
 
+    const customChatIsOwnRecentWebMessage =
+        !!(
+            customChat &&
+            customChat.username === bot.username &&
+            cleanMinecraftText(state.lastWebChatText) === customChat.message &&
+            Date.now() - state.lastWebChatAt <= 2500
+        );
+
     if (
         customChat &&
+        !customChatIsOwnRecentWebMessage &&
         !isRecentChatMessage(
             state,
-            customChat.message
+            customChat.message,
+            customChat.username,
+            customChat.role
         )
     ) {
         addChatLog(
@@ -3323,6 +3220,8 @@ label{
         <div
           class="equipment-slot"
           data-destination="head"
+          draggable="true"
+          ondragstart="startEquipmentDrag(event,'head')"
           ondragover="allowDrop(event)"
           ondragleave="clearDragOver(event)"
           ondrop="dropEquip(event,'head')"
@@ -3335,6 +3234,8 @@ label{
         <div
           class="equipment-slot"
           data-destination="torso"
+          draggable="true"
+          ondragstart="startEquipmentDrag(event,'torso')"
           ondragover="allowDrop(event)"
           ondragleave="clearDragOver(event)"
           ondrop="dropEquip(event,'torso')"
@@ -3347,6 +3248,8 @@ label{
         <div
           class="equipment-slot"
           data-destination="legs"
+          draggable="true"
+          ondragstart="startEquipmentDrag(event,'legs')"
           ondragover="allowDrop(event)"
           ondragleave="clearDragOver(event)"
           ondrop="dropEquip(event,'legs')"
@@ -3359,6 +3262,8 @@ label{
         <div
           class="equipment-slot"
           data-destination="feet"
+          draggable="true"
+          ondragstart="startEquipmentDrag(event,'feet')"
           ondragover="allowDrop(event)"
           ondragleave="clearDragOver(event)"
           ondrop="dropEquip(event,'feet')"
@@ -3371,6 +3276,8 @@ label{
         <div
           class="equipment-slot"
           data-destination="off-hand"
+          draggable="true"
+          ondragstart="startEquipmentDrag(event,'off-hand')"
           ondragover="allowDrop(event)"
           ondragleave="clearDragOver(event)"
           ondrop="dropEquip(event,'off-hand')"
@@ -3891,6 +3798,42 @@ function renderInventory() {
   }
 }
 
+function startEquipmentDrag(event, destination) {
+  const slotMap = {
+    head: 5,
+    torso: 6,
+    legs: 7,
+    feet: 8,
+    'off-hand': 45
+  };
+
+  const slot = slotMap[destination];
+
+  if (!Number.isInteger(slot)) {
+    return;
+  }
+
+  draggedSlot = slot;
+
+  try {
+    event.dataTransfer.setData(
+      'text/plain',
+      String(slot)
+    );
+    event.dataTransfer.effectAllowed = 'move';
+  } catch (_) {
+  }
+}
+
+function equipmentDestinationFromSlot(slot) {
+  if (slot === 5) return 'head';
+  if (slot === 6) return 'torso';
+  if (slot === 7) return 'legs';
+  if (slot === 8) return 'feet';
+  if (slot === 45) return 'off-hand';
+  return null;
+}
+
 function allowDrop(event) {
 
   event.preventDefault();
@@ -3958,6 +3901,16 @@ async function dropInventory(
     !Number.isInteger(sourceSlot) ||
     sourceSlot === destinationSlot
   ) {
+    return;
+  }
+
+  const equipmentDestination =
+    equipmentDestinationFromSlot(sourceSlot);
+
+  if (equipmentDestination) {
+    await unequipEquipment(
+      equipmentDestination
+    );
     return;
   }
 
@@ -5204,7 +5157,7 @@ app.get(
             botId: BOT_ID,
             id: BOT_ID_NUMBER,
             label: BOT_LABEL,
-            protocol: 1,
+            protocol: 2,
             api: {
                 status: '/api/bot',
                 node: '/api/node',
@@ -5368,16 +5321,21 @@ app.post(
             'Restart from web panel'
         );
 
-        setTimeout(() => {
+        const restartTimer =
+            setTimeout(() => {
 
-            botState.manuallyStopped =
-                false;
+                botState.manuallyStopped =
+                    false;
 
-            startBot(
-                botState
-            );
+                startBot(
+                    botState
+                );
 
-        }, 500);
+            }, 500);
+
+        botState.afkTimers.push(
+            restartTimer
+        );
 
         res.json({
             ok: true,
@@ -5515,17 +5473,6 @@ app.post(
 // Inventory API
 // -----------------------------------------------------------------------------
 
-app.get(
-    '/api/inventory',
-    (req, res) => {
-        res.json(
-            publicInventoryState(
-                botState
-            )
-        );
-    }
-);
-
 // -----------------------------------------------------------------------------
 // Inventory manager helpers
 // -----------------------------------------------------------------------------
@@ -5562,13 +5509,31 @@ function canUseInventoryAction(state) {
         state.status !== 'offline' &&
         state.status !== 'connecting' &&
         state.status !== 'authenticating' &&
-        state.status !== 'entering'
+        state.status !== 'entering' &&
+        state.status !== 'kicked'
     );
 }
 
 async function finishInventoryAction(state, bot) {
     await new Promise(
-        resolve => setTimeout(resolve, 75)
+        resolve => setTimeout(resolve, 120)
+    );
+
+    if (
+        state.bot !== bot ||
+        state.manuallyStopped
+    ) {
+        return;
+    }
+
+    scanInventory(
+        state,
+        bot,
+        false
+    );
+
+    await new Promise(
+        resolve => setTimeout(resolve, 80)
     );
 
     if (
