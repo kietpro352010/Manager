@@ -19,10 +19,10 @@ const BOT_CONFIG = {
     PLATFORM: 'render',
 
     // Bot identity
-    BOT_ID: '4',
+    BOT_ID: '1',
 
     // KingMC account
-    USERNAME: 'mhuy3667',
+    USERNAME: 'kietdz2010',
     PASSWORD: 'kietpro352010',
 
     // HTTP/Web port
