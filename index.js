@@ -32,11 +32,11 @@ const BOT_CONFIG = {
     RAVEN_HTTP_PORT: null,                // Cổng RavenHost: ĐỂ NULL ĐỂ TỰ ĐỘNG LẤY TỪ PANEL RAVENHOST (SERVER_PORT)
     BOT_ID: '1',                          // ID định danh của bot
 
-    // --- 5. TỐI ƯU HÓA BỘ NHỚ & CHỐNG TRÀN RAM (WATCHDOG <300MB) ---
+    // --- 5. TỐI ƯU HÓA BỘ NHỚ & CHỐNG TRÀN RAM (WATCHDOG 300-500MB) ---
     AUTO_START: true,                     // Tự động kết nối vào game nếu đã có USERNAME và PASSWORD
     VIEW_DISTANCE: 'tiny',                // Tầm nhìn tối thiểu để tiết kiệm RAM tối đa
     CHECK_TIMEOUT_MS: 30000,              // Timeout kiểm tra kết nối mạng
-    RAM_WATCHDOG_LIMIT_MB: 300,           // Ngưỡng RAM tự dọn dẹp sạch sẽ và kích hoạt GC (<300MB)
+    RAM_WATCHDOG_LIMIT_MB: 380,           // Ngưỡng RAM tự dọn dẹp sạch sẽ và kích hoạt GC (300-500MB)
 
     // --- 6. TỌA ĐỘ CHUYỂN SERVER KINGMC ---
     AUTH_COORDS: { x: 5, y: 119, z: 4 },
@@ -304,7 +304,8 @@ const BOT_ID =
     String(BOT_ID_RAW || BOT_ID_NUMBER);
 const BOT_LABEL = `Bot ${BOT_ID}`;
 
-const MAX_LOGS = 100;
+const MAX_LOGS = 500;
+const MAX_CHAT_LOGS = 500;
 const RECONNECT_DELAY = 3000;
 const INVENTORY_ACTION_TIMEOUT_MS = 15000;
 const AUTO_START_ON_BOOT = Boolean(BOT_CONFIG.AUTO_START);
@@ -876,10 +877,10 @@ function addChatLog(
     state.chatLogs.push(line);
     state.chatLogRevision++;
 
-    if (state.chatLogs.length > MAX_LOGS) {
+    if (state.chatLogs.length > MAX_CHAT_LOGS) {
         state.chatLogs.splice(
             0,
-            state.chatLogs.length - MAX_LOGS
+            state.chatLogs.length - MAX_CHAT_LOGS
         );
     }
 
@@ -1318,7 +1319,8 @@ function startMemoryWatchdog(state) {
             state.lastRssMb = rssMb;
             state.lastHeapMb = heapMb;
 
-            if (rssMb > 280) {
+            const limitMb = Number(BOT_CONFIG.RAM_WATCHDOG_LIMIT_MB) || 380;
+            if (rssMb > limitMb) {
                 // Ép dọn dẹp thực thể và chunk
                 if (state.bot && state.bot.entities) {
                     const myId = state.bot.entity ? state.bot.entity.id : -1;
@@ -1329,14 +1331,14 @@ function startMemoryWatchdog(state) {
                     }
                 }
 
-                if (state.logs && state.logs.length > 50) state.logs = state.logs.slice(-50);
-                if (state.chatLogs && state.chatLogs.length > 50) state.chatLogs = state.chatLogs.slice(-50);
+                if (state.logs && state.logs.length > 300) state.logs = state.logs.slice(-300);
+                if (state.chatLogs && state.chatLogs.length > 300) state.chatLogs = state.chatLogs.slice(-300);
 
                 if (typeof global.gc === 'function') {
                     global.gc();
                 }
 
-                addLog(state, `[BỘ NHỚ] Kích hoạt giải phóng RAM khẩn cấp (RSS: ${rssMb} MB, Heap: ${heapMb} MB).`);
+                addLog(state, `[BỘ NHỚ] Kích hoạt giải phóng RAM khẩn cấp (RSS: ${rssMb} MB / Ngưỡng: ${limitMb} MB).`);
             }
         } catch (_) {}
     }, 30000);
@@ -5320,7 +5322,7 @@ input:focus, select:focus, textarea:focus {
 }
 
 .log, .chat-log {
-  height: 380px;
+  height: 440px;
   overflow: auto;
   background: rgba(8, 12, 17, 0.95);
   border: 1px solid var(--border);
@@ -6047,12 +6049,13 @@ input:focus, select:focus, textarea:focus {
       </form>
 
       <div class="chip-row">
-        <button type="button" class="chip" onclick="quickSendCommand('/menu')">⚡ /menu</button>
-        <button type="button" class="chip" onclick="quickSendCommand('/dn')">🔑 /dn</button>
+        <button type="button" class="chip" onclick="quickSendCommand('/menu')">⚡ /menu (Slot 24)</button>
+        <button type="button" class="chip" onclick="quickSendCommand('/dn')">🔑 /dn [MK]</button>
+        <button type="button" class="chip" onclick="quickSendCommand('/login')">🔓 /login [MK]</button>
+        <button type="button" class="chip" onclick="quickSendCommand('/bal')">💵 /bal</button>
+        <button type="button" class="chip" onclick="quickSendCommand('/team chat')">🛡️ /team chat</button>
         <button type="button" class="chip" onclick="quickSendCommand('/spawn')">🏠 /spawn</button>
-        <button type="button" class="chip" onclick="quickSendCommand('/fix')">🔨 /fix</button>
         <button type="button" class="chip" onclick="quickSendCommand('/pay')">💰 /pay</button>
-        <button type="button" class="chip" onclick="quickSendCommand('/server lobby')">🌐 /server lobby</button>
       </div>
 
       <div class="note">
@@ -8882,36 +8885,105 @@ app.post(
         }
 
         try {
+            const raw = text.trim();
+            const lower = raw.toLowerCase();
 
-            botState.bot.chat(
-                text
-            );
+            // 1. Tự động gắn mật khẩu cho /dn
+            if (lower === '/dn') {
+                if (!botState.password) {
+                    return res.status(400).json({
+                        error: 'Bot chưa có mật khẩu! Vui lòng lưu mật khẩu trong Cài đặt.'
+                    });
+                }
+                botState.bot.chat(`/dn ${botState.password}`);
+                botState.lastWebChatText = '/dn [PASSWORD]';
+                botState.lastWebChatAt = Date.now();
+                addChatLog(botState, 'WEB', '→ /dn ********');
+                return res.json({
+                    ok: true,
+                    message: 'Đã gửi /dn (kèm mật khẩu đã lưu).'
+                });
+            }
 
-            botState.lastWebChatText =
-                cleanMinecraftText(text);
+            // 2. Tự động gắn mật khẩu cho /login
+            if (lower === '/login') {
+                if (!botState.password) {
+                    return res.status(400).json({
+                        error: 'Bot chưa có mật khẩu! Vui lòng lưu mật khẩu trong Cài đặt.'
+                    });
+                }
+                botState.bot.chat(`/login ${botState.password}`);
+                botState.lastWebChatText = '/login [PASSWORD]';
+                botState.lastWebChatAt = Date.now();
+                addChatLog(botState, 'WEB', '→ /login ********');
+                return res.json({
+                    ok: true,
+                    message: 'Đã gửi /login (kèm mật khẩu đã lưu).'
+                });
+            }
 
-            botState.lastWebChatAt =
-                Date.now();
+            // 3. /menu: gửi lệnh và tự động bấm ô slot 24 đúng 1 lần duy nhất, không lặp lại
+            if (lower === '/menu') {
+                botState.bot.chat('/menu');
+                botState.lastWebChatText = '/menu';
+                botState.lastWebChatAt = Date.now();
+                addChatLog(botState, 'WEB', '→ /menu');
 
+                let slot24Handled = false;
+                const clickSlot24Once = () => {
+                    if (slot24Handled) return;
+                    slot24Handled = true;
+                    setTimeout(() => {
+                        try {
+                            if (botState.bot && botState.bot.currentWindow) {
+                                botState.bot.clickWindow(24, 0, 0);
+                                addLog(botState, '[MENU] Đã click slot 24 (1 lần duy nhất).');
+                            }
+                        } catch (err) {
+                            addLog(botState, `[MENU] Lỗi click slot 24: ${err.message}`);
+                        }
+                    }, 700);
+                };
+
+                if (botState.bot.currentWindow) {
+                    clickSlot24Once();
+                } else {
+                    botState.bot.once('windowOpen', clickSlot24Once);
+                    setTimeout(() => {
+                        if (!slot24Handled && botState.bot) {
+                            botState.bot.removeListener('windowOpen', clickSlot24Once);
+                        }
+                    }, 10000);
+                }
+
+                return res.json({
+                    ok: true,
+                    message: 'Đã gửi /menu (tự động bấm ô 24 một lần).'
+                });
+            }
+
+            // 4. Các lệnh khác (kể cả người dùng tự gõ /dn <pass> hoặc /login <pass>)
+            const isAuthCmd = lower.startsWith('/dn ') || lower.startsWith('/login ');
+            botState.bot.chat(raw);
+            botState.lastWebChatText = isAuthCmd
+                ? `${raw.split(' ')[0]} [PASSWORD]`
+                : cleanMinecraftText(raw);
+            botState.lastWebChatAt = Date.now();
             addChatLog(
                 botState,
                 'WEB',
-                `→ ${text}`
+                isAuthCmd ? `→ ${raw.split(' ')[0]} ********` : `→ ${raw}`
             );
 
             res.json({
                 ok: true,
-                message:
-                    'Đã gửi.'
+                message: 'Đã gửi.'
             });
 
         } catch (err) {
-
             res.status(500).json({
-                error:
-                    `Gửi thất bại: ${err.message}`
+                error: `Gửi thất bại: ${err.message}`
             });
-
         }
     }
 );
