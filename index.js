@@ -6244,6 +6244,7 @@ function botCardHtml(bot) {
   const uptimeText = sec > 0 ? (Math.floor(sec / 3600) + 'h ' + Math.floor((sec % 3600) / 60) + 'm') : '--';
   const hpText = Number.isFinite(Number(bot.health)) ? (Math.round(bot.health) + ' / 20 HP') : '--';
   const kickWarning = bot.lastKickReason ? ('<div class="note" style="color:var(--yellow);border-color:rgba(234,179,8,0.3);margin-top:6px;">⚠️ Kick: ' + escapeHtml(bot.lastKickReason) + '</div>') : '';
+  const ipDisplay = bot.ipAddress || (bot.url ? (()=>{ try { const u = new URL(bot.url); return (u.hostname && u.hostname !== 'localhost' && u.hostname !== '127.0.0.1') ? u.hostname : ''; } catch(_) { return ''; } })() : '') || '--';
 
   return '<div class="bot-card" data-bot-id="'+id+'" draggable="'+(isAdmin?'true':'false')+'" '+(isAdmin?'ondragstart="startBotDrag(event,'+id+')" ondragover="allowBotDrop(event)" ondrop="dropBot(event,'+id+')"':'')+' onclick="openBot('+id+')">'+
     '<div style="display:flex;align-items:center;gap:8px;">'+
@@ -6269,6 +6270,10 @@ function botCardHtml(bot) {
       '<div class="summary-item"><div class="summary-label">LƯU LƯỢNG MẠNG</div><div class="summary-value" style="color:var(--yellow);font-weight:700;font-size:12.5px;">'+escapeHtml(netText)+'</div></div>'+
       '<div class="summary-item"><div class="summary-label">COORD</div><div class="summary-value">'+escapeHtml(pos)+'</div></div>'+
       '<div class="summary-item"><div class="summary-label">RAM TIẾN TRÌNH BOT</div><div class="summary-value" style="color:#38bdf8;font-weight:700;display:flex;align-items:center;justify-content:space-between;"><span>'+botRamMb+' MB RSS</span>'+ramSpark+'</div></div>'+
+      '<div class="summary-item" style="cursor:pointer;" title="'+escapeHtml(ipDisplay !== '--' ? ('Click để sao chép IP: ' + ipDisplay) : 'Chưa có thông tin IP')+'" data-ip="'+escapeHtml(ipDisplay)+'" onclick="event.stopPropagation();if(this.dataset.ip && this.dataset.ip !== \'--\')copyToClipboard(this.dataset.ip, \'IP Bot\')">'+
+        '<div class="summary-label">ĐỊA CHỈ IP 📋</div>'+
+        '<div class="summary-value" style="color:#c084fc;font-weight:700;font-family:monospace;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escapeHtml(ipDisplay)+'</div>'+
+      '</div>'+
     '</div>'+
     kickWarning+
     (hostRamTotalMb > 0 ?
