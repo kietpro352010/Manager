@@ -16,7 +16,7 @@ const MANAGER_CONFIG = {
     // --- 0. KHÓA BẢO MẬT NỘI BỘ MANAGER <-> BOT CON ---
     BOT_SECRET_KEY: '',                   // Khóa bảo mật nội bộ kết nối Bot con
     // --- 1. MẬT KHẨU QUẢN TRỊ ADMIN (ĐỂ TRỐNG ĐỂ TỰ ĐIỀN) ---
-    ADMIN_PASSWORD: '',                   // Mật khẩu quản trị Manager (ĐỂ TRỐNG: hệ thống tự sinh ngẫu nhiên an toàn)
+    ADMIN_PASSWORD: 'admin123',           // Mật khẩu quản trị Manager (Mặc định: 'admin123' hoặc đặt qua biến môi trường ADMIN_PASSWORD)
 
     // --- 2. THÔNG BÁO WEBHOOK DISCORD & TELEGRAM (ĐỂ TRỐNG NẾU CHƯA DÙNG) ---
     DISCORD_WEBHOOK_URL: '',              // Webhook Discord nhận cảnh báo khi bot offline > 5p, low totem
@@ -2737,16 +2737,16 @@ function initializeAdminPassword() {
     } else if (registry.adminPassword) {
         // Đã có mật khẩu Admin hợp lệ
     } else {
-        // Khởi tạo ban đầu: Tự động sinh ngẫu nhiên mật khẩu Admin an toàn (12 ký tự hex)
-        const generatedPass = crypto.randomBytes(6).toString('hex');
-        registry.adminPassword = hashAdminPassword(generatedPass);
+        // Khởi tạo ban đầu: Mặc định là 'admin123'
+        const defaultPass = 'admin123';
+        registry.adminPassword = hashAdminPassword(defaultPass);
         registry.mustChangePassword = true;
         saveRegistry();
         console.log('================================================================================');
         console.log('[SECURITY BOOTSTRAP] 🔑 KHỞI TẠO TÀI KHOẢN QUẢN TRỊ VIÊN (ADMIN) LẦN ĐẦU:');
         console.log('  Tài khoản: admin');
-        console.log(`  Mật khẩu tự sinh: ${generatedPass}`);
-        console.log('  ⚠️ Vui lòng lưu lại mật khẩu này và đổi mật khẩu sau khi đăng nhập!');
+        console.log('  Mật khẩu mặc định: admin123');
+        console.log('  ⚠️ Vui lòng đổi mật khẩu quản trị ngay sau khi đăng nhập để đảm bảo an toàn!');
         console.log('================================================================================');
     }
 }
