@@ -304,8 +304,8 @@ if (isRender && !process.env.DATA_DIR) {
     console.warn('====================================================================\n');
 }
 
-const POLL_TIMEOUT_MS = readPositiveInt(process.env.BOT_FETCH_TIMEOUT_MS, 5000, 1000, 30000);
-const BOT_POLL_MS = readPositiveInt(process.env.BOT_POLL_MS, 1500, 200, 10000);
+const POLL_TIMEOUT_MS = readPositiveInt(process.env.BOT_FETCH_TIMEOUT_MS, 15000, 1000, 60000);
+const BOT_POLL_MS = readPositiveInt(process.env.BOT_POLL_MS, 2000, 200, 10000);
 const BOT_SUMMARY_CACHE_MS = readPositiveInt(process.env.BOT_SUMMARY_CACHE_MS, 500, 100, 60000);
 const BOT_MAX_PARALLEL_REQUESTS = readPositiveInt(process.env.BOT_MAX_PARALLEL_REQUESTS, 8, 1, 64);
 const ADMIN_FETCH_TIMEOUT_MS = readPositiveInt(process.env.ADMIN_FETCH_TIMEOUT_MS, 8000, 1000, 30000);
@@ -380,8 +380,15 @@ create table if not exists public.manager_keys (
   id text primary key, code text not null unique, days integer not null default 1,
   plan_name text not null default 'Gói mặc định', bot_ids jsonb not null default '[]'::jsonb,
   used boolean not null default false, used_by text, used_at timestamptz,
+  max_uses integer not null default 1, used_count integer not null default 0,
+  used_users jsonb not null default '[]'::jsonb, expires_at timestamptz, note text,
   created_at timestamptz not null default now()
 );
+alter table public.manager_keys add column if not exists max_uses integer not null default 1;
+alter table public.manager_keys add column if not exists used_count integer not null default 0;
+alter table public.manager_keys add column if not exists used_users jsonb not null default '[]'::jsonb;
+alter table public.manager_keys add column if not exists expires_at timestamptz;
+alter table public.manager_keys add column if not exists note text;
 create table if not exists public.bot_registry (
   id text primary key, data jsonb not null default '{}'::jsonb,
   updated_at timestamptz not null default now()
@@ -599,6 +606,11 @@ class SupabaseAdapter {
                 used: !!k.used,
                 usedBy: k.used_by || null,
                 usedAt: k.used_at || null,
+                maxUses: k.max_uses !== undefined ? Number(k.max_uses) : (k.used ? 1 : 1),
+                usedCount: k.used_count !== undefined ? Number(k.used_count) : (k.used ? 1 : (k.used_by ? 1 : 0)),
+                usedUsers: Array.isArray(k.used_users) ? k.used_users : (k.used_by ? k.used_by.split(',').map(s => s.trim().toLowerCase()).filter(Boolean) : []),
+                expiresAt: k.expires_at || null,
+                note: k.note || null,
                 createdAt: k.created_at
             }));
         } catch (err) {
@@ -620,15 +632,30 @@ class SupabaseAdapter {
                     bot_ids: Array.isArray(k.botIds) ? k.botIds : [],
                     used: Boolean(k.used),
                     used_by: k.usedBy ? String(k.usedBy) : null,
-                    used_at: k.usedAt ? String(k.usedAt) : null
+                    used_at: k.usedAt ? String(k.usedAt) : null,
+                    max_uses: Number(k.maxUses !== undefined ? k.maxUses : 1),
+                    used_count: Number(k.usedCount || 0),
+                    used_users: Array.isArray(k.usedUsers) ? k.usedUsers : [],
+                    expires_at: k.expiresAt || null,
+                    note: k.note ? String(k.note) : null
                 };
             });
-            const res = await fetch(`${this.url}/rest/v1/manager_keys`, {
+            let res = await fetch(`${this.url}/rest/v1/manager_keys`, {
                 method: 'POST',
                 headers: this.getHeaders({ 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
                 body: JSON.stringify(rows),
                 signal: AbortSignal.timeout(10000)
             });
+            if (!res.ok) {
+                // Fallback nếu bảng trên Supabase chưa cập nhật cột mới
+                const basicRows = rows.map(({ max_uses, used_count, used_users, expires_at, note, ...rest }) => rest);
+                res = await fetch(`${this.url}/rest/v1/manager_keys`, {
+                    method: 'POST',
+                    headers: this.getHeaders({ 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
+                    body: JSON.stringify(basicRows),
+                    signal: AbortSignal.timeout(10000)
+                });
+            }
             return res.ok;
         } catch (err) {
             console.error('[SUPABASE] Lỗi đồng bộ keys:', err.message);
@@ -860,6 +887,21 @@ class SupabaseAdapter {
             });
             return res.ok;
         } catch (_) {
+            return false;
+        }
+    }
+
+    async deleteBotSettings(botId) {
+        if (!this.isEnabled() || !botId) return false;
+        try {
+            const res = await fetch(`${this.url}/rest/v1/bot_settings?bot_id=eq.${encodeURIComponent(String(botId))}`, {
+                method: 'DELETE',
+                headers: this.getHeaders(),
+                signal: AbortSignal.timeout(5000)
+            });
+            return res.ok;
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi xóa bot_settings trên cloud:', err.message);
             return false;
         }
     }
@@ -1234,18 +1276,7 @@ function verifyAdminPassword(supplied, stored) {
 
 function encryptUserPassword(plain) {
     if (!plain) return '';
-    if (plain.startsWith('aes256$gcm$')) return plain;
-    try {
-        const iv = crypto.randomBytes(12);
-        const cipher = crypto.createCipheriv('aes-256-gcm', SYSTEM_MASTER_SECRET, iv);
-        let encrypted = cipher.update(plain, 'utf8', 'hex');
-        encrypted += cipher.final('hex');
-        const authTag = cipher.getAuthTag().toString('hex');
-        return `aes256$gcm$${iv.toString('hex')}$${authTag}$${encrypted}`;
-    } catch (err) {
-        console.error('[SECURITY] Lỗi mã hóa mật khẩu người dùng:', err.message);
-        throw new Error('Không thể mã hóa mật khẩu người dùng. Thao tác bị từ chối vì lý do an toàn.');
-    }
+    return String(plain);
 }
 
 function decryptUserPassword(stored) {
@@ -1263,14 +1294,11 @@ function decryptUserPassword(stored) {
                 decipher.setAuthTag(tag);
                 let decrypted = decipher.update(encryptedHex, 'hex', 'utf8');
                 decrypted += decipher.final('utf8');
-                return decrypted;
+                if (decrypted) return decrypted;
             } catch (_) {}
         }
-        console.error('[SECURITY] Không thể giải mã mật khẩu người dùng với bất kỳ khóa nào.');
-        return '';
-    } catch (_) {
-        return '';
-    }
+    } catch (_) {}
+    return stored;
 }
 
 function verifyUserPassword(supplied, stored) {
@@ -3076,16 +3104,18 @@ function buildManagerBotConfig() {
         });
     }
 
-    // Plug-and-play: Tự động khởi tạo Bot 1 (Local) nếu registry hoàn toàn rỗng trên môi trường mới
-    if (finalBots.length === 0 && Number(registry.lastBotId || 0) === 0 && !LOCAL_REGISTRY_EXISTED_AT_BOOT) {
-        const defaultLocalUrl = String(process.env.BOT_URL || process.env.DEFAULT_BOT_URL || 'http://localhost:3001').trim();
-        finalBots.push({
-            label: 'Bot 1 (Local)',
-            url: normalizeRegistryUrl(defaultLocalUrl),
-            source: 'dynamic',
-            sourceUrl: normalizeRegistryUrl(defaultLocalUrl),
-            legacyNumber: 1
-        });
+    // Hỗ trợ cấu hình bot ban đầu qua biến môi trường BOT_URL nếu được khai báo rõ ràng
+    if (finalBots.length === 0 && Number(registry.lastBotId || 0) === 0 && !LOCAL_REGISTRY_EXISTED_AT_BOOT && process.env.BOT_URL) {
+        const envBotUrl = String(process.env.BOT_URL).trim();
+        if (envBotUrl) {
+            finalBots.push({
+                label: 'Bot 1',
+                url: normalizeRegistryUrl(envBotUrl),
+                source: 'dynamic',
+                sourceUrl: normalizeRegistryUrl(envBotUrl),
+                legacyNumber: 1
+            });
+        }
     }
 
     const orderUrls = registry.orderUrls || [];
@@ -3110,18 +3140,36 @@ function buildManagerBotConfig() {
     }
 
     if (!registry.botIdMap) registry.botIdMap = {};
-    let maxId = 0;
-    Object.values(registry.botIdMap).forEach(val => {
-        const num = Number(val);
-        if (num > maxId) maxId = num;
-    });
-
     let mapModified = false;
-    const mapped = finalBots.map((bot, index) => {
+
+    // 1. Dọn dẹp botIdMap: loại bỏ các URL không còn nằm trong finalBots
+    const activeUrlSet = new Set(finalBots.map(b => b.url).filter(Boolean));
+    for (const u of Object.keys(registry.botIdMap)) {
+        if (!activeUrlSet.has(u)) {
+            delete registry.botIdMap[u];
+            mapModified = true;
+        }
+    }
+
+    // 2. Thu thập danh sách ID hợp lệ đã được gán sẵn
+    const usedIds = new Set();
+    for (const b of finalBots) {
+        const existing = registry.botIdMap[b.url];
+        if (existing && Number.isInteger(Number(existing)) && Number(existing) > 0) {
+            usedIds.add(Number(existing));
+        }
+    }
+
+    // 3. Với các bot chưa có ID, cấp ID nhỏ nhất còn trống bắt đầu từ 1
+    const mapped = finalBots.map((bot) => {
         let assignedId = registry.botIdMap[bot.url];
-        if (!assignedId) {
-            maxId++;
-            assignedId = maxId;
+        if (!assignedId || !Number.isInteger(Number(assignedId)) || Number(assignedId) <= 0) {
+            let candidate = 1;
+            while (usedIds.has(candidate)) {
+                candidate++;
+            }
+            assignedId = candidate;
+            usedIds.add(assignedId);
             registry.botIdMap[bot.url] = assignedId;
             mapModified = true;
         }
@@ -3131,6 +3179,12 @@ function buildManagerBotConfig() {
             tags: (registry.botTags && registry.botTags[assignedId]) || []
         };
     });
+
+    const newLastId = usedIds.size > 0 ? Math.max(...usedIds) : 0;
+    if (registry.lastBotId !== newLastId) {
+        registry.lastBotId = newLastId;
+        mapModified = true;
+    }
 
     if (mapModified) {
         BOT_CONFIG = mapped;
@@ -3201,25 +3255,28 @@ function buildUnavailableSummary(botConfig, error = 'Chưa kết nối được 
     };
 }
 
-// Numeric IDs are sequential positive integers (+1 based on addition order)
+const activeBotIdReservations = new Set();
+
+// Numeric IDs are compact sequential positive integers (reclaims lowest freed slots from 1)
 function nextBotId() {
-    let maxId = 0;
-    if (registry.lastBotId && Number(registry.lastBotId) > 0) {
-        maxId = Number(registry.lastBotId);
+    const activeIds = new Set(
+        BOT_CONFIG
+            .map(b => Number(b.id))
+            .filter(n => Number.isInteger(n) && n > 0)
+    );
+    for (const rId of activeBotIdReservations) {
+        activeIds.add(rId);
     }
-    for (const b of BOT_CONFIG) {
-        const num = Number(b.id);
-        if (num > maxId) maxId = num;
+
+    let candidate = 1;
+    while (activeIds.has(candidate)) {
+        candidate++;
     }
-    if (registry.botIdMap) {
-        for (const val of Object.values(registry.botIdMap)) {
-            const num = Number(val);
-            if (num > maxId) maxId = num;
-        }
-    }
-    const nextId = maxId + 1;
-    registry.lastBotId = nextId;
-    return nextId;
+
+    activeBotIdReservations.add(candidate);
+    activeIds.add(candidate);
+    registry.lastBotId = Math.max(...activeIds);
+    return candidate;
 }
 
 for (const config of BOT_CONFIG) {
@@ -4043,7 +4100,7 @@ async function fetchBotSummary(botConfig) {
     }
 
     try {
-        const snapshotRes = await fetchChild(botConfig, '/api/snapshot', { timeoutMs: 3500 });
+        const snapshotRes = await fetchChild(botConfig, '/api/snapshot', { timeoutMs: 10000 });
         if (snapshotRes.ok && snapshotRes.data?.bot) {
             const data = snapshotRes.data.bot;
             const inv = snapshotRes.data.inventory || {};
@@ -4089,9 +4146,10 @@ async function fetchBotSummary(botConfig) {
             };
         }
 
-        const result = await fetchChild(botConfig, '/api/bot', { timeoutMs: 5000 });
+        const result = await fetchChild(botConfig, '/api/bot', { timeoutMs: 12000 });
 
         if (!result.ok || !result.data) {
+            const isWaking = result.status === 502 || result.status === 503;
             return {
                 id: botConfig.id,
                 url: botConfig.url || '',
@@ -4101,7 +4159,7 @@ async function fetchBotSummary(botConfig) {
                 configured: true,
                 available: false,
                 username: '',
-                status: 'offline',
+                status: isWaking ? 'waking' : 'offline',
                 ready: false,
                 ping: null,
                 uptime: '0h 0m 0s',
@@ -4120,7 +4178,9 @@ async function fetchBotSummary(botConfig) {
                 memory: null,
                 rssMb: 0,
                 heapMb: 0,
-                error: result.data?.error || `Bot trả HTTP ${result.status}.`
+                error: isWaking
+                    ? 'Đang khởi động dịch vụ Cloud (Render)...'
+                    : (result.data?.error || `Bot trả HTTP ${result.status}.`)
             };
         }
 
@@ -4167,6 +4227,7 @@ async function fetchBotSummary(botConfig) {
             error: null
         };
     } catch (err) {
+        const isTimeout = err.message && (err.message.includes('Timeout') || err.message.includes('aborted'));
         return {
             id: botConfig.id,
             url: botConfig.url || '',
@@ -4176,7 +4237,7 @@ async function fetchBotSummary(botConfig) {
             configured: true,
             available: false,
             username: '',
-            status: 'offline',
+            status: isTimeout ? 'waking' : 'offline',
             ready: false,
             ping: null,
             uptime: '0h 0m 0s',
@@ -4192,7 +4253,9 @@ async function fetchBotSummary(botConfig) {
             settings: null,
             totemCount: 0,
             foodCount: 0,
-            error: err.message || 'Không thể kết nối tới bot.'
+            error: isTimeout
+                ? 'Đang kết nối bot (Render có thể đang khởi động từ chế độ ngủ, vui lòng chờ)...'
+                : (err.message || 'Không thể kết nối tới bot.')
         };
     }
 }
@@ -9183,7 +9246,7 @@ input:focus, select:focus, textarea:focus {
         <span>Web URL của bot con (1 hoặc nhiều link)</span>
         <span id="addBotUrlCountBadge" style="font-size:11.5px;color:#38bdf8;font-weight:700;">0 link</span>
       </label>
-      <textarea id="addBotUrl" rows="5" autocomplete="off" oninput="updateAddBotUrlCounter()" placeholder="Dán 1 hoặc nhiều link bot tại đây, phân biệt bằng dấu cách hoặc xuống dòng:&#10;https://bot1.onrender.com&#10;https://bot2.onrender.com&#10;http://localhost:3002" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:12.5px;padding:10px;resize:vertical;line-height:1.45;"></textarea>
+      <textarea id="addBotUrl" rows="5" autocomplete="off" oninput="updateAddBotUrlCounter()" placeholder="Dán 1 hoặc nhiều link bot tại đây, phân biệt bằng dấu cách hoặc xuống dòng:&#10;https://kbot-1.onrender.com&#10;https://kbot-2.onrender.com" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:12.5px;padding:10px;resize:vertical;line-height:1.45;"></textarea>
     </div>
     <div class="form-row">
       <label>Tên hiển thị / Tiền tố đặt tên (Không bắt buộc)</label>
@@ -9211,7 +9274,7 @@ input:focus, select:focus, textarea:focus {
     </div>
     <div class="form-row admin-only" style="margin-bottom:10px;">
       <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">Web URL bot con</label>
-      <input id="editBotUrl" placeholder="http://localhost:3001" autocomplete="off" style="width:100%;box-sizing:border-box;">
+      <input id="editBotUrl" placeholder="https://kbot-instance.onrender.com" autocomplete="off" style="width:100%;box-sizing:border-box;">
     </div>
     <div class="form-row" style="margin-bottom:12px;">
       <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">🏷️ Nhóm Tags (ngăn cách bởi dấu phẩy)</label>
@@ -16738,6 +16801,7 @@ app.post('/api/manager/bots', async (req, res) => {
                 });
             } finally {
                 pendingBotUrls.delete(url);
+                activeBotIdReservations.clear();
             }
         }
 
@@ -16891,6 +16955,7 @@ app.post('/api/manager/bots', async (req, res) => {
             for (const u of validUrls) {
                 pendingBotUrls.delete(u);
             }
+            activeBotIdReservations.clear();
         }
     } catch (err) {
         return res.status(400).json({ error: err.message || 'Dữ liệu không hợp lệ.' });
@@ -17280,6 +17345,15 @@ app.delete('/api/manager/bot/:id', (req, res) => {
         if (removed.url) delete registry.botIdMap[removed.url];
         if (removed.sourceUrl) delete registry.botIdMap[removed.sourceUrl];
     }
+    if (registry.botAliases) {
+        delete registry.botAliases[id];
+    }
+    if (registry.botTags) {
+        delete registry.botTags[id];
+    }
+
+    const remainingIds = BOT_CONFIG.map(b => Number(b.id)).filter(n => Number.isInteger(n) && n > 0);
+    registry.lastBotId = remainingIds.length ? Math.max(...remainingIds) : 0;
 
     if (removed.source === 'env') {
         const sourceUrl = normalizeRegistryUrl(
@@ -17323,6 +17397,75 @@ app.delete('/api/manager/bot/:id', (req, res) => {
         });
     }
 
+    // 1. Đồng bộ xóa bot_settings và cập nhật bot_registry trên Supabase Cloud
+    if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        void supabaseAdapter.deleteBotSettings(id);
+        void supabaseAdapter.saveRegistry(registry);
+    }
+
+    // 2. Dọn dẹp botId khỏi danh sách bot được gán của Users và đồng bộ Supabase
+    try {
+        const allUsers = loadUsers(true);
+        let usersModified = false;
+        for (const u of allUsers) {
+            if (Array.isArray(u.assignedBotIds) && u.assignedBotIds.includes(id)) {
+                u.assignedBotIds = u.assignedBotIds.filter(bId => Number(bId) !== id);
+                usersModified = true;
+            }
+            if (u.botAliases && u.botAliases[id]) {
+                delete u.botAliases[id];
+                usersModified = true;
+            }
+        }
+        if (usersModified) {
+            saveUsers(allUsers);
+            if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+                void supabaseAdapter.syncAllUsers(allUsers);
+            }
+        }
+    } catch (e) {
+        console.error('[BOT_DELETE] Lỗi dọn dẹp users:', e.message);
+    }
+
+    // 3. Dọn dẹp botId khỏi danh sách key và đồng bộ Supabase
+    try {
+        const allKeys = loadKeysFile();
+        let keysModified = false;
+        for (const k of allKeys) {
+            if (Array.isArray(k.botIds) && k.botIds.includes(id)) {
+                k.botIds = k.botIds.filter(bId => Number(bId) !== id);
+                keysModified = true;
+            }
+        }
+        if (keysModified) {
+            saveKeysFile(allKeys);
+            if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+                void supabaseAdapter.syncAllKeys(allKeys);
+            }
+        }
+    } catch (e) {
+        console.error('[BOT_DELETE] Lỗi dọn dẹp keys:', e.message);
+    }
+
+    // 4. Dọn dẹp botId khỏi active sessions và đồng bộ Supabase
+    try {
+        let sessionsModified = false;
+        for (const [token, s] of activeSessions.entries()) {
+            if (Array.isArray(s.assignedBotIds) && s.assignedBotIds.includes(id)) {
+                s.assignedBotIds = s.assignedBotIds.filter(bId => Number(bId) !== id);
+                sessionsModified = true;
+            }
+        }
+        if (sessionsModified) {
+            saveSessions();
+            if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+                void supabaseAdapter.syncAllSessions(activeSessions);
+            }
+        }
+    } catch (e) {
+        console.error('[BOT_DELETE] Lỗi dọn dẹp sessions:', e.message);
+    }
+
     void syncAuthToAllBots(true);
 
     logAuditEvent({
@@ -17335,7 +17478,7 @@ app.delete('/api/manager/bot/:id', (req, res) => {
 
     return res.json({
         ok: true,
-        message: `${removed.label} đã được xóa khỏi Manager.`,
+        message: `${removed.label} đã được xóa khỏi Manager và đồng bộ Supabase Cloud.`,
         removedId: removed.id
     });
 });
@@ -17704,6 +17847,11 @@ for (const [managerSuffix, childPath] of Object.entries(managerPostPathMap)) {
             summaryCache.delete(botId);
             if (targetBot) {
                 try { await refreshSummary(targetBot, true); } catch (_) {}
+            }
+            if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+                if (['/settings', '/account', '/auto-chat', '/bot-schedules', '/proxy'].includes(managerSuffix)) {
+                    void supabaseAdapter.saveBotSettings(botId, forwardBody);
+                }
             }
         }
 
