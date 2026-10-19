@@ -89,6 +89,20 @@ function extractCliArgs() {
         } else if (arg.startsWith('-p=')) {
             const p = parseInt(arg.split('=')[1], 10);
             if (Number.isFinite(p) && p > 0 && p <= 65535) port = p;
+        } else if (arg.startsWith('--server_port=') || arg.startsWith('--server-port=')) {
+            const p = parseInt(arg.split('=')[1], 10);
+            if (Number.isFinite(p) && p > 0 && p <= 65535) port = p;
+        } else if (arg === '--server_port' || arg === '--server-port') {
+            if (i + 1 < argv.length) {
+                const p = parseInt(argv[i + 1], 10);
+                if (Number.isFinite(p) && p > 0 && p <= 65535) {
+                    port = p;
+                    i++;
+                }
+            }
+        } else if (arg.startsWith('--web_port=') || arg.startsWith('--web-port=')) {
+            const p = parseInt(arg.split('=')[1], 10);
+            if (Number.isFinite(p) && p > 0 && p <= 65535) port = p;
         } else if (arg.startsWith('--platform=')) {
             platform = arg.split('=')[1].trim().toLowerCase();
         } else if (arg === '--platform') {
@@ -107,7 +121,7 @@ function extractCliArgs() {
 function detectHostPlatformAndPort(config, fallbackPort, role = 'manager') {
     const cli = extractCliArgs();
 
-    // 1. Dấu hiệu Render Cloud Web Service chính thức (https://render.com/docs/environment-variables)
+    // 1. Nhận diện nền tảng Hosting (Render Cloud, Deplexo, WispByte, Pterodactyl, VPS, Local):
     const isRender = !!(
         (process.env.RENDER && String(process.env.RENDER).toLowerCase() === 'true') ||
         process.env.RENDER_SERVICE_ID ||
@@ -116,45 +130,71 @@ function detectHostPlatformAndPort(config, fallbackPort, role = 'manager') {
         process.env.RENDER_EXTERNAL_HOSTNAME
     );
 
-    let platform = isRender ? 'render' : 'local';
+    const isPanel = !!(
+        process.env.PTERODACTYL ||
+        process.env.P_SERVER_UUID ||
+        process.env.P_SERVER_ALLOCATION_LIMIT ||
+        process.env.SERVER_PORT ||
+        process.env.P_SERVER_PORT ||
+        process.env.STARTUP ||
+        process.env.DEPLEXO ||
+        process.env.WISPBYTE ||
+        process.env.WISPBAY ||
+        process.env.WISP
+    );
+
+    let platform = isRender ? 'render' : (isPanel ? 'pterodactyl' : 'local');
     let detectionSource = isRender
-        ? 'Biến môi trường Render chính thức (process.env.RENDER / RENDER_SERVICE_ID)'
-        : 'Môi trường Local PC / VPS độc lập (Render Compatible Mode)';
+        ? 'Render Cloud Web Service (process.env.RENDER / RENDER_SERVICE_ID)'
+        : (isPanel
+            ? 'Hosting Panel / Pterodactyl / Wisp (Deplexo, WispByte, Game Host Container)'
+            : 'Môi trường Local PC / VPS độc lập (Universal Mode)');
 
     const configuredPlatform = String(config.PLATFORM || 'auto').trim().toLowerCase();
-    if (cli.platform === 'render' || cli.platform === 'local') {
+    if (cli.platform) {
         platform = cli.platform;
         detectionSource = `Tham số dòng lệnh CLI (--platform=${cli.platform})`;
-    } else if (configuredPlatform === 'render' || configuredPlatform === 'local') {
+    } else if (configuredPlatform && configuredPlatform !== 'auto') {
         platform = configuredPlatform;
-        detectionSource = `Cấu hình ép buộc config.PLATFORM = '${configuredPlatform}'`;
+        detectionSource = `Cấu hình config.PLATFORM = '${configuredPlatform}'`;
     }
 
-    // 2. Phân giải Cổng (Port) theo chuẩn Render Cloud (PORT=10000)
-    let port = fallbackPort;
+    // 2. Phân giải Cổng (Port) thông minh thích ứng mọi Hosting
+    function isValidPort(p) {
+        const n = Number(p);
+        return Number.isFinite(n) && n > 0 && n <= 65535;
+    }
+
+    let port = fallbackPort || 3000;
     let portSource = 'mặc định';
 
-    if (cli.port) {
-        port = cli.port;
-        portSource = `Tham số dòng lệnh CLI (--port = ${cli.port})`;
-    } else if (process.env.PORT) {
-        const envPort = Number(process.env.PORT);
-        if (Number.isFinite(envPort) && envPort > 0 && envPort <= 65535) {
-            port = envPort;
-            portSource = `Render cấp tự động (process.env.PORT = ${envPort})`;
-        }
-    } else if (platform === 'render') {
+    if (cli.port && isValidPort(cli.port)) {
+        port = Number(cli.port);
+        portSource = `Tham số dòng lệnh CLI (--port = ${port})`;
+    } else if (isValidPort(process.env.PORT)) {
+        port = Number(process.env.PORT);
+        portSource = `Biến môi trường PORT = ${port} (Render / Cloud Web Service)`;
+    } else if (isValidPort(process.env.SERVER_PORT)) {
+        port = Number(process.env.SERVER_PORT);
+        portSource = `Biến môi trường SERVER_PORT = ${port} (Deplexo / WispByte / Pterodactyl)`;
+    } else if (isValidPort(process.env.P_SERVER_PORT)) {
+        port = Number(process.env.P_SERVER_PORT);
+        portSource = `Biến môi trường P_SERVER_PORT = ${port} (Pterodactyl Allocation)`;
+    } else if (isValidPort(process.env.APP_PORT)) {
+        port = Number(process.env.APP_PORT);
+        portSource = `Biến môi trường APP_PORT = ${port}`;
+    } else if (isValidPort(process.env.WEB_PORT)) {
+        port = Number(process.env.WEB_PORT);
+        portSource = `Biến môi trường WEB_PORT = ${port}`;
+    } else if (isRender) {
         port = 10000;
         portSource = 'Render Web Service mặc định (10000)';
+    } else if (isValidPort(config.WEB_PORT)) {
+        port = Number(config.WEB_PORT);
+        portSource = `Cấu hình config.WEB_PORT = ${port}`;
     } else {
-        const cfgPort = Number(config.WEB_PORT);
-        if (Number.isFinite(cfgPort) && cfgPort > 0 && cfgPort <= 65535) {
-            port = cfgPort;
-            portSource = `Cấu hình config.WEB_PORT = ${cfgPort}`;
-        } else {
-            port = fallbackPort;
-            portSource = `Cổng dự phòng fallback (${fallbackPort})`;
-        }
+        port = fallbackPort || 3000;
+        portSource = `Cổng dự phòng fallback (${port})`;
     }
 
     return { platform, detectionSource, port, portSource };
@@ -162,25 +202,33 @@ function detectHostPlatformAndPort(config, fallbackPort, role = 'manager') {
 
 function listenHttpServer(app, initialPort, platform, onListening) {
     const fixedPort = initialPort;
-    const maxRetries = 5;
+    const maxRetries = 10;
     let attempt = 0;
+    let bindHost = '0.0.0.0';
 
     function tryListen() {
-        const srv = app.listen(fixedPort, '0.0.0.0');
+        const srv = app.listen(fixedPort, bindHost);
 
         srv.on('listening', () => {
-            onListening(srv, fixedPort);
+            onListening(srv, fixedPort, bindHost);
         });
 
         srv.on('error', (err) => {
+            if (err.code === 'EADDRNOTAVAIL' && bindHost !== '0.0.0.0') {
+                console.warn(`[HTTP] ⚠️ Không thể gán IP ${bindHost} (EADDRNOTAVAIL). Tự động chuyển sang bind '0.0.0.0'...`);
+                bindHost = '0.0.0.0';
+                setTimeout(tryListen, 500);
+                return;
+            }
+
             if (err.code === 'EADDRINUSE' && attempt < maxRetries) {
                 attempt++;
                 console.warn(`[HTTP] ⚠️ Cổng ${fixedPort} đang tạm thời bận (EADDRINUSE). Đang chờ giải phóng socket và thử lại lần ${attempt}/${maxRetries} sau 1 giây...`);
                 setTimeout(tryListen, 1000);
             } else {
-                console.error(`[HTTP] ❌ Lỗi khởi động máy chủ web trên cổng cố định ${fixedPort}:`, err.message);
+                console.error(`[HTTP] ❌ Lỗi khởi động máy chủ web trên cổng ${fixedPort} (IP: ${bindHost}):`, err.message);
                 if (err.code === 'EADDRINUSE') {
-                    console.error(`[HTTP] 💡 Khắc phục: Cổng ${fixedPort} đang bị chiếm bởi tiến trình khác. Hãy kiểm tra các bot/tiến trình Node.js đang chạy ngầm hoặc khởi động lại dịch vụ trên Render.`);
+                    console.error(`[HTTP] 💡 Khắc phục: Cổng ${fixedPort} đang bị chiếm bởi tiến trình khác. Hãy kiểm tra các bot/tiến trình Node.js đang chạy ngầm hoặc khởi động lại dịch vụ.`);
                 }
                 process.exit(1);
             }
@@ -1011,6 +1059,70 @@ function saveKeysFile(keysList) {
         console.error('[KEYS] Lỗi lưu manager_keys.json:', e.message);
         return false;
     }
+}
+
+// ----------------------------------------------------------------------------
+// ENTERPRISE GIFTCODE & LICENSE KEY ENGINE: VALIDATION & CONSUMPTION
+// ----------------------------------------------------------------------------
+function checkKeyValidity(keyObj, username) {
+    if (!keyObj || typeof keyObj !== 'object') {
+        return { ok: false, error: 'Mã Key / Giftcode không tồn tại trên hệ thống.' };
+    }
+
+    const u = String(username || '').trim().toLowerCase();
+
+    // 1. Kiểm tra thời hạn áp dụng của mã code (Expiration Date)
+    if (keyObj.expiresAt) {
+        const expMs = Date.parse(keyObj.expiresAt);
+        if (!isNaN(expMs) && Date.now() > expMs) {
+            const expDateStr = new Date(expMs).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
+            return { ok: false, error: `Mã Key / Giftcode này đã hết thời hạn áp dụng vào lúc ${expDateStr}!` };
+        }
+    }
+
+    // 2. Kiểm tra nếu mã có ngày bắt đầu áp dụng
+    if (keyObj.startsAt) {
+        const startMs = Date.parse(keyObj.startsAt);
+        if (!isNaN(startMs) && Date.now() < startMs) {
+            const startDateStr = new Date(startMs).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
+            return { ok: false, error: `Mã Key / Giftcode này chưa đến thời gian áp dụng (Bắt đầu từ ${startDateStr})!` };
+        }
+    }
+
+    // 3. Chuẩn hóa danh sách người đã sử dụng mã
+    const usedUsers = Array.isArray(keyObj.usedUsers)
+        ? keyObj.usedUsers.map(x => String(x).toLowerCase())
+        : (keyObj.usedBy ? keyObj.usedBy.split(',').map(x => x.trim().toLowerCase()).filter(Boolean) : []);
+
+    // 4. KIỂM TRA ĐIỀU KIỆN CỐT LÕI: Mỗi tài khoản chỉ được dùng mã này 1 lần duy nhất!
+    if (u && usedUsers.includes(u)) {
+        return { ok: false, error: 'Tài khoản của bạn đã sử dụng mã Code này rồi! Mỗi tài khoản chỉ được dùng 1 lần duy nhất.' };
+    }
+
+    // 5. Kiểm tra giới hạn tổng số lượt sử dụng toàn hệ thống (Max Uses)
+    const maxUses = Number(keyObj.maxUses) || (keyObj.used !== undefined ? 1 : 1);
+    const usedCount = Number(keyObj.usedCount) || (keyObj.used ? 1 : usedUsers.length);
+    if (maxUses > 0 && usedCount >= maxUses) {
+        return { ok: false, error: `Mã Key / Giftcode này đã hết lượt sử dụng trên hệ thống (Đã dùng ${usedCount}/${maxUses} lượt)!` };
+    }
+
+    return { ok: true, maxUses, usedCount, usedUsers };
+}
+
+function consumeKeyForUser(keyObj, username) {
+    const u = String(username || '').trim().toLowerCase();
+    keyObj.usedUsers = Array.isArray(keyObj.usedUsers)
+        ? keyObj.usedUsers.map(x => String(x).toLowerCase())
+        : (keyObj.usedBy ? keyObj.usedBy.split(',').map(x => x.trim().toLowerCase()).filter(Boolean) : []);
+
+    if (u && !keyObj.usedUsers.includes(u)) {
+        keyObj.usedUsers.push(u);
+    }
+    keyObj.usedCount = (Number(keyObj.usedCount) || 0) + 1;
+    const maxUses = Number(keyObj.maxUses) || 1;
+    keyObj.used = maxUses > 0 && keyObj.usedCount >= maxUses;
+    keyObj.usedBy = keyObj.usedUsers.join(', ');
+    keyObj.usedAt = new Date().toISOString();
 }
 
 // ----------------------------------------------------------------------------
@@ -2740,7 +2852,7 @@ function initializeAdminPassword() {
         // Khởi tạo ban đầu: Mặc định là 'admin123'
         const defaultPass = 'admin123';
         registry.adminPassword = hashAdminPassword(defaultPass);
-        registry.mustChangePassword = true;
+        registry.mustChangePassword = false;
         saveRegistry();
         console.log('================================================================================');
         console.log('[SECURITY BOOTSTRAP] 🔑 KHỞI TẠO TÀI KHOẢN QUẢN TRỊ VIÊN (ADMIN) LẦN ĐẦU:');
@@ -8716,7 +8828,7 @@ input:focus, select:focus, textarea:focus {
     <!-- SUB-PANEL 2: QUẢN LÝ KEY GIA HẠN -->
     <div id="subPanelKeys" class="sub-panel hidden">
       <div class="create-key-card">
-        <h4 style="margin:0 0 10px 0;font-size:14.5px;color:#38bdf8;font-weight:750;">🎟️ Tạo Mã Key Gia Hạn Nhanh</h4>
+        <h4 style="margin:0 0 10px 0;font-size:14.5px;color:#38bdf8;font-weight:750;">🎟️ Tạo Mã Key & Giftcode Sự Kiện</h4>
         <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
           <div>
             <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">GÓI THUÊ:</label>
@@ -8736,13 +8848,31 @@ input:focus, select:focus, textarea:focus {
           </div>
           <div>
             <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">TÊN GÓI:</label>
-            <input type="text" id="mgmtKeyPlan" placeholder="VD: Gói Tuần VIP" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:150px;" />
+            <input type="text" id="mgmtKeyPlan" placeholder="VD: Gói Tuần VIP" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:130px;" />
           </div>
           <div>
-            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">SỐ LƯỢNG KEY:</label>
-            <input type="number" id="mgmtKeyCount" value="1" min="1" max="20" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:70px;" />
+            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">MÃ TÙY CHỌN (GIFTCODE):</label>
+            <input type="text" id="mgmtKeyCustomKey" placeholder="Để trống = sinh ngẫu nhiên" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:160px;text-transform:uppercase;" />
           </div>
-          <button class="primary" onclick="submitCreateKeysFromMgmt()" style="padding:9px 18px;font-weight:750;">+ Phát Hành Key Ngay</button>
+          <div>
+            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;" title="Số lượt dùng tối đa trên toàn server. Mỗi user chỉ được dùng 1 lần!">LƯỢT DÙNG:</label>
+            <input type="number" id="mgmtKeyMaxUses" value="1" min="0" max="10000" title="1 = Key cá nhân, n = Giftcode nhiều người nhập, 0 = Không giới hạn" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:75px;" />
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">HẠN ÁP DỤNG:</label>
+            <select id="mgmtKeyValidDays" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;">
+              <option value="0" selected>Vô thời hạn</option>
+              <option value="1">Trong 1 Ngày</option>
+              <option value="3">Trong 3 Ngày</option>
+              <option value="7">Trong 7 Ngày</option>
+              <option value="30">Trong 30 Ngày</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">SỐ KEY:</label>
+            <input type="number" id="mgmtKeyCount" value="1" min="1" max="50" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:60px;" />
+          </div>
+          <button class="primary" onclick="submitCreateKeysFromMgmt()" style="padding:9px 18px;font-weight:750;">+ Phát Hành Mã</button>
         </div>
       </div>
 
@@ -8750,11 +8880,11 @@ input:focus, select:focus, textarea:focus {
         <table class="user-table">
           <thead>
             <tr>
-              <th>MÃ KEY GIA HẠN</th>
+              <th>MÃ KEY / GIFTCODE</th>
               <th>GÓI THUÊ</th>
-              <th>TRẠNG THÁI</th>
+              <th>TRẠNG THÁI &amp; LƯỢT DÙNG</th>
               <th>NGƯỜI KÍCH HOẠT</th>
-              <th>THỜI GIAN TẠO</th>
+              <th>HẠN ÁP DỤNG</th>
               <th style="text-align:right;">THAO TÁC</th>
             </tr>
           </thead>
@@ -11868,6 +11998,12 @@ async function submitCreateKeysFromMgmt() {
     days = parseInt(daysVal, 10) || 7;
   }
 
+  const customKey = document.getElementById('mgmtKeyCustomKey')?.value.trim();
+  const maxUsesVal = document.getElementById('mgmtKeyMaxUses')?.value;
+  const validDaysVal = document.getElementById('mgmtKeyValidDays')?.value;
+  const maxUses = maxUsesVal !== '' ? parseInt(maxUsesVal, 10) : 1;
+  const validDays = parseInt(validDaysVal, 10) || 0;
+
   try {
     const res = await requestJson('/api/manager/keys', {
       method: 'POST',
@@ -11876,11 +12012,15 @@ async function submitCreateKeysFromMgmt() {
         days,
         planName: planName || (isPermanent ? 'VIP Vĩnh Viễn' : ('Gói ' + days + ' Ngày')),
         count,
+        customKey: customKey || undefined,
+        maxUses: isNaN(maxUses) ? 1 : maxUses,
+        validDays: validDays > 0 ? validDays : undefined,
         setPermanent: isPermanent
       })
     });
     if (!res.ok) throw new Error(res.data?.error || 'Không thể tạo mã Key.');
     showToast('🎉 ' + (res.data?.message || 'Đã tạo ' + count + ' mã Key thành công!'));
+    if (document.getElementById('mgmtKeyCustomKey')) document.getElementById('mgmtKeyCustomKey').value = '';
     await refreshKeysTable();
   } catch (err) {
     showToast('Lỗi: ' + err.message);
@@ -13200,35 +13340,68 @@ function closeKeyManagementModal() {
 
 async function refreshKeysTable() {
   const tbody = document.getElementById('keysTableBody');
-  if (!tbody) return;
-  tbody.innerHTML = '<tr><td colspan="5" style="padding:12px;text-align:center;color:var(--muted);">Đang tải danh sách Key...</td></tr>';
+  const fullTbody = document.getElementById('keysFullTableBody');
+  if (!tbody && !fullTbody) return;
+  const loadingHtml = '<tr><td colspan="6" style="padding:16px;text-align:center;color:var(--muted);">Đang tải danh sách Key / Giftcode...</td></tr>';
+  if (tbody) tbody.innerHTML = loadingHtml;
+  if (fullTbody) fullTbody.innerHTML = loadingHtml;
+
   try {
     const res = await requestJson('/api/manager/keys');
     if (!res.ok) throw new Error(res.data?.error || 'Lỗi tải danh sách key');
     const keys = res.data?.keys || [];
+    const countBadge = document.getElementById('keyMgmtTotalCount');
+    if (countBadge) countBadge.textContent = keys.length;
+
     if (!keys.length) {
-      tbody.innerHTML = '<tr><td colspan="5" style="padding:12px;text-align:center;color:var(--muted);">Chưa có mã Key nào. Bấm Tạo Key phía trên để tạo mới.</td></tr>';
+      const emptyHtml = '<tr><td colspan="6" style="padding:16px;text-align:center;color:var(--muted);">Chưa có mã Key / Giftcode nào. Sử dụng bảng phát hành phía trên để tạo mới.</td></tr>';
+      if (tbody) tbody.innerHTML = emptyHtml;
+      if (fullTbody) fullTbody.innerHTML = emptyHtml;
       return;
     }
-    tbody.innerHTML = keys.map(k => {
-      const isUsed = !!k.used;
-      const statusBadge = isUsed
-        ? '<span style="color:var(--red);background:rgba(239,68,68,0.15);padding:2px 6px;border-radius:4px;">Đã dùng</span>'
-        : '<span style="color:var(--green);background:rgba(16,185,129,0.15);padding:2px 6px;border-radius:4px;">Chưa dùng</span>';
+
+    const rowsHtml = keys.map(k => {
+      const maxUses = Number(k.maxUses) || (k.used !== undefined ? 1 : 1);
+      const usedCount = Number(k.usedCount) || (k.used ? 1 : (Array.isArray(k.usedUsers) ? k.usedUsers.length : 0));
+      const isExpired = k.expiresAt && Date.now() > Date.parse(k.expiresAt);
+      const isExhausted = maxUses > 0 && usedCount >= maxUses;
+
+      let statusBadge = '';
+      if (isExpired) {
+        statusBadge = '<span style="color:#f59e0b;background:rgba(245,158,11,0.15);padding:2px 7px;border-radius:4px;font-size:11px;font-weight:700;">Hết hạn</span>';
+      } else if (isExhausted) {
+        statusBadge = '<span style="color:var(--red);background:rgba(239,68,68,0.15);padding:2px 7px;border-radius:4px;font-size:11px;font-weight:700;">Hết lượt (' + usedCount + '/' + maxUses + ')</span>';
+      } else if (usedCount > 0) {
+        statusBadge = '<span style="color:#38bdf8;background:rgba(56,189,248,0.15);padding:2px 7px;border-radius:4px;font-size:11px;font-weight:700;">Đang dùng (' + usedCount + '/' + (maxUses > 0 ? maxUses : '∞') + ')</span>';
+      } else {
+        statusBadge = '<span style="color:var(--green);background:rgba(16,185,129,0.15);padding:2px 7px;border-radius:4px;font-size:11px;font-weight:700;">Khả dụng (0/' + (maxUses > 0 ? maxUses : '∞') + ')</span>';
+      }
+
+      const usersText = Array.isArray(k.usedUsers) && k.usedUsers.length > 0
+        ? k.usedUsers.join(', ')
+        : (k.usedBy ? String(k.usedBy) : '-');
+
+      const expText = k.expiresAt
+        ? new Date(k.expiresAt).toLocaleDateString('vi-VN')
+        : 'Vô thời hạn';
+
       return '<tr style="border-bottom:1px solid var(--border);">' +
-        '<td style="padding:8px 10px;font-family:monospace;font-weight:700;color:#38bdf8;">' + escapeHtml(k.key) + '</td>' +
+        '<td style="padding:8px 10px;font-family:monospace;font-weight:750;color:#38bdf8;">' + escapeHtml(k.key) + '</td>' +
         '<td style="padding:8px 10px;">' + escapeHtml(k.planName || (k.days + ' Ngày')) + '</td>' +
         '<td style="padding:8px 10px;">' + statusBadge + '</td>' +
-        '<td style="padding:8px 10px;color:var(--muted);">' + (isUsed ? (escapeHtml(k.usedBy) + ' (' + new Date(k.usedAt).toLocaleDateString('vi-VN') + ')') : '-') + '</td>' +
+        '<td style="padding:8px 10px;color:var(--muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(usersText) + '">' + escapeHtml(usersText) + '</td>' +
+        '<td style="padding:8px 10px;color:var(--muted);font-size:12px;">' + escapeHtml(expText) + '</td>' +
         '<td style="padding:8px 10px;text-align:right;">' +
           '<button type="button" class="small btn-copy-key" data-key="' + escapeHtml(k.key) + '" style="margin-right:6px;">📋 Copy</button>' +
           '<button type="button" class="small danger btn-delete-key" data-key="' + escapeHtml(k.key) + '">🗑 Xóa</button>' +
         '</td>' +
       '</tr>';
     }).join('');
-    if (!tbody._delegationInit) {
-      tbody._delegationInit = true;
-      tbody.addEventListener('click', function(e) {
+
+    function attachDelegation(el) {
+      if (!el || el._delegationInit) return;
+      el._delegationInit = true;
+      el.addEventListener('click', function(e) {
         const btn = e.target.closest('button');
         if (!btn) return;
         if (btn.classList.contains('btn-copy-key')) {
@@ -13238,8 +13411,19 @@ async function refreshKeysTable() {
         }
       });
     }
+
+    if (tbody) {
+      tbody.innerHTML = rowsHtml;
+      attachDelegation(tbody);
+    }
+    if (fullTbody) {
+      fullTbody.innerHTML = rowsHtml;
+      attachDelegation(fullTbody);
+    }
   } catch(e) {
-    tbody.innerHTML = '<tr><td colspan="5" style="padding:12px;text-align:center;color:var(--red);">' + escapeHtml(e.message) + '</td></tr>';
+    const errHtml = '<tr><td colspan="6" style="padding:12px;text-align:center;color:var(--red);">' + escapeHtml(e.message) + '</td></tr>';
+    if (tbody) tbody.innerHTML = errHtml;
+    if (fullTbody) fullTbody.innerHTML = errHtml;
   }
 }
 
@@ -15111,14 +15295,17 @@ app.post('/api/auth/register', (req, res) => {
             if (providedKey !== '') {
                 const keysList = loadKeysFile();
                 const keyIndex = keysList.findIndex(k => k.key.toUpperCase() === providedKey);
-                if (keyIndex === -1 || keysList[keyIndex].used) {
+                if (keyIndex === -1) {
                     recordRegisterAttempt(clientIp, username, false);
-                    return res.status(400).json({ ok: false, error: 'Mã Key gia hạn không hợp lệ hoặc đã được sử dụng!' });
+                    return res.status(400).json({ ok: false, error: 'Mã Key / Giftcode gia hạn không tồn tại!' });
                 }
                 keyObj = keysList[keyIndex];
-                keyObj.used = true;
-                keyObj.usedBy = username;
-                keyObj.usedAt = new Date().toISOString();
+                const keyCheck = checkKeyValidity(keyObj, username);
+                if (!keyCheck.ok) {
+                    recordRegisterAttempt(clientIp, username, false);
+                    return res.status(400).json({ ok: false, error: keyCheck.error });
+                }
+                consumeKeyForUser(keyObj, username);
                 const days = Number(keyObj.days || 30);
                 expiresAt = new Date(Date.now() + days * 86400000).toISOString();
                 planName = keyObj.planName || `Gói ${days} ngày`;
@@ -15381,21 +15568,24 @@ app.post('/api/auth/login', async (req, res) => {
 
         const keysList = loadKeysFile();
         const keyIndex = keysList.findIndex(k => k.key.toUpperCase() === providedKey);
-        if (keyIndex === -1 || keysList[keyIndex].used) {
+        if (keyIndex === -1) {
             recordRenewAttempt(req, user.username, false);
-            return res.status(400).json({ ok: false, error: 'Mã Key gia hạn không hợp lệ hoặc đã được sử dụng!' });
+            return res.status(400).json({ ok: false, error: 'Mã Key / Giftcode gia hạn không tồn tại!' });
+        }
+        const keyObj = keysList[keyIndex];
+        const keyCheck = checkKeyValidity(keyObj, user.username);
+        if (!keyCheck.ok) {
+            recordRenewAttempt(req, user.username, false);
+            return res.status(400).json({ ok: false, error: keyCheck.error });
         }
 
         recordRenewAttempt(req, user.username, true);
-        const keyObj = keysList[keyIndex];
 
         // Giao dịch atomic nạp Key
         const keysBackup = JSON.parse(JSON.stringify(keysList));
         const usersBackup = JSON.parse(JSON.stringify(users));
 
-        keyObj.used = true;
-        keyObj.usedBy = user.username;
-        keyObj.usedAt = new Date().toISOString();
+        consumeKeyForUser(keyObj, user.username);
 
         const baseTime = (user.expiresAt && Date.parse(user.expiresAt) > Date.now())
             ? Date.parse(user.expiresAt)
@@ -17796,24 +17986,55 @@ app.post('/api/manager/keys', (req, res) => {
         return res.status(403).json({ error: 'Chỉ Quản trị viên mới có quyền tạo Key.' });
     }
     const rawDays = Number(req.body?.days);
-    const days = Number.isFinite(rawDays) && rawDays >= 1 ? Math.min(Math.floor(rawDays), 3650) : 7;
+    const days = Number.isFinite(rawDays) && rawDays >= 1 ? Math.min(Math.floor(rawDays), 36500) : 7;
     const planName = (req.body?.planName || `Gói ${days} Ngày`).trim();
     const botIds = Array.isArray(req.body?.botIds) ? req.body.botIds.map(Number).filter(Number.isFinite) : [];
     const rawCount = Number(req.body?.count);
     const count = Number.isFinite(rawCount) && rawCount >= 1 ? Math.min(Math.floor(rawCount), 50) : 1;
+
+    // Giới hạn số lượt dùng tối đa trên toàn server (1 = key cá nhân, n = giftcode, 0 = không giới hạn)
+    const rawMaxUses = Number(req.body?.maxUses);
+    const maxUses = Number.isFinite(rawMaxUses) && rawMaxUses >= 0 ? Math.floor(rawMaxUses) : 1;
+
+    // Thời hạn áp dụng của mã Code (ngày hết hạn hoặc số ngày có hiệu lực validDays)
+    let expiresAt = null;
+    if (req.body?.expiresAt) {
+        const expMs = Date.parse(req.body.expiresAt);
+        if (!isNaN(expMs)) expiresAt = new Date(expMs).toISOString();
+    } else if (req.body?.validDays) {
+        const vDays = Number(req.body.validDays);
+        if (Number.isFinite(vDays) && vDays > 0) {
+            expiresAt = new Date(Date.now() + vDays * 86400000).toISOString();
+        }
+    }
+
+    const customKey = String(req.body?.customKey || req.body?.customCode || '').trim().toUpperCase();
 
     const keysList = loadKeysFile();
     const previousKeys = [...keysList];
     const createdKeys = [];
 
     for (let i = 0; i < count; i++) {
-        const rand = crypto.randomBytes(6).toString('hex').toUpperCase();
-        const keyStr = `KINGMC-${days}D-${rand}`;
+        let keyStr;
+        if (count === 1 && customKey) {
+            keyStr = customKey;
+            if (keysList.some(k => k.key.toUpperCase() === keyStr)) {
+                return res.status(400).json({ ok: false, error: `Mã Key/Giftcode "${keyStr}" đã tồn tại. Vui lòng chọn mã khác!` });
+            }
+        } else {
+            const rand = crypto.randomBytes(6).toString('hex').toUpperCase();
+            keyStr = customKey ? `${customKey}-${rand.slice(0, 4)}` : `KINGMC-${days}D-${rand}`;
+        }
+
         const keyItem = {
             key: keyStr,
             days,
             planName,
             botIds,
+            maxUses,            // Giới hạn lượt dùng (1 = private key, n = giftcode, 0 = không giới hạn)
+            usedCount: 0,       // Số lượt đã dùng
+            usedUsers: [],      // Danh sách username đã nhập mã (mỗi user chỉ dùng được 1 lần)
+            expiresAt,          // Hạn áp dụng mã (null = vĩnh viễn)
             createdAt: new Date().toISOString(),
             used: false,
             usedBy: null,
@@ -17832,11 +18053,11 @@ app.post('/api/manager/keys', (req, res) => {
     logAuditEvent({
         req,
         action: 'LICENSE_KEYS_CREATE',
-        details: `Tạo ${count} mã key gia hạn (${days} ngày, gói ${planName})`,
+        details: `Tạo ${count} mã key (${days} ngày, gói ${planName}, maxUses: ${maxUses}, expiresAt: ${expiresAt || 'Vô thời hạn'})`,
         status: 'SUCCESS'
     });
 
-    res.json({ ok: true, message: `Đã tạo ${count} mã Key thành công!`, keys: createdKeys });
+    res.json({ ok: true, message: `Đã tạo ${count} mã Key/Giftcode thành công!`, keys: createdKeys });
 });
 
 app.delete('/api/manager/keys/:key', async (req, res) => {
@@ -17891,11 +18112,7 @@ app.post('/api/manager/renew', async (req, res) => {
         const keyItem = keysList.find(k => k.key === rawKey);
         if (!keyItem) {
             recordRenewAttempt(req, rateLimitUsername, false);
-            return res.status(404).json({ error: 'Mã Key gia hạn không hợp lệ hoặc không tồn tại.' });
-        }
-        if (keyItem.used) {
-            recordRenewAttempt(req, rateLimitUsername, false);
-            return res.status(400).json({ error: 'Mã Key này đã được sử dụng.' });
+            return res.status(404).json({ error: 'Mã Key / Giftcode gia hạn không hợp lệ hoặc không tồn tại.' });
         }
 
         const users = loadUsers();
@@ -17918,6 +18135,12 @@ app.post('/api/manager/renew', async (req, res) => {
         if (!targetUser) {
             recordRenewAttempt(req, rateLimitUsername, false);
             return res.status(404).json({ error: 'Không tìm thấy tài khoản người dùng.' });
+        }
+
+        const keyCheck = checkKeyValidity(keyItem, targetUser.username);
+        if (!keyCheck.ok) {
+            recordRenewAttempt(req, rateLimitUsername, false);
+            return res.status(400).json({ error: keyCheck.error });
         }
 
         // Capture deep backup before modifications
@@ -17949,10 +18172,8 @@ app.post('/api/manager/renew', async (req, res) => {
             assignBotsExclusively(users, targetUser.id || targetUser.username, keyItem.botIds);
         }
 
-        // Đánh dấu Key đã dùng
-        keyItem.used = true;
-        keyItem.usedBy = targetUser.username;
-        keyItem.usedAt = new Date().toISOString();
+        // Đánh dấu Key đã dùng cho tài khoản này
+        consumeKeyForUser(keyItem, targetUser.username);
 
         const uSaved = saveUsers(users);
         const kSaved = saveKeysFile(keysList);
