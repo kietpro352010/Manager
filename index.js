@@ -379,11 +379,13 @@ create table if not exists public.manager_users (
 create table if not exists public.manager_keys (
   id text primary key, code text not null unique, days integer not null default 1,
   plan_name text not null default 'Gói mặc định', bot_ids jsonb not null default '[]'::jsonb,
+  bot_count integer not null default 1,
   used boolean not null default false, used_by text, used_at timestamptz,
   max_uses integer not null default 1, used_count integer not null default 0,
   used_users jsonb not null default '[]'::jsonb, expires_at timestamptz, note text,
   created_at timestamptz not null default now()
 );
+alter table public.manager_keys add column if not exists bot_count integer not null default 1;
 alter table public.manager_keys add column if not exists max_uses integer not null default 1;
 alter table public.manager_keys add column if not exists used_count integer not null default 0;
 alter table public.manager_keys add column if not exists used_users jsonb not null default '[]'::jsonb;
@@ -603,6 +605,7 @@ class SupabaseAdapter {
                 days: k.days,
                 planName: k.plan_name,
                 botIds: Array.isArray(k.bot_ids) ? k.bot_ids : [],
+                botCount: k.bot_count !== undefined ? Number(k.bot_count) : (Array.isArray(k.bot_ids) && k.bot_ids.length ? k.bot_ids.length : 1),
                 used: !!k.used,
                 usedBy: k.used_by || null,
                 usedAt: k.used_at || null,
@@ -630,6 +633,7 @@ class SupabaseAdapter {
                     days: Number(k.days || 1),
                     plan_name: String(k.planName || 'Gói mặc định'),
                     bot_ids: Array.isArray(k.botIds) ? k.botIds : [],
+                    bot_count: Number(k.botCount !== undefined ? k.botCount : (Array.isArray(k.botIds) && k.botIds.length ? k.botIds.length : 1)),
                     used: Boolean(k.used),
                     used_by: k.usedBy ? String(k.usedBy) : null,
                     used_at: k.usedAt ? String(k.usedAt) : null,
@@ -648,7 +652,7 @@ class SupabaseAdapter {
             });
             if (!res.ok) {
                 // Fallback nếu bảng trên Supabase chưa cập nhật cột mới
-                const basicRows = rows.map(({ max_uses, used_count, used_users, expires_at, note, ...rest }) => rest);
+                const basicRows = rows.map(({ bot_count, max_uses, used_count, used_users, expires_at, note, ...rest }) => rest);
                 res = await fetch(`${this.url}/rest/v1/manager_keys`, {
                     method: 'POST',
                     headers: this.getHeaders({ 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
@@ -3161,6 +3165,7 @@ function buildManagerBotConfig() {
     }
 
     // 3. Với các bot chưa có ID, cấp ID nhỏ nhất còn trống bắt đầu từ 1
+    const rentalDisabledSet = new Set((registry.botRentalDisabled || []).map(Number));
     const mapped = finalBots.map((bot) => {
         let assignedId = registry.botIdMap[bot.url];
         if (!assignedId || !Number.isInteger(Number(assignedId)) || Number(assignedId) <= 0) {
@@ -3173,10 +3178,12 @@ function buildManagerBotConfig() {
             registry.botIdMap[bot.url] = assignedId;
             mapModified = true;
         }
+        const bId = Number(assignedId);
         return {
             ...bot,
-            id: Number(assignedId),
-            tags: (registry.botTags && registry.botTags[assignedId]) || []
+            id: bId,
+            tags: (registry.botTags && registry.botTags[bId]) || [],
+            rentable: !rentalDisabledSet.has(bId)
         };
     });
 
@@ -8983,6 +8990,10 @@ input:focus, select:focus, textarea:focus {
             </select>
           </div>
           <div>
+            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;" title="Số lượng bot tối đa cấp độc quyền cho tài khoản sử dụng key này (mặc định 1 bot)">SỐ BOT:</label>
+            <input type="number" id="mgmtKeyBotCount" value="1" min="1" max="50" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:60px;" />
+          </div>
+          <div>
             <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">SỐ KEY:</label>
             <input type="number" id="mgmtKeyCount" value="1" min="1" max="50" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:60px;" />
           </div>
@@ -9280,6 +9291,15 @@ input:focus, select:focus, textarea:focus {
       <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">🏷️ Nhóm Tags (ngăn cách bởi dấu phẩy)</label>
       <input id="editBotTags" placeholder="farm, afk, lobby, vip..." autocomplete="off" oninput="renderEditBotTagPreviews(this.value)" style="width:100%;box-sizing:border-box;">
       <div id="editBotTagsPreview" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;min-height:24px;"></div>
+    </div>
+    <div class="form-row admin-only" style="margin-bottom:12px;background:rgba(255,255,255,0.03);padding:10px 12px;border-radius:8px;border:1px solid var(--border);">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0;font-size:13px;font-weight:600;color:var(--text);">
+        <input type="checkbox" id="editBotRentable" style="width:16px;height:16px;cursor:pointer;">
+        <span>Cho phép thuê (Nằm trong danh sách cấp phát tự động)</span>
+      </label>
+      <div style="font-size:11.5px;color:var(--muted);margin-top:4px;line-height:1.4;">
+        Nếu bỏ chọn, bot này sẽ không bao giờ được cấp tự động khi khách đăng ký mới hoặc nạp Giftcode.
+      </div>
     </div>
     <div class="modal-actions" style="margin-top:16px;">
       <button onclick="closeEditBotModal()">Hủy</button>
@@ -10273,7 +10293,9 @@ function botCardHtml(bot) {
 
   // Ownership badge
   let ownerBadgeHtml = '';
-  if (bot.assignedUsername) {
+  if (bot.rentable === false) {
+    ownerBadgeHtml = '<span class="bot-owner-pill blocked" title="Bot này không nằm trong danh sách cho thuê tự động" style="background:rgba(148,163,184,0.15);color:var(--muted);border:1px solid rgba(148,163,184,0.3);font-size:11px;padding:2px 8px;border-radius:12px;">🚫 Không Cho Thuê</span>';
+  } else if (bot.assignedUsername) {
     ownerBadgeHtml = '<span class="bot-owner-pill rented" title="Bot được thuê bởi ' + escapeHtml(bot.assignedUsername) + '">' +
       '👤 Thuộc: <strong>' + escapeHtml(bot.assignedUsername) + '</strong>' +
       (bot.assignedPlan ? ' <small>(' + escapeHtml(bot.assignedPlan) + ')</small>' : '') +
@@ -10443,6 +10465,8 @@ function editBot(event,id){
   const tagsInput = document.getElementById('editBotTags');
   if (tagsInput) tagsInput.value = tagsVal;
   renderEditBotTagPreviews(tagsVal);
+  const rentChk = document.getElementById('editBotRentable');
+  if (rentChk) rentChk.checked = bot.rentable !== false;
   document.getElementById('editBotModal').classList.remove('hidden');
 }
 function closeEditBotModal(){document.getElementById('editBotModal').classList.add('hidden');}
@@ -10452,9 +10476,10 @@ async function saveEditBot(){
   const label=document.getElementById('editBotLabel').value.trim();
   const rawTags=document.getElementById('editBotTags')?.value || '';
   const tags = rawTags.split(/[,;\s]+/).map(t => t.trim().toLowerCase().replace(/^#/, '')).filter(Boolean);
+  const rentable = document.getElementById('editBotRentable') ? document.getElementById('editBotRentable').checked : true;
   if(!url){showToast('URL không được trống.');return;}
   try{
-    const result=await requestJson('/api/manager/bot/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,label,tags})});
+    const result=await requestJson('/api/manager/bot/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,label,tags,rentable})});
     const data=result.data||{};
     if(!result.ok)throw new Error(data.error||'Không thể sửa bot.');
     closeEditBotModal();
@@ -10463,6 +10488,7 @@ async function saveEditBot(){
     if (found && data.bot) {
       if (data.bot.label) found.label = data.bot.label;
       if (data.bot.tags) found.tags = data.bot.tags;
+      found.rentable = data.bot.rentable !== false;
     }
     updateTagPills();
     filterBots();
@@ -11945,11 +11971,12 @@ function renderUserFormBotsCheckboxes(selectedIds, targetUserId) {
     const owner = userManagementBotOwnership[botId] || b.currentOwner;
     const isOccupiedByOther = owner && owner.userId && (!targetUserId || owner.userId !== targetUserId);
 
+    const nonRentableBadge = b.rentable === false ? '<span style="font-size:10px;color:#f87171;margin-left:4px;font-weight:600;">[Không cho thuê]</span>' : '';
     if (isOccupiedByOther) {
       return '<label class="bot-check-item bot-occupied" style="position:relative;">' +
         '<input type="checkbox" class="user-bot-chk" value="' + botId + '" ' + (isChecked ? 'checked' : '') + ' data-occupied="1" data-bot-id="' + botId + '" data-bot-label="' + escapeHtml(b.label || 'Bot #' + botId) + '" data-owner="' + escapeHtml(owner.username) + '" onclick="handleOccupiedBotClick(event)">' +
         '<div>' +
-          '<span><strong>' + escapeHtml(b.label || 'Bot #' + botId) + '</strong> (ID: ' + botId + ')</span>' +
+          '<span><strong>' + escapeHtml(b.label || 'Bot #' + botId) + '</strong> (ID: ' + botId + ')' + nonRentableBadge + '</span>' +
           '<span class="badge-occupied">👤 Đang cấp cho: ' + escapeHtml(owner.username) + '</span>' +
         '</div>' +
       '</label>';
@@ -11957,7 +11984,7 @@ function renderUserFormBotsCheckboxes(selectedIds, targetUserId) {
 
     return '<label class="bot-check-item">' +
       '<input type="checkbox" class="user-bot-chk" value="' + botId + '" ' + (isChecked ? 'checked' : '') + '>' +
-      '<span><strong>' + escapeHtml(b.label || 'Bot #' + botId) + '</strong> (ID: ' + botId + ')</span>' +
+      '<span><strong>' + escapeHtml(b.label || 'Bot #' + botId) + '</strong> (ID: ' + botId + ')' + nonRentableBadge + '</span>' +
     '</label>';
   }).join('');
 }
@@ -12097,6 +12124,7 @@ async function submitCreateKeysFromMgmt() {
   const customInp = document.getElementById('mgmtKeyCustomDays');
   const planName = document.getElementById('mgmtKeyPlan')?.value.trim();
   const count = parseInt(document.getElementById('mgmtKeyCount')?.value, 10) || 1;
+  const botCount = parseInt(document.getElementById('mgmtKeyBotCount')?.value, 10) || 1;
 
   const isPermanent = daysVal === 'lifetime';
   let days = 7;
@@ -12128,6 +12156,7 @@ async function submitCreateKeysFromMgmt() {
         days,
         planName: planName || (isPermanent ? 'VIP Vĩnh Viễn' : ('Gói ' + days + ' Ngày')),
         count,
+        botCount,
         customKey: customKey || undefined,
         maxUses: isNaN(maxUses) ? 1 : maxUses,
         validDays: validDays > 0 ? validDays : undefined,
@@ -12947,6 +12976,7 @@ async function getRegistryFallback() {
       source:bot.source||'unknown',
       botId:String(bot.id),
       label:bot.label||('Bot '+bot.id),
+      rentable:bot.rentable!==false,
       configured:!!bot.url,
       available:false,
       username:'',
@@ -13503,7 +13533,7 @@ async function refreshKeysTable() {
 
       return '<tr style="border-bottom:1px solid var(--border);">' +
         '<td style="padding:8px 10px;font-family:monospace;font-weight:750;color:#38bdf8;">' + escapeHtml(k.key) + '</td>' +
-        '<td style="padding:8px 10px;">' + escapeHtml(k.planName || (k.days + ' Ngày')) + '</td>' +
+        '<td style="padding:8px 10px;">' + escapeHtml(k.planName || (k.days + ' Ngày')) + ' • <span style="color:#a78bfa;font-weight:700;">' + (k.botCount || 1) + ' Bot</span></td>' +
         '<td style="padding:8px 10px;">' + statusBadge + '</td>' +
         '<td style="padding:8px 10px;color:var(--muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(usersText) + '">' + escapeHtml(usersText) + '</td>' +
         '<td style="padding:8px 10px;color:var(--muted);font-size:12px;">' + escapeHtml(expText) + '</td>' +
@@ -13561,11 +13591,12 @@ async function submitCreateKeys() {
   const defaultPlanName = 'Gói ' + days + ' Ngày';
   const planName = document.getElementById('createKeyPlan')?.value.trim() || defaultPlanName;
   const count = Number(document.getElementById('createKeyCount')?.value) || 1;
+  const botCount = Number(document.getElementById('createKeyBotCount')?.value) || 1;
   try {
     const res = await requestJson('/api/manager/keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ days, planName, count })
+      body: JSON.stringify({ days, planName, count, botCount })
     });
     if (!res.ok) throw new Error(res.data?.error || 'Lỗi tạo key');
     showToast(res.data?.message || 'Đã tạo key thành công!');
@@ -15207,6 +15238,10 @@ setInterval(updateUserHeaderCountdown, 5000);
             <input type="text" id="createKeyPlan" placeholder="VD: Gói Tuần VIP" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 10px;border-radius:6px;font-size:13px;width:130px;" />
           </div>
           <div>
+            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">SỐ BOT:</label>
+            <input type="number" id="createKeyBotCount" value="1" min="1" max="50" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 10px;border-radius:6px;font-size:13px;width:60px;" />
+          </div>
+          <div>
             <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">SỐ LƯỢNG KEY:</label>
             <input type="number" id="createKeyCount" value="1" min="1" max="10" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 10px;border-radius:6px;font-size:13px;width:60px;" />
           </div>
@@ -15271,14 +15306,15 @@ async function resetBotsForAssignment(botIds, reason = 'reassignment') {
     return { ok: true };
 }
 
-async function allocateBotForNewUser(newUsername) {
+async function allocateBotsForUser(username, count = 1, preferredBotIds = []) {
     const users = loadUsers(true);
     const now = Date.now();
+    const rentalDisabledSet = new Set((registry.botRentalDisabled || []).map(Number));
 
-    // 1. Tập hợp các bot đang có người dùng active (chưa hết hạn) thuê
+    // 1. Tập hợp các bot đang có khách hàng active thuê (role !== 'admin', status === 'active', chưa hết hạn)
     const activeOccupiedBotMap = new Map();
     for (const u of users) {
-        if (u.status === 'active') {
+        if (u.role !== 'admin' && u.status === 'active' && u.username.toLowerCase() !== username.toLowerCase()) {
             const isExpired = u.expiresAt && Date.parse(u.expiresAt) <= now;
             if (!isExpired && Array.isArray(u.assignedBotIds)) {
                 for (const bId of u.assignedBotIds) {
@@ -15288,7 +15324,17 @@ async function allocateBotForNewUser(newUsername) {
         }
     }
 
-    // 2. Tập hợp tất cả bot đã từng gán cho bất kỳ user nào
+    // 2. Lấy danh sách toàn bộ bot cho thuê hợp lệ (rentable !== false và không nằm trong botRentalDisabled)
+    const rentableConfigs = BOT_CONFIG.filter(b => {
+        const bId = Number(b.id);
+        return !rentalDisabledSet.has(bId) && b.rentable !== false;
+    });
+
+    if (rentableConfigs.length === 0) {
+        return { ok: false, error: 'NO_RENTABLE_BOTS', botIds: [] };
+    }
+
+    // 3. Tập hợp các bot đã từng gán cho user
     const allAssignedBotIds = new Set();
     for (const u of users) {
         if (Array.isArray(u.assignedBotIds)) {
@@ -15298,24 +15344,43 @@ async function allocateBotForNewUser(newUsername) {
         }
     }
 
+    const targetUser = users.find(u => u.username.toLowerCase() === username.toLowerCase());
+    const existingBots = new Set(Array.isArray(targetUser?.assignedBotIds) ? targetUser.assignedBotIds.map(Number) : []);
+
+    const allocatedIds = [];
     const candidates = [];
 
-    // Ưu tiên 1: Bot trong BOT_CONFIG hoàn toàn chưa ai thuê
-    for (const b of BOT_CONFIG) {
-        const bId = Number(b.id);
-        if (!allAssignedBotIds.has(bId)) {
-            candidates.push({ botConfig: b, reclaimedFrom: null });
+    // Ưu tiên 0: preferredBotIds nếu được truyền vào
+    if (Array.isArray(preferredBotIds) && preferredBotIds.length > 0) {
+        for (const pId of preferredBotIds.map(Number)) {
+            const found = rentableConfigs.find(b => Number(b.id) === pId);
+            if (found && !activeOccupiedBotMap.has(pId) && !existingBots.has(pId)) {
+                const prevOwner = users.find(u => u.username.toLowerCase() !== username.toLowerCase() && Array.isArray(u.assignedBotIds) && u.assignedBotIds.includes(pId));
+                candidates.push({ botConfig: found, reclaimedFrom: prevOwner || null });
+            }
         }
     }
 
-    // Ưu tiên 2: Nếu không có bot hoàn toàn trống, tìm bot của user đã hết hạn thuê
+    // Ưu tiên 1: Bot hoàn toàn trống (chưa từng gán hoặc không ai giữ)
+    for (const b of rentableConfigs) {
+        const bId = Number(b.id);
+        if (!activeOccupiedBotMap.has(bId) && !existingBots.has(bId) && !allAssignedBotIds.has(bId)) {
+            if (!candidates.some(c => Number(c.botConfig.id) === bId)) {
+                candidates.push({ botConfig: b, reclaimedFrom: null });
+            }
+        }
+    }
+
+    // Ưu tiên 2: Bot của người dùng đã hết hạn
     for (const u of users) {
+        if (u.username.toLowerCase() === username.toLowerCase()) continue;
         const isExpired = u.status === 'expired' || (u.expiresAt && Date.parse(u.expiresAt) <= now);
-        if (isExpired && Array.isArray(u.assignedBotIds) && u.assignedBotIds.length > 0) {
+        if (isExpired && Array.isArray(u.assignedBotIds)) {
             for (const bId of u.assignedBotIds) {
-                if (!activeOccupiedBotMap.has(Number(bId))) {
-                    const found = BOT_CONFIG.find(c => Number(c.id) === Number(bId));
-                    if (found && !candidates.some(c => Number(c.botConfig.id) === Number(bId))) {
+                const numId = Number(bId);
+                const found = rentableConfigs.find(c => Number(c.id) === numId);
+                if (found && !activeOccupiedBotMap.has(numId) && !existingBots.has(numId)) {
+                    if (!candidates.some(c => Number(c.botConfig.id) === numId)) {
                         candidates.push({ botConfig: found, reclaimedFrom: u });
                     }
                 }
@@ -15323,12 +15388,9 @@ async function allocateBotForNewUser(newUsername) {
         }
     }
 
-    if (candidates.length === 0) {
-        return { ok: false, error: 'FULL_BOTS' };
-    }
-
-    // Thử từng candidate tuần tự: bot nào reset thành công trước thì bàn giao bot đó!
+    // Tiến hành reset và bàn giao bot theo số lượng yêu cầu
     for (const { botConfig, reclaimedFrom } of candidates) {
+        if (allocatedIds.length >= count) break;
         const chosenBotId = Number(botConfig.id);
         try {
             const resetRes = await fetchChild(botConfig, '/api/bot/reset-customer', { method: 'POST', timeoutMs: 5000 });
@@ -15339,26 +15401,34 @@ async function allocateBotForNewUser(newUsername) {
                     logAuditEvent({
                         action: 'BOT_RECLAIM_EXPIRED',
                         target: { botId: chosenBotId, label: botConfig.label },
-                        details: `Thu hồi Bot #${chosenBotId} (${botConfig.label || ''}) từ tài khoản hết hạn "${reclaimedFrom.username}" để bàn giao cho khách mới "${newUsername}".`,
+                        details: `Thu hồi Bot #${chosenBotId} (${botConfig.label || ''}) từ tài khoản hết hạn "${reclaimedFrom.username}" để cấp cho "${username}".`,
                         status: 'SUCCESS'
                     });
                 }
                 summaryCache.delete(chosenBotId);
                 try { await refreshSummary(botConfig, true); } catch (_) {}
-                return {
-                    ok: true,
-                    botId: chosenBotId,
-                    botLabel: botConfig.label || ('Bot ' + chosenBotId)
-                };
-            } else {
-                console.warn(`[ALLOCATE] Bot #${chosenBotId} reset trả về lỗi (${resetRes?.data?.error || resetRes?.status}), đang thử ứng viên tiếp theo...`);
+                allocatedIds.push(chosenBotId);
             }
         } catch (e) {
-            console.warn(`[ALLOCATE] Không thể kết nối tới Bot #${chosenBotId} (${e.message}), đang thử ứng viên tiếp theo...`);
+            console.warn(`[ALLOCATE] Không thể kết nối tới Bot #${chosenBotId} (${e.message}), thử bot tiếp theo...`);
         }
     }
 
-    return { ok: false, error: 'RESET_FAILED' };
+    if (allocatedIds.length === 0) {
+        return { ok: false, error: 'FULL_BOTS', botIds: [] };
+    }
+
+    return {
+        ok: true,
+        botIds: allocatedIds,
+        botId: allocatedIds[0],
+        botLabel: (BOT_CONFIG.find(b => Number(b.id) === allocatedIds[0])?.label) || ('Bot ' + allocatedIds[0]),
+        partial: allocatedIds.length < count
+    };
+}
+
+async function allocateBotForNewUser(newUsername) {
+    return allocateBotsForUser(newUsername, 1);
 }
 
 // Khách tự đăng ký tài khoản mới (Tự động cấp bot trống hoặc tái sử dụng bot của tài khoản hết hạn)
@@ -15425,32 +15495,33 @@ app.post('/api/auth/register', (req, res) => {
                 const days = Number(keyObj.days || 30);
                 expiresAt = new Date(Date.now() + days * 86400000).toISOString();
                 planName = keyObj.planName || `Gói ${days} ngày`;
-                if (Array.isArray(keyObj.botIds) && keyObj.botIds.length > 0) {
-                    assignedBotIds = keyObj.botIds.map(Number);
-                    const resetRes = await resetBotsForAssignment(assignedBotIds, `đăng ký tài khoản "${username}" với Key ${providedKey}`);
-                    if (!resetRes.ok) {
-                        recordRegisterAttempt(clientIp, username, false);
-                        return res.status(500).json({ ok: false, error: `Không thể dọn dẹp reset Bot #${resetRes.botId} để bàn giao (${resetRes.error}). Vui lòng liên hệ Admin!` });
-                    }
+
+                const requestedBotCount = Number(keyObj.botCount) || (Array.isArray(keyObj.botIds) && keyObj.botIds.length > 0 ? keyObj.botIds.length : 1);
+                const preferredBotIds = Array.isArray(keyObj.botIds) ? keyObj.botIds.map(Number) : [];
+
+                const alloc = await allocateBotsForUser(username, requestedBotCount, preferredBotIds);
+                if (alloc.ok && alloc.botIds.length > 0) {
+                    assignedBotIds = alloc.botIds;
+                    registerMessage = `Đăng ký thành công với Mã Key! Gói: ${planName}, Cấp ${assignedBotIds.length} bot (#${assignedBotIds.join(', ')}), Hạn: ${days} ngày.`;
+                } else {
+                    assignedBotIds = [];
+                    registerMessage = `Đăng ký thành công với Mã Key! Gói: ${planName}, Hạn: ${days} ngày (Hiện chưa có bot trống trong danh sách cho thuê, vui lòng liên hệ Admin để gán bot).`;
                 }
-                registerMessage = `Đăng ký thành công với Mã Key! Gói: ${planName}, Hạn: ${days} ngày.`;
             } else {
                 // Đăng ký không có Key -> kiểm tra cài đặt tặng ngày dùng thử của Admin
                 if (trialGiftEnabled) {
-                    const alloc = await allocateBotForNewUser(username);
-                    if (alloc.ok) {
-                        assignedBotIds = [alloc.botId];
-                        registerMessage = `Đăng ký thành công! Bạn đã được cấp Bot #${alloc.botId} (${alloc.botLabel}) dùng thử ${trialDays} ngày miễn phí.`;
-                    } else if (alloc.error === 'RESET_FAILED') {
-                        // Bot đang có trục trặc dọn dẹp -> tạo tài khoản nhưng chưa cấp bot bẩn
+                    const alloc = await allocateBotsForUser(username, 1);
+                    if (alloc.ok && alloc.botIds.length > 0) {
+                        assignedBotIds = alloc.botIds;
+                        registerMessage = `Đăng ký thành công! Bạn đã được cấp Bot #${assignedBotIds.join(', ')} dùng thử ${trialDays} ngày miễn phí.`;
+                    } else if (alloc.error === 'NO_RENTABLE_BOTS') {
                         assignedBotIds = [];
                         planName = `Chờ cấp bot (${planName})`;
-                        registerMessage = `Đăng ký thành công! Bot hiện tại đang bảo trì/dọn dẹp. Tài khoản của bạn đã được tạo kèm ${trialDays} ngày dùng thử, vui lòng liên hệ Admin để được kích hoạt bot.`;
+                        registerMessage = `Đăng ký thành công! Hiện chưa có bot nào được mở cho thuê. Tài khoản của bạn đã được tạo kèm ${trialDays} ngày dùng thử, vui lòng liên hệ Admin để được cấp bot.`;
                     } else {
-                        // Toàn bộ bot đều đang có người thuê -> acc vẫn tạo nhưng chưa cấp bot
                         assignedBotIds = [];
                         planName = `Chờ cấp bot (${planName})`;
-                        registerMessage = `Đăng ký thành công! Hiện tại toàn bộ bot đều đang có người thuê. Tài khoản của bạn đã được tạo kèm ${trialDays} ngày dùng thử, vui lòng liên hệ Admin để được cấp bot.`;
+                        registerMessage = `Đăng ký thành công! Hiện tại toàn bộ bot cho thuê đều đang có người sử dụng. Tài khoản của bạn đã được tạo kèm ${trialDays} ngày dùng thử, vui lòng liên hệ Admin để được cấp bot.`;
                     }
                 } else {
                     // Admin đã TẮT chế độ tặng dùng thử -> Chặn đăng ký không có Key
@@ -15709,8 +15780,9 @@ app.post('/api/auth/login', async (req, res) => {
         user.expiresAt = new Date(baseTime + Number(keyObj.days || 30) * 86400000).toISOString();
         user.status = 'active';
         if (keyObj.planName) user.planName = keyObj.planName;
+        const keyBotCount = Number(keyObj.botCount) || (Array.isArray(keyObj.botIds) && keyObj.botIds.length > 0 ? keyObj.botIds.length : 0);
+        const currentBots = Array.isArray(user.assignedBotIds) ? user.assignedBotIds.map(Number) : [];
         if (Array.isArray(keyObj.botIds) && keyObj.botIds.length > 0) {
-            const currentBots = Array.isArray(user.assignedBotIds) ? user.assignedBotIds.map(Number) : [];
             const newlyAssigned = keyObj.botIds.map(Number).filter(id => !currentBots.includes(id));
             if (newlyAssigned.length > 0) {
                 const resetRes = await resetBotsForAssignment(newlyAssigned, `nạp Key gia hạn cho "${user.username}"`);
@@ -15722,6 +15794,13 @@ app.post('/api/auth/login', async (req, res) => {
             const merged = [...new Set([...currentBots, ...keyObj.botIds.map(Number)])];
             user.assignedBotIds = merged;
             assignBotsExclusively(users, user.id || user.username, keyObj.botIds);
+        } else if (keyBotCount > 0 && currentBots.length < keyBotCount) {
+            const needed = keyBotCount - currentBots.length;
+            const alloc = await allocateBotsForUser(user.username, needed);
+            if (alloc.ok && alloc.botIds.length > 0) {
+                user.assignedBotIds = [...new Set([...currentBots, ...alloc.botIds])];
+                assignBotsExclusively(users, user.id || user.username, user.assignedBotIds);
+            }
         }
 
         const keysSaved = saveKeysFile(keysList);
@@ -16008,6 +16087,7 @@ app.get('/api/manager/users', (req, res) => {
         id: b.id,
         label: b.label || `Bot ${b.id}`,
         url: b.url || '',
+        rentable: b.rentable !== false,
         currentOwner: botOwnership[b.id] || null
     }));
     res.json({ ok: true, users, availableBots, botOwnership });
@@ -16679,6 +16759,7 @@ app.get('/api/manager/registry', (req, res) => {
             label: bot.label,
             url: (session && session.role === 'admin') ? bot.url : '',
             source: bot.source,
+            rentable: bot.rentable !== false,
             identity: (session && session.role === 'admin') ? bot.url : `Bot #${bot.id}`
         }))
     });
@@ -16993,8 +17074,24 @@ app.patch('/api/manager/bot/:id', async (req, res) => {
         const previousOverrides = registry.overrides.map(item => ({ ...item }));
         const previousBotIdMap = { ...(registry.botIdMap || {}) };
         const previousBotTags = { ...(registry.botTags || {}) };
+        const previousBotRentalDisabled = [...(registry.botRentalDisabled || [])];
 
         bot.label = nextLabel || bot.label || `Bot ${id}`;
+
+        if (req.body?.rentable !== undefined) {
+            if (!Array.isArray(registry.botRentalDisabled)) {
+                registry.botRentalDisabled = [];
+            }
+            const isRentable = req.body.rentable === true;
+            if (isRentable) {
+                registry.botRentalDisabled = registry.botRentalDisabled.filter(bId => Number(bId) !== id);
+            } else {
+                if (!registry.botRentalDisabled.includes(id)) {
+                    registry.botRentalDisabled.push(id);
+                }
+            }
+            bot.rentable = isRentable;
+        }
 
         if (req.body?.tags !== undefined) {
             const rawTags = Array.isArray(req.body.tags)
@@ -17061,6 +17158,7 @@ app.patch('/api/manager/bot/:id', async (req, res) => {
             registry.overrides = previousOverrides;
             registry.botIdMap = previousBotIdMap;
             registry.botTags = previousBotTags;
+            registry.botRentalDisabled = previousBotRentalDisabled;
             return res.status(500).json({
                 error: 'Không thể lưu registry; thay đổi đã được rollback.'
             });
@@ -17073,11 +17171,15 @@ app.patch('/api/manager/bot/:id', async (req, res) => {
             req,
             action: 'BOT_UPDATE',
             target: { botId: id, label: bot.label },
-            details: `Cập nhật cấu hình Bot #${id}: Tên="${bot.label}", URL="${bot.url}" (Trước đó: "${previousBot.label}", "${previousBot.url}")`,
+            details: `Cập nhật cấu hình Bot #${id}: Tên="${bot.label}", URL="${bot.url}", Cho thuê=${bot.rentable !== false ? 'CÓ' : 'KHÔNG'} (Trước đó: "${previousBot.label}", "${previousBot.url}")`,
             status: 'SUCCESS'
         });
 
-        const resultBot = { ...bot, tags: (registry.botTags && registry.botTags[id]) || [] };
+        const resultBot = {
+            ...bot,
+            tags: (registry.botTags && registry.botTags[id]) || [],
+            rentable: bot.rentable !== false
+        };
         res.json({ ok: true, message: `${bot.label} đã được cập nhật.`, bot: resultBot });
     } catch (err) {
         res.status(400).json({ error: err.message || 'Không thể sửa bot.' });
@@ -17351,6 +17453,9 @@ app.delete('/api/manager/bot/:id', (req, res) => {
     if (registry.botTags) {
         delete registry.botTags[id];
     }
+    if (registry.botRentalDisabled) {
+        registry.botRentalDisabled = registry.botRentalDisabled.filter(bId => Number(bId) !== id);
+    }
 
     const remainingIds = BOT_CONFIG.map(b => Number(b.id)).filter(n => Number.isInteger(n) && n > 0);
     registry.lastBotId = remainingIds.length ? Math.max(...remainingIds) : 0;
@@ -17521,6 +17626,7 @@ app.get('/api/manager/bots', (req, res) => {
             copy.assignedExpiresAt = session.expiresAtRental || null;
         }
         copy.tags = (registry.botTags && registry.botTags[config.id]) || [];
+        copy.rentable = config.rentable !== false;
         return copy;
     });
 
@@ -18190,6 +18296,8 @@ app.post('/api/manager/keys', (req, res) => {
     const days = Number.isFinite(rawDays) && rawDays >= 1 ? Math.min(Math.floor(rawDays), 36500) : 7;
     const planName = (req.body?.planName || `Gói ${days} Ngày`).trim();
     const botIds = Array.isArray(req.body?.botIds) ? req.body.botIds.map(Number).filter(Number.isFinite) : [];
+    const rawBotCount = Number(req.body?.botCount);
+    const botCount = Number.isFinite(rawBotCount) && rawBotCount >= 1 ? Math.min(Math.floor(rawBotCount), 50) : (botIds.length || 1);
     const rawCount = Number(req.body?.count);
     const count = Number.isFinite(rawCount) && rawCount >= 1 ? Math.min(Math.floor(rawCount), 50) : 1;
 
@@ -18232,6 +18340,7 @@ app.post('/api/manager/keys', (req, res) => {
             days,
             planName,
             botIds,
+            botCount,           // Số lượng bot cấp cho tài khoản khi kích hoạt
             maxUses,            // Giới hạn lượt dùng (1 = private key, n = giftcode, 0 = không giới hạn)
             usedCount: 0,       // Số lượt đã dùng
             usedUsers: [],      // Danh sách username đã nhập mã (mỗi user chỉ dùng được 1 lần)
