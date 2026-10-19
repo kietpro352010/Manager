@@ -171,15 +171,18 @@ function detectHostPlatformAndPort(config, fallbackPort, role = 'manager') {
     if (cli.port && isValidPort(cli.port)) {
         port = Number(cli.port);
         portSource = `Tham số dòng lệnh CLI (--port = ${port})`;
-    } else if (isValidPort(process.env.PORT)) {
-        port = Number(process.env.PORT);
-        portSource = `Biến môi trường PORT = ${port} (Render / Cloud Web Service)`;
     } else if (isValidPort(process.env.SERVER_PORT)) {
         port = Number(process.env.SERVER_PORT);
-        portSource = `Biến môi trường SERVER_PORT = ${port} (Deplexo / WispByte / Pterodactyl)`;
+        portSource = `Biến môi trường SERVER_PORT = ${port} (WispByte / Deplexo / Pterodactyl)`;
     } else if (isValidPort(process.env.P_SERVER_PORT)) {
         port = Number(process.env.P_SERVER_PORT);
         portSource = `Biến môi trường P_SERVER_PORT = ${port} (Pterodactyl Allocation)`;
+    } else if (isValidPort(process.env.ALLOCATION_PORT)) {
+        port = Number(process.env.ALLOCATION_PORT);
+        portSource = `Biến môi trường ALLOCATION_PORT = ${port}`;
+    } else if (isValidPort(process.env.PORT)) {
+        port = Number(process.env.PORT);
+        portSource = `Biến môi trường PORT = ${port} (Render / Cloud Web Service)`;
     } else if (isValidPort(process.env.APP_PORT)) {
         port = Number(process.env.APP_PORT);
         portSource = `Biến môi trường APP_PORT = ${port}`;
@@ -2411,12 +2414,17 @@ function isPrivateOrBlockedIp(ipStr) {
     return false;
 }
 
-const ALLOWED_INTERNAL_HOSTS = new Set(
-    (process.env.ALLOWED_INTERNAL_HOSTS || (MANAGER_PLATFORM === 'local' ? 'localhost,127.0.0.1' : ''))
-        .split(',')
-        .map(s => s.trim().toLowerCase())
-        .filter(Boolean)
-);
+const rawAllowedHosts = (process.env.ALLOWED_INTERNAL_HOSTS || '')
+    .split(',')
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+
+// Luôn cho phép localhost, 127.0.0.1, 0.0.0.0, container host để Manager kết nối bot nội bộ
+const defaultAllowedHosts = ['localhost', '127.0.0.1', '::1', '0.0.0.0', 'host.docker.internal'];
+const ALLOWED_INTERNAL_HOSTS = new Set([...defaultAllowedHosts, ...rawAllowedHosts]);
+
+const DISABLE_SSRF_CHECK = String(process.env.DISABLE_SSRF_CHECK || '').toLowerCase() === 'true';
+const ALLOW_PRIVATE_BOT_IPS = String(process.env.ALLOW_PRIVATE_BOT_IPS || 'true').toLowerCase() !== 'false';
 
 async function validateSafeBotUrl(rawUrl) {
     const raw = String(rawUrl || '').trim();
@@ -2438,29 +2446,44 @@ async function validateSafeBotUrl(rawUrl) {
     }
 
     const hostname = url.hostname.toLowerCase();
-    if (hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === 'metadata.google.internal') {
-        if (!ALLOWED_INTERNAL_HOSTS.has(hostname)) {
-            throw new Error(`Hostname '${hostname}' bị chặn do chính sách bảo mật SSRF.`);
-        }
+
+    // Luôn chặn endpoint Cloud Metadata (AWS 169.254.169.254 / GCP metadata.google.internal)
+    if (hostname === '169.254.169.254' || hostname === 'metadata.google.internal' || hostname.endsWith('.metadata.google.internal')) {
+        throw new Error(`Hostname '${hostname}' bị chặn do chính sách bảo mật đám mây.`);
+    }
+
+    if (DISABLE_SSRF_CHECK || ALLOWED_INTERNAL_HOSTS.has(hostname)) {
+        url.hash = '';
+        url.search = '';
+        return url.toString().replace(/\/+$/, '');
     }
 
     if (net.isIP(hostname) !== 0) {
-        if (isPrivateOrBlockedIp(hostname)) {
+        if (!ALLOW_PRIVATE_BOT_IPS && isPrivateOrBlockedIp(hostname)) {
             if (!ALLOWED_INTERNAL_HOSTS.has(hostname)) {
                 throw new Error(`Địa chỉ IP '${hostname}' là địa chỉ nội bộ bị chặn (SSRF).`);
             }
         }
-    } else if (!ALLOWED_INTERNAL_HOSTS.has(hostname)) {
+    } else {
         try {
             const records = await dns.promises.lookup(hostname, { all: true });
             for (const rec of records) {
-                if (isPrivateOrBlockedIp(rec.address)) {
-                    throw new Error(`Hostname '${hostname}' trỏ về IP nội bộ '${rec.address}' bị chặn (SSRF).`);
+                if (rec.address === '169.254.169.254' || rec.address.startsWith('169.254.')) {
+                    throw new Error(`Hostname '${hostname}' trỏ về Cloud Metadata IP '${rec.address}' bị chặn.`);
+                }
+                if (!ALLOW_PRIVATE_BOT_IPS && isPrivateOrBlockedIp(rec.address)) {
+                    if (!ALLOWED_INTERNAL_HOSTS.has(hostname)) {
+                        throw new Error(`Hostname '${hostname}' trỏ về IP nội bộ '${rec.address}' bị chặn (SSRF).`);
+                    }
                 }
             }
         } catch (e) {
             if (e.message.includes('SSRF') || e.message.includes('bị chặn')) throw e;
-            throw new Error(`Lỗi phân giải DNS cho '${hostname}': ${e.message}`);
+            if (ALLOW_PRIVATE_BOT_IPS && (e.code === 'ENOTFOUND' || e.code === 'EAI_AGAIN')) {
+                // Cho phép hostname nội bộ trong môi trường Docker/Wispbyte node
+            } else {
+                throw new Error(`Lỗi phân giải DNS cho '${hostname}': ${e.message}`);
+            }
         }
     }
 
@@ -2489,13 +2512,12 @@ function normalizeBotUrl(value) {
     }
 
     const hostname = url.hostname.toLowerCase();
-    if (hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === 'metadata.google.internal') {
-        if (!ALLOWED_INTERNAL_HOSTS.has(hostname)) {
-            throw new Error(`Hostname '${hostname}' bị chặn do chính sách bảo mật SSRF.`);
-        }
+    if (hostname === '169.254.169.254' || hostname === 'metadata.google.internal' || hostname.endsWith('.metadata.google.internal')) {
+        throw new Error(`Hostname '${hostname}' bị chặn do chính sách bảo mật đám mây.`);
     }
-    if (net.isIP(hostname) !== 0 && isPrivateOrBlockedIp(hostname)) {
-        if (!ALLOWED_INTERNAL_HOSTS.has(hostname)) {
+
+    if (!DISABLE_SSRF_CHECK && !ALLOWED_INTERNAL_HOSTS.has(hostname)) {
+        if (!ALLOW_PRIVATE_BOT_IPS && net.isIP(hostname) !== 0 && isPrivateOrBlockedIp(hostname)) {
             throw new Error(`Địa chỉ IP '${hostname}' là địa chỉ nội bộ bị chặn (SSRF).`);
         }
     }
@@ -3775,20 +3797,37 @@ async function assertSafeChildUrl(childUrl) {
     if (!childUrl) throw new Error('URL bot rỗng.');
     const parsed = new URL(childUrl);
     const hostname = parsed.hostname.toLowerCase();
-    if (ALLOWED_INTERNAL_HOSTS.has(hostname)) return;
-    if (net.isIP(hostname) !== 0 && isPrivateOrBlockedIp(hostname)) {
-        throw new Error(`Địa chỉ IP đích '${hostname}' là địa chỉ nội bộ bị chặn (SSRF).`);
+
+    // Luôn chặn endpoint Cloud Metadata (AWS 169.254.169.254 / GCP metadata.google.internal)
+    if (hostname === '169.254.169.254' || hostname === 'metadata.google.internal' || hostname.endsWith('.metadata.google.internal')) {
+        throw new Error(`Hostname '${hostname}' bị chặn do chính sách bảo mật đám mây.`);
     }
+
+    if (DISABLE_SSRF_CHECK || ALLOWED_INTERNAL_HOSTS.has(hostname)) return;
+
+    if (net.isIP(hostname) !== 0) {
+        if (!ALLOW_PRIVATE_BOT_IPS && isPrivateOrBlockedIp(hostname)) {
+            throw new Error(`Địa chỉ IP đích '${hostname}' là địa chỉ nội bộ bị chặn (SSRF).`);
+        }
+        return;
+    }
+
     const now = Date.now();
     const cached = safeHostDnsCache.get(hostname);
     if (cached && (now - cached.timestamp < 30000)) {
         if (!cached.safe) throw new Error(cached.error);
         return;
     }
+
     try {
         const records = await dns.promises.lookup(hostname, { all: true });
         for (const rec of records) {
-            if (isPrivateOrBlockedIp(rec.address)) {
+            if (rec.address === '169.254.169.254' || rec.address.startsWith('169.254.')) {
+                const errStr = `Hostname '${hostname}' trỏ về Cloud Metadata IP '${rec.address}' bị chặn.`;
+                safeHostDnsCache.set(hostname, { safe: false, error: errStr, timestamp: now });
+                throw new Error(errStr);
+            }
+            if (!ALLOW_PRIVATE_BOT_IPS && isPrivateOrBlockedIp(rec.address)) {
                 const errStr = `Hostname '${hostname}' trỏ về IP nội bộ '${rec.address}' bị chặn (SSRF DNS rebinding).`;
                 safeHostDnsCache.set(hostname, { safe: false, error: errStr, timestamp: now });
                 throw new Error(errStr);
@@ -3799,6 +3838,10 @@ async function assertSafeChildUrl(childUrl) {
         if (e.message.includes('SSRF') || e.message.includes('bị chặn')) {
             safeHostDnsCache.set(hostname, { safe: false, error: e.message, timestamp: now });
             throw e;
+        }
+        if (ALLOW_PRIVATE_BOT_IPS && (e.code === 'ENOTFOUND' || e.code === 'EAI_AGAIN')) {
+            safeHostDnsCache.set(hostname, { safe: true, timestamp: now });
+            return;
         }
         throw new Error(`Lỗi phân giải DNS cho '${hostname}': ${e.message}`);
     }
@@ -3843,7 +3886,7 @@ async function fetchChild(botConfig, path, options = {}) {
                         ? JSON.stringify(options.body)
                         : undefined,
                 cache: 'no-store',
-                redirect: 'error',
+                redirect: 'follow',
                 signal: controller.signal
             }
         );
@@ -4046,7 +4089,7 @@ async function fetchBotSummary(botConfig) {
             };
         }
 
-        const result = await fetchChild(botConfig, '/api/bot', { timeoutMs: 3000 });
+        const result = await fetchChild(botConfig, '/api/bot', { timeoutMs: 5000 });
 
         if (!result.ok || !result.data) {
             return {
@@ -5217,10 +5260,11 @@ input:focus, select:focus, textarea:focus {
 /* Grids & Panels */
 .bot-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, 340px);
-  gap: 18px;
-  justify-content: start;
-  align-items: start;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+  width: 100%;
+  box-sizing: border-box;
+  align-items: stretch;
 }
 
 .bot-card, .panel {
@@ -5229,23 +5273,23 @@ input:focus, select:focus, textarea:focus {
   background: var(--card);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
-  padding: 18px;
+  padding: 16px;
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
   transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.22s ease, box-shadow 0.22s ease;
 }
 
 .bot-card {
   position: relative;
-  width: 340px;
-  max-width: 340px;
+  width: 100%;
+  max-width: 100%;
   box-sizing: border-box;
   background: rgba(15, 23, 42, 0.85);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 18px;
-  padding: 16px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  border-radius: 16px;
+  padding: 12px 14px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
   cursor: pointer;
   display: flex;
   flex-direction: column;
@@ -5267,13 +5311,13 @@ input:focus, select:focus, textarea:focus {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
+  gap: 6px;
+  margin-bottom: 8px;
 }
 .bot-card-title-group {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   min-width: 0;
   flex: 1;
 }
@@ -5289,7 +5333,7 @@ input:focus, select:focus, textarea:focus {
   flex-shrink: 0;
 }
 .bot-card-name {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 800;
   color: #fff;
   margin: 0;
@@ -5303,9 +5347,9 @@ input:focus, select:focus, textarea:focus {
   flex-shrink: 0;
 }
 .bot-mini-btn {
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 700;
-  padding: 3px 8px;
+  padding: 3px 7px;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -5330,19 +5374,19 @@ input:focus, select:focus, textarea:focus {
 .bot-status-strip {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
-  margin-bottom: 10px;
-  padding-bottom: 8px;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 .bot-status-pill {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 11px;
+  gap: 5px;
+  font-size: 10.5px;
   font-weight: 750;
-  padding: 3px 8px;
+  padding: 2px 7px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.06);
 }
@@ -5372,10 +5416,10 @@ input:focus, select:focus, textarea:focus {
 .pulse-status-dot.red { background: #ef4444; box-shadow: 0 0 8px #ef4444; }
 
 .eco-badge-glow {
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 800;
-  padding: 2px 6px;
-  border-radius: 6px;
+  padding: 2px 5px;
+  border-radius: 5px;
   background: rgba(34, 197, 94, 0.15);
   color: #4ade80;
   border: 1px solid rgba(34, 197, 94, 0.35);
@@ -5387,9 +5431,9 @@ input:focus, select:focus, textarea:focus {
   align-items: center;
 }
 .bot-owner-pill {
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 700;
-  padding: 2px 7px;
+  padding: 2px 6px;
   border-radius: 6px;
   display: inline-flex;
   align-items: center;
@@ -5410,37 +5454,44 @@ input:focus, select:focus, textarea:focus {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
+  gap: 6px;
+  margin-bottom: 8px;
   background: rgba(0, 0, 0, 0.25);
-  padding: 6px 10px;
-  border-radius: 8px;
+  padding: 5px 8px;
+  border-radius: 7px;
   border: 1px solid rgba(255, 255, 255, 0.04);
-  font-size: 12px;
+  font-size: 11.5px;
 }
 .bot-ingame-user {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   font-weight: 700;
   color: #f1f5f9;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
+  flex: 1;
 }
 .bot-ip-pill {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   font-family: monospace;
-  font-size: 11px;
+  font-size: 10.5px;
   color: #c084fc;
   cursor: pointer;
-  padding: 2px 6px;
-  border-radius: 4px;
+  padding: 2px 7px;
+  border-radius: 5px;
   background: rgba(192, 132, 252, 0.1);
   border: 1px solid rgba(192, 132, 252, 0.25);
   transition: all 0.15s;
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .bot-ip-pill:hover {
   background: rgba(192, 132, 252, 0.22);
@@ -5450,14 +5501,14 @@ input:focus, select:focus, textarea:focus {
 .bot-vitals-matrix {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin-bottom: 10px;
+  gap: 6px;
+  margin-bottom: 8px;
 }
 .vital-card {
   background: rgba(255, 255, 255, 0.025);
   border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 10px;
-  padding: 7px 10px;
+  border-radius: 8px;
+  padding: 5px 8px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -5466,22 +5517,22 @@ input:focus, select:focus, textarea:focus {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 11px;
-  margin-bottom: 4px;
+  font-size: 10.5px;
+  margin-bottom: 3px;
 }
 .vital-label {
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 750;
   color: var(--muted);
   letter-spacing: 0.3px;
 }
 .vital-val {
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 800;
 }
 .hp-bar-track {
   width: 100%;
-  height: 5px;
+  height: 4px;
   background: rgba(255, 255, 255, 0.08);
   border-radius: 999px;
   overflow: hidden;
@@ -5493,68 +5544,68 @@ input:focus, select:focus, textarea:focus {
   transition: width 0.3s ease;
 }
 .totem-warning-badge {
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 800;
   color: #f87171;
   background: rgba(239, 68, 68, 0.15);
   border-radius: 4px;
-  padding: 1px 5px;
+  padding: 1px 4px;
   display: inline-block;
   width: fit-content;
-  margin-top: 2px;
+  margin-top: 1px;
 }
 .totem-ok-badge {
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 700;
   color: #4ade80;
   background: rgba(74, 222, 128, 0.12);
   border-radius: 4px;
-  padding: 1px 5px;
+  padding: 1px 4px;
   display: inline-block;
   width: fit-content;
-  margin-top: 2px;
+  margin-top: 1px;
 }
 .sparkline-container {
-  height: 14px;
+  height: 12px;
   margin-top: 2px;
   display: flex;
   align-items: center;
   justify-content: flex-end;
 }
 .vital-sub-info {
-  font-size: 9.5px;
+  font-size: 9px;
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  margin-top: 2px;
+  margin-top: 1px;
 }
 .bot-kick-notice {
   background: rgba(234, 179, 8, 0.12);
   border: 1px solid rgba(234, 179, 8, 0.3);
-  border-radius: 8px;
-  padding: 6px 10px;
-  font-size: 11px;
+  border-radius: 7px;
+  padding: 5px 8px;
+  font-size: 10.5px;
   color: #facc15;
-  margin-bottom: 8px;
+  margin-bottom: 7px;
 }
 .bot-ram-meter-box {
   background: rgba(0, 0, 0, 0.2);
   border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 8px;
-  padding: 6px 10px;
-  margin-bottom: 10px;
-  font-size: 10.5px;
+  border-radius: 7px;
+  padding: 5px 8px;
+  margin-bottom: 8px;
+  font-size: 10px;
 }
 .bot-ram-meter-labels {
   display: flex;
   justify-content: space-between;
   color: var(--muted);
-  margin-bottom: 4px;
+  margin-bottom: 3px;
 }
 .ram-meter-track {
   width: 100%;
-  height: 5px;
+  height: 4px;
   background: rgba(255, 255, 255, 0.06);
   border-radius: 999px;
   overflow: hidden;
@@ -5566,17 +5617,17 @@ input:focus, select:focus, textarea:focus {
 }
 .card-quick-actions {
   display: flex;
-  gap: 6px;
+  gap: 5px;
   margin-top: auto;
-  padding-top: 10px;
+  padding-top: 8px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 .card-btn {
   flex: 1;
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 700;
-  padding: 6px 6px;
-  border-radius: 7px;
+  padding: 5px 4px;
+  border-radius: 6px;
   text-align: center;
 }
 .detail-link-btn {
@@ -6994,9 +7045,9 @@ input:focus, select:focus, textarea:focus {
   .grid { grid-template-columns: 1fr; }
 }
 
-@media (max-width: 520px) {
-  .bot-grid { grid-template-columns: 1fr; }
-  .bot-card { width: 100%; max-width: 100%; }
+@media (max-width: 680px) {
+  .bot-grid { grid-template-columns: 1fr; gap: 12px; }
+  .bot-card { width: 100%; max-width: 100%; padding: 12px; }
   .info, .inventory-grid { grid-template-columns: 1fr; }
   .equipment-row { grid-template-columns: repeat(5, minmax(48px, 1fr)); }
 }
@@ -10153,7 +10204,9 @@ function botCardHtml(bot) {
   const hpColor = hpVal === null ? '#94a3b8' : (hpVal <= 6 ? 'var(--red)' : hpVal <= 14 ? 'var(--yellow)' : 'var(--green)');
 
   const kickWarning = bot.lastKickReason ? ('<div class="bot-kick-notice">⚠️ <strong>Bị kick:</strong> ' + escapeHtml(bot.lastKickReason) + '</div>') : '';
-  const ipDisplay = bot.ipAddress || (bot.url ? (()=>{ try { const u = new URL(bot.url); return (u.hostname && u.hostname !== 'localhost' && u.hostname !== '127.0.0.1') ? u.hostname : ''; } catch(_) { return ''; } })() : '') || '--';
+  const rawIp = String(bot.ipAddress || '').trim();
+  const isLoopback = rawIp === '127.0.0.1' || rawIp === 'localhost' || rawIp === '0.0.0.0' || rawIp === '::1';
+  const ipDisplay = (!isLoopback && rawIp) ? rawIp : (bot.host ? bot.host : '--');
 
   // Ownership badge
   let ownerBadgeHtml = '';
@@ -13122,9 +13175,9 @@ function detailStatusHtml() {
     tpsEl.style.color = tpsVal >= 18.5 ? 'var(--green)' : (tpsVal >= 14.0 ? 'var(--yellow)' : 'var(--red)');
   }
   const pos=detailBot.position;
-  document.getElementById('detailPosition').textContent=pos&&Number.isFinite(pos.x)&&Number.isFinite(pos.y)&&Number.isFinite(pos.z)?Math.round(pos.x)+' '+Math.round(pos.y)+' '+Math.round(pos.z):'-';
-  document.getElementById('detailDimension').textContent=detailBot.dimension||'-';
-  document.getElementById('detailIp').textContent=detailBot.ipAddress||'-';
+  const rawDetailIp = String(detailBot.ipAddress || '').trim();
+  const isDetailLoopback = rawDetailIp === '127.0.0.1' || rawDetailIp === 'localhost' || rawDetailIp === '0.0.0.0' || rawDetailIp === '::1';
+  document.getElementById('detailIp').textContent = (!isDetailLoopback && rawDetailIp) ? rawDetailIp : (detailBot.host || '-');
 
   const hw = detailBot.hostHardware;
   const botRamMb = Number(hw?.botRssMb || detailBot.ramRss || detailBot.rssMb || detailBot.memory?.rssMb || 0);
