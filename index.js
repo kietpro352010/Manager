@@ -4,6 +4,28 @@ const crypto = require('crypto');
 const express = require('express');
 const dns = require('dns');
 const net = require('net');
+const zlib = require('zlib');
+const v8 = require('v8');
+const vm = require('vm');
+
+let dynamicGc = null;
+try {
+    v8.setFlagsFromString('--expose_gc');
+    dynamicGc = vm.runInNewContext('gc');
+} catch (_) {}
+
+function runGarbageCollection() {
+    try {
+        if (typeof global.gc === 'function') {
+            global.gc();
+            return true;
+        } else if (typeof dynamicGc === 'function') {
+            dynamicGc();
+            return true;
+        }
+    } catch (_) {}
+    return false;
+}
 
 // ============================================================================
 // CẤU HÌNH TỔNG BỘ ĐIỀU KHIỂN MANAGER (COMMERCIAL ENTERPRISE EDITION V11.6)
@@ -15,8 +37,8 @@ const net = require('net');
 const MANAGER_CONFIG = {
     // --- 0. KHÓA BẢO MẬT NỘI BỘ MANAGER <-> BOT CON ---
     BOT_SECRET_KEY: '',                   // Khóa bảo mật nội bộ kết nối Bot con
-    // --- 1. MẬT KHẨU QUẢN TRỊ ADMIN (ĐỂ TRỐNG ĐỂ TỰ ĐIỀN) ---
-    ADMIN_PASSWORD: 'admin123',           // Mật khẩu quản trị Manager (Mặc định: 'admin123' hoặc đặt qua biến môi trường ADMIN_PASSWORD)
+    // --- 1. MẬT KHẨU QUẢN TRỊ ADMIN ---
+    ADMIN_PASSWORD: '',           // Để trống sẽ tạo mật khẩu khởi tạo ngẫu nhiên, yêu cầu đổi ngay
 
     // --- 2. THÔNG BÁO WEBHOOK DISCORD & TELEGRAM (ĐỂ TRỐNG NẾU CHƯA DÙNG) ---
     DISCORD_WEBHOOK_URL: '',              // Webhook Discord nhận cảnh báo khi bot offline > 5p, low totem
@@ -25,7 +47,7 @@ const MANAGER_CONFIG = {
 
     // --- 3. CỔNG MÁY CHỦ WEB & NỀN TẢNG HOSTING (THUẦN RENDER CLOUD) ---
     PLATFORM: 'auto',                     // 'auto' (Tự nhận diện Render Cloud Web Service / Local PC)
-    WEB_PORT: 10000,                      // Cổng Web mặc định trên Render (Render tự gán PORT=10000; test Local dự phòng 3000)
+    WEB_PORT: 3000,                       // Cổng Web mặc định Local: 3000 (Trên Render, biến môi trường PORT tự động ghi đè)
 
     // --- 4. DANH SÁCH BOT KHỞI TẠO SẴN (NẾU CÓ) ---
     // Ví dụ: 'https://bot-a.onrender.com,https://bot-b.onrender.com'
@@ -40,6 +62,14 @@ const MANAGER_CONFIG = {
     MAX_SPARKLINE_POINTS: 20              // Số điểm lưu trữ vẽ đồ thị SVG Sparkline thời gian thực
 };
 
+const SYSTEM_MASTER_SECRET = String(
+    process.env.MANAGER_MASTER_KEY || process.env.BOT_CREDENTIALS_ENCRYPTION_KEY ||
+    process.env.BOT_SECRET_KEY || MANAGER_CONFIG.BOT_SECRET_KEY ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || ''
+).trim();
+
+const BOT_SECRET_KEY = String(process.env.BOT_SECRET_KEY || MANAGER_CONFIG.BOT_SECRET_KEY || '').trim();
+
 function getAdminPassword() {
     if (typeof registry !== 'undefined' && registry && registry.adminPassword) {
         return String(registry.adminPassword).trim();
@@ -49,7 +79,38 @@ function getAdminPassword() {
     return '';
 }
 
+function normalizeManagerRole(role) {
+    return String(role || '').trim().toLowerCase() === 'admin' ? 'admin' : 'user';
+}
+
 const app = express();
+
+// Express 4 does not forward rejected async route promises to error middleware.
+// Wrap every route callback at registration time so named handlers, arrays and
+// inline async callbacks all share one rejection path.
+function wrapExpress4RouteHandler(handler) {
+    if (typeof handler !== 'function' || handler.length === 4) return handler;
+    return function express4RouteHandler(req, res, next) {
+        try {
+            const result = handler.apply(this, arguments);
+            return result && typeof result.then === 'function'
+                ? Promise.resolve(result).catch(next)
+                : result;
+        } catch (err) {
+            return next(err);
+        }
+    };
+}
+function wrapExpress4RouteHandlers(handler) {
+    return Array.isArray(handler) ? handler.map(wrapExpress4RouteHandlers) : wrapExpress4RouteHandler(handler);
+}
+for (const method of ['get', 'post', 'put', 'patch', 'delete', 'all', 'options', 'head']) {
+    const originalRouteMethod = app[method].bind(app);
+    app[method] = function express4SafeRoute(path, ...handlers) {
+        if (handlers.length === 0) return originalRouteMethod(path);
+        return originalRouteMethod(path, ...handlers.map(wrapExpress4RouteHandlers));
+    };
+}
 
 function readPositiveInt(value, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
     if (value === undefined || value === null || String(value).trim() === '') {
@@ -211,6 +272,10 @@ function listenHttpServer(app, initialPort, platform, onListening) {
 
     function tryListen() {
         const srv = app.listen(fixedPort, bindHost);
+        if (typeof srv.keepAliveTimeout !== 'undefined') {
+            srv.keepAliveTimeout = 65000;
+            srv.headersTimeout = 66000;
+        }
 
         srv.on('listening', () => {
             onListening(srv, fixedPort, bindHost);
@@ -253,60 +318,11 @@ const isRender = Boolean(process.env.RENDER || process.env.RENDER_SERVICE_ID || 
 app.set('trust proxy', process.env.TRUST_PROXY ? process.env.TRUST_PROXY : (isRender || process.env.PORT || process.env.NODE_ENV === 'production' ? 1 : 'loopback'));
 
 const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : __dirname;
-try {
-    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-} catch (e) {
-    console.error('[STORAGE] Không thể tạo DATA_DIR:', e.message);
-}
-
-// Tự động di chuyển dữ liệu cũ từ __dirname sang DATA_DIR nếu DATA_DIR được cấu hình riêng
-if (DATA_DIR !== __dirname) {
-    const dataFilesToMigrate = [
-        'bot_registry.json',
-        'manager_users.json',
-        'manager_sessions.json',
-        'manager_keys.json',
-        'manager_audit.jsonl',
-        '.manager_master_key',
-        '.bot_secret_key',
-        '.supabase_secret'
-    ];
-    for (const f of dataFilesToMigrate) {
-        const src = path.join(__dirname, f);
-        const dst = path.join(DATA_DIR, f);
-        if (fs.existsSync(src) && !fs.existsSync(dst)) {
-            try {
-                fs.copyFileSync(src, dst);
-                console.log(`[DATA_MIGRATION] Đã sao chép ${f} sang ${DATA_DIR}`);
-            } catch (err) {
-                console.error(`[DATA_MIGRATION] Lỗi sao chép ${f}:`, err.message);
-            }
-        }
-    }
-    const srcBackups = path.join(__dirname, 'backups');
-    const dstBackups = path.join(DATA_DIR, 'backups');
-    if (fs.existsSync(srcBackups) && !fs.existsSync(dstBackups)) {
-        try {
-            fs.mkdirSync(dstBackups, { recursive: true });
-            for (const bf of fs.readdirSync(srcBackups)) {
-                fs.copyFileSync(path.join(srcBackups, bf), path.join(dstBackups, bf));
-            }
-            console.log(`[DATA_MIGRATION] Đã sao chép backups sang ${DATA_DIR}`);
-        } catch (_) {}
-    }
-}
-
-if (isRender && !process.env.DATA_DIR) {
-    console.warn('\n====================================================================');
-    console.warn('[STORAGE WARNING] ⚠️ Manager đang chạy trên Render mà chưa cấu hình DATA_DIR!');
-    console.warn('Filesystem mặc định của Render là ephemeral (sẽ mất dữ liệu khi restart/deploy).');
-    console.warn('Khuyến nghị: Thêm Render Persistent Disk mount tại /data và đặt DATA_DIR=/data.');
-    console.warn('====================================================================\n');
-}
+// DATA_DIR is retained only as a location to explicitly import legacy files on Admin request.
 
 const POLL_TIMEOUT_MS = readPositiveInt(process.env.BOT_FETCH_TIMEOUT_MS, 15000, 1000, 60000);
-const BOT_POLL_MS = readPositiveInt(process.env.BOT_POLL_MS, 2000, 200, 10000);
-const BOT_SUMMARY_CACHE_MS = readPositiveInt(process.env.BOT_SUMMARY_CACHE_MS, 500, 100, 60000);
+const BOT_POLL_MS = readPositiveInt(process.env.BOT_POLL_MS, 4000, 200, 30000);
+const BOT_SUMMARY_CACHE_MS = readPositiveInt(process.env.BOT_SUMMARY_CACHE_MS, 2000, 100, 60000);
 const BOT_MAX_PARALLEL_REQUESTS = readPositiveInt(process.env.BOT_MAX_PARALLEL_REQUESTS, 8, 1, 64);
 const ADMIN_FETCH_TIMEOUT_MS = readPositiveInt(process.env.ADMIN_FETCH_TIMEOUT_MS, 8000, 1000, 30000);
 const REGISTRY_FILE_FROM_ENV = String(process.env.BOT_REGISTRY_FILE || '').trim();
@@ -316,8 +332,6 @@ const REGISTRY_CANDIDATES = [
     path.join(__dirname, 'bot_registry.json'),
     path.join(process.cwd(), 'bot_registry.json')
 ].filter((value, index, arr) => value && arr.indexOf(value) === index);
-
-let REGISTRY_FILE = REGISTRY_CANDIDATES[0] || path.join(DATA_DIR, 'bot_registry.json');
 let USERS_FILE = path.join(DATA_DIR, 'manager_users.json');
 let SESSIONS_FILE = path.join(DATA_DIR, 'manager_sessions.json');
 let BACKUP_DIR = path.join(DATA_DIR, 'backups');
@@ -325,118 +339,135 @@ let AUDIT_LOG_FILE = path.join(DATA_DIR, 'manager_audit.jsonl');
 let KEYS_FILE = path.join(DATA_DIR, 'manager_keys.json');
 let MASTER_KEY_FILE = path.join(DATA_DIR, '.manager_master_key');
 let SUPABASE_SECRET_FILE = path.join(DATA_DIR, '.supabase_secret');
+let ADMIN_BOOTSTRAP_HASH_FILE = path.join(DATA_DIR, '.admin_bootstrap_hash');
+
+function isStoredCredentialCiphertext(value) {
+    return typeof value === 'string' && (
+        value.startsWith('aes256$gcm$') || value.startsWith('enc:v1:') ||
+        value.startsWith('enc:v2:') || value.startsWith('enc$')
+    );
+}
+
+function isUnsupportedCredentialCiphertext(value) {
+    return typeof value === 'string' && /^enc:v[0-9]+:/i.test(value) && !isStoredCredentialCiphertext(value);
+}
+
+function getManagerCredentialKey() {
+    const source = String(process.env.MANAGER_MASTER_KEY || process.env.BOT_CREDENTIALS_ENCRYPTION_KEY || '').trim();
+    return source ? crypto.createHash('sha256').update(source).digest() : null;
+}
+
+function getLegacyManagerCredentialKeys() {
+    let fileKey = '';
+    for (const filename of [MASTER_KEY_FILE, path.join(__dirname, '.manager_master_key')]) {
+        try { if (filename && fs.existsSync(filename)) { fileKey = fs.readFileSync(filename, 'utf8').trim(); if (fileKey) break; } } catch (_) {}
+    }
+    const sources = [
+        process.env.MANAGER_MASTER_KEY, process.env.BOT_CREDENTIALS_ENCRYPTION_KEY,
+        process.env.ENCRYPTION_KEY, process.env.BOT_SECRET_KEY, MANAGER_CONFIG.BOT_SECRET_KEY,
+        process.env.SUPABASE_SERVICE_ROLE_KEY, process.env.SUPABASE_KEY,
+        'kbot_enterprise_stable_encryption_key_v11', 'kbot_default_key', fileKey
+    ];
+    const seen = new Set();
+    return sources.map(value => String(value || '').trim()).filter(value => {
+        if (!value || seen.has(value)) return false;
+        seen.add(value); return true;
+    }).map(value => crypto.createHash('sha256').update(value).digest());
+}
+
+function encryptUserPassword(value) {
+    if (value === null || value === undefined || value === '') return '';
+    let plaintext = String(value);
+    if (isUnsupportedCredentialCiphertext(plaintext)) throw new Error('Định dạng ciphertext credential không được hỗ trợ.');
+    if (isStoredCredentialCiphertext(plaintext)) {
+        const decrypted = decryptUserPassword(plaintext);
+        if (decrypted === null || decrypted === '') throw new Error('Không thể xác minh ciphertext credential hiện có.');
+        plaintext = decrypted;
+    }
+    const key = getManagerCredentialKey();
+    if (!key) throw new Error('Thiếu MANAGER_MASTER_KEY hoặc BOT_CREDENTIALS_ENCRYPTION_KEY; không thể mã hóa credential an toàn.');
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+    return ['aes256', 'gcm', iv.toString('hex'), cipher.getAuthTag().toString('hex'), ciphertext.toString('hex')].join('$');
+}
+
+function decryptUserPassword(value) {
+    if (value === null || value === undefined || value === '') return '';
+    const stored = String(value);
+    if (isUnsupportedCredentialCiphertext(stored)) return null;
+    if (!isStoredCredentialCiphertext(stored)) return stored;
+    let iv, tag, ciphertext;
+    if (stored.startsWith('aes256$gcm$')) {
+        const parts = stored.split('$');
+        if (parts.length !== 5) return null;
+        iv = parts[2]; tag = parts[3]; ciphertext = parts[4];
+    } else if (stored.startsWith('enc:v1:') || stored.startsWith('enc:v2:')) {
+        const parts = stored.split(':');
+        if (parts.length !== 5) return null;
+        iv = parts[2]; tag = parts[3]; ciphertext = parts[4];
+    } else {
+        const parts = stored.split('$');
+        if (parts.length < 4) return null;
+        iv = parts[1]; tag = parts[2]; ciphertext = parts[3];
+    }
+    if (!/^[a-f0-9]{24}$/i.test(iv || '') || !/^[a-f0-9]{32}$/i.test(tag || '') || !/^(?:[a-f0-9]{2})*$/i.test(ciphertext || '')) return null;
+    for (const key of getLegacyManagerCredentialKeys()) {
+        try {
+            const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'hex'));
+            decipher.setAuthTag(Buffer.from(tag, 'hex'));
+            return Buffer.concat([decipher.update(Buffer.from(ciphertext, 'hex')), decipher.final()]).toString('utf8');
+        } catch (_) {}
+    }
+    return null;
+}
 
 function loadSupabaseSecretKey() {
-    if (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY) {
-        return String(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY).trim();
-    }
-    try {
-        if (fs.existsSync(SUPABASE_SECRET_FILE)) {
-            return fs.readFileSync(SUPABASE_SECRET_FILE, 'utf8').trim();
-        }
-    } catch (_) {}
-    return '';
+    return String(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || '').trim();
 }
 
-function saveSupabaseSecretKey(key) {
-    if (!key) return;
-    try {
-        fs.writeFileSync(SUPABASE_SECRET_FILE, String(key).trim(), { encoding: 'utf8', mode: 0o600 });
-    } catch (e) {
-        console.error('[SUPABASE] Lỗi ghi .supabase_secret:', e.message);
-    }
+function saveSupabaseSecretKey() {
+    // Supabase credentials belong in environment variables and are never written to disk.
+    return false;
 }
-
-try {
-    if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
-} catch (e) {
-    console.error('[BACKUP] Không thể khởi tạo thư mục backups:', e.message);
-}
-
 
 // ----------------------------------------------------------------------------
 // SUPABASE CLOUD DATABASE ADAPTER (ENTERPRISE PERSISTENCE ENGINE)
 // ----------------------------------------------------------------------------
 const SUPABASE_REQUIRED_TABLES = Object.freeze([
-    'manager_users',
-    'manager_keys',
-    'bot_registry',
-    'manager_sessions',
-    'bot_settings',
-    'audit_logs'
+    'manager_users', 'manager_keys', 'bot_registry', 'manager_sessions', 'bot_settings',
+    'audit_logs', 'bot_chat_logs', 'bot_event_logs', 'bot_position_state', 'bot_position_logs', 'manager_backups', 'manager_locks', 'manager_key_usage_transactions', 'bot_log_clear_cutoffs',
+    'manager_user_state', 'manager_users_write_transactions', 'manager_session_revocations'
 ]);
 
-// Run this once in Supabase SQL Editor before connecting a new project. The
-// service-role key bypasses RLS; browser clients never receive this key.
-const SUPABASE_SCHEMA_SQL = `
-create table if not exists public.manager_users (
-  id text primary key, username text not null unique, password text not null,
-  role text not null default 'user', status text not null default 'active',
-  assigned_bot_ids jsonb not null default '[]'::jsonb, expires_at timestamptz,
-  plan_name text not null default 'Gói mặc định', bot_aliases jsonb not null default '{}'::jsonb,
-  created_at timestamptz not null default now(), updated_at timestamptz not null default now()
-);
-create table if not exists public.manager_keys (
-  id text primary key, code text not null unique, days integer not null default 1,
-  plan_name text not null default 'Gói mặc định', bot_ids jsonb not null default '[]'::jsonb,
-  bot_count integer not null default 1,
-  used boolean not null default false, used_by text, used_at timestamptz,
-  max_uses integer not null default 1, used_count integer not null default 0,
-  used_users jsonb not null default '[]'::jsonb, expires_at timestamptz, note text,
-  created_at timestamptz not null default now()
-);
-alter table public.manager_keys add column if not exists bot_count integer not null default 1;
-alter table public.manager_keys add column if not exists max_uses integer not null default 1;
-alter table public.manager_keys add column if not exists used_count integer not null default 0;
-alter table public.manager_keys add column if not exists used_users jsonb not null default '[]'::jsonb;
-alter table public.manager_keys add column if not exists expires_at timestamptz;
-alter table public.manager_keys add column if not exists note text;
-create table if not exists public.bot_registry (
-  id text primary key, data jsonb not null default '{}'::jsonb,
-  updated_at timestamptz not null default now()
-);
-create table if not exists public.manager_sessions (
-  token_hash text primary key, user_id text not null, username text not null,
-  role text not null default 'user', assigned_bot_ids jsonb not null default '[]'::jsonb,
-  expires_at bigint not null, plan_name text not null default 'Gói thường',
-  allow_account_change boolean not null default true, status text not null default 'active',
-  updated_at timestamptz not null default now()
-);
-create table if not exists public.bot_settings (
-  bot_id text primary key, username text not null default '', password text not null default '',
-  settings jsonb not null default '{}'::jsonb, proxy jsonb not null default '{}'::jsonb,
-  schedules jsonb not null default '[]'::jsonb, auto_chat jsonb not null default '[]'::jsonb,
-  updated_at timestamptz not null default now()
-);
-create table if not exists public.audit_logs (
-  id text primary key, log_type text not null default 'SYSTEM', category text not null default 'SYSTEM',
-  action text not null, action_label text not null default '', actor_username text not null default 'system',
-  actor_role text not null default 'system', actor_ip text not null default '', target jsonb not null default '{}'::jsonb,
-  details text not null default '', status text not null default 'SUCCESS', timestamp timestamptz not null default now()
-);
-create index if not exists audit_logs_timestamp_idx on public.audit_logs (timestamp desc);
-create index if not exists audit_logs_type_category_idx on public.audit_logs (log_type, category);
-create index if not exists manager_sessions_expires_at_idx on public.manager_sessions (expires_at);
-alter table public.manager_users enable row level security;
-alter table public.manager_keys enable row level security;
-alter table public.bot_registry enable row level security;
-alter table public.manager_sessions enable row level security;
-alter table public.bot_settings enable row level security;
-alter table public.audit_logs enable row level security;
-`;
+const SUPABASE_SCHEMA_SQL = "-- KingMC Bot Manager storage contract, aligned with manager.js and bot.js.\n-- Safe to run more than once. Keeps legacy columns/rows and adds the current API schema.\nBEGIN;\n\nCREATE TABLE IF NOT EXISTS public.manager_users (\n  id text,\n  username text PRIMARY KEY,\n  password text,\n  password_hash text,\n  role text NOT NULL DEFAULT 'user',\n  status text NOT NULL DEFAULT 'active',\n  assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  expires_at timestamptz,\n  plan_name text NOT NULL DEFAULT 'Gói mặc định',\n  bot_aliases jsonb NOT NULL DEFAULT '{}'::jsonb,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS username text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS password text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS password_hash text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS expires_at timestamptz;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS plan_name text NOT NULL DEFAULT 'Gói mặc định';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS bot_aliases jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_users ALTER COLUMN password_hash DROP NOT NULL;\nUPDATE public.manager_users SET id = 'usr_' || username WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.manager_users SET password = password_hash WHERE (password IS NULL OR password = '') AND password_hash IS NOT NULL;\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_users_id_unique ON public.manager_users(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_users_username_unique ON public.manager_users(username);\n\nCREATE TABLE IF NOT EXISTS public.manager_keys (\n  id text PRIMARY KEY,\n  code text,\n  key_code text,\n  days integer NOT NULL DEFAULT 1,\n  duration_days integer NOT NULL DEFAULT 0,\n  duration_ms bigint NOT NULL DEFAULT 0,\n  plan_name text NOT NULL DEFAULT 'Gói mặc định',\n  bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  bot_count integer NOT NULL DEFAULT 1,\n  used boolean NOT NULL DEFAULT false,\n  status text NOT NULL DEFAULT 'unused',\n  allow_account_change boolean NOT NULL DEFAULT true,\n  used_by text,\n  used_at timestamptz,\n  max_uses integer NOT NULL DEFAULT 1,\n  used_count integer NOT NULL DEFAULT 0,\n  used_users jsonb NOT NULL DEFAULT '[]'::jsonb,\n  expires_at timestamptz,\n  note text,\n  created_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS code text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS key_code text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS days integer NOT NULL DEFAULT 1;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS duration_days integer NOT NULL DEFAULT 0;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS duration_ms bigint NOT NULL DEFAULT 0;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS plan_name text NOT NULL DEFAULT 'Gói mặc định';\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS bot_count integer NOT NULL DEFAULT 1;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used boolean NOT NULL DEFAULT false;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'unused';\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS allow_account_change boolean NOT NULL DEFAULT true;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_by text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_at timestamptz;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS max_uses integer NOT NULL DEFAULT 1;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_count integer NOT NULL DEFAULT 0;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_users jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS expires_at timestamptz;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS note text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nUPDATE public.manager_keys SET code = key_code WHERE code IS NULL OR code = '';\nUPDATE public.manager_keys SET key_code = code WHERE key_code IS NULL OR key_code = '';\nUPDATE public.manager_keys SET id = 'key_' || code WHERE (id IS NULL OR id = '') AND code IS NOT NULL;\nUPDATE public.manager_keys SET days = duration_days WHERE duration_days > 0 AND (days IS NULL OR days = 1);\nUPDATE public.manager_keys SET bot_ids = assigned_bot_ids WHERE bot_ids = '[]'::jsonb AND assigned_bot_ids <> '[]'::jsonb;\nUPDATE public.manager_keys SET used = (lower(status) IN ('used','active','redeemed')) WHERE status IS NOT NULL AND used = false;\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_keys_code_unique ON public.manager_keys(code);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_keys_id_unique ON public.manager_keys(id);\n\nCREATE TABLE IF NOT EXISTS public.bot_registry (\n  id text PRIMARY KEY,\n  data jsonb NOT NULL DEFAULT '{}'::jsonb,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\n-- Earlier versions stored one bot per row with numeric ids. Convert the id type\n-- without removing those rows, then create the singleton registry document.\nDO $$\nBEGIN\n  IF EXISTS (\n    SELECT 1 FROM information_schema.columns\n    WHERE table_schema='public' AND table_name='bot_registry'\n      AND column_name='id' AND data_type <> 'text'\n  ) THEN\n    ALTER TABLE public.bot_registry ALTER COLUMN id TYPE text USING id::text;\n  END IF;\nEND $$;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS data jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS url text;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS label text DEFAULT '';\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS sort_order integer DEFAULT 0;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS admin_password text DEFAULT '';\nDO $$\nDECLARE\n  legacy_bots jsonb;\n  legacy_id_map jsonb;\n  legacy_order jsonb;\n  legacy_admin text;\nBEGIN\n  IF NOT EXISTS (SELECT 1 FROM public.bot_registry WHERE id='default') THEN\n    SELECT COALESCE(jsonb_agg(jsonb_build_object('label', COALESCE(label,''), 'url', url) ORDER BY sort_order, id), '[]'::jsonb),\n           COALESCE(jsonb_object_agg(url, id), '{}'::jsonb),\n           COALESCE(jsonb_agg(url ORDER BY sort_order, id), '[]'::jsonb),\n           COALESCE(max(admin_password), '')\n      INTO legacy_bots, legacy_id_map, legacy_order, legacy_admin\n      FROM public.bot_registry\n      WHERE id <> 'default' AND url IS NOT NULL AND btrim(url) <> '';\n    INSERT INTO public.bot_registry(id, data, updated_at, url, label, sort_order, admin_password)\n      VALUES ('default', jsonb_build_object(\n        'dynamicBots', legacy_bots, 'botIdMap', legacy_id_map,\n        'orderUrls', legacy_order, 'adminPassword', legacy_admin,\n        'disabledEnvUrls', '[]'::jsonb, 'disabledEnvIds', '[]'::jsonb,\n        'overrides', '[]'::jsonb, 'order', '[]'::jsonb,\n        'botAliases', '{}'::jsonb, 'botTags', '{}'::jsonb,\n        'systemSettings', '{}'::jsonb, 'lastBotId', 0\n      ), now(), '', 'KingMC Registry', -1, legacy_admin) ON CONFLICT (id) DO NOTHING;\n  END IF;\nEND $$;\n\nCREATE TABLE IF NOT EXISTS public.manager_sessions (\n  token_hash text PRIMARY KEY,\n  user_id text NOT NULL DEFAULT '',\n  username text NOT NULL,\n  role text NOT NULL DEFAULT 'user',\n  assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  expires_at bigint NOT NULL DEFAULT 0,\n  plan_name text NOT NULL DEFAULT 'Gói thường',\n  allow_account_change boolean NOT NULL DEFAULT true,\n  status text NOT NULL DEFAULT 'active',\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS user_id text NOT NULL DEFAULT '';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS token_hash text;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS username text;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS expires_at bigint NOT NULL DEFAULT 0;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS plan_name text NOT NULL DEFAULT 'Gói thường';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS allow_account_change boolean NOT NULL DEFAULT true;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nUPDATE public.manager_sessions SET user_id = username WHERE user_id IS NULL OR user_id = '';\n\nCREATE TABLE IF NOT EXISTS public.bot_settings (\n  bot_id text PRIMARY KEY,\n  username text NOT NULL DEFAULT '',\n  password text NOT NULL DEFAULT '',\n  settings jsonb NOT NULL DEFAULT '{}'::jsonb,\n  proxy jsonb NOT NULL DEFAULT '{}'::jsonb,\n  schedules jsonb NOT NULL DEFAULT '[]'::jsonb,\n  auto_chat jsonb NOT NULL DEFAULT '[]'::jsonb,\n  manually_stopped boolean NOT NULL DEFAULT false,\n  synced_auth jsonb NOT NULL DEFAULT '{}'::jsonb,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS username text NOT NULL DEFAULT '';\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS password text NOT NULL DEFAULT '';\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS settings jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS proxy jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS schedules jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS auto_chat jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS manually_stopped boolean NOT NULL DEFAULT false;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS synced_auth jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\n\nCREATE TABLE IF NOT EXISTS public.audit_logs (\n  id text PRIMARY KEY,\n  bot_id text,\n  log_type text NOT NULL DEFAULT 'SYSTEM',\n  category text NOT NULL DEFAULT 'SYSTEM',\n  action text NOT NULL DEFAULT '',\n  action_label text NOT NULL DEFAULT '',\n  actor_username text NOT NULL DEFAULT 'system',\n  actor_role text NOT NULL DEFAULT 'system',\n  actor_ip text NOT NULL DEFAULT '',\n  target jsonb NOT NULL DEFAULT '{}'::jsonb,\n  details text NOT NULL DEFAULT '',\n  status text NOT NULL DEFAULT 'SUCCESS',\n  timestamp timestamptz NOT NULL DEFAULT now(),\n  actor jsonb NOT NULL DEFAULT '{}'::jsonb,\n  ip text NOT NULL DEFAULT ''\n);\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS log_type text NOT NULL DEFAULT 'SYSTEM';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS category text NOT NULL DEFAULT 'SYSTEM';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS action text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS action_label text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_username text NOT NULL DEFAULT 'system';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_role text NOT NULL DEFAULT 'system';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_ip text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS target jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS details text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'SUCCESS';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS timestamp timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS ip text NOT NULL DEFAULT '';\nUPDATE public.audit_logs SET\n  actor_username = COALESCE(NULLIF(actor_username, 'system'), actor->>'username', 'system'),\n  actor_role = COALESCE(NULLIF(actor_role, 'system'), actor->>'role', 'system'),\n  actor_ip = COALESCE(NULLIF(actor_ip, ''), ip, ''),\n  bot_id = COALESCE(NULLIF(bot_id, ''), NULLIF(target->>'botId',''), NULLIF(target->>'bot_id',''))\nWHERE actor IS NOT NULL OR ip <> '' OR bot_id IS NULL;\n\nCREATE TABLE IF NOT EXISTS public.bot_chat_logs (\n  id text PRIMARY KEY,\n  bot_id text NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  sender text NOT NULL DEFAULT 'SERVER',\n  event_type text NOT NULL DEFAULT 'CHAT',\n  message text NOT NULL DEFAULT '',\n  metadata jsonb NOT NULL DEFAULT '{}'::jsonb\n);\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS sender text NOT NULL DEFAULT 'SERVER';\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS event_type text NOT NULL DEFAULT 'CHAT';\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS message text NOT NULL DEFAULT '';\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb;\nCREATE TABLE IF NOT EXISTS public.bot_event_logs (\n  id text PRIMARY KEY,\n  bot_id text NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  level text NOT NULL DEFAULT 'INFO',\n  event_type text NOT NULL DEFAULT 'SYSTEM',\n  message text NOT NULL DEFAULT '',\n  metadata jsonb NOT NULL DEFAULT '{}'::jsonb\n);\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS level text NOT NULL DEFAULT 'INFO';\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS event_type text NOT NULL DEFAULT 'SYSTEM';\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS message text NOT NULL DEFAULT '';\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb;\nCREATE TABLE IF NOT EXISTS public.bot_position_state (\n  bot_id text PRIMARY KEY,\n  position jsonb NOT NULL DEFAULT '{}'::jsonb,\n  dimension text NOT NULL DEFAULT 'unknown',\n  location_state text NOT NULL DEFAULT 'Unknown',\n  last_event_key text,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS position jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS dimension text NOT NULL DEFAULT 'unknown';\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS location_state text NOT NULL DEFAULT 'Unknown';\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS last_event_key text;\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nCREATE TABLE IF NOT EXISTS public.bot_position_logs (\n  id text PRIMARY KEY,\n  bot_id text NOT NULL,\n  changed_at timestamptz NOT NULL DEFAULT now(),\n  from_position jsonb,\n  to_position jsonb NOT NULL,\n  from_dimension text,\n  to_dimension text NOT NULL DEFAULT 'unknown',\n  location_state text NOT NULL DEFAULT 'Unknown',\n  reason text NOT NULL DEFAULT 'MOVE',\n  event_key text NOT NULL UNIQUE\n);\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS changed_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS from_position jsonb;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS to_position jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS from_dimension text;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS to_dimension text NOT NULL DEFAULT 'unknown';\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS location_state text NOT NULL DEFAULT 'Unknown';\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS reason text NOT NULL DEFAULT 'MOVE';\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS event_key text;\nCREATE TABLE IF NOT EXISTS public.manager_backups (\n  name text PRIMARY KEY,\n  bot_id text,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  size_bytes integer NOT NULL DEFAULT 0,\n  payload jsonb NOT NULL DEFAULT '{}'::jsonb\n);\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS name text;\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS size_bytes integer NOT NULL DEFAULT 0;\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS payload jsonb NOT NULL DEFAULT '{}'::jsonb;\n\n-- Repair nullable legacy identifiers without deleting or merging existing rows.\nUPDATE public.audit_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_chat_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_event_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_position_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_position_logs SET event_key = 'legacy:' || id WHERE event_key IS NULL OR btrim(event_key) = '';\n\nCREATE INDEX IF NOT EXISTS idx_manager_users_role_status ON public.manager_users(role, status);\nCREATE INDEX IF NOT EXISTS idx_manager_keys_used_created ON public.manager_keys(used, created_at DESC);\nCREATE INDEX IF NOT EXISTS idx_manager_sessions_username ON public.manager_sessions(username);\nCREATE INDEX IF NOT EXISTS idx_manager_sessions_expires_at ON public.manager_sessions(expires_at);\nCREATE INDEX IF NOT EXISTS idx_audit_logs_bot_time ON public.audit_logs(bot_id, timestamp DESC);\nCREATE INDEX IF NOT EXISTS idx_audit_logs_user_time ON public.audit_logs(actor_username, timestamp DESC);\nCREATE INDEX IF NOT EXISTS idx_bot_chat_logs_bot_time ON public.bot_chat_logs(bot_id, created_at DESC);\nCREATE INDEX IF NOT EXISTS idx_bot_event_logs_bot_time ON public.bot_event_logs(bot_id, created_at DESC);\nCREATE INDEX IF NOT EXISTS idx_bot_position_logs_bot_time ON public.bot_position_logs(bot_id, changed_at DESC);\nCREATE INDEX IF NOT EXISTS idx_manager_backups_bot_time ON public.manager_backups(bot_id, created_at DESC);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_sessions_token_hash_unique ON public.manager_sessions(token_hash);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_settings_bot_id_unique ON public.bot_settings(bot_id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_audit_logs_id_unique ON public.audit_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_chat_logs_id_unique ON public.bot_chat_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_event_logs_id_unique ON public.bot_event_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_position_state_bot_id_unique ON public.bot_position_state(bot_id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_position_logs_id_unique ON public.bot_position_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_position_logs_event_key_unique ON public.bot_position_logs(event_key);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_backups_name_unique ON public.manager_backups(name);\n\nALTER TABLE public.manager_users ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_keys ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_registry ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_sessions ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_settings ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_chat_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_event_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_position_state ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_position_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_backups ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON public.manager_users, public.manager_keys, public.bot_registry,\n  public.manager_sessions, public.bot_settings, public.audit_logs,\n  public.bot_chat_logs, public.bot_event_logs, public.bot_position_state,\n  public.bot_position_logs, public.manager_backups FROM anon, authenticated;\nGRANT ALL ON public.manager_users, public.manager_keys, public.bot_registry,\n  public.manager_sessions, public.bot_settings, public.audit_logs,\n  public.bot_chat_logs, public.bot_event_logs, public.bot_position_state,\n  public.bot_position_logs, public.manager_backups TO service_role;\n\nCREATE OR REPLACE FUNCTION public.record_bot_position_change(\n  p_id text,\n  p_bot_id text,\n  p_changed_at timestamptz,\n  p_to_position jsonb,\n  p_to_dimension text,\n  p_location_state text,\n  p_reason text,\n  p_event_key text,\n  p_min_distance double precision DEFAULT 5.0\n) RETURNS jsonb\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $$\nDECLARE\n  prior public.bot_position_state%ROWTYPE;\n  dx double precision := 0;\n  dy double precision := 0;\n  dz double precision := 0;\n  distance double precision := 0;\n  dimension_changed boolean := false;\n  state_changed boolean := false;\nBEGIN\n  IF p_bot_id IS NULL OR p_bot_id !~ '^[1-9][0-9]{0,8}$' THEN\n    RAISE EXCEPTION 'Invalid bot_id';\n  END IF;\n  IF p_event_key IS NULL OR btrim(p_event_key) = '' THEN\n    RAISE EXCEPTION 'event_key is required';\n  END IF;\n  IF EXISTS (SELECT 1 FROM public.bot_position_logs WHERE event_key = p_event_key) THEN\n    RETURN jsonb_build_object('ok', true, 'recorded', false, 'duplicate', true);\n  END IF;\n\n  PERFORM pg_advisory_xact_lock(hashtext('bot-position:' || p_bot_id)::bigint);\n  -- Recheck under the bot lock so a concurrent retry cannot advance state twice.\n  IF EXISTS (SELECT 1 FROM public.bot_position_logs WHERE event_key = p_event_key) THEN\n    RETURN jsonb_build_object('ok', true, 'recorded', false, 'duplicate', true);\n  END IF;\n  SELECT * INTO prior FROM public.bot_position_state WHERE bot_id = p_bot_id FOR UPDATE;\n  IF FOUND THEN\n    dimension_changed := COALESCE(prior.dimension, '') <> COALESCE(p_to_dimension, 'unknown');\n    state_changed := COALESCE(prior.location_state, '') <> COALESCE(p_location_state, 'Unknown');\n    BEGIN\n      dx := COALESCE((p_to_position->>'x')::double precision, 0) - COALESCE((prior.position->>'x')::double precision, 0);\n      dy := COALESCE((p_to_position->>'y')::double precision, 0) - COALESCE((prior.position->>'y')::double precision, 0);\n      dz := COALESCE((p_to_position->>'z')::double precision, 0) - COALESCE((prior.position->>'z')::double precision, 0);\n      distance := sqrt(dx*dx + dy*dy + dz*dz);\n    EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN\n      distance := 0;\n    END;\n    IF NOT dimension_changed AND NOT state_changed AND distance < GREATEST(COALESCE(p_min_distance, 5.0), 0) THEN\n      RETURN jsonb_build_object('ok', true, 'recorded', false, 'duplicate', false, 'distance', distance);\n    END IF;\n  END IF;\n\n  INSERT INTO public.bot_position_logs(id, bot_id, changed_at, from_position, to_position,\n    from_dimension, to_dimension, location_state, reason, event_key)\n  VALUES (COALESCE(NULLIF(p_id,''), md5(random()::text || clock_timestamp()::text)), p_bot_id,\n    COALESCE(p_changed_at, now()), CASE WHEN prior.bot_id IS NULL THEN NULL ELSE prior.position END,\n    COALESCE(p_to_position, '{}'::jsonb), CASE WHEN prior.bot_id IS NULL THEN NULL ELSE prior.dimension END,\n    COALESCE(p_to_dimension, 'unknown'), COALESCE(p_location_state, 'Unknown'),\n    COALESCE(NULLIF(p_reason,''), 'MOVE'), p_event_key)\n  ON CONFLICT (event_key) DO NOTHING;\n\n  INSERT INTO public.bot_position_state(bot_id, position, dimension, location_state, last_event_key, updated_at)\n  VALUES (p_bot_id, COALESCE(p_to_position, '{}'::jsonb), COALESCE(p_to_dimension, 'unknown'),\n    COALESCE(p_location_state, 'Unknown'), p_event_key, COALESCE(p_changed_at, now()))\n  ON CONFLICT (bot_id) DO UPDATE SET position=EXCLUDED.position, dimension=EXCLUDED.dimension,\n    location_state=EXCLUDED.location_state, last_event_key=EXCLUDED.last_event_key, updated_at=EXCLUDED.updated_at;\n  RETURN jsonb_build_object('ok', true, 'recorded', true, 'distance', distance);\nEND;\n$$;\nREVOKE ALL ON FUNCTION public.record_bot_position_change(text,text,timestamptz,jsonb,text,text,text,text,double precision) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.record_bot_position_change(text,text,timestamptz,jsonb,text,text,text,text,double precision) TO service_role;\n\nCOMMIT;\n\nBEGIN;\n\nCREATE TABLE IF NOT EXISTS public.manager_locks (\n  lock_key text PRIMARY KEY,\n  owner_id text NOT NULL,\n  lease_until timestamptz NOT NULL,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_locks ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_locks FROM PUBLIC, anon, authenticated;\n\nCREATE TABLE IF NOT EXISTS public.manager_key_usage_transactions (\n  transaction_id text PRIMARY KEY,\n  key_id text NOT NULL,\n  username text NOT NULL,\n  usage_snapshot jsonb NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_key_usage_transactions ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_key_usage_transactions FROM PUBLIC, anon, authenticated;\nGRANT SELECT ON TABLE public.manager_key_usage_transactions TO service_role;\n\nCREATE TABLE IF NOT EXISTS public.bot_log_clear_cutoffs (\n  bot_id text PRIMARY KEY,\n  event_cutoff timestamptz,\n  chat_cutoff timestamptz,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.bot_log_clear_cutoffs ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.bot_log_clear_cutoffs FROM PUBLIC, anon, authenticated;\nGRANT SELECT ON TABLE public.bot_log_clear_cutoffs TO service_role;\n\nCREATE OR REPLACE FUNCTION public.acquire_manager_lock(\n  p_lock_key text,\n  p_owner_id text,\n  p_lease_seconds integer DEFAULT 900\n) RETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE affected integer;\nBEGIN\n  IF COALESCE(btrim(p_lock_key), '') = '' OR COALESCE(btrim(p_owner_id), '') = '' THEN\n    RETURN false;\n  END IF;\n  INSERT INTO public.manager_locks(lock_key, owner_id, lease_until, updated_at)\n  VALUES (p_lock_key, p_owner_id, now() + make_interval(secs => GREATEST(30, LEAST(COALESCE(p_lease_seconds, 900), 3600))), now())\n  ON CONFLICT (lock_key) DO UPDATE\n    SET owner_id = EXCLUDED.owner_id, lease_until = EXCLUDED.lease_until, updated_at = now()\n    WHERE public.manager_locks.lease_until <= now() OR public.manager_locks.owner_id = EXCLUDED.owner_id;\n  GET DIAGNOSTICS affected = ROW_COUNT;\n  RETURN affected = 1;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.release_manager_lock(p_lock_key text, p_owner_id text)\nRETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE affected integer;\nBEGIN\n  DELETE FROM public.manager_locks WHERE lock_key = p_lock_key AND owner_id = p_owner_id;\n  GET DIAGNOSTICS affected = ROW_COUNT;\n  RETURN affected = 1;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.renew_manager_lock(\n  p_lock_key text,\n  p_owner_id text,\n  p_lease_seconds integer DEFAULT 900\n) RETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE affected integer;\nBEGIN\n  UPDATE public.manager_locks\n  SET lease_until = now() + make_interval(secs => GREATEST(30, LEAST(COALESCE(p_lease_seconds, 900), 3600))),\n      updated_at = now()\n  WHERE lock_key = p_lock_key AND owner_id = p_owner_id AND lease_until > now();\n  GET DIAGNOSTICS affected = ROW_COUNT;\n  RETURN affected = 1;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.patch_manager_registry(\n  p_patch jsonb DEFAULT '{}'::jsonb,\n  p_pending_reset_patch jsonb DEFAULT '{}'::jsonb,\n  p_pending_reset_deletes text[] DEFAULT '{}'::text[]\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_data jsonb;\n  v_resets jsonb;\n  v_key text;\nBEGIN\n  INSERT INTO public.bot_registry(id, data, updated_at)\n  VALUES ('default', '{}'::jsonb, now()) ON CONFLICT (id) DO NOTHING;\n  SELECT COALESCE(data, '{}'::jsonb) INTO v_data\n  FROM public.bot_registry WHERE id = 'default' FOR UPDATE;\n  v_data := v_data || COALESCE(p_patch, '{}'::jsonb);\n  v_resets := CASE WHEN jsonb_typeof(v_data->'pendingResets') = 'object' THEN v_data->'pendingResets' ELSE '{}'::jsonb END;\n  FOREACH v_key IN ARRAY COALESCE(p_pending_reset_deletes, '{}'::text[]) LOOP\n    v_resets := v_resets - v_key;\n  END LOOP;\n  v_resets := v_resets || CASE WHEN jsonb_typeof(p_pending_reset_patch) = 'object' THEN p_pending_reset_patch ELSE '{}'::jsonb END;\n  v_data := jsonb_set(v_data, '{pendingResets}', v_resets, true);\n  UPDATE public.bot_registry SET data = v_data, updated_at = now() WHERE id = 'default';\n  RETURN jsonb_build_object('ok', true);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.set_bot_log_clear_cutoff(\n  p_bot_id text,\n  p_kind text,\n  p_cutoff timestamptz\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE v_cutoff timestamptz;\nBEGIN\n  IF p_bot_id IS NULL OR p_bot_id !~ '^[1-9][0-9]{0,8}$' OR p_cutoff IS NULL OR p_kind IS NULL OR p_kind NOT IN ('event','chat') THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_INPUT');\n  END IF;\n  IF p_kind = 'event' THEN\n    INSERT INTO public.bot_log_clear_cutoffs(bot_id, event_cutoff, updated_at)\n    VALUES (p_bot_id, p_cutoff, now())\n    ON CONFLICT (bot_id) DO UPDATE SET\n      event_cutoff = CASE WHEN public.bot_log_clear_cutoffs.event_cutoff IS NULL THEN EXCLUDED.event_cutoff ELSE GREATEST(public.bot_log_clear_cutoffs.event_cutoff, EXCLUDED.event_cutoff) END,\n      updated_at = now()\n    RETURNING event_cutoff INTO v_cutoff;\n  ELSE\n    INSERT INTO public.bot_log_clear_cutoffs(bot_id, chat_cutoff, updated_at)\n    VALUES (p_bot_id, p_cutoff, now())\n    ON CONFLICT (bot_id) DO UPDATE SET\n      chat_cutoff = CASE WHEN public.bot_log_clear_cutoffs.chat_cutoff IS NULL THEN EXCLUDED.chat_cutoff ELSE GREATEST(public.bot_log_clear_cutoffs.chat_cutoff, EXCLUDED.chat_cutoff) END,\n      updated_at = now()\n    RETURNING chat_cutoff INTO v_cutoff;\n  END IF;\n  RETURN jsonb_build_object('ok', true, 'cutoff', v_cutoff);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.reject_cleared_bot_log()\nRETURNS trigger\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE v_cutoff timestamptz;\nBEGIN\n  IF TG_TABLE_NAME = 'bot_event_logs' THEN\n    SELECT event_cutoff INTO v_cutoff FROM public.bot_log_clear_cutoffs WHERE bot_id = NEW.bot_id;\n  ELSE\n    SELECT chat_cutoff INTO v_cutoff FROM public.bot_log_clear_cutoffs WHERE bot_id = NEW.bot_id;\n  END IF;\n  IF v_cutoff IS NOT NULL AND NEW.created_at < v_cutoff THEN\n    RETURN NULL;\n  END IF;\n  RETURN NEW;\nEND;\n$$;\n\nDROP TRIGGER IF EXISTS reject_cleared_event_log ON public.bot_event_logs;\nCREATE TRIGGER reject_cleared_event_log BEFORE INSERT ON public.bot_event_logs\nFOR EACH ROW EXECUTE FUNCTION public.reject_cleared_bot_log();\nDROP TRIGGER IF EXISTS reject_cleared_chat_log ON public.bot_chat_logs;\nCREATE TRIGGER reject_cleared_chat_log BEFORE INSERT ON public.bot_chat_logs\nFOR EACH ROW EXECUTE FUNCTION public.reject_cleared_bot_log();\n\nCREATE OR REPLACE FUNCTION public.consume_manager_key_usage(p_code text, p_username text, p_transaction_id text)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_key public.manager_keys%ROWTYPE;\n  v_code text := upper(btrim(COALESCE(p_code, '')));\n  v_username text := lower(btrim(COALESCE(p_username, '')));\n  v_users jsonb;\n  v_count integer;\n  v_max integer;\n  v_used_by text;\n  v_transaction public.manager_key_usage_transactions%ROWTYPE;\nBEGIN\n  IF v_code = '' OR v_username = '' OR COALESCE(btrim(p_transaction_id), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_INPUT');\n  END IF;\n  SELECT * INTO v_transaction FROM public.manager_key_usage_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF v_transaction.username <> v_username OR upper(COALESCE(v_transaction.usage_snapshot->>'code', v_transaction.usage_snapshot->>'key_code', '')) <> v_code THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN jsonb_build_object('ok', true, 'replayed', true, 'transactionId', p_transaction_id, 'row', v_transaction.usage_snapshot);\n  END IF;\n  SELECT * INTO v_key\n  FROM public.manager_keys\n  WHERE upper(COALESCE(NULLIF(code, ''), key_code, '')) = v_code\n  FOR UPDATE;\n  IF NOT FOUND THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'KEY_NOT_FOUND');\n  END IF;\n\n  -- A duplicate request may have waited on this key row while its first attempt committed.\n  SELECT * INTO v_transaction FROM public.manager_key_usage_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF v_transaction.username <> v_username\n       OR upper(COALESCE(v_transaction.usage_snapshot->>'code', v_transaction.usage_snapshot->>'key_code', '')) <> v_code THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN jsonb_build_object('ok', true, 'replayed', true, 'transactionId', p_transaction_id, 'row', v_transaction.usage_snapshot);\n  END IF;\n\n  v_max := COALESCE(v_key.max_uses, 1);\n  IF v_max < 0 THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_MAX_USES');\n  END IF;\n  v_users := CASE WHEN jsonb_typeof(v_key.used_users) = 'array' THEN v_key.used_users ELSE '[]'::jsonb END;\n  IF jsonb_array_length(v_users) > 0 THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM jsonb_array_elements_text(v_users) AS u(value)\n    WHERE btrim(value) <> '';\n  END IF;\n  IF jsonb_array_length(v_users) = 0 AND COALESCE(v_key.used_by, '') <> '' THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM unnest(string_to_array(v_key.used_by, ',')) AS value\n    WHERE btrim(value) <> '';\n  END IF;\n  IF v_users ? v_username THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'ALREADY_USED');\n  END IF;\n  v_count := GREATEST(COALESCE(v_key.used_count, 0), jsonb_array_length(v_users), CASE WHEN v_key.used THEN 1 ELSE 0 END);\n  IF v_max > 0 AND v_count >= v_max THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'EXHAUSTED');\n  END IF;\n\n  v_users := v_users || jsonb_build_array(v_username);\n  v_count := v_count + 1;\n  SELECT string_agg(value, ', ' ORDER BY ord) INTO v_used_by\n  FROM jsonb_array_elements_text(v_users) WITH ORDINALITY AS u(value, ord);\n  UPDATE public.manager_keys\n  SET used_users = v_users,\n      used_count = v_count,\n      used_by = v_used_by,\n      used_at = now(),\n      used = (v_max > 0 AND v_count >= v_max)\n  WHERE id = v_key.id\n  RETURNING * INTO v_key;\n  INSERT INTO public.manager_key_usage_transactions(transaction_id, key_id, username, usage_snapshot)\n  VALUES (p_transaction_id, v_key.id, v_username, to_jsonb(v_key));\n  RETURN jsonb_build_object('ok', true, 'transactionId', p_transaction_id, 'row', to_jsonb(v_key));\nEND;\n$$;\n\nREVOKE ALL ON FUNCTION public.acquire_manager_lock(text,text,integer) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.release_manager_lock(text,text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.renew_manager_lock(text,text,integer) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.patch_manager_registry(jsonb,jsonb,text[]) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.set_bot_log_clear_cutoff(text,text,timestamptz) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.reject_cleared_bot_log() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.consume_manager_key_usage(text,text,text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.acquire_manager_lock(text,text,integer) TO service_role;\nGRANT EXECUTE ON FUNCTION public.release_manager_lock(text,text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.renew_manager_lock(text,text,integer) TO service_role;\nGRANT EXECUTE ON FUNCTION public.patch_manager_registry(jsonb,jsonb,text[]) TO service_role;\nGRANT EXECUTE ON FUNCTION public.set_bot_log_clear_cutoff(text,text,timestamptz) TO service_role;\nGRANT EXECUTE ON FUNCTION public.consume_manager_key_usage(text,text,text) TO service_role;\n\nCOMMIT;\n\nNOTIFY pgrst, 'reload schema';\n\nBEGIN;\n\n-- User entitlement fields were previously accepted by Manager but not persisted.\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS allow_account_change boolean NOT NULL DEFAULT true;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS lock_reason text NOT NULL DEFAULT '';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS note text NOT NULL DEFAULT '';\n\nCREATE TABLE IF NOT EXISTS public.manager_user_state (\n  singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),\n  revision bigint NOT NULL DEFAULT 1 CHECK (revision >= 1),\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nINSERT INTO public.manager_user_state(singleton, revision)\nVALUES (true, 1) ON CONFLICT (singleton) DO NOTHING;\n\nCREATE TABLE IF NOT EXISTS public.manager_users_write_transactions (\n  transaction_id uuid PRIMARY KEY,\n  expected_revision bigint NOT NULL,\n  users_payload jsonb NOT NULL,\n  result jsonb NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE TABLE IF NOT EXISTS public.manager_session_revocations (\n  token_hash text PRIMARY KEY,\n  revoked_at timestamptz NOT NULL DEFAULT now()\n);\n\nALTER TABLE public.manager_key_usage_transactions\n  ADD COLUMN IF NOT EXISTS user_revision bigint;\n\nALTER TABLE public.manager_user_state ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_users_write_transactions ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_session_revocations ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_user_state FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON TABLE public.manager_users_write_transactions FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON TABLE public.manager_session_revocations FROM PUBLIC, anon, authenticated;\nGRANT SELECT ON TABLE public.manager_users_write_transactions TO service_role;\n-- Force every service-role user write through the revision-checked RPCs below.\n-- This makes stale legacy snapshot upserts fail closed during mixed-version deploys.\nREVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE public.manager_users FROM service_role;\nGRANT SELECT ON TABLE public.manager_users TO service_role;\n\nCREATE OR REPLACE FUNCTION public.bump_manager_users_revision()\nRETURNS trigger\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nBEGIN\n  UPDATE public.manager_user_state\n  SET revision = revision + 1, updated_at = now()\n  WHERE singleton = true;\n  RETURN NULL;\nEND;\n$$;\n\nDROP TRIGGER IF EXISTS manager_users_revision_after_write ON public.manager_users;\nCREATE TRIGGER manager_users_revision_after_write\nAFTER INSERT OR UPDATE OR DELETE ON public.manager_users\nFOR EACH STATEMENT EXECUTE FUNCTION public.bump_manager_users_revision();\n\nCREATE OR REPLACE FUNCTION public.reject_revoked_manager_session()\nRETURNS trigger\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nBEGIN\n  IF EXISTS (\n    SELECT 1 FROM public.manager_session_revocations\n    WHERE token_hash = NEW.token_hash\n  ) THEN\n    RETURN NULL;\n  END IF;\n  RETURN NEW;\nEND;\n$$;\n\nDROP TRIGGER IF EXISTS manager_sessions_reject_revoked ON public.manager_sessions;\nCREATE TRIGGER manager_sessions_reject_revoked\nBEFORE INSERT OR UPDATE ON public.manager_sessions\nFOR EACH ROW EXECUTE FUNCTION public.reject_revoked_manager_session();\n\nCREATE OR REPLACE FUNCTION public.read_manager_users_snapshot()\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_revision bigint;\n  v_users jsonb;\nBEGIN\n  SELECT revision INTO v_revision\n  FROM public.manager_user_state\n  WHERE singleton = true\n  FOR UPDATE;\n  SELECT COALESCE(jsonb_agg(to_jsonb(u) ORDER BY u.username), '[]'::jsonb)\n  INTO v_users\n  FROM public.manager_users AS u;\n  RETURN jsonb_build_object('ok', true, 'revision', v_revision, 'users', v_users);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.read_manager_session(p_token_hash text)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE v_session jsonb;\nBEGIN\n  IF COALESCE(btrim(p_token_hash), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_TOKEN_HASH');\n  END IF;\n  SELECT to_jsonb(s) INTO v_session\n  FROM public.manager_sessions AS s\n  WHERE s.token_hash = p_token_hash\n    AND s.expires_at > (extract(epoch FROM now()) * 1000)::bigint\n    AND NOT EXISTS (\n      SELECT 1 FROM public.manager_session_revocations AS r\n      WHERE r.token_hash = s.token_hash\n    );\n  RETURN jsonb_build_object('ok', true, 'session', v_session);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.read_manager_authorization(p_token_hash text)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_session public.manager_sessions%ROWTYPE;\n  v_user jsonb;\nBEGIN\n  IF COALESCE(btrim(p_token_hash), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_TOKEN_HASH');\n  END IF;\n  SELECT * INTO v_session\n  FROM public.manager_sessions AS s\n  WHERE s.token_hash = p_token_hash\n    AND s.expires_at > (extract(epoch FROM now()) * 1000)::bigint\n    AND NOT EXISTS (\n      SELECT 1 FROM public.manager_session_revocations AS r\n      WHERE r.token_hash = s.token_hash\n    );\n  IF NOT FOUND THEN\n    RETURN jsonb_build_object('ok', true, 'session', NULL, 'user', NULL);\n  END IF;\n  IF v_session.role <> 'admin' THEN\n    SELECT jsonb_build_object(\n      'id', u.id, 'username', u.username, 'status', u.status,\n      'assigned_bot_ids', u.assigned_bot_ids, 'expires_at', u.expires_at,\n      'plan_name', u.plan_name, 'allow_account_change', u.allow_account_change,\n      'lock_reason', u.lock_reason\n    ) INTO v_user\n    FROM public.manager_users AS u\n    WHERE u.id = v_session.user_id\n      AND lower(u.username) = lower(v_session.username);\n  END IF;\n  RETURN jsonb_build_object('ok', true, 'session', to_jsonb(v_session), 'user', v_user);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.revoke_manager_session(p_token_hash text)\nRETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nBEGIN\n  IF COALESCE(btrim(p_token_hash), '') = '' THEN RETURN false; END IF;\n  INSERT INTO public.manager_session_revocations(token_hash, revoked_at)\n  VALUES (p_token_hash, now())\n  ON CONFLICT (token_hash) DO NOTHING;\n  DELETE FROM public.manager_sessions WHERE token_hash = p_token_hash;\n  RETURN true;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.create_manager_user_session(\n  p_expected_revision bigint,\n  p_session jsonb\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_revision bigint;\n  v_user_id text;\n  v_username text;\n  v_token_hash text;\n  v_expires_at bigint;\n  v_rows integer;\nBEGIN\n  SELECT revision INTO v_revision\n  FROM public.manager_user_state\n  WHERE singleton = true\n  FOR UPDATE;\n  IF v_revision IS DISTINCT FROM p_expected_revision THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'REVISION_CONFLICT', 'revision', v_revision);\n  END IF;\n  v_user_id := btrim(COALESCE(p_session->>'user_id', ''));\n  v_username := btrim(COALESCE(p_session->>'username', ''));\n  v_token_hash := btrim(COALESCE(p_session->>'token_hash', ''));\n  v_expires_at := NULLIF(p_session->>'expires_at', '')::bigint;\n  IF v_user_id = '' OR v_username = '' OR v_token_hash !~ '^[a-f0-9]{64}$' OR v_expires_at IS NULL\n     OR v_expires_at <= (extract(epoch FROM now()) * 1000)::bigint THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_SESSION');\n  END IF;\n  IF NOT EXISTS (\n    SELECT 1 FROM public.manager_users AS u\n    WHERE u.id = v_user_id AND lower(u.username) = lower(v_username)\n      AND lower(COALESCE(u.status, 'active')) <> 'disabled'\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_CHANGED');\n  END IF;\n  INSERT INTO public.manager_sessions(\n    token_hash, user_id, username, role, assigned_bot_ids, expires_at,\n    plan_name, allow_account_change, status, updated_at\n  ) VALUES (\n    v_token_hash, v_user_id, v_username, 'user',\n    COALESCE(p_session->'assigned_bot_ids', '[]'::jsonb), v_expires_at,\n    COALESCE(NULLIF(p_session->>'plan_name', ''), 'Gói thường'),\n    COALESCE((p_session->>'allow_account_change')::boolean, true),\n    COALESCE(NULLIF(p_session->>'status', ''), 'active'), now()\n  ) ON CONFLICT (token_hash) DO NOTHING;\n  GET DIAGNOSTICS v_rows = ROW_COUNT;\n  IF v_rows <> 1 THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'SESSION_NOT_CREATED');\n  END IF;\n  RETURN jsonb_build_object('ok', true, 'revision', v_revision);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.apply_manager_users_snapshot_locked(\n  p_expected_revision bigint,\n  p_users jsonb,\n  p_allow_empty boolean DEFAULT false\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_revision bigint;\n  v_user jsonb;\n  v_id text;\n  v_username text;\n  v_affected integer;\n  v_result jsonb;\nBEGIN\n  SELECT revision INTO v_revision\n  FROM public.manager_user_state\n  WHERE singleton = true\n  FOR UPDATE;\n  IF v_revision IS DISTINCT FROM p_expected_revision THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'REVISION_CONFLICT', 'revision', v_revision);\n  END IF;\n  IF p_users IS NULL OR jsonb_typeof(p_users) <> 'array' OR (jsonb_array_length(p_users) = 0 AND NOT p_allow_empty) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_OR_EMPTY_SNAPSHOT', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY lower(btrim(value->>'username'))\n    HAVING lower(btrim(value->>'username')) = '' OR count(*) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'DUPLICATE_OR_INVALID_USERNAME', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE jsonb_typeof(item.value->'assigned_bot_ids') NOT IN ('array', 'null')\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_BOT_ASSIGNMENTS', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT btrim(bot_id.value)\n    FROM jsonb_array_elements(p_users) AS item(value)\n    CROSS JOIN LATERAL jsonb_array_elements_text(\n      CASE WHEN jsonb_typeof(item.value->'assigned_bot_ids') = 'array'\n        THEN item.value->'assigned_bot_ids' ELSE '[]'::jsonb END\n    ) AS bot_id(value)\n    GROUP BY btrim(bot_id.value)\n    HAVING btrim(bot_id.value) = '' OR count(DISTINCT lower(btrim(item.value->>'username'))) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'BOT_OWNERSHIP_CONFLICT', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY btrim(COALESCE(value->>'id', ''))\n    HAVING btrim(COALESCE(value->>'id', '')) = '' OR count(*) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'DUPLICATE_OR_INVALID_USER_ID', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE btrim(COALESCE(item.value->>'username', '')) = ''\n       OR btrim(COALESCE(item.value->>'id', '')) = ''\n       OR btrim(COALESCE(item.value->>'password', '')) = ''\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW', 'revision', v_revision);\n  END IF;\n\n  FOR v_user IN SELECT value FROM jsonb_array_elements(p_users) AS item(value)\n  LOOP\n    v_username := btrim(COALESCE(v_user->>'username', ''));\n    v_id := btrim(COALESCE(v_user->>'id', ''));\n    IF v_username = '' OR v_id = '' OR COALESCE(v_user->>'password', '') = '' THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW', 'revision', v_revision);\n    END IF;\n\n    UPDATE public.manager_users AS u\n    SET id = v_id,\n        username = v_username,\n        password = v_user->>'password',\n        role = COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n        status = COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n        assigned_bot_ids = COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n        expires_at = NULLIF(v_user->>'expires_at', '')::timestamptz,\n        plan_name = COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n        bot_aliases = CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n        allow_account_change = COALESCE((v_user->>'allow_account_change')::boolean, true),\n        lock_reason = COALESCE(v_user->>'lock_reason', ''),\n        note = COALESCE(v_user->>'note', ''),\n        created_at = COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, u.created_at, now()),\n        updated_at = COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n    WHERE u.id = v_id;\n    GET DIAGNOSTICS v_affected = ROW_COUNT;\n    IF v_affected = 0 THEN\n      UPDATE public.manager_users AS u\n      SET id = v_id,\n          username = v_username,\n          password = v_user->>'password',\n          role = COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n          status = COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n          assigned_bot_ids = COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n          expires_at = NULLIF(v_user->>'expires_at', '')::timestamptz,\n          plan_name = COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n          bot_aliases = CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n          allow_account_change = COALESCE((v_user->>'allow_account_change')::boolean, true),\n          lock_reason = COALESCE(v_user->>'lock_reason', ''),\n          note = COALESCE(v_user->>'note', ''),\n          created_at = COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, u.created_at, now()),\n          updated_at = COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n      WHERE lower(u.username) = lower(v_username);\n      GET DIAGNOSTICS v_affected = ROW_COUNT;\n    END IF;\n    IF v_affected = 0 THEN\n      INSERT INTO public.manager_users(\n        id, username, password, role, status, assigned_bot_ids, expires_at,\n        plan_name, bot_aliases, allow_account_change, lock_reason, note,\n        created_at, updated_at\n      ) VALUES (\n        v_id, v_username, v_user->>'password',\n        COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n        COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n        COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n        NULLIF(v_user->>'expires_at', '')::timestamptz,\n        COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n        CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n        COALESCE((v_user->>'allow_account_change')::boolean, true),\n        COALESCE(v_user->>'lock_reason', ''), COALESCE(v_user->>'note', ''),\n        COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, now()),\n        COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n      );\n    END IF;\n  END LOOP;\n\n  DELETE FROM public.manager_users AS u\n  WHERE NOT EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE COALESCE(item.value->>'id', '') = u.id\n       OR lower(COALESCE(item.value->>'username', '')) = lower(u.username)\n  );\n\n  SELECT revision INTO v_revision FROM public.manager_user_state WHERE singleton = true;\n  v_result := jsonb_build_object('ok', true, 'revision', v_revision);\n  RETURN v_result;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.save_manager_users_snapshot(\n  p_expected_revision bigint,\n  p_transaction_id uuid,\n  p_users jsonb,\n  p_allow_empty boolean DEFAULT false\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_existing public.manager_users_write_transactions%ROWTYPE;\n  v_result jsonb;\nBEGIN\n  IF p_transaction_id IS NULL THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_TRANSACTION_ID');\n  END IF;\n  PERFORM 1 FROM public.manager_user_state WHERE singleton = true FOR UPDATE;\n  SELECT * INTO v_existing FROM public.manager_users_write_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF v_existing.expected_revision <> p_expected_revision OR v_existing.users_payload <> p_users THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN v_existing.result;\n  END IF;\n  v_result := public.apply_manager_users_snapshot_locked(p_expected_revision, p_users, p_allow_empty);\n  IF COALESCE((v_result->>'ok')::boolean, false) THEN\n    INSERT INTO public.manager_users_write_transactions(transaction_id, expected_revision, users_payload, result)\n    VALUES (p_transaction_id, p_expected_revision, p_users, v_result);\n  END IF;\n  RETURN v_result;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.insert_manager_users_if_absent(p_users jsonb)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_user jsonb;\n  v_id text;\n  v_username text;\n  v_revision bigint;\n  v_inserted integer := 0;\n  v_rows integer;\nBEGIN\n  PERFORM 1 FROM public.manager_user_state WHERE singleton = true FOR UPDATE;\n  IF p_users IS NULL OR jsonb_typeof(p_users) <> 'array' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USERS');\n  END IF;\n  IF EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE btrim(COALESCE(item.value->>'username', '')) = ''\n       OR btrim(COALESCE(item.value->>'id', '')) = ''\n       OR btrim(COALESCE(item.value->>'password', '')) = ''\n       OR (item.value ? 'assigned_bot_ids' AND jsonb_typeof(item.value->'assigned_bot_ids') NOT IN ('array', 'null'))\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW');\n  END IF;\n  IF EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY lower(btrim(value->>'username'))\n    HAVING lower(btrim(value->>'username')) = '' OR count(*) > 1\n  ) OR EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY btrim(COALESCE(value->>'id', ''))\n    HAVING btrim(COALESCE(value->>'id', '')) = '' OR count(*) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'DUPLICATE_OR_INVALID_USER');\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    CROSS JOIN LATERAL jsonb_array_elements_text(\n      CASE WHEN jsonb_typeof(item.value->'assigned_bot_ids') = 'array'\n        THEN item.value->'assigned_bot_ids' ELSE '[]'::jsonb END\n    ) AS assigned(value)\n    GROUP BY assigned.value\n    HAVING assigned.value = '' OR count(DISTINCT lower(btrim(item.value->>'username'))) > 1\n  ) OR EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    CROSS JOIN LATERAL jsonb_array_elements_text(\n      CASE WHEN jsonb_typeof(item.value->'assigned_bot_ids') = 'array'\n        THEN item.value->'assigned_bot_ids' ELSE '[]'::jsonb END\n    ) AS assigned(value)\n    JOIN public.manager_users AS existing\n      ON existing.assigned_bot_ids ? assigned.value\n     AND existing.id <> COALESCE(item.value->>'id', '')\n     AND lower(existing.username) <> lower(COALESCE(item.value->>'username', ''))\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'BOT_OWNERSHIP_CONFLICT');\n  END IF;\n  FOR v_user IN SELECT value FROM jsonb_array_elements(p_users) AS item(value)\n  LOOP\n    v_username := btrim(COALESCE(v_user->>'username', ''));\n    v_id := btrim(COALESCE(v_user->>'id', ''));\n    IF v_username = '' OR v_id = '' OR COALESCE(v_user->>'password', '') = '' THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW');\n    END IF;\n    IF EXISTS (\n      SELECT 1 FROM public.manager_users AS existing\n      WHERE lower(existing.username) = lower(v_username) OR existing.id = v_id\n    ) THEN\n      CONTINUE;\n    END IF;\n    IF EXISTS (\n      SELECT 1\n      FROM jsonb_array_elements(COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb)) AS assigned(value)\n      JOIN public.manager_users AS existing\n        ON existing.assigned_bot_ids ? (assigned.value #>> '{}')\n    ) THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'BOT_OWNERSHIP_CONFLICT');\n    END IF;\n    INSERT INTO public.manager_users(\n      id, username, password, role, status, assigned_bot_ids, expires_at,\n      plan_name, bot_aliases, allow_account_change, lock_reason, note,\n      created_at, updated_at\n    ) VALUES (\n      v_id, v_username, v_user->>'password',\n      COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n      COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n      COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n      NULLIF(v_user->>'expires_at', '')::timestamptz,\n      COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n      CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n      COALESCE((v_user->>'allow_account_change')::boolean, true),\n      COALESCE(v_user->>'lock_reason', ''), COALESCE(v_user->>'note', ''),\n      COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, now()),\n      COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n    ) ON CONFLICT DO NOTHING;\n    GET DIAGNOSTICS v_rows = ROW_COUNT;\n    v_inserted := v_inserted + v_rows;\n  END LOOP;\n  SELECT revision INTO v_revision FROM public.manager_user_state WHERE singleton = true;\n  RETURN jsonb_build_object('ok', true, 'inserted', v_inserted, 'revision', v_revision);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.redeem_manager_key_and_save_users(\n  p_code text,\n  p_username text,\n  p_transaction_id text,\n  p_expected_revision bigint,\n  p_users jsonb,\n  p_allow_empty boolean DEFAULT false\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_key public.manager_keys%ROWTYPE;\n  v_transaction public.manager_key_usage_transactions%ROWTYPE;\n  v_code text := upper(btrim(COALESCE(p_code, '')));\n  v_username text := lower(btrim(COALESCE(p_username, '')));\n  v_users jsonb;\n  v_count integer;\n  v_max integer;\n  v_used_by text;\n  v_user_revision bigint;\n  v_result jsonb;\nBEGIN\n  IF v_code = '' OR v_username = '' OR COALESCE(btrim(p_transaction_id), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_INPUT');\n  END IF;\n  PERFORM 1 FROM public.manager_user_state WHERE singleton = true FOR UPDATE;\n  SELECT * INTO v_transaction FROM public.manager_key_usage_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF lower(v_transaction.username) <> v_username\n       OR upper(COALESCE(v_transaction.usage_snapshot->>'code', v_transaction.usage_snapshot->>'key_code', '')) <> v_code THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN jsonb_build_object('ok', true, 'replayed', true, 'transactionId', p_transaction_id,\n      'row', v_transaction.usage_snapshot, 'userRevision', v_transaction.user_revision);\n  END IF;\n  SELECT * INTO v_key\n  FROM public.manager_keys\n  WHERE upper(COALESCE(NULLIF(code, ''), key_code, '')) = v_code\n  FOR UPDATE;\n  IF NOT FOUND THEN RETURN jsonb_build_object('ok', false, 'error', 'KEY_NOT_FOUND'); END IF;\n\n  v_max := COALESCE(v_key.max_uses, 1);\n  IF v_max < 0 THEN RETURN jsonb_build_object('ok', false, 'error', 'INVALID_MAX_USES'); END IF;\n  IF v_key.expires_at IS NOT NULL AND v_key.expires_at <= now() THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'KEY_EXPIRED');\n  END IF;\n  v_users := CASE WHEN jsonb_typeof(v_key.used_users) = 'array' THEN v_key.used_users ELSE '[]'::jsonb END;\n  IF jsonb_array_length(v_users) > 0 THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM jsonb_array_elements_text(v_users) AS item(value) WHERE btrim(value) <> '';\n  END IF;\n  IF jsonb_array_length(v_users) = 0 AND COALESCE(v_key.used_by, '') <> '' THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM unnest(string_to_array(v_key.used_by, ',')) AS value WHERE btrim(value) <> '';\n  END IF;\n  IF v_users ? v_username THEN RETURN jsonb_build_object('ok', false, 'error', 'ALREADY_USED'); END IF;\n  v_count := GREATEST(COALESCE(v_key.used_count, 0), jsonb_array_length(v_users), CASE WHEN v_key.used THEN 1 ELSE 0 END);\n  IF v_max > 0 AND v_count >= v_max THEN RETURN jsonb_build_object('ok', false, 'error', 'EXHAUSTED'); END IF;\n\n  v_users := v_users || jsonb_build_array(v_username);\n  v_count := v_count + 1;\n  SELECT string_agg(value, ', ' ORDER BY ord) INTO v_used_by\n  FROM jsonb_array_elements_text(v_users) WITH ORDINALITY AS item(value, ord);\n  IF NOT EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE lower(btrim(item.value->>'username')) = v_username\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'REDEEM_USER_MISSING');\n  END IF;\n  v_result := public.apply_manager_users_snapshot_locked(p_expected_revision, p_users, p_allow_empty);\n  IF NOT COALESCE((v_result->>'ok')::boolean, false) THEN RETURN v_result; END IF;\n\n  UPDATE public.manager_keys\n  SET used_users = v_users, used_count = v_count, used_by = v_used_by,\n      used_at = now(), used = (v_max > 0 AND v_count >= v_max)\n  WHERE id = v_key.id\n  RETURNING * INTO v_key;\n  SELECT revision INTO v_user_revision FROM public.manager_user_state WHERE singleton = true;\n  INSERT INTO public.manager_key_usage_transactions(transaction_id, key_id, username, usage_snapshot, user_revision)\n  VALUES (p_transaction_id, v_key.id, v_username, to_jsonb(v_key), v_user_revision);\n  RETURN jsonb_build_object('ok', true, 'transactionId', p_transaction_id,\n    'row', to_jsonb(v_key), 'userRevision', v_user_revision);\nEND;\n$$;\n\nREVOKE ALL ON FUNCTION public.bump_manager_users_revision() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.reject_revoked_manager_session() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.read_manager_users_snapshot() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.read_manager_session(text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.read_manager_authorization(text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.revoke_manager_session(text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.create_manager_user_session(bigint,jsonb) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.apply_manager_users_snapshot_locked(bigint,jsonb,boolean) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.save_manager_users_snapshot(bigint,uuid,jsonb,boolean) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.insert_manager_users_if_absent(jsonb) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.redeem_manager_key_and_save_users(text,text,text,bigint,jsonb,boolean) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.read_manager_users_snapshot() TO service_role;\nGRANT EXECUTE ON FUNCTION public.read_manager_session(text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.read_manager_authorization(text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.revoke_manager_session(text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.create_manager_user_session(bigint,jsonb) TO service_role;\nGRANT EXECUTE ON FUNCTION public.save_manager_users_snapshot(bigint,uuid,jsonb,boolean) TO service_role;\nGRANT EXECUTE ON FUNCTION public.insert_manager_users_if_absent(jsonb) TO service_role;\nGRANT EXECUTE ON FUNCTION public.redeem_manager_key_and_save_users(text,text,text,bigint,jsonb,boolean) TO service_role;\n\nCOMMIT;\nNOTIFY pgrst, 'reload schema';";
 
+
+// Phân loại khóa Supabase để chặn khóa công khai (anon/publishable) được dùng làm khóa ghi.
+// Chỉ trả về 'anon' khi khẳng định được; không xác định được thì trả 'unknown' (không chặn).
 function getSupabaseKeyRole(key) {
-    const raw = String(key || '').trim();
-    if (raw.startsWith('sb_secret_')) return 'service_role';
-    if (raw.startsWith('sb_publishable_')) return 'anon';
-    const parts = raw.split('.');
-    if (parts.length !== 3) return 'unknown';
-    try {
-        const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
-        return String(payload?.role || 'unknown');
-    } catch (_) {
-        return 'unknown';
+    const k = String(key || '').trim();
+    if (!k) return 'none';
+    // Định dạng khóa mới 2024+: sb_publishable_xxx (công khai) / sb_secret_xxx (bí mật).
+    if (k.startsWith('sb_publishable_')) return 'anon';
+    if (k.startsWith('sb_secret_')) return 'service';
+    // Định dạng JWT legacy: kiểm tra payload.role của khóa.
+    const parts = k.split('.');
+    if (parts.length === 3 && parts.every(p => p.length > 0)) {
+        try {
+            const decodeB64 = (segment) => JSON.parse(Buffer.from(segment.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+            const header = decodeB64(parts[0]);
+            const payload = decodeB64(parts[1]);
+            if (header?.alg && String(header.alg).includes('HS')) {
+                const role = String(payload?.role || '').toLowerCase();
+                const ref = String(payload?.ref || '').toLowerCase();
+                if (role === 'service_role' || ref === 'service_role') return 'service';
+                if (role === 'anon' || role === 'anon_key' || ref === 'anon') return 'anon';
+                return 'unknown';
+            }
+        } catch (_) { /* không phải JWT dạng đọc được */ }
     }
+    return 'unknown';
 }
 
 class SupabaseAdapter {
@@ -461,12 +492,138 @@ class SupabaseAdapter {
     }
 
     getHeaders(extra = {}) {
-        return {
+        const headers = {
             'apikey': this.key,
-            'Authorization': `Bearer ${this.key}`,
             'Content-Type': 'application/json',
             ...extra
         };
+        if (typeof this.key === 'string' && this.key.split('.').length === 3) {
+            headers['Authorization'] = `Bearer ${this.key}`;
+        }
+        return headers;
+    }
+
+    async fetchAllRows(table, { order = '', pageSize = 1000, uniqueKey = '' } = {}) {
+        if (!this.isEnabled()) throw new Error('Supabase chưa được cấu hình.');
+        if (!/^[a-z0-9_]+$/i.test(String(table || ''))) throw new Error('Tên bảng Supabase không hợp lệ.');
+        const safePageSize = Math.max(1, Math.min(1000, Number(pageSize) || 1000));
+        const rows = [];
+        const seen = new Set();
+        let offset = 0;
+        let expectedTotal = null;
+        for (let page = 0; page < 1000; page++) {
+            const params = new URLSearchParams({
+                select: '*',
+                limit: String(safePageSize),
+                offset: String(offset)
+            });
+            if (order) params.set('order', order);
+            const res = await fetch(this.url + '/rest/v1/' + table + '?' + params.toString(), {
+                headers: this.getHeaders({ Prefer: 'count=exact' }),
+                signal: AbortSignal.timeout(15000)
+            });
+            if (!res.ok) throw new Error('Đọc ' + table + ' thất bại: HTTP ' + res.status + ' ' + await res.text().catch(() => ''));
+            const data = await res.json();
+            if (!Array.isArray(data)) throw new Error('Supabase trả payload ' + table + ' không phải array.');
+            const contentRange = String(res.headers?.get?.('content-range') || '');
+            const totalPart = contentRange.split('/')[1];
+            const total = totalPart && totalPart !== '*' ? Number(totalPart) : NaN;
+            if (expectedTotal === null && Number.isSafeInteger(total) && total >= 0) expectedTotal = total;
+            if (page === 0 && expectedTotal === null) {
+                throw new Error('Supabase không trả Content-Range hợp lệ khi đọc ' + table + '; không thể xác minh đã tải đủ dữ liệu.');
+            }
+            if (data.length === 0) break;
+            for (const row of data) {
+                if (uniqueKey) {
+                    const key = String(row?.[uniqueKey] ?? '').trim();
+                    if (key) {
+                        if (seen.has(key)) throw new Error('Dữ liệu ' + table + ' bị trùng khóa ' + uniqueKey + '=' + key + '; không thể đọc đầy đủ.');
+                        seen.add(key);
+                    }
+                }
+                rows.push(row);
+            }
+            offset += data.length;
+            // Do not stop early when rows reach the first-page count: a concurrent insert could
+            // otherwise be silently omitted. Always read to the empty page, then compare totals.
+        }
+        if (expectedTotal !== null && rows.length !== expectedTotal) {
+            throw new Error('Đọc ' + table + ' thiếu dữ liệu: nhận ' + rows.length + '/' + expectedTotal + ' bản ghi.');
+        }
+        return rows;
+    }
+
+    async withManagerLock(lockKey, fn, leaseSeconds = 900) {
+        const owner = crypto.randomUUID();
+        const safeLeaseSeconds = Math.max(30, Math.min(3600, Number(leaseSeconds) || 900));
+        const rpc = async (name, body) => {
+            const res = await fetch(`${this.url}/rest/v1/rpc/${name}`, {
+                method: 'POST', headers: this.getHeaders(), body: JSON.stringify(body), signal: AbortSignal.timeout(8000)
+            });
+            const text = await res.text().catch(() => '');
+            if (!res.ok) throw new Error('Cloud lock RPC ' + name + ' thất bại (HTTP ' + res.status + '): ' + text.slice(0, 200));
+            return text ? JSON.parse(text) : null;
+        };
+        const acquired = await rpc('acquire_manager_lock', { p_lock_key: String(lockKey), p_owner_id: owner, p_lease_seconds: safeLeaseSeconds });
+        const isAcquired = acquired === true || (Array.isArray(acquired) && acquired[0] === true);
+        if (!isAcquired) throw new Error('Tác vụ đang được Manager khác xử lý trên Cloud: ' + lockKey);
+        let renewalInFlight = null;
+        let lockLostError = null;
+        let lockLeaseUntil = Date.now() + safeLeaseSeconds * 1000;
+        const renew = () => {
+            if (renewalInFlight) return renewalInFlight;
+            renewalInFlight = rpc('renew_manager_lock', {
+                p_lock_key: String(lockKey), p_owner_id: owner, p_lease_seconds: safeLeaseSeconds
+            }).then(result => {
+                const renewed = result === true || (Array.isArray(result) && result[0] === true);
+                if (!renewed) {
+                    lockLostError = new Error('Lock Cloud đã hết hạn hoặc không còn thuộc Manager này.');
+                    return false;
+                }
+                lockLeaseUntil = Date.now() + safeLeaseSeconds * 1000;
+                return true;
+            }).catch(err => {
+                if (Date.now() >= lockLeaseUntil - 5000) lockLostError = err;
+                console.error('[SUPABASE] Không gia hạn được lock ' + lockKey + ':', err.message);
+                return false;
+            }).finally(() => { renewalInFlight = null; });
+            return renewalInFlight;
+        };
+        const heartbeat = setInterval(() => { void renew(); }, Math.max(5000, Math.min(30000, Math.floor(safeLeaseSeconds * 1000 / 3))));
+        if (typeof heartbeat.unref === 'function') heartbeat.unref();
+        try {
+            const result = await fn();
+            if (lockLostError || Date.now() >= lockLeaseUntil) throw new Error('Lock Cloud đã mất quyền sở hữu trong lúc chạy: ' + (lockLostError?.message || lockKey));
+            return result;
+        } finally {
+            clearInterval(heartbeat);
+            if (renewalInFlight) await renewalInFlight;
+            try { await rpc('release_manager_lock', { p_lock_key: String(lockKey), p_owner_id: owner }); }
+            catch (err) { console.error('[SUPABASE] Không nhả được lock ' + lockKey + '; lock sẽ tự hết hạn:', err.message); }
+        }
+    }
+
+    async callRpc(name, body, timeoutMs = 10000) {
+        if (!this.isEnabled() || !/^[a-z][a-z0-9_]*$/i.test(String(name || ''))) {
+            throw new Error('Supabase RPC không hợp lệ hoặc chưa được cấu hình.');
+        }
+        const res = await fetch(`${this.url}/rest/v1/rpc/${name}`, {
+            method: 'POST',
+            headers: this.getHeaders(),
+            body: JSON.stringify(body || {}),
+            signal: AbortSignal.timeout(timeoutMs)
+        });
+        const text = await res.text().catch(() => '');
+        if (!res.ok) {
+            const error = new Error('Supabase RPC ' + name + ' thất bại (HTTP ' + res.status + ').');
+            error.status = res.status;
+            error.responseText = text.slice(0, 500);
+            error.missingRpc = (res.status === 404 || res.status === 400) && /(?:PGRST202|function .* does not exist|could not find the function|schema cache)/i.test(text);
+            throw error;
+        }
+        if (!text) return null;
+        try { return JSON.parse(text); }
+        catch (_) { throw new Error('Supabase RPC ' + name + ' trả JSON không hợp lệ.'); }
     }
 
     async testConnection() {
@@ -491,9 +648,57 @@ class SupabaseAdapter {
                 .map(item => item.table);
             this.lastMissingTables = missingTables;
             if (failed.length === 0) {
+                let rpcAvailable = false;
+                let rpcSpecVerified = false;
+                let rpcProbeError = '';
+                try {
+                    const specRes = await fetch(`${this.url}/rest/v1/`, {
+                        headers: this.getHeaders(),
+                        signal: AbortSignal.timeout(6000)
+                    });
+                    if (!specRes.ok) throw new Error('HTTP ' + specRes.status);
+                    const spec = await specRes.json().catch(() => null);
+                    if (!spec || typeof spec !== 'object' || !spec.paths || typeof spec.paths !== 'object') {
+                        throw new Error('OpenAPI spec không có danh sách paths hợp lệ.');
+                    }
+                    rpcSpecVerified = true;
+                    const paths = Object.keys(spec.paths);
+                    const normalizedPaths = paths.map(pathName => String(pathName).replace(/\/+$/, ''));
+                    rpcAvailable = [
+                        '/rpc/record_bot_position_change', '/rpc/consume_manager_key_usage',
+                        '/rpc/acquire_manager_lock', '/rpc/release_manager_lock', '/rpc/renew_manager_lock',
+                        '/rpc/read_manager_users_snapshot', '/rpc/save_manager_users_snapshot',
+                        '/rpc/insert_manager_users_if_absent', '/rpc/redeem_manager_key_and_save_users',
+                        '/rpc/read_manager_session', '/rpc/read_manager_authorization', '/rpc/create_manager_user_session', '/rpc/revoke_manager_session'
+                    ]
+                        .every(required => normalizedPaths.includes(required));
+                } catch (err) {
+                    rpcProbeError = err.message || String(err);
+                }
+                if (!rpcAvailable) {
+                    this.lastPingOk = false;
+                    if (!rpcSpecVerified) {
+                        const error = `Chưa xác minh được RPC record_bot_position_change trên Supabase: ${rpcProbeError || 'không đọc được OpenAPI spec'}. Chưa thể kết luận RPC bị thiếu.`;
+                        this.lastPingError = error;
+                        return { ok: false, error, missingRpc: false, rpcVerified: false, rpcProbeError: rpcProbeError || 'OpenAPI spec không đọc được.' };
+                    }
+                    const error = 'Thiếu một hoặc nhiều RPC bắt buộc cho user CAS, session revoke, Key transaction hoặc lock. Hãy chạy các migration Supabase theo thứ tự trước khi bật Manager.';
+                    this.lastPingError = error;
+                    return { ok: false, error, missingRpc: true, rpcVerified: true };
+                }
+                const userColumns = await fetch(`${this.url}/rest/v1/manager_users?select=id,username,allow_account_change,lock_reason,note&limit=0`, {
+                    headers: this.getHeaders(),
+                    signal: AbortSignal.timeout(6000)
+                });
+                if (!userColumns.ok) {
+                    const error = 'Thiếu cột user allow_account_change/lock_reason/note. Hãy chạy migration 20261023_manager_user_transactions.sql.';
+                    this.lastPingOk = false;
+                    this.lastPingError = error;
+                    return { ok: false, error, missingColumns: true };
+                }
                 this.lastPingOk = true;
                 this.lastPingError = '';
-                return { ok: true, message: 'Kết nối Supabase Cloud thành công!' };
+                return { ok: true, message: 'Kết nối Supabase Cloud thành công!', rpcVerified: true };
             }
             this.lastPingOk = false;
             const error = missingTables.length
@@ -513,16 +718,14 @@ class SupabaseAdapter {
     async fetchUsers() {
         if (!this.isEnabled()) return null;
         try {
-            const res = await fetch(`${this.url}/rest/v1/manager_users?select=*`, {
-                headers: this.getHeaders(),
-                signal: AbortSignal.timeout(8000)
-            });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const data = await res.json();
+            const data = await this.fetchAllRows('manager_users', { order: 'username.asc', uniqueKey: 'username' });
             return data.map(u => {
                 const encryptedPassword = String(u.password || '');
                 const password = decryptUserPassword(encryptedPassword);
-                if (encryptedPassword.startsWith('aes256$gcm$') && !password) {
+                if (encryptedPassword && isUnsupportedCredentialCiphertext(encryptedPassword)) {
+                    throw new Error('Mật khẩu cloud dùng định dạng mã hóa không được hỗ trợ: ' + encryptedPassword.slice(0, 12) + '…');
+                }
+                if (encryptedPassword && isStoredCredentialCiphertext(encryptedPassword) && password === null) {
                     throw new Error('Không thể giải mã mật khẩu cloud. Hãy giữ nguyên MANAGER_MASTER_KEY khi deploy.');
                 }
                 return {
@@ -535,6 +738,9 @@ class SupabaseAdapter {
                     expiresAt: u.expires_at || null,
                     planName: u.plan_name || 'Gói mặc định',
                     botAliases: (u.bot_aliases && typeof u.bot_aliases === 'object') ? u.bot_aliases : {},
+                    allowAccountChange: u.allow_account_change !== false,
+                    lockReason: String(u.lock_reason || ''),
+                    note: String(u.note || ''),
                     createdAt: u.created_at,
                     updatedAt: u.updated_at
                 };
@@ -545,59 +751,266 @@ class SupabaseAdapter {
         }
     }
 
-    async syncAllUsers(users) {
-        if (!this.isEnabled() || !Array.isArray(users)) return false;
+    userToDatabaseRows(users) {
+        return users.map(u => ({
+            id: String(u.id || ('usr_' + u.username)),
+            username: String(u.username || ''),
+            password: encryptUserPassword(String(u.password ?? '')),
+            role: String(u.role || 'user'),
+            status: String(u.status || 'active'),
+            assigned_bot_ids: Array.isArray(u.assignedBotIds) ? u.assignedBotIds : [],
+            expires_at: u.expiresAt ? String(u.expiresAt) : null,
+            plan_name: String(u.planName || 'Gói mặc định'),
+            bot_aliases: (u.botAliases && typeof u.botAliases === 'object' && !Array.isArray(u.botAliases)) ? u.botAliases : {},
+            allow_account_change: u.allowAccountChange !== false,
+            lock_reason: String(u.lockReason || ''),
+            note: String(u.note || ''),
+            created_at: u.createdAt || new Date().toISOString(),
+            updated_at: u.updatedAt || new Date().toISOString()
+        }));
+    }
+
+    mapDatabaseUser(u) {
+        const encryptedPassword = String(u.password || '');
+        const password = decryptUserPassword(encryptedPassword);
+        if (encryptedPassword && isUnsupportedCredentialCiphertext(encryptedPassword)) {
+            throw new Error('Mật khẩu cloud dùng định dạng mã hóa không được hỗ trợ: ' + encryptedPassword.slice(0, 12) + '…');
+        }
+        if (encryptedPassword && isStoredCredentialCiphertext(encryptedPassword) && password === null) {
+            throw new Error('Không thể giải mã mật khẩu cloud. Hãy giữ nguyên MANAGER_MASTER_KEY khi deploy.');
+        }
+        return {
+            id: u.id,
+            username: u.username,
+            password,
+            role: u.role || 'user',
+            status: u.status || 'active',
+            assignedBotIds: Array.isArray(u.assigned_bot_ids) ? u.assigned_bot_ids : [],
+            expiresAt: u.expires_at || null,
+            planName: u.plan_name || 'Gói mặc định',
+            botAliases: (u.bot_aliases && typeof u.bot_aliases === 'object') ? u.bot_aliases : {},
+            allowAccountChange: u.allow_account_change !== false,
+            lockReason: String(u.lock_reason || ''),
+            note: String(u.note || ''),
+            createdAt: u.created_at,
+            updatedAt: u.updated_at
+        };
+    }
+
+    async fetchUsersSnapshot() {
+        if (!this.isEnabled()) return null;
         try {
-            const rows = users.map(u => ({
-                id: String(u.id || ('usr_' + u.username)),
-                username: String(u.username),
-                password: encryptUserPassword(String(u.password)),
-                role: String(u.role || 'user'),
-                status: String(u.status || 'active'),
-                assigned_bot_ids: Array.isArray(u.assignedBotIds) ? u.assignedBotIds : [],
-                expires_at: u.expiresAt ? String(u.expiresAt) : null,
-                plan_name: String(u.planName || 'Gói mặc định'),
-                bot_aliases: (u.botAliases && typeof u.botAliases === 'object') ? u.botAliases : {},
-                updated_at: new Date().toISOString()
-            }));
-            const res = await fetch(`${this.url}/rest/v1/manager_users`, {
-                method: 'POST',
-                headers: this.getHeaders({ 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
-                body: JSON.stringify(rows),
-                signal: AbortSignal.timeout(10000)
-            });
-            return res.ok;
+            const data = await this.callRpc('read_manager_users_snapshot', {});
+            const result = Array.isArray(data) ? data[0] : data;
+            const revision = Number(result?.revision);
+            if (result?.ok !== true || !Array.isArray(result.users) || !Number.isSafeInteger(revision) || revision < 1) return null;
+            return { revision, users: result.users.map(row => this.mapDatabaseUser(row)) };
         } catch (err) {
-            console.error('[SUPABASE] Lỗi đồng bộ users:', err.message);
+            console.error('[SUPABASE] Không đọc được snapshot users phiên bản hóa:', err.message);
+            return null;
+        }
+    }
+
+    async fetchSessionByTokenHash(tokenHash) {
+        if (!this.isEnabled() || !tokenHash) return { ok: false, error: 'Supabase session store chưa sẵn sàng.' };
+        try {
+            const data = await this.callRpc('read_manager_session', { p_token_hash: String(tokenHash) }, 5000);
+            const result = Array.isArray(data) ? data[0] : data;
+            if (result?.ok !== true) return { ok: false, error: 'Không thể xác minh session trên Supabase.' };
+            const row = result.session;
+            if (!row) return { ok: true, session: null };
+            return { ok: true, session: {
+                tokenHash: String(row.token_hash || ''), userId: String(row.user_id || ''),
+                username: String(row.username || ''), role: String(row.role || 'user'),
+                assignedBotIds: Array.isArray(row.assigned_bot_ids) ? row.assigned_bot_ids.map(Number) : [],
+                expiresAt: Number(row.expires_at || 0), planName: String(row.plan_name || 'Gói thường'),
+                allowAccountChange: row.allow_account_change !== false, status: String(row.status || 'active')
+            } };
+        } catch (err) {
+            return { ok: false, error: err.message || 'Không thể xác minh session trên Supabase.' };
+        }
+    }
+
+    async fetchManagerAuthorization(tokenHash) {
+        if (!this.isEnabled() || !tokenHash) return { ok: false, error: 'Supabase session store chưa sẵn sàng.' };
+        try {
+            const data = await this.callRpc('read_manager_authorization', { p_token_hash: String(tokenHash) }, 6000);
+            const result = Array.isArray(data) ? data[0] : data;
+            if (result?.ok !== true) return { ok: false, error: 'Không thể xác minh phiên đăng nhập trên Supabase.' };
+            const sessionRow = result.session;
+            const userRow = result.user;
+            return {
+                ok: true,
+                session: sessionRow ? {
+                    tokenHash: String(sessionRow.token_hash || ''), userId: String(sessionRow.user_id || ''),
+                    username: String(sessionRow.username || ''), role: normalizeManagerRole(sessionRow.role),
+                    assignedBotIds: Array.isArray(sessionRow.assigned_bot_ids) ? sessionRow.assigned_bot_ids.map(Number) : [],
+                    expiresAt: Number(sessionRow.expires_at || 0), planName: String(sessionRow.plan_name || 'Gói thường'),
+                    allowAccountChange: sessionRow.allow_account_change !== false, status: String(sessionRow.status || 'active')
+                } : null,
+                user: userRow ? {
+                    id: String(userRow.id || ''), username: String(userRow.username || ''), status: String(userRow.status || 'active'),
+                    assignedBotIds: Array.isArray(userRow.assigned_bot_ids) ? userRow.assigned_bot_ids.map(Number) : [],
+                    expiresAt: userRow.expires_at || null, planName: String(userRow.plan_name || 'Gói thường'),
+                    allowAccountChange: userRow.allow_account_change !== false, lockReason: String(userRow.lock_reason || '')
+                } : null
+            };
+        } catch (err) {
+            return { ok: false, error: err.message || 'Không thể xác minh phiên đăng nhập trên Supabase.' };
+        }
+    }
+
+    async fetchUserAuthorization(userId, username) {
+        if (!this.isEnabled()) return { ok: false, error: 'Supabase users chưa sẵn sàng.' };
+        try {
+            const params = new URLSearchParams({
+                select: 'id,username,status,assigned_bot_ids,expires_at,plan_name,allow_account_change,lock_reason',
+                limit: '2'
+            });
+            if (userId) params.set('id', 'eq.' + String(userId));
+            else params.set('username', 'ilike.' + String(username || '').replace(/[(),]/g, ''));
+            const res = await fetch(`${this.url}/rest/v1/manager_users?${params.toString()}`, {
+                headers: this.getHeaders(), signal: AbortSignal.timeout(6000)
+            });
+            if (!res.ok) throw new Error('Đọc entitlement user thất bại (HTTP ' + res.status + ').');
+            const rows = await res.json();
+            if (!Array.isArray(rows) || rows.length > 1) throw new Error('Supabase trả entitlement user không hợp lệ hoặc trùng.');
+            const row = rows[0];
+            return { ok: true, user: row ? {
+                id: String(row.id || ''), username: String(row.username || ''), status: String(row.status || 'active'),
+                assignedBotIds: Array.isArray(row.assigned_bot_ids) ? row.assigned_bot_ids.map(Number) : [],
+                expiresAt: row.expires_at || null, planName: String(row.plan_name || 'Gói thường'),
+                allowAccountChange: row.allow_account_change !== false, lockReason: String(row.lock_reason || '')
+            } : null };
+        } catch (err) {
+            return { ok: false, error: err.message || 'Không thể xác minh entitlement user trên Supabase.' };
+        }
+    }
+
+    async reconcileUserSnapshotTransaction(transactionId, expectedRevision, rows) {
+        try {
+            const params = new URLSearchParams({
+                select: 'transaction_id,expected_revision,users_payload,result',
+                transaction_id: 'eq.' + String(transactionId), limit: '1'
+            });
+            const res = await fetch(`${this.url}/rest/v1/manager_users_write_transactions?${params.toString()}`, {
+                headers: this.getHeaders(), signal: AbortSignal.timeout(6000)
+            });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const records = await res.json();
+            const row = Array.isArray(records) ? records[0] : null;
+            if (row && Number(row.expected_revision) === Number(expectedRevision) && stableJson(row.users_payload) === stableJson(rows)) {
+                const result = row.result;
+                if (result?.ok === true) return result;
+            }
+            return { ok: false, uncertain: true, error: 'Không đối chiếu được kết quả ghi users; không retry bằng snapshot khác.' };
+        } catch (err) {
+            return { ok: false, uncertain: true, error: 'Không thể đối chiếu transaction users trên Cloud: ' + err.message };
+        }
+    }
+
+    async saveUsersSnapshot(users, expectedRevision, { transactionId = crypto.randomUUID(), allowEmpty = false } = {}) {
+        if (!this.isEnabled() || !Array.isArray(users) || !Number.isSafeInteger(Number(expectedRevision)) || Number(expectedRevision) < 1 || (!allowEmpty && users.length === 0)) {
+            return { ok: false, error: 'INVALID_USER_SNAPSHOT' };
+        }
+        const rows = this.userToDatabaseRows(users);
+        try {
+            const data = await this.callRpc('save_manager_users_snapshot', {
+                p_expected_revision: Number(expectedRevision), p_transaction_id: transactionId,
+                p_users: rows, p_allow_empty: allowEmpty === true
+            });
+            const result = Array.isArray(data) ? data[0] : data;
+            return result && typeof result === 'object' ? result : { ok: false, uncertain: true, error: 'Cloud trả kết quả ghi users không hợp lệ.' };
+        } catch (err) {
+            if (err.missingRpc) return { ok: false, missingRpc: true, error: 'Thiếu RPC save_manager_users_snapshot; hãy chạy migration 20261023_manager_user_transactions.sql.' };
+            if (err.name === 'TimeoutError' || err.name === 'AbortError' || err.status >= 500) {
+                return await this.reconcileUserSnapshotTransaction(transactionId, expectedRevision, rows);
+            }
+            return { ok: false, status: err.status || 503, error: err.message || 'Không lưu được users trên Supabase.' };
+        }
+    }
+
+    async insertUsersIfAbsent(users) {
+        if (!this.isEnabled() || !Array.isArray(users) || !users.length) return Array.isArray(users) && users.length === 0;
+        const rows = this.userToDatabaseRows(users);
+        try {
+            const data = await this.callRpc('insert_manager_users_if_absent', { p_users: rows });
+            const result = Array.isArray(data) ? data[0] : data;
+            return result?.ok === true;
+        } catch (err) {
+            console.error('[SUPABASE] Không thể import users theo chế độ insert-only:', err.message);
             return false;
         }
     }
 
-    async deleteUser(userId) {
-        if (!this.isEnabled()) return false;
-        try {
-            const res = await fetch(`${this.url}/rest/v1/manager_users?id=eq.${encodeURIComponent(userId)}`, {
-                method: 'DELETE',
-                headers: this.getHeaders(),
-                signal: AbortSignal.timeout(5000)
-            });
-            return res.ok;
-        } catch (err) {
-            console.error('[SUPABASE] Lỗi xóa user:', err.message);
-            return false;
+    async redeemKeyAndSaveUsersAtomic(code, username, users, expectedRevision, transactionId = crypto.randomUUID()) {
+        if (!this.isEnabled() || !Array.isArray(users) || !Number.isSafeInteger(Number(expectedRevision))) {
+            return { ok: false, error: 'INVALID_REDEMPTION_SNAPSHOT' };
         }
+        const rows = this.userToDatabaseRows(users);
+        const body = {
+            p_code: String(code || '').trim().toUpperCase(), p_username: String(username || '').trim().toLowerCase(),
+            p_transaction_id: transactionId, p_expected_revision: Number(expectedRevision), p_users: rows,
+            p_allow_empty: false
+        };
+        const reconcile = async () => {
+            try {
+                const params = new URLSearchParams({
+                    select: 'transaction_id,username,usage_snapshot,user_revision',
+                    transaction_id: 'eq.' + transactionId, limit: '1'
+                });
+                const res = await fetch(`${this.url}/rest/v1/manager_key_usage_transactions?${params.toString()}`, {
+                    headers: this.getHeaders(), signal: AbortSignal.timeout(6000)
+                });
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const records = await res.json();
+                const row = Array.isArray(records) ? records[0] : null;
+                if (row && String(row.username || '').toLowerCase() === body.p_username && row.usage_snapshot) {
+                    return { ok: true, transactionId, row: row.usage_snapshot, userRevision: Number(row.user_revision), reconciled: true };
+                }
+                return { ok: false, uncertain: true, error: 'Giao dịch redeem chưa được xác nhận; không lặp lại với transaction ID mới.' };
+            } catch (err) {
+                return { ok: false, uncertain: true, error: 'Không thể đối chiếu giao dịch redeem trên Cloud: ' + err.message };
+            }
+        };
+        try {
+            const data = await this.callRpc('redeem_manager_key_and_save_users', body, 12000);
+            const result = Array.isArray(data) ? data[0] : data;
+            return result && typeof result === 'object' ? { ...result, transactionId } : { ok: false, uncertain: true, error: 'Cloud trả kết quả redeem không hợp lệ.' };
+        } catch (err) {
+            if (err.missingRpc) return { ok: false, missingRpc: true, error: 'Thiếu RPC redeem_manager_key_and_save_users; hãy chạy migration 20261023_manager_user_transactions.sql.' };
+            if (err.name === 'TimeoutError' || err.name === 'AbortError' || err.status >= 500) return await reconcile();
+            return { ok: false, status: err.status || 503, error: err.message || 'Không thể xác nhận giao dịch redeem.' };
+        }
+    }
+
+    async syncAllUsers(users) {
+        // Legacy import path is insert-only; it must never merge a stale full snapshot.
+        return await this.insertUsersIfAbsent(users);
+    }
+
+    async deleteUser(userId) {
+        const snapshot = await this.fetchUsersSnapshot();
+        if (!snapshot) return false;
+        const users = snapshot.users.filter(user => String(user.id || '') !== String(userId || ''));
+        if (users.length === snapshot.users.length) return true;
+        const result = await this.saveUsersSnapshot(users, snapshot.revision, { allowEmpty: users.length === 0 });
+        return result.ok === true;
+    }
+
+    async replaceUsersSnapshot(users, { allowEmpty = false } = {}) {
+        if (!this.isEnabled() || !Array.isArray(users) || (!allowEmpty && users.length === 0)) return false;
+        const current = await this.fetchUsersSnapshot();
+        if (!current) return false;
+        const result = await this.saveUsersSnapshot(users, current.revision, { allowEmpty });
+        return result.ok === true;
     }
 
     // --- KEYS ---
     async fetchKeys() {
         if (!this.isEnabled()) return null;
         try {
-            const res = await fetch(`${this.url}/rest/v1/manager_keys?select=*`, {
-                headers: this.getHeaders(),
-                signal: AbortSignal.timeout(8000)
-            });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const data = await res.json();
+            const data = await this.fetchAllRows('manager_keys', { order: 'id.asc', uniqueKey: 'id' });
             return data.map(k => ({
                 id: k.id,
                 key: k.code || k.key,
@@ -609,7 +1022,8 @@ class SupabaseAdapter {
                 used: !!k.used,
                 usedBy: k.used_by || null,
                 usedAt: k.used_at || null,
-                maxUses: k.max_uses !== undefined ? Number(k.max_uses) : (k.used ? 1 : 1),
+                // Giữ đúng quy ước: 0 = không giới hạn. `Number(x) || 1` sẽ phá vỡ unlimited.
+                maxUses: normalizeMaxUses(k.max_uses),
                 usedCount: k.used_count !== undefined ? Number(k.used_count) : (k.used ? 1 : (k.used_by ? 1 : 0)),
                 usedUsers: Array.isArray(k.used_users) ? k.used_users : (k.used_by ? k.used_by.split(',').map(s => s.trim().toLowerCase()).filter(Boolean) : []),
                 expiresAt: k.expires_at || null,
@@ -622,48 +1036,135 @@ class SupabaseAdapter {
         }
     }
 
-    async syncAllKeys(keys) {
-        if (!this.isEnabled() || !Array.isArray(keys)) return false;
+    async insertKeys(keys) {
+        if (!this.isEnabled() || !Array.isArray(keys) || !keys.length) return Array.isArray(keys) && keys.length === 0;
+        if (keys.some(key => normalizeMaxUses(key?.maxUses) === null)) {
+            console.error('[SUPABASE] Từ chối tạo key có maxUses âm hoặc không phải số nguyên.');
+            return false;
+        }
+        const rows = keys.map(k => {
+            const code = String(k.key || k.code || '').trim().toUpperCase();
+            return {
+                id: String(k.id || ('key_' + code)), code, key_code: code,
+                days: Number(k.days || 1), plan_name: String(k.planName || 'Gói mặc định'),
+                bot_ids: Array.isArray(k.botIds) ? k.botIds : [],
+                bot_count: Number(k.botCount !== undefined ? k.botCount : (Array.isArray(k.botIds) && k.botIds.length ? k.botIds.length : 1)),
+                used: Boolean(k.used), used_by: k.usedBy ? String(k.usedBy) : null,
+                used_at: k.usedAt ? String(k.usedAt) : null, max_uses: normalizeMaxUses(k.maxUses),
+                used_count: Number(k.usedCount || 0), used_users: Array.isArray(k.usedUsers) ? k.usedUsers : [],
+                expires_at: k.expiresAt || null, note: k.note ? String(k.note) : null,
+                ...(k.createdAt ? { created_at: k.createdAt } : {})
+            };
+        });
         try {
-            const rows = keys.map(k => {
-                const code = String(k.key || k.code || '');
-                return {
-                    id: String(k.id || ('key_' + code)),
-                    code,
-                    days: Number(k.days || 1),
-                    plan_name: String(k.planName || 'Gói mặc định'),
-                    bot_ids: Array.isArray(k.botIds) ? k.botIds : [],
-                    bot_count: Number(k.botCount !== undefined ? k.botCount : (Array.isArray(k.botIds) && k.botIds.length ? k.botIds.length : 1)),
-                    used: Boolean(k.used),
-                    used_by: k.usedBy ? String(k.usedBy) : null,
-                    used_at: k.usedAt ? String(k.usedAt) : null,
-                    max_uses: Number(k.maxUses !== undefined ? k.maxUses : 1),
-                    used_count: Number(k.usedCount || 0),
-                    used_users: Array.isArray(k.usedUsers) ? k.usedUsers : [],
-                    expires_at: k.expiresAt || null,
-                    note: k.note ? String(k.note) : null
-                };
-            });
-            let res = await fetch(`${this.url}/rest/v1/manager_keys`, {
+            const res = await fetch(`${this.url}/rest/v1/manager_keys?on_conflict=id`, {
                 method: 'POST',
-                headers: this.getHeaders({ 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
-                body: JSON.stringify(rows),
-                signal: AbortSignal.timeout(10000)
+                headers: this.getHeaders({ Prefer: 'resolution=ignore-duplicates,return=representation' }),
+                body: JSON.stringify(rows), signal: AbortSignal.timeout(10000)
             });
             if (!res.ok) {
-                // Fallback nếu bảng trên Supabase chưa cập nhật cột mới
-                const basicRows = rows.map(({ bot_count, max_uses, used_count, used_users, expires_at, note, ...rest }) => rest);
-                res = await fetch(`${this.url}/rest/v1/manager_keys`, {
-                    method: 'POST',
-                    headers: this.getHeaders({ 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
-                    body: JSON.stringify(basicRows),
+                console.error('[SUPABASE] Lỗi insert-only keys:', 'HTTP ' + res.status + ': ' + await res.text().catch(() => ''));
+                return false;
+            }
+            const inserted = await res.json().catch(() => []);
+            const insertedIds = new Set(Array.isArray(inserted) ? inserted.map(row => String(row.id)) : []);
+            if (insertedIds.size !== rows.length || rows.some(row => !insertedIds.has(row.id))) {
+                // Do not report a partial batch as success; remove only rows returned by this insert.
+                for (const id of insertedIds) await this.deleteKey(id);
+                return false;
+            }
+            return true;
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi insert-only keys:', err.message);
+            return false;
+        }
+    }
+
+    // Legacy imports and snapshot restore may adjust key metadata, but never usage counters.
+    async updateKeysMetadata(keys) {
+        if (!this.isEnabled() || !Array.isArray(keys)) return false;
+        if (keys.some(key => normalizeMaxUses(key?.maxUses) === null)) return false;
+        if (!keys.length) return true;
+        try {
+            for (const k of keys) {
+                const code = String(k.key || k.code || '').trim().toUpperCase();
+                const id = String(k.id || ('key_' + code));
+                const res = await fetch(`${this.url}/rest/v1/manager_keys?id=eq.${encodeURIComponent(id)}`, {
+                    method: 'PATCH',
+                    headers: this.getHeaders({ Prefer: 'return=minimal' }),
+                    body: JSON.stringify({
+                        days: Number(k.days || 1), plan_name: String(k.planName || 'Gói mặc định'),
+                        bot_ids: Array.isArray(k.botIds) ? k.botIds : [],
+                        bot_count: Number(k.botCount !== undefined ? k.botCount : (Array.isArray(k.botIds) && k.botIds.length ? k.botIds.length : 1)),
+                        max_uses: normalizeMaxUses(k.maxUses), expires_at: k.expiresAt || null,
+                        note: k.note ? String(k.note) : null
+                    }),
                     signal: AbortSignal.timeout(10000)
                 });
+                if (!res.ok) {
+                    console.error('[SUPABASE] Lỗi cập nhật metadata key ' + code + ' (schema migration cần thiết):', 'HTTP ' + res.status + ': ' + await res.text().catch(() => ''));
+                    return false;
+                }
             }
-            return res.ok;
+            return true;
         } catch (err) {
-            console.error('[SUPABASE] Lỗi đồng bộ keys:', err.message);
+            console.error('[SUPABASE] Lỗi cập nhật metadata keys:', err.message);
             return false;
+        }
+    }
+
+    // Kept for import callers; duplicate IDs/codes are ignored and existing rows are never overwritten.
+    async syncAllKeys(keys) { return this.insertKeys(keys); }
+
+    // Nguyên tố hóa việc tiêu thụ giftcode:
+    // PATCH có điều kiện `used_count=eq.<expected>` là compare-and-swap một lệnh SQL,
+    // nên 2 instance Manager hoặc 2 request song song không thể cùng tiêu thụ lượt cuối.
+    // Trả về:
+    //   true        : CAS thành công (lượt đã được trừ nguyên tố trên Cloud)
+    //   'conflict'  : HTTP 200 nhưng 0 dòng khớp -> ai đó đã tiêu thụ trước
+    //   false       : HTTP lỗi/không đọc được số dòng -> lỗi hạ tầng
+    //   null        : bảng chưa có cột CAS hoặc lỗi không xác định -> caller dùng fallback
+    async consumeKeyUsageAtomic(code, username) {
+        if (!this.isEnabled()) return { ok: false, error: 'Supabase chưa sẵn sàng.' };
+        const normalizedCode = String(code || '').trim().toUpperCase();
+        const normalizedUser = String(username || '').trim().toLowerCase();
+        const transactionId = crypto.randomUUID();
+        const reconcile = async () => {
+            try {
+                const check = await fetch(`${this.url}/rest/v1/manager_key_usage_transactions?transaction_id=eq.${encodeURIComponent(transactionId)}&select=transaction_id,username,usage_snapshot`, {
+                    headers: this.getHeaders(), signal: AbortSignal.timeout(8000)
+                });
+                if (!check.ok) throw new Error('HTTP ' + check.status);
+                const rows = await check.json();
+                const transaction = Array.isArray(rows) ? rows.find(row => row.transaction_id === transactionId) : null;
+                if (transaction && String(transaction.username).toLowerCase() === normalizedUser && transaction.usage_snapshot && typeof transaction.usage_snapshot === 'object') {
+                    return { ok: true, reconciled: true, transactionId, row: transaction.usage_snapshot };
+                }
+                return { ok: false, uncertain: true, error: 'CAS timeout; Cloud chưa xác nhận được transaction ID nên giao dịch bị dừng an toàn.' };
+            } catch (err) {
+                return { ok: false, uncertain: true, error: 'CAS timeout và không thể đối chiếu transaction ID trên Cloud: ' + err.message };
+            }
+        };
+        try {
+            const res = await fetch(`${this.url}/rest/v1/rpc/consume_manager_key_usage`, {
+                method: 'POST',
+                headers: this.getHeaders(),
+                body: JSON.stringify({ p_code: normalizedCode, p_username: normalizedUser, p_transaction_id: transactionId }),
+                signal: AbortSignal.timeout(10000)
+            });
+            const text = await res.text().catch(() => '');
+            if (!res.ok) {
+                const missingRpc = (res.status === 404 || res.status === 400) && /(?:PGRST202|function .* does not exist|could not find the function|consume_manager_key_usage)/i.test(text);
+                if (!missingRpc && (res.status >= 500 || res.status === 408)) return await reconcile();
+                return { ok: false, missingRpc, uncertain: !missingRpc && (res.status >= 500 || res.status === 408), error: 'Không xác nhận được CAS tiêu thụ Key (HTTP ' + res.status + '): ' + text.slice(0, 300) };
+            }
+            const data = text ? JSON.parse(text) : null;
+            const result = Array.isArray(data) ? data[0] : data;
+            if (!result || typeof result !== 'object') return { ok: false, uncertain: true, error: 'Supabase trả phản hồi CAS không hợp lệ.' };
+            return result.ok === true ? { ...result, transactionId } : result;
+        } catch (err) {
+            const reconciled = await reconcile();
+            return reconciled.ok || !reconciled.uncertain ? reconciled : { ...reconciled, error: 'Trạng thái CAS không xác định: ' + err.message + '. ' + reconciled.error };
         }
     }
 
@@ -684,6 +1185,57 @@ class SupabaseAdapter {
         }
     }
 
+    async replaceKeysSnapshot(keys, { allowEmpty = false } = {}) {
+        if (!this.isEnabled() || !Array.isArray(keys) || (!allowEmpty && keys.length === 0)) return false;
+        const current = await this.fetchKeys();
+        if (!Array.isArray(current)) return false;
+        const currentById = new Map(current.map(key => [String(key.id || '').toLowerCase(), key]));
+        const currentByCode = new Map(current.map(key => [normalizeKeyCode(key), key]));
+        const newKeys = [];
+        const existingKeys = [];
+        const keep = new Set();
+        for (const key of keys) {
+            const id = String(key?.id || ('key_' + (key?.key || key?.code || ''))).toLowerCase();
+            const match = currentById.get(id) || currentByCode.get(normalizeKeyCode(key));
+            if (match) {
+                existingKeys.push({ ...key, id: match.id });
+                keep.add(String(match.id).toLowerCase());
+            } else {
+                newKeys.push(key);
+                keep.add(id);
+            }
+        }
+        if (newKeys.length && !(await this.insertKeys(newKeys))) return false;
+        if (existingKeys.length && !(await this.updateKeysMetadata(existingKeys))) return false;
+        for (const key of current) {
+            const id = String(key?.id || '');
+            if (id && !keep.has(id.toLowerCase()) && !(await this.deleteKey(id))) return false;
+        }
+        return true;
+    }
+
+    async clearUsers() {
+        const snapshot = await this.fetchUsersSnapshot();
+        if (!snapshot) return false;
+        const result = await this.saveUsersSnapshot([], snapshot.revision, { allowEmpty: true });
+        return result.ok === true;
+    }
+
+    async clearKeys() {
+        if (!this.isEnabled()) return false;
+        try {
+            const res = await fetch(`${this.url}/rest/v1/manager_keys`, {
+                method: 'DELETE',
+                headers: this.getHeaders({ Prefer: 'return=minimal' }),
+                signal: AbortSignal.timeout(10000)
+            });
+            return res.ok;
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi xóa toàn bộ keys:', err.message);
+            return false;
+        }
+    }
+
     // --- REGISTRY ---
     async fetchRegistry() {
         if (!this.isEnabled()) return null;
@@ -698,6 +1250,7 @@ class SupabaseAdapter {
                 const registryData = data[0].data;
                 if (!registryData || typeof registryData !== 'object') return null;
                 const restored = { ...registryData };
+                restored.botRentalDisabled = normalizeBotRentalDisabled(registryData.botRentalDisabled);
                 if (registryData.webhook && typeof registryData.webhook === 'object') {
                     const webhook = { ...registryData.webhook };
                     let legacyMaskedSecret = false;
@@ -705,12 +1258,19 @@ class SupabaseAdapter {
                         const stored = String(webhook[field] || '');
                         if (stored === '[CONFIGURED]') {
                             legacyMaskedSecret = true;
-                            delete webhook[field];
+                            if (registry?.webhook?.[field] && registry.webhook[field] !== '[CONFIGURED]') {
+                                webhook[field] = registry.webhook[field];
+                            } else {
+                                delete webhook[field];
+                            }
                             continue;
                         }
-                        if (stored.startsWith('aes256$gcm$')) {
+                        if (isUnsupportedCredentialCiphertext(stored)) {
+                            throw new Error('Webhook cloud dùng định dạng mã hóa không được hỗ trợ: ' + stored.slice(0, 12) + '…');
+                        }
+                        if (isStoredCredentialCiphertext(stored)) {
                             const plain = decryptUserPassword(stored);
-                            if (!plain) {
+                            if (plain === null) {
                                 throw new Error('Không thể giải mã webhook cloud. Hãy giữ nguyên MANAGER_MASTER_KEY khi deploy.');
                             }
                             webhook[field] = plain;
@@ -721,7 +1281,7 @@ class SupabaseAdapter {
                 }
                 return restored;
             }
-            return null;
+            return {};
         } catch (err) {
             console.error('[SUPABASE] Lỗi tải registry:', err.message);
             return null;
@@ -741,8 +1301,13 @@ class SupabaseAdapter {
                 order: payload.order || [],
                 botIdMap: payload.botIdMap || {},
                 botAliases: payload.botAliases || {},
+                botTags: payload.botTags || {},
+                botRentalDisabled: normalizeBotRentalDisabled(payload.botRentalDisabled),
                 systemSettings: payload.systemSettings || {},
                 lastBotId: payload.lastBotId || 0,
+                pendingResets: (payload.pendingResets && typeof payload.pendingResets === 'object' && !Array.isArray(payload.pendingResets))
+                    ? payload.pendingResets
+                    : {},
                 mustChangePassword: payload.mustChangePassword === true,
                 supabase: payload.supabase ? {
                     url: payload.supabase.url || '',
@@ -750,8 +1315,8 @@ class SupabaseAdapter {
                 } : null,
                 webhook: payload.webhook ? {
                     enabled: !!payload.webhook.enabled,
-                    discordUrl: payload.webhook.discordUrl ? encryptUserPassword(String(payload.webhook.discordUrl)) : '',
-                    telegramToken: payload.webhook.telegramToken ? encryptUserPassword(String(payload.webhook.telegramToken)) : '',
+                    discordUrl: (payload.webhook.discordUrl && payload.webhook.discordUrl !== '[CONFIGURED]') ? encryptUserPassword(String(payload.webhook.discordUrl)) : '',
+                    telegramToken: (payload.webhook.telegramToken && payload.webhook.telegramToken !== '[CONFIGURED]') ? encryptUserPassword(String(payload.webhook.telegramToken)) : '',
                     telegramChatId: String(payload.webhook.telegramChatId || ''),
                     notifyOnOffline: payload.webhook.notifyOnOffline !== false,
                     notifyOnLowTotem: payload.webhook.notifyOnLowTotem !== false,
@@ -762,15 +1327,41 @@ class SupabaseAdapter {
                 } : {},
                 announcement: payload.announcement || {}
             };
-            const res = await fetch(`${this.url}/rest/v1/bot_registry`, {
-                method: 'POST',
-                headers: this.getHeaders({ 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
-                body: JSON.stringify([{ id: 'default', data: dataToSave, updated_at: new Date().toISOString() }]),
-                signal: AbortSignal.timeout(10000)
-            });
-            return res.ok;
+            const pendingResets = dataToSave.pendingResets;
+            return await this.patchRegistry(dataToSave, pendingResets, [], { webhookEncrypted: true });
         } catch (err) {
             console.error('[SUPABASE] Lỗi lưu registry:', err.message);
+            return false;
+        }
+    }
+
+    async patchRegistry(patch = {}, pendingResetPatch = {}, pendingResetDeletes = [], { webhookEncrypted = false } = {}) {
+        if (!this.isEnabled()) return false;
+        try {
+            const safePatch = { ...patch };
+            delete safePatch.pendingResets;
+            if (safePatch.webhook && typeof safePatch.webhook === 'object') {
+                safePatch.webhook = { ...safePatch.webhook };
+                if (!webhookEncrypted) for (const field of ['discordUrl', 'telegramToken']) {
+                    if (safePatch.webhook[field]) safePatch.webhook[field] = encryptUserPassword(String(safePatch.webhook[field]));
+                }
+            }
+            const res = await fetch(`${this.url}/rest/v1/rpc/patch_manager_registry`, {
+                method: 'POST', headers: this.getHeaders(),
+                body: JSON.stringify({
+                    p_patch: safePatch,
+                    p_pending_reset_patch: pendingResetPatch,
+                    p_pending_reset_deletes: pendingResetDeletes
+                }), signal: AbortSignal.timeout(10000)
+            });
+            if (!res.ok) {
+                console.error('[SUPABASE] Lỗi cập nhật registry theo patch:', 'HTTP ' + res.status + ': ' + await res.text().catch(() => ''));
+                return false;
+            }
+            const result = await res.json().catch(() => null);
+            return result?.ok === true || (Array.isArray(result) && result[0]?.ok === true);
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi cập nhật registry theo patch:', err.message);
             return false;
         }
     }
@@ -779,18 +1370,12 @@ class SupabaseAdapter {
     async fetchSessions() {
         if (!this.isEnabled()) return null;
         try {
-            const res = await fetch(`${this.url}/rest/v1/manager_sessions?select=*`, {
-                headers: this.getHeaders(),
-                signal: AbortSignal.timeout(8000)
-            });
-            if (!res.ok) return null;
-            const data = await res.json();
-            if (!Array.isArray(data)) return null;
+            const data = await this.fetchAllRows('manager_sessions', { order: 'token_hash.asc', uniqueKey: 'token_hash' });
             return data.map(r => ({
                 tokenHash: r.token_hash,
                 userId: r.user_id,
                 username: r.username,
-                role: r.role || 'user',
+                role: normalizeManagerRole(r.role),
                 assignedBotIds: Array.isArray(r.assigned_bot_ids) ? r.assigned_bot_ids : [],
                 expiresAt: Number(r.expires_at) || 0,
                 planName: r.plan_name || 'Gói thường',
@@ -800,6 +1385,32 @@ class SupabaseAdapter {
         } catch (err) {
             console.error('[SUPABASE] Lỗi tải sessions:', err.message);
             return null;
+        }
+    }
+
+    async createManagerUserSession(session, expectedUserRevision) {
+        if (!this.isEnabled()) {
+            return { ok: true };
+        }
+        if (!session || !Number.isSafeInteger(Number(expectedUserRevision)) || Number(expectedUserRevision) < 1) {
+            return { ok: false, error: 'INVALID_SESSION_TRANSACTION' };
+        }
+        const row = {
+            token_hash: String(session.tokenHash || ''), user_id: String(session.userId || ''),
+            username: String(session.username || ''), role: 'user',
+            assigned_bot_ids: Array.isArray(session.assignedBotIds) ? session.assignedBotIds : [],
+            expires_at: Number(session.expiresAt), plan_name: String(session.planName || 'Gói thường'),
+            allow_account_change: session.allowAccountChange !== false, status: String(session.status || 'active'),
+            updated_at: new Date().toISOString()
+        };
+        try {
+            const data = await this.callRpc('create_manager_user_session', {
+                p_expected_revision: Number(expectedUserRevision), p_session: row
+            }, 6000);
+            const result = Array.isArray(data) ? data[0] : data;
+            return result && typeof result === 'object' ? result : { ok: false, error: 'INVALID_SESSION_RESPONSE' };
+        } catch (err) {
+            return { ok: false, status: err.status || 503, error: err.message || 'Không lưu được session user trên Supabase.' };
         }
     }
 
@@ -842,57 +1453,221 @@ class SupabaseAdapter {
     async deleteSession(tokenHash) {
         if (!this.isEnabled() || !tokenHash) return false;
         try {
-            const res = await fetch(`${this.url}/rest/v1/manager_sessions?token_hash=eq.${encodeURIComponent(tokenHash)}`, {
-                method: 'DELETE',
-                headers: this.getHeaders(),
-                signal: AbortSignal.timeout(4000)
-            });
-            return res.ok;
+            const data = await this.callRpc('revoke_manager_session', { p_token_hash: String(tokenHash) }, 5000);
+            return data === true || (Array.isArray(data) && data[0] === true);
         } catch (err) {
-            console.error('[SUPABASE] Lỗi xóa session trên cloud:', err.message);
+            console.error('[SUPABASE] Lỗi thu hồi session trên Cloud:', err.message);
             return false;
         }
     }
 
     // --- BOT SETTINGS ---
     async fetchBotSettings(botId) {
-        if (!this.isEnabled() || !botId) return null;
+        return this.fetchBotSettingsStrict(botId);
+    }
+
+    async fetchBotSettingsStrict(botId) {
+        const stableId = String(botId || '').trim();
+        if (!this.isEnabled() || !/^[1-9][0-9]{0,8}$/.test(stableId)) throw new Error('BOT_ID không hợp lệ hoặc Supabase chưa cấu hình.');
+        const res = await fetch(this.url + '/rest/v1/bot_settings?bot_id=eq.' + encodeURIComponent(stableId) + '&select=*', {
+            headers: this.getHeaders(), signal: AbortSignal.timeout(8000)
+        });
+        if (!res.ok) throw new Error('Đọc bot_settings #' + stableId + ' thất bại: HTTP ' + res.status + ' ' + await res.text().catch(() => ''));
+        const rows = await res.json();
+        if (!Array.isArray(rows)) throw new Error('Supabase trả payload bot_settings không phải array.');
+        return rows[0] || null;
+    }
+
+    async fetchAllBotSettings() {
+        if (!this.isEnabled()) return null;
         try {
-            const res = await fetch(`${this.url}/rest/v1/bot_settings?bot_id=eq.${encodeURIComponent(String(botId))}&select=*`, {
-                headers: this.getHeaders(),
-                signal: AbortSignal.timeout(6000)
-            });
-            if (!res.ok) return null;
-            const data = await res.json();
-            return Array.isArray(data) && data.length > 0 ? data[0] : null;
-        } catch (_) {
+            return await this.fetchAllRows('bot_settings', { order: 'bot_id.asc', uniqueKey: 'bot_id' });
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi tải toàn bộ bot_settings:', err.message);
             return null;
         }
     }
 
-    async saveBotSettings(botId, payload) {
-        if (!this.isEnabled() || !botId) return false;
+    async saveBotSettings(botId, payload = {}) {
+        const stableId = String(botId || '').trim();
+        if (!this.isEnabled() || !/^[1-9][0-9]{0,8}$/.test(stableId)) return false;
         try {
+            const existing = await this.fetchBotSettingsStrict(stableId); // null = NOT_FOUND; thrown error = READ_ERROR.
+            const clearCredentials = payload.clearCredentials === true || payload.clearPassword === true;
+            const clearProxyPassword = payload.clearCredentials === true || payload.clearProxyPassword === true;
+            const suppliedPassword = Object.prototype.hasOwnProperty.call(payload, 'password') ? String(payload.password ?? '') : '';
+            const incomingSettings = payload.settings && typeof payload.settings === 'object' ? { ...payload.settings } : null;
+            const incomingProxy = payload.proxy && typeof payload.proxy === 'object'
+                ? { ...payload.proxy }
+                : (incomingSettings?.proxy && typeof incomingSettings.proxy === 'object' ? { ...incomingSettings.proxy } : null);
+            const storedPassword = String(existing?.password || '');
+            let password = clearCredentials ? '' : storedPassword;
+            if (!clearCredentials && suppliedPassword.trim() !== '' && suppliedPassword !== '********') {
+                password = isStoredCredentialCiphertext(suppliedPassword) ? suppliedPassword : encryptUserPassword(suppliedPassword);
+                if (!password) throw new Error('Không tạo được ciphertext cho password bot.');
+            }
+            const existingProxy = existing?.proxy && typeof existing.proxy === 'object' && Object.keys(existing.proxy).length
+                ? existing.proxy
+                : (existing?.settings?.proxy && typeof existing.settings.proxy === 'object' ? existing.settings.proxy : {});
+            const proxy = incomingProxy ? { ...existingProxy, ...incomingProxy } : { ...existingProxy };
+            const incomingProxyPassword = incomingProxy ? String(incomingProxy.password ?? '') : '';
+            if (clearProxyPassword) proxy.password = '';
+            else if (!incomingProxy || incomingProxyPassword === '' || incomingProxyPassword === '********') {
+                proxy.password = String(existingProxy.password || '');
+            } else {
+                proxy.password = isStoredCredentialCiphertext(incomingProxyPassword)
+                    ? incomingProxyPassword
+                    : encryptUserPassword(incomingProxyPassword);
+                if (!proxy.password) throw new Error('Không tạo được ciphertext cho password Proxy.');
+            }
+            const settings = incomingSettings || (existing?.settings && typeof existing.settings === 'object' ? { ...existing.settings } : {});
+            if (settings.proxy && typeof settings.proxy === 'object') settings.proxy = { ...settings.proxy, password: proxy.password };
+            else if (incomingProxy) settings.proxy = { ...proxy };
             const row = {
-                bot_id: String(botId),
-                username: String(payload.username || ''),
-                password: String(payload.password || ''),
-                settings: payload.settings || {},
-                proxy: payload.proxy || payload.settings?.proxy || {},
-                schedules: payload.botSchedules || payload.schedules || [],
-                auto_chat: payload.autoChatSchedules || payload.auto_chat || [],
+                bot_id: stableId,
+                username: clearCredentials ? '' : (payload.username !== undefined && String(payload.username).trim() ? String(payload.username).trim() : (existing?.username || '')),
+                password,
+                settings,
+                proxy,
+                schedules: payload.botSchedules ?? payload.schedules ?? existing?.schedules ?? [],
+                auto_chat: payload.autoChatSchedules ?? payload.auto_chat ?? existing?.auto_chat ?? [],
+                synced_auth: payload.syncedAuth && typeof payload.syncedAuth === 'object'
+                    ? payload.syncedAuth
+                    : (existing?.synced_auth && typeof existing.synced_auth === 'object' ? existing.synced_auth : {}),
+                manually_stopped: payload.manuallyStopped ?? settings.manuallyStopped ?? existing?.manually_stopped ?? false,
                 updated_at: new Date().toISOString()
             };
-            const res = await fetch(`${this.url}/rest/v1/bot_settings`, {
+            const res = await fetch(this.url + '/rest/v1/bot_settings?on_conflict=bot_id', {
                 method: 'POST',
                 headers: this.getHeaders({ 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
                 body: JSON.stringify([row]),
-                signal: AbortSignal.timeout(8000)
+                signal: AbortSignal.timeout(10000)
             });
-            return res.ok;
-        } catch (_) {
+            if (!res.ok) throw new Error('HTTP ' + res.status + ': ' + await res.text().catch(() => ''));
+            const confirmed = await this.fetchBotSettingsStrict(stableId);
+            if (!confirmed || String(confirmed.bot_id) !== stableId || String(confirmed.password || '') !== password || String(confirmed.username || '') !== row.username ||
+                stableJson(confirmed.proxy || {}) !== stableJson(proxy) || stableJson(confirmed.settings || {}) !== stableJson(settings) ||
+                stableJson(confirmed.schedules || []) !== stableJson(row.schedules) || stableJson(confirmed.auto_chat || []) !== stableJson(row.auto_chat) ||
+                stableJson(confirmed.synced_auth || {}) !== stableJson(row.synced_auth) ||
+                Boolean(confirmed.manually_stopped) !== Boolean(row.manually_stopped)) {
+                throw new Error('Dữ liệu bot_settings sau khi lưu không khớp payload đã gửi.');
+            }
+            return true;
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi lưu bot_settings:', err.message);
             return false;
         }
+    }
+
+    async fetchBotLogs(botId, kind = 'event', { limit = 100, page = 1 } = {}) {
+        const stableId = String(botId || '').trim();
+        if (!this.isEnabled() || !/^[1-9][0-9]{0,8}$/.test(stableId)) return null;
+        const table = kind === 'chat' ? 'bot_chat_logs' : 'bot_event_logs';
+        const safeLimit = readPositiveInt(limit, 100, 1, 500);
+        const safePage = readPositiveInt(page, 1, 1, 1000000);
+        const offset = (safePage - 1) * safeLimit;
+        try {
+            const res = await fetch(this.url + '/rest/v1/' + table + '?bot_id=eq.' + encodeURIComponent(stableId) + '&select=*&order=created_at.desc&limit=' + safeLimit + '&offset=' + offset, {
+                headers: this.getHeaders({ Prefer: 'count=exact' }), signal: AbortSignal.timeout(8000)
+            });
+            if (!res.ok) throw new Error('HTTP ' + res.status + ': ' + await res.text().catch(() => ''));
+            const rows = await res.json();
+            const range = res.headers.get('content-range') || '';
+            const total = Number(range.split('/')[1]) || rows.length;
+            return { rows: Array.isArray(rows) ? rows : [], total, page: safePage, limit: safeLimit };
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi tải log bot:', err.message);
+            return null;
+        }
+    }
+
+    async fetchBotPositionLogs(botId, { limit = 20, page = 1 } = {}) {
+        const stableId = String(botId || '').trim();
+        if (!this.isEnabled() || !/^[1-9][0-9]{0,8}$/.test(stableId)) return null;
+        const safeLimit = readPositiveInt(limit, 20, 1, 100);
+        const safePage = readPositiveInt(page, 1, 1, 1000000);
+        const offset = (safePage - 1) * safeLimit;
+        try {
+            const res = await fetch(this.url + '/rest/v1/bot_position_logs?bot_id=eq.' + encodeURIComponent(stableId) + '&select=id,bot_id,changed_at,from_position,to_position,from_dimension,to_dimension,location_state,reason&order=changed_at.desc&limit=' + safeLimit + '&offset=' + offset, {
+                headers: this.getHeaders({ Prefer: 'count=exact' }), signal: AbortSignal.timeout(8000)
+            });
+            if (!res.ok) throw new Error('HTTP ' + res.status + ': ' + await res.text().catch(() => ''));
+            const rows = await res.json();
+            const range = res.headers.get('content-range') || '';
+            const total = Number(range.split('/')[1]) || rows.length;
+            return { rows: Array.isArray(rows) ? rows : [], total, page: safePage, limit: safeLimit };
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi tải lịch sử tọa độ:', err.message);
+            return null;
+        }
+    }
+
+    async setBotLogClearCutoff(botId, kind = 'event', createdBefore = null) {
+        const stableId = String(botId || '').trim();
+        const cutoffMs = Date.parse(createdBefore || '');
+        if (!this.isEnabled() || !/^[1-9][0-9]{0,8}$/.test(stableId) || !Number.isFinite(cutoffMs)) return { ok: false, error: 'BOT_ID hoặc cutoff không hợp lệ.' };
+        try {
+            const res = await fetch(`${this.url}/rest/v1/rpc/set_bot_log_clear_cutoff`, {
+                method: 'POST', headers: this.getHeaders(),
+                body: JSON.stringify({ p_bot_id: stableId, p_kind: kind === 'chat' ? 'chat' : 'event', p_cutoff: new Date(cutoffMs).toISOString() }),
+                signal: AbortSignal.timeout(8000)
+            });
+            if (!res.ok) throw new Error('HTTP ' + res.status + ': ' + await res.text().catch(() => ''));
+            const result = await res.json().catch(() => null);
+            const data = Array.isArray(result) ? result[0] : result;
+            if (data?.ok !== true) throw new Error(data?.error || 'Cutoff log chưa được xác nhận trên Cloud.');
+            return { ok: true, cutoff: data.cutoff || new Date(cutoffMs).toISOString() };
+        } catch (err) {
+            return { ok: false, error: 'Không lưu được cutoff log bền vững (cần chạy migration mới): ' + err.message };
+        }
+    }
+
+    async clearBotLogs(botId, kind = 'event', createdBefore = null) {
+        const stableId = String(botId || '').trim();
+        if (!this.isEnabled() || !/^[1-9][0-9]{0,8}$/.test(stableId)) return { ok: false, error: 'BOT_ID không hợp lệ hoặc Supabase chưa cấu hình.' };
+        const table = kind === 'chat' ? 'bot_chat_logs' : 'bot_event_logs';
+        const cutoff = createdBefore ? Date.parse(createdBefore) : NaN;
+        try {
+            if (!Number.isFinite(cutoff)) return { ok: false, error: 'Thiếu cutoff hợp lệ; từ chối xóa log để tránh xóa log mới.' };
+            const tombstone = await this.setBotLogClearCutoff(stableId, kind, new Date(cutoff).toISOString());
+            if (!tombstone.ok) return tombstone;
+            const effectiveCutoff = new Date(Date.parse(tombstone.cutoff || cutoff)).toISOString();
+            const cutoffQuery = '&created_at=lt.' + encodeURIComponent(effectiveCutoff);
+            const res = await fetch(this.url + '/rest/v1/' + table + '?bot_id=eq.' + encodeURIComponent(stableId) + cutoffQuery, {
+                method: 'DELETE', headers: this.getHeaders({ Prefer: 'count=exact,return=minimal' }), signal: AbortSignal.timeout(10000)
+            });
+            if (!res.ok) throw new Error('HTTP ' + res.status + ': ' + await res.text().catch(() => ''));
+            const range = res.headers.get('content-range') || '';
+            return { ok: true, deleted: Number(range.split('/')[1]) || 0, cutoff: effectiveCutoff };
+        } catch (err) {
+            return { ok: false, error: err.message };
+        }
+    }
+
+    async recordBotPositionChange({ botId, position, dimension, locationState, reason = 'MOVE', eventKey, id, changedAt }) {
+        const stableId = String(botId || '').trim();
+        if (!this.isEnabled() || !/^[1-9][0-9]{0,8}$/.test(stableId)) return { ok: false, error: 'BOT_ID không hợp lệ hoặc Supabase chưa cấu hình.' };
+        const key = String(eventKey || crypto.randomUUID());
+        const body = { p_id: id || crypto.randomUUID(), p_bot_id: stableId, p_changed_at: changedAt || new Date().toISOString(), p_to_position: position, p_to_dimension: dimension, p_location_state: locationState || 'Unknown', p_reason: reason, p_event_key: key, p_min_distance: 5.0 };
+        for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+                const res = await fetch(this.url + '/rest/v1/rpc/record_bot_position_change', {
+                    method: 'POST', headers: this.getHeaders(), body: JSON.stringify(body), signal: AbortSignal.timeout(8000)
+                });
+                if (!res.ok) {
+                    const errText = await res.text().catch(() => '');
+                    if (res.status === 404 || /function.*does not exist|rpc.*not found/i.test(errText)) {
+                        return { ok: false, error: 'RPC record_bot_position_change chưa được tạo trong schema Supabase; vị trí bot không được lưu.', missingRpc: true };
+                    }
+                    throw new Error('HTTP ' + res.status + ': ' + errText);
+                }
+                const result = await res.json().catch(() => ({}));
+                return { ok: true, result };
+            } catch (err) {
+                if (attempt === 1) return { ok: false, error: err.message };
+            }
+        }
+        return { ok: false, error: 'Không thể ghi lịch sử tọa độ.' };
     }
 
     async deleteBotSettings(botId) {
@@ -910,12 +1685,68 @@ class SupabaseAdapter {
         }
     }
 
+    async replaceBotSettingsSnapshot(settingsByBot, { allowEmpty = false } = {}) {
+        if (!this.isEnabled() || !settingsByBot || typeof settingsByBot !== 'object' || Array.isArray(settingsByBot) || (!allowEmpty && Object.keys(settingsByBot).length === 0)) return false;
+        const current = await this.fetchAllBotSettings();
+        if (!Array.isArray(current)) return false;
+        const ids = Object.keys(settingsByBot);
+        for (const id of ids) {
+            const row = settingsByBot[id];
+            if (!/^[1-9][0-9]{0,8}$/.test(id) || !row || (row.bot_id && String(row.bot_id) !== id) ||
+                !(await this.restoreBotSettingsRow({ ...row, bot_id: id }))) return false;
+        }
+        const keep = new Set(ids);
+        for (const row of current) {
+            const id = String(row?.bot_id || '');
+            if (id && !keep.has(id) && !(await this.deleteBotSettings(id))) return false;
+        }
+        return true;
+    }
+
+    async restoreBotSettingsRow(row) {
+        if (!this.isEnabled() || !row?.bot_id) return false;
+        try {
+            const restoredRow = {
+                bot_id: String(row.bot_id),
+                username: String(row.username || ''),
+                password: String(row.password || ''),
+                settings: row.settings && typeof row.settings === 'object' ? row.settings : {},
+                proxy: row.proxy && typeof row.proxy === 'object' ? row.proxy : {},
+                schedules: Array.isArray(row.schedules) ? row.schedules : [],
+                auto_chat: Array.isArray(row.auto_chat) ? row.auto_chat : [],
+                manually_stopped: row.manually_stopped === true,
+                synced_auth: row.synced_auth && typeof row.synced_auth === 'object' ? row.synced_auth : {},
+                updated_at: row.updated_at || new Date().toISOString()
+            };
+            const res = await fetch(`${this.url}/rest/v1/bot_settings?on_conflict=bot_id`, {
+                method: 'POST',
+                headers: this.getHeaders({ 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
+                body: JSON.stringify([restoredRow]),
+                signal: AbortSignal.timeout(8000)
+            });
+            if (!res.ok) return false;
+            const confirmed = await this.fetchBotSettingsStrict(restoredRow.bot_id);
+            return !!confirmed &&
+                String(confirmed.password || '') === restoredRow.password &&
+                String(confirmed.username || '') === restoredRow.username &&
+                stableJson(confirmed.settings || {}) === stableJson(restoredRow.settings) &&
+                stableJson(confirmed.proxy || {}) === stableJson(restoredRow.proxy) &&
+                stableJson(confirmed.schedules || []) === stableJson(restoredRow.schedules) &&
+                stableJson(confirmed.auto_chat || []) === stableJson(restoredRow.auto_chat) &&
+                Boolean(confirmed.manually_stopped) === restoredRow.manually_stopped;
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi khôi phục bot_settings:', err.message);
+            return false;
+        }
+    }
+
     // --- AUDIT LOGS ---
     async insertAuditLog(entry) {
         if (!this.isEnabled()) return false;
         try {
             const row = {
                 id: String(entry.id),
+                bot_id: entry.botId ?? entry.target?.botId ?? entry.target?.bot_id ?? null,
                 log_type: String(entry.logType || 'SYSTEM'),
                 category: String(entry.category || 'SYSTEM'),
                 action: String(entry.action || 'UNKNOWN'),
@@ -930,7 +1761,7 @@ class SupabaseAdapter {
             };
             const res = await fetch(`${this.url}/rest/v1/audit_logs`, {
                 method: 'POST',
-                headers: this.getHeaders({ 'Prefer': 'return=minimal' }),
+                headers: this.getHeaders({ 'Prefer': 'resolution=ignore-duplicates,return=minimal' }),
                 body: JSON.stringify([row]),
                 signal: AbortSignal.timeout(5000)
             });
@@ -943,22 +1774,29 @@ class SupabaseAdapter {
     async syncAuditLogs(entries) {
         if (!this.isEnabled() || !Array.isArray(entries)) return false;
         try {
-            const rows = entries
-                .filter(entry => entry && entry.id)
-                .map(entry => ({
-                    id: String(entry.id),
-                    log_type: String(entry.logType || 'SYSTEM'),
-                    category: String(entry.category || 'SYSTEM'),
-                    action: String(entry.action || 'UNKNOWN'),
-                    action_label: String(entry.actionLabel || entry.action || ''),
-                    actor_username: String(entry.actor?.username || 'system'),
-                    actor_role: String(entry.actor?.role || 'system'),
-                    actor_ip: String(entry.actor?.ip || '127.0.0.1'),
-                    target: entry.target || {},
-                    details: String(entry.details || ''),
-                    status: String(entry.status || 'SUCCESS'),
-                    timestamp: entry.timestamp || new Date().toISOString()
-                }));
+            const uniqueMap = new Map();
+            for (const entry of entries) {
+                if (!entry || !entry.id) continue;
+                const id = String(entry.id);
+                if (!uniqueMap.has(id)) {
+                    uniqueMap.set(id, {
+                        id,
+                        bot_id: entry.botId ?? entry.target?.botId ?? entry.target?.bot_id ?? null,
+                        log_type: String(entry.logType || 'SYSTEM'),
+                        category: String(entry.category || 'SYSTEM'),
+                        action: String(entry.action || 'UNKNOWN'),
+                        action_label: String(entry.actionLabel || entry.action || ''),
+                        actor_username: String(entry.actor?.username || 'system'),
+                        actor_role: String(entry.actor?.role || 'system'),
+                        actor_ip: String(entry.actor?.ip || '127.0.0.1'),
+                        target: entry.target || {},
+                        details: String(entry.details || ''),
+                        status: String(entry.status || 'SUCCESS'),
+                        timestamp: entry.timestamp || new Date().toISOString()
+                    });
+                }
+            }
+            const rows = Array.from(uniqueMap.values());
             for (let offset = 0; offset < rows.length; offset += 200) {
                 const res = await fetch(`${this.url}/rest/v1/audit_logs`, {
                     method: 'POST',
@@ -975,7 +1813,7 @@ class SupabaseAdapter {
         }
     }
 
-    async fetchAuditLogs({ logType = '', category = '', status = '', q = '', limit = 50, page = 1 } = {}) {
+    async fetchAuditLogs({ logType = '', category = '', status = '', q = '', actor = '', botId = '', limit = 50, page = 1 } = {}) {
         if (!this.isEnabled()) return null;
         try {
             const offset = (page - 1) * limit;
@@ -983,6 +1821,8 @@ class SupabaseAdapter {
             if (logType) query += `&log_type=eq.${encodeURIComponent(logType)}`;
             if (category) query += `&category=eq.${encodeURIComponent(category)}`;
             if (status) query += `&status=eq.${encodeURIComponent(status)}`;
+            if (actor) query += `&actor_username=ilike.*${encodeURIComponent(actor)}*`;
+            if (botId) query += `&bot_id=eq.${encodeURIComponent(botId)}`;
             if (q) query += `&or=(action.ilike.*${encodeURIComponent(q)}*,details.ilike.*${encodeURIComponent(q)}*,actor_username.ilike.*${encodeURIComponent(q)}*)`;
 
             const res = await fetch(`${this.url}/rest/v1/audit_logs?${query}`, {
@@ -1001,6 +1841,7 @@ class SupabaseAdapter {
             const data = await res.json();
             const logs = data.map(r => ({
                 id: r.id,
+                botId: r.bot_id || null,
                 logType: r.log_type,
                 timestamp: r.timestamp,
                 actor: {
@@ -1038,6 +1879,69 @@ class SupabaseAdapter {
             return false;
         }
     }
+
+    async fetchBackups() {
+        if (!this.isEnabled()) return null;
+        try {
+            const res = await fetch(`${this.url}/rest/v1/manager_backups?select=name,created_at,size_bytes&order=created_at.desc&limit=1000`, {
+                headers: this.getHeaders(), signal: AbortSignal.timeout(8000)
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return (await res.json()).map(row => ({ filename: row.name, createdAt: row.created_at, sizeBytes: row.size_bytes, mtimeMs: Date.parse(row.created_at) || 0 }));
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi tải danh sách backup:', err.message);
+            return null;
+        }
+    }
+
+    async fetchBackupPayload(filename) {
+        if (!this.isEnabled() || !/^backup-[A-Za-z0-9._-]+\.json$/.test(String(filename || ''))) throw new Error('Tên bản sao lưu không hợp lệ hoặc Supabase chưa cấu hình.');
+        const res = await fetch(`${this.url}/rest/v1/manager_backups?name=eq.${encodeURIComponent(filename)}&select=payload`, {
+            headers: this.getHeaders(), signal: AbortSignal.timeout(8000)
+        });
+        if (!res.ok) throw new Error('Không đọc được backup từ Supabase (HTTP ' + res.status + ').');
+        const rows = await res.json();
+        if (!Array.isArray(rows)) throw new Error('Supabase trả payload backup không hợp lệ.');
+        return rows[0]?.payload || null;
+    }
+
+    async saveBackup(name, payload) {
+        if (!this.isEnabled() || !name || !payload) return false;
+        try {
+            const safePayload = sanitizeBackupPayload(payload);
+            const serialized = JSON.stringify(safePayload);
+            const res = await fetch(`${this.url}/rest/v1/manager_backups?on_conflict=name`, {
+                method: 'POST', headers: this.getHeaders({ Prefer: 'resolution=merge-duplicates,return=minimal' }),
+                body: JSON.stringify([{ name, bot_id: null, created_at: safePayload.createdAt || new Date().toISOString(), size_bytes: Buffer.byteLength(serialized), payload: safePayload }]),
+                signal: AbortSignal.timeout(15000)
+            });
+            return res.ok;
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi lưu backup:', err.message);
+            return false;
+        }
+    }
+
+    async deleteBackup(name) {
+        if (!this.isEnabled() || !name) return false;
+        try {
+            const res = await fetch(`${this.url}/rest/v1/manager_backups?name=eq.${encodeURIComponent(name)}`, {
+                method: 'DELETE', headers: this.getHeaders(), signal: AbortSignal.timeout(8000)
+            });
+            return res.ok;
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi xóa backup:', err.message);
+            return false;
+        }
+    }
+
+    async pruneBackups(maxKeep = 30) {
+        const backups = await this.fetchBackups();
+        if (!backups) return false;
+        const extras = backups.slice(Math.max(1, Number(maxKeep) || 30));
+        const results = await Promise.all(extras.map(backup => this.deleteBackup(backup.filename)));
+        return results.every(Boolean);
+    }
 }
 
 const SUPABASE_CONFIG = {
@@ -1045,6 +1949,9 @@ const SUPABASE_CONFIG = {
     key: String(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || '').trim()
 };
 const supabaseAdapter = new SupabaseAdapter(SUPABASE_CONFIG);
+let supabaseStorageReady = false;
+let registryNeedsSave = false;
+const supabaseSyncLocks = { upload: false, syncDown: false };
 
 const KEYS_CANDIDATES = [
     path.join(DATA_DIR, 'manager_keys.json'),
@@ -1052,67 +1959,97 @@ const KEYS_CANDIDATES = [
     path.join(process.cwd(), 'manager_keys.json')
 ].filter((val, idx, arr) => val && arr.indexOf(val) === idx);
 
+let cachedKeys = [];
+
+function setKeysCache(keysList) {
+    cachedKeys = Array.isArray(keysList) ? keysList.map(key => ({ ...key })) : [];
+    return cachedKeys;
+}
+
 function resolveKeysFile() {
-    let bestFile = null;
-    let maxCount = -1;
-    for (const f of KEYS_CANDIDATES) {
-        if (fs.existsSync(f)) {
-            try {
-                const data = JSON.parse(fs.readFileSync(f, 'utf8'));
-                if (Array.isArray(data) && data.length > maxCount) {
-                    maxCount = data.length;
-                    bestFile = f;
-                }
-            } catch (_) {}
-        }
-    }
-    return bestFile || KEYS_FILE;
+    return KEYS_FILE;
 }
 
 function loadKeysFile() {
-    const file = resolveKeysFile();
-    try {
-        if (!fs.existsSync(file)) {
-            const initial = [];
-            fs.writeFileSync(KEYS_FILE, JSON.stringify(initial, null, 2), 'utf8');
-            return initial;
-        }
-        return JSON.parse(fs.readFileSync(file, 'utf8'));
-    } catch (e) {
-        console.error('[KEYS] Lỗi đọc manager_keys.json:', e.message);
-        return [];
-    }
+    return cachedKeys.map(key => JSON.parse(JSON.stringify(key)));
 }
 
-function saveKeysFile(keysList) {
-    try {
-        const content = JSON.stringify(keysList, null, 2);
-        const tmp = `${KEYS_FILE}.tmp-${process.pid}-${Date.now()}`;
-        fs.writeFileSync(tmp, content, 'utf8');
-        try {
-            fs.renameSync(tmp, KEYS_FILE);
-        } catch (renameErr) {
-            fs.copyFileSync(tmp, KEYS_FILE);
-            try { fs.unlinkSync(tmp); } catch (_) {}
-        }
-        for (const candidate of KEYS_CANDIDATES) {
-            if (candidate && candidate !== KEYS_FILE) {
-                try { fs.writeFileSync(candidate, content, 'utf8'); } catch (_) {}
-            }
-        }
-        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
-            void supabaseAdapter.syncAllKeys(keysList);
-        }
+// Nạp lại kêny từ Cloud trước khi tiêu thụ để không dựa vào cache có thể cũ
+// (instance Manager khác, admin vừa xóa/thêm key, người khác vừa tiêu thụ).
+// Trả về null khi Cloud chưa sẵn sàng hoặc không đọc được — caller phải fail-closed.
+async function loadKeysFresh() {
+    if (!supabaseAdapter?.isEnabled?.()) return loadKeysFile();
+    if (!supabaseStorageReady) return null;
+    const fresh = await supabaseAdapter.fetchKeys();
+    if (!Array.isArray(fresh)) return null;
+    setKeysCache(fresh);
+    return fresh.map(key => JSON.parse(JSON.stringify(key)));
+}
+
+async function saveKeysFile(keysList) {
+    if (!Array.isArray(keysList)) return false;
+    if (!supabaseAdapter?.isEnabled?.()) {
+        setKeysCache(keysList);
         return true;
-    } catch (e) {
-        console.error('[KEYS] Lỗi lưu manager_keys.json:', e.message);
-        return false;
     }
+    if (!supabaseStorageReady) return false;
+    const current = await supabaseAdapter.fetchKeys();
+    if (!Array.isArray(current)) return false;
+    if (keysList.length === 0 && current.length > 0) return false;
+    const currentById = new Map(current.map(key => [String(key.id || '').toLowerCase(), key]));
+    const currentByCode = new Map(current.map(key => [normalizeKeyCode(key), key]).filter(([code]) => !!code));
+    const newKeys = [];
+    const existingKeys = [];
+    const metadataSignature = key => stableRegistryJson({
+        days: Number(key.days || 1), planName: String(key.planName || 'Gói mặc định'),
+        botIds: Array.isArray(key.botIds) ? key.botIds : [],
+        botCount: Number(key.botCount !== undefined ? key.botCount : (Array.isArray(key.botIds) && key.botIds.length ? key.botIds.length : 1)),
+        maxUses: normalizeMaxUses(key.maxUses), expiresAt: key.expiresAt || null, note: key.note || null
+    });
+    for (const key of keysList) {
+        const id = String(key.id || ('key_' + (key.key || key.code || ''))).toLowerCase();
+        const code = normalizeKeyCode(key);
+        const match = currentById.get(id) || currentByCode.get(code);
+        if (match && metadataSignature(key) !== metadataSignature(match)) existingKeys.push({ ...key, id: match.id });
+        else if (match) continue;
+        else newKeys.push(key);
+    }
+    // This helper updates metadata of existing records and inserts new ones only.
+    // It intentionally never deletes omitted rows or writes usage counters.
+    if (newKeys.length && !(await supabaseAdapter.insertKeys(newKeys))) return false;
+    if (existingKeys.length && !(await supabaseAdapter.updateKeysMetadata(existingKeys))) return false;
+    setKeysCache(keysList);
+    return true;
 }
 
 // ----------------------------------------------------------------------------
 // ENTERPRISE GIFTCODE & LICENSE KEY ENGINE: VALIDATION & CONSUMPTION
 // ----------------------------------------------------------------------------
+// Chuẩn hóa giới hạn số lượt dùng. Quy ước: 0 = KHÔNG GIỚI HẠN (unlimited),
+// n>0 = số lượt tối đa, thiếu/giá trị không đọc được = 1 (khóa cá nhân).
+// KHÔNG dùng `Number(x) || 1` vì JavaScript coi 0 là falsy sẽ phá vỡ unlimited.
+function normalizeMaxUses(value, fallback = 1) {
+    if (value === null || value === undefined || String(value).trim() === '') return fallback;
+    const raw = Number(value);
+    if (!Number.isSafeInteger(raw) || raw < 0) return null;
+    return raw;
+}
+// Dòng key legacy/hỏng có thể thiếu `key` hoặc `code`. Chuẩn hóa an toàn để
+// một bản ghi lỗi không làm sập toàn bộ đăng ký / đăng nhập / tạo key.
+function normalizeKeyCode(record) {
+    const raw = record && typeof record === 'object'
+        ? (record.key !== undefined && record.key !== null ? record.key : record.code)
+        : record;
+    return String(raw === undefined || raw === null ? '' : raw).trim().toUpperCase();
+}
+// Không ghi nguyên văn giftcode vào audit/ghi chú. Chỉ giữ 4 ký tự đầu/cuối
+// để admin đối chiếu khi cần mà không biến log thành nơi lộ key.
+function maskLicenseKey(value) {
+    const code = String(value || '').trim();
+    if (!code) return '';
+    if (code.length <= 8) return code.slice(0, 2) + '****';
+    return code.slice(0, 4) + '****' + code.slice(-4);
+}
 function checkKeyValidity(keyObj, username) {
     if (!keyObj || typeof keyObj !== 'object') {
         return { ok: false, error: 'Mã Key / Giftcode không tồn tại trên hệ thống.' };
@@ -1149,7 +2086,8 @@ function checkKeyValidity(keyObj, username) {
     }
 
     // 5. Kiểm tra giới hạn tổng số lượt sử dụng toàn hệ thống (Max Uses)
-    const maxUses = Number(keyObj.maxUses) || (keyObj.used !== undefined ? 1 : 1);
+    const maxUses = normalizeMaxUses(keyObj.maxUses);
+    if (maxUses === null) return { ok: false, error: 'Giới hạn số lượt dùng của mã Key không hợp lệ.' };
     const usedCount = Number(keyObj.usedCount) || (keyObj.used ? 1 : usedUsers.length);
     if (maxUses > 0 && usedCount >= maxUses) {
         return { ok: false, error: `Mã Key / Giftcode này đã hết lượt sử dụng trên hệ thống (Đã dùng ${usedCount}/${maxUses} lượt)!` };
@@ -1158,870 +2096,522 @@ function checkKeyValidity(keyObj, username) {
     return { ok: true, maxUses, usedCount, usedUsers };
 }
 
-function consumeKeyForUser(keyObj, username) {
-    const u = String(username || '').trim().toLowerCase();
-    keyObj.usedUsers = Array.isArray(keyObj.usedUsers)
-        ? keyObj.usedUsers.map(x => String(x).toLowerCase())
-        : (keyObj.usedBy ? keyObj.usedBy.split(',').map(x => x.trim().toLowerCase()).filter(Boolean) : []);
-
-    if (u && !keyObj.usedUsers.includes(u)) {
-        keyObj.usedUsers.push(u);
-    }
-    keyObj.usedCount = (Number(keyObj.usedCount) || 0) + 1;
-    const maxUses = Number(keyObj.maxUses) || 1;
-    keyObj.used = maxUses > 0 && keyObj.usedCount >= maxUses;
-    keyObj.usedBy = keyObj.usedUsers.join(', ');
-    keyObj.usedAt = new Date().toISOString();
-}
-
-// ----------------------------------------------------------------------------
-// ENTERPRISE SECURITY: MASTER KEY & BOT SECRET CONFIGURATION
-// ----------------------------------------------------------------------------
-let fileMasterKey = '';
-try {
-    if (fs.existsSync(MASTER_KEY_FILE)) {
-        fileMasterKey = fs.readFileSync(MASTER_KEY_FILE, 'utf8').trim();
-    }
-    if (!fileMasterKey) {
-        fileMasterKey = crypto.randomBytes(32).toString('hex');
-        fs.writeFileSync(MASTER_KEY_FILE, fileMasterKey, { encoding: 'utf8', mode: 0o600 });
-    }
-} catch (e) {
-    console.error('[SECURITY] Lỗi đọc/ghi MASTER_KEY_FILE:', e.message);
-}
-
-let botSecretKeySource = String(process.env.BOT_SECRET_KEY || MANAGER_CONFIG.BOT_SECRET_KEY || '').trim();
-const botSecretKeyFile = path.join(DATA_DIR, '.bot_secret_key');
-if (!botSecretKeySource) {
-    try {
-        if (fs.existsSync(botSecretKeyFile)) {
-            botSecretKeySource = fs.readFileSync(botSecretKeyFile, 'utf8').trim();
-        }
-    } catch (_) {}
-}
-if (!botSecretKeySource) {
-    botSecretKeySource = crypto.randomBytes(32).toString('hex');
-    try {
-        fs.writeFileSync(botSecretKeyFile, botSecretKeySource, { encoding: 'utf8', mode: 0o600 });
-        console.log(`[SECURITY] 🔑 Đã tự động tạo BOT_SECRET_KEY ngẫu nhiên an toàn và lưu vào ${botSecretKeyFile}`);
-    } catch (e) {
-        console.warn(`[SECURITY] Không thể lưu .bot_secret_key: ${e.message}`);
-    }
-}
-const BOT_SECRET_KEY = botSecretKeySource;
-
-function timingSafeStringEquals(left, right) {
-    if (typeof left !== 'string' || typeof right !== 'string') return false;
-    const leftBuffer = Buffer.from(left);
-    const rightBuffer = Buffer.from(right);
-    return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
-}
-
-function isBotSecretRequest(req) {
-    if (!BOT_SECRET_KEY) return false;
-    const incoming = String(req.headers['x-bot-secret'] || '');
-    return timingSafeStringEquals(incoming, BOT_SECRET_KEY);
-}
-
-const activeMasterSecretSource = String(
-    process.env.MANAGER_MASTER_KEY ||
-    process.env.BOT_CREDENTIALS_ENCRYPTION_KEY ||
-    process.env.BOT_SECRET_KEY ||
-    MANAGER_CONFIG.MASTER_KEY ||
-    fileMasterKey || ''
-);
-const SYSTEM_MASTER_SECRET = crypto.createHash('sha256')
-    .update(activeMasterSecretSource || crypto.randomBytes(32))
-    .digest();
-
-// Danh sách khóa giải mã dự phòng tương thích ngược (để decrypt dữ liệu cũ khi đổi key)
-const FALLBACK_SECRETS = [
-    SYSTEM_MASTER_SECRET,
-    fileMasterKey ? crypto.createHash('sha256').update(fileMasterKey).digest() : null
-].filter(Boolean);
-
-function hashAdminPassword(plain) {
-    if (!plain) return '';
-    if (plain.startsWith('scrypt$')) return plain;
-    const salt = crypto.randomBytes(16).toString('hex');
-    const derivedKey = crypto.scryptSync(plain, salt, 64, { N: 16384, r: 8, p: 1 });
-    return `scrypt$N=16384,r=8,p=1$${salt}$${derivedKey.toString('hex')}`;
-}
-
-function verifyAdminPassword(supplied, stored) {
-    if (!supplied || !stored) return false;
-    if (!stored.startsWith('scrypt$')) {
-        const bufA = Buffer.from(supplied);
-        const bufB = Buffer.from(stored);
-        if (bufA.length !== bufB.length) return false;
-        return crypto.timingSafeEqual(bufA, bufB);
-    }
-    const parts = stored.split('$');
-    let salt = '';
-    let originalHash = '';
-    if (parts.length === 4) {
-        salt = parts[2];
-        originalHash = parts[3];
-    } else if (parts.length === 6) {
-        salt = parts[4];
-        originalHash = parts[5];
-    } else {
-        return false;
-    }
-    try {
-        const derivedKey = crypto.scryptSync(supplied, salt, 64, { N: 16384, r: 8, p: 1 });
-        const originalBuffer = Buffer.from(originalHash, 'hex');
-        if (originalBuffer.length !== derivedKey.length) return false;
-        return crypto.timingSafeEqual(originalBuffer, derivedKey);
-    } catch (_) {
-        return false;
-    }
-}
-
-function encryptUserPassword(plain) {
-    if (!plain) return '';
-    return String(plain);
-}
-
-function decryptUserPassword(stored) {
-    if (!stored) return '';
-    if (!stored.startsWith('aes256$gcm$')) return stored;
-    const parts = stored.split('$');
-    if (parts.length !== 5) return stored;
-    try {
-        const [, , ivHex, tagHex, encryptedHex] = parts;
-        const iv = Buffer.from(ivHex, 'hex');
-        const tag = Buffer.from(tagHex, 'hex');
-        for (const secretKey of FALLBACK_SECRETS) {
-            try {
-                const decipher = crypto.createDecipheriv('aes-256-gcm', secretKey, iv);
-                decipher.setAuthTag(tag);
-                let decrypted = decipher.update(encryptedHex, 'hex', 'utf8');
-                decrypted += decipher.final('utf8');
-                if (decrypted) return decrypted;
-            } catch (_) {}
-        }
-    } catch (_) {}
-    return stored;
-}
-
-function verifyUserPassword(supplied, stored) {
-    if (!supplied || !stored) return false;
-    const plainStored = decryptUserPassword(stored);
-    const bufA = Buffer.from(supplied);
-    const bufB = Buffer.from(plainStored);
-    if (bufA.length !== bufB.length) return false;
-    return crypto.timingSafeEqual(bufA, bufB);
-}
-
-// ----------------------------------------------------------------------------
-// ENTERPRISE BRUTE-FORCE RATE LIMITER
-// ----------------------------------------------------------------------------
-class MemoryRateLimiter {
-    constructor({ maxFailures = 5, ipMaxFailures = 15, windowMs = 15 * 60 * 1000, maxEntries = 5000, message = 'Quá nhiều lần thử thất bại. Vui lòng thử lại sau.' } = {}) {
-        this.maxFailures = maxFailures;
-        this.ipMaxFailures = ipMaxFailures;
-        this.windowMs = windowMs;
-        this.maxEntries = maxEntries;
-        this.message = message;
-        this.attempts = new Map();
-        this._lastCleanup = Date.now();
-    }
-
-    _clean() {
-        const now = Date.now();
-        if (now - this._lastCleanup > 60000 || this.attempts.size > this.maxEntries) {
-            this._lastCleanup = now;
-            for (const [key, val] of this.attempts.entries()) {
-                if (now - val.lastAttempt > this.windowMs && (!val.lockedUntil || now > val.lockedUntil)) {
-                    this.attempts.delete(key);
-                }
-            }
-            if (this.attempts.size > this.maxEntries) {
-                for (const [key, val] of this.attempts.entries()) {
-                    if (this.attempts.size <= this.maxEntries) break;
-                    if (!val.lockedUntil || now >= val.lockedUntil) {
-                        this.attempts.delete(key);
-                    }
-                }
-            }
-        }
-    }
-
-    _getKeys(ip, identifier = '') {
-        const normIp = String(ip || 'unknown').trim().toLowerCase() || 'unknown';
-        const normId = String(identifier || '').trim().toLowerCase();
-        const keys = [{ key: `ip:${normIp}`, max: this.ipMaxFailures, isIp: true }];
-        if (normId) {
-            keys.push({ key: `combo:${normIp}:${normId}`, max: this.maxFailures, isIp: false });
-            keys.push({ key: `user:${normId}`, max: this.maxFailures, isIp: false });
-        }
-        return keys;
-    }
-
-    check(ip, identifier = '') {
-        this._clean();
-        const now = Date.now();
-        let lockedUntil = 0;
-        for (const { key } of this._getKeys(ip, identifier)) {
-            const record = this.attempts.get(key);
-            if (record?.lockedUntil && now < record.lockedUntil) {
-                lockedUntil = Math.max(lockedUntil, record.lockedUntil);
-            }
-        }
-        if (lockedUntil) {
-            const remainingSec = Math.ceil((lockedUntil - now) / 1000);
-            const remainingMin = Math.ceil(remainingSec / 60);
-            return {
-                allowed: false,
-                error: `${this.message} (Chờ ${remainingMin} phút / ${remainingSec}s)`
-            };
-        }
-        return { allowed: true };
-    }
-
-    record(ip, identifier = '', success = false) {
-        this._clean();
-        const now = Date.now();
-        const keys = this._getKeys(ip, identifier);
-        for (const { key, max, isIp } of keys) {
-            if (success) {
-                if (!isIp) {
-                    this.attempts.delete(key);
-                }
-                continue;
-            }
-            const record = this.attempts.get(key) || { count: 0, lockedUntil: 0, lastAttempt: now };
-            record.count += 1;
-            record.lastAttempt = now;
-            if (record.count >= max) {
-                record.lockedUntil = now + this.windowMs;
-            }
-            this.attempts.set(key, record);
-        }
-    }
-}
-
-const loginLimiter = new MemoryRateLimiter({
-    maxFailures: 5,
-    ipMaxFailures: 15,
-    windowMs: 15 * 60 * 1000,
-    message: 'Cổng đăng nhập tạm khóa do nhập sai quá nhiều lần.'
-});
-
-const renewLimiter = new MemoryRateLimiter({
-    maxFailures: 5,
-    ipMaxFailures: 15,
-    windowMs: 15 * 60 * 1000,
-    message: 'Đã nhập sai mã Key quá nhiều lần.'
-});
-
-const changePassLimiter = new MemoryRateLimiter({
-    maxFailures: 5,
-    ipMaxFailures: 15,
-    windowMs: 15 * 60 * 1000,
-    message: 'Nhập sai mật khẩu hiện tại quá nhiều lần.'
-});
-
-const adminCredsLimiter = new MemoryRateLimiter({
-    maxFailures: 5,
-    ipMaxFailures: 15,
-    windowMs: 15 * 60 * 1000,
-    message: 'Sai mật khẩu xác thực cấp 2 quá nhiều lần.'
-});
-
-const verifyBotLimiter = new MemoryRateLimiter({
-    maxFailures: 10,
-    ipMaxFailures: 30,
-    windowMs: 5 * 60 * 1000,
-    message: 'Quá nhiều yêu cầu xác thực bot không hợp lệ.'
-});
-
-const registerLimiter = new MemoryRateLimiter({
-    maxFailures: 5,
-    ipMaxFailures: 5,
-    windowMs: 15 * 60 * 1000,
-    message: 'Bạn đã đăng ký quá nhiều tài khoản từ IP này. Vui lòng thử lại sau 15 phút.'
-});
-
-function checkRegisterRateLimit(ip, username = '') {
-    return registerLimiter.check(ip, username);
-}
-
-function recordRegisterAttempt(ip, username = '', success = false) {
-    return registerLimiter.record(ip, username, success);
-}
-
-const RESTRICTED_MINECRAFT_ACCOUNT_COMMANDS = new Set([
-    '/register',
-    '/reg',
-    '/changepassword',
-    '/changepass',
-    '/cp',
-    '/unregister',
-    '/unreg',
-    '/authme',
-    '/user'
-]);
-
-function getClientIp(req) {
-    return req.ip || req.socket?.remoteAddress || '127.0.0.1';
-}
-
-function checkLoginRateLimit(ip, username = '') {
-    return loginLimiter.check(ip, username);
-}
-
-function recordLoginAttempt(ip, username = '', success = false) {
-    return loginLimiter.record(ip, username, success);
-}
-
-function checkRenewRateLimit(req, username = '') {
-    return renewLimiter.check(getClientIp(req), username);
-}
-
-function recordRenewAttempt(req, username = '', success = false) {
-    return renewLimiter.record(getClientIp(req), username, success);
-}
-
-function isRestrictedMinecraftAccountCommand(value) {
-    const command = String(value || '').trim().toLowerCase().split(/\s+/, 1)[0];
-    return RESTRICTED_MINECRAFT_ACCOUNT_COMMANDS.has(command);
-}
-
-function hasRestrictedMinecraftAccountCommand(schedules) {
-    return Array.isArray(schedules) && schedules.some(schedule =>
-        Array.isArray(schedule?.messages) && schedule.messages.some(isRestrictedMinecraftAccountCommand)
-    );
-}
-
-function parseSafeIsoDate(val) {
-    if (val === undefined || val === null || String(val).trim() === '') {
-        return { valid: true, value: null };
-    }
-    const parsed = Date.parse(val);
-    if (Number.isNaN(parsed)) {
-        return { valid: false, error: 'Định dạng ngày hết hạn không hợp lệ.' };
-    }
-    return { valid: true, value: new Date(parsed).toISOString() };
-}
-
-function assignBotsExclusively(allUsers, targetUserIdOrUsername, botIdsToAssign) {
-    const cleanBotIds = (Array.isArray(botIdsToAssign) ? botIdsToAssign : []).map(Number).filter(n => Number.isFinite(n));
-    if (cleanBotIds.length === 0) return;
-    const targetKey = String(targetUserIdOrUsername || '').toLowerCase();
-    for (const u of allUsers) {
-        const uId = String(u.id || '').toLowerCase();
-        const uName = String(u.username || '').toLowerCase();
-        if (uId === targetKey || uName === targetKey) {
-            continue;
-        }
-        if (Array.isArray(u.assignedBotIds) && u.assignedBotIds.length > 0) {
-            u.assignedBotIds = u.assignedBotIds.map(Number).filter(id => !cleanBotIds.includes(id));
-        }
-    }
-}
-
-function canChangeMinecraftAccount(session) {
-    if (!session) return false;
-    if (session.role === 'admin') return true;
-    return session.allowAccountChange !== false;
-}
-
-// ----------------------------------------------------------------------------
-// ENTERPRISE AUDIT TRAIL (ACTIVITY LOGS & HISTORY ENGINE)
-// ----------------------------------------------------------------------------
-
-const AUDIT_ACTION_METADATA = {
-    // AUTHENTICATION & SECURITY
-    AUTH_LOGIN_SUCCESS: { category: 'AUTH', label: '🔑 Đăng nhập thành công', icon: '🔑', color: 'var(--green)' },
-    AUTH_ADMIN_LOGIN_SUCCESS: { category: 'AUTH', label: '👑 Admin đăng nhập', icon: '👑', color: 'var(--cyan)' },
-    AUTH_USER_LOGIN_SUCCESS: { category: 'AUTH', label: '👤 Khách thuê đăng nhập', icon: '👤', color: 'var(--green)' },
-    AUTH_LOGIN_FAILED: { category: 'AUTH', label: '❌ Đăng nhập thất bại (Sai pass)', icon: '❌', color: 'var(--red)' },
-    AUTH_LOGIN_BLOCKED: { category: 'AUTH', label: '🛡️ Khóa IP chống Brute-Force', icon: '🛡️', color: 'var(--red)' },
-    AUTH_USER_LOGIN_DISABLED: { category: 'AUTH', label: '🚫 Tài khoản bị vô hiệu hóa', icon: '🚫', color: 'var(--yellow)' },
-    AUTH_USER_LOGIN_EXPIRED: { category: 'AUTH', label: '⏳ Tài khoản đã hết hạn thuê', icon: '⏳', color: 'var(--yellow)' },
-    AUTH_LOGOUT: { category: 'AUTH', label: '🚪 Đăng xuất hệ thống', icon: '🚪', color: 'var(--muted)' },
-    AUTH_ADMIN_CHANGE_PASS_SUCCESS: { category: 'AUTH', label: '🔒 Admin đổi mật khẩu', icon: '🔒', color: 'var(--cyan)' },
-    AUTH_ADMIN_CHANGE_PASS_FAILED: { category: 'AUTH', label: '⚠️ Admin đổi mật khẩu lỗi', icon: '⚠️', color: 'var(--red)' },
-    AUTH_USER_CHANGE_PASS_SUCCESS: { category: 'AUTH', label: '🔒 Khách đổi mật khẩu', icon: '🔒', color: 'var(--green)' },
-    AUTH_USER_CHANGE_PASS_FAILED: { category: 'AUTH', label: '⚠️ Khách đổi mật khẩu lỗi', icon: '⚠️', color: 'var(--red)' },
-    ADMIN_CREDENTIALS_ACCESS: { category: 'AUTH', label: '👁️ Xác thực xem mật khẩu Bot', icon: '👁️', color: 'var(--yellow)' },
-    AUTH_VERIFY_BOT_ACCESS: { category: 'AUTH', label: '🚪 Kiểm tra Gate vào Dashboard Bot', icon: '🚪', color: 'var(--cyan)' },
-
-    // BOT CONTROL
-    BOT_START: { category: 'BOT_CONTROL', label: '▶ Khởi động Bot', icon: '▶', color: 'var(--green)' },
-    BOT_STOP: { category: 'BOT_CONTROL', label: '■ Dừng Bot', icon: '■', color: 'var(--red)' },
-    BOT_RESTART: { category: 'BOT_CONTROL', label: '🔄 Khởi động lại Bot', icon: '🔄', color: 'var(--cyan)' },
-    BOT_CHAT_SEND: { category: 'BOT_CONTROL', label: '💬 Gửi tin nhắn / Lệnh chat', icon: '💬', color: 'var(--cyan)' },
-    BOT_LOGS_CLEAR: { category: 'BOT_CONTROL', label: '🧹 Xóa Event Logs Bot', icon: '🧹', color: 'var(--muted)' },
-    BOT_CHAT_LOGS_CLEAR: { category: 'BOT_CONTROL', label: '🧹 Xóa Chat Logs Bot', icon: '🧹', color: 'var(--muted)' },
-    BOT_WINDOW_CLICK: { category: 'BOT_CONTROL', label: '🖱️ Tương tác GUI / Click Slot', icon: '🖱️', color: 'var(--purple)' },
-
-    // BOT ACCOUNT
-    BOT_ACCOUNT_CHANGE: { category: 'BOT_ACCOUNT', label: '👤 Đổi tài khoản Minecraft Bot', icon: '👤', color: 'var(--yellow)' },
-    BOT_COORDS: { category: 'BOT_COORDS', label: '📍 Tọa độ Bot sinh tồn', icon: '📍', color: 'var(--cyan)' },
-    BOT_POSITION_UPDATE: { category: 'BOT_COORDS', label: '📍 Tọa độ Bot sinh tồn', icon: '📍', color: 'var(--cyan)' },
-    BOT_PROXY_UPDATE: { category: 'BOT_SETTINGS', label: '🌐 Cập nhật Proxy Bot', icon: '🌐', color: 'var(--yellow)' },
-    BOT_DEATH: { category: 'BOT_CONTROL', label: '💀 Bot tử vong', icon: '💀', color: 'var(--red)' },
-    SUPABASE_SYNC: { category: 'SYSTEM', label: '☁️ Đồng bộ Supabase Cloud', icon: '☁️', color: 'var(--cyan)' },
-
-    // BOT SETTINGS
-    BOT_SETTINGS_UPDATE: { category: 'BOT_SETTINGS', label: '⚙️ Cập nhật Cài đặt Bot', icon: '⚙️', color: 'var(--cyan)' },
-    BOT_AUTOCHAT_UPDATE: { category: 'BOT_SETTINGS', label: '📢 Cập nhật Tự Động Chat', icon: '📢', color: 'var(--cyan)' },
-    BOT_SCHEDULES_UPDATE: { category: 'BOT_SETTINGS', label: '⏰ Cập nhật Lịch trình Bot', icon: '⏰', color: 'var(--cyan)' },
-
-    // BOT INVENTORY
-    BOT_INVENTORY_DROP: { category: 'BOT_INVENTORY', label: '📦 Thả vật phẩm (Drop Item)', icon: '📦', color: 'var(--yellow)' },
-    BOT_INVENTORY_MOVE: { category: 'BOT_INVENTORY', label: '🔄 Chuyển ô đồ (Move Item)', icon: '🔄', color: 'var(--cyan)' },
-    BOT_INVENTORY_EQUIP: { category: 'BOT_INVENTORY', label: '🛡️ Trang bị vật phẩm (Equip)', icon: '🛡️', color: 'var(--green)' },
-
-    // FLEET MANAGEMENT
-    BOT_CREATE: { category: 'FLEET', label: '➕ Thêm Bot mới vào Hạm đội', icon: '➕', color: 'var(--green)' },
-    BOT_UPDATE: { category: 'FLEET', label: '✏️ Chỉnh sửa thông tin Bot', icon: '✏️', color: 'var(--yellow)' },
-    BOT_DELETE: { category: 'FLEET', label: '🗑 Xóa Bot khỏi Hạm đội', icon: '🗑', color: 'var(--red)' },
-    BOT_REORDER: { category: 'FLEET', label: '📑 Sắp xếp lại thứ tự Bot', icon: '📑', color: 'var(--cyan)' },
-    FLEET_START: { category: 'FLEET', label: '▶ Khởi động toàn bộ Bot', icon: '▶', color: 'var(--green)' },
-    FLEET_STOP: { category: 'FLEET', label: '■ Dừng toàn bộ Bot', icon: '■', color: 'var(--red)' },
-    FLEET_RESTART: { category: 'FLEET', label: '🔄 Khởi động lại toàn bộ Bot', icon: '🔄', color: 'var(--cyan)' },
-    FLEET_BROADCAST_CHAT: { category: 'FLEET', label: '📢 Broadcast lệnh tới Hạm đội', icon: '📢', color: 'var(--purple)' },
-    BROADCAST_COMMAND: { category: 'FLEET', label: '📢 Broadcast lệnh tới Hạm đội', icon: '📢', color: 'var(--purple)' },
-    FLEET_SETTINGS_UPDATE: { category: 'FLEET', label: '⚙️ Đồng bộ Cài đặt toàn Hạm đội', icon: '⚙️', color: 'var(--cyan)' },
-    BOT_RESET_CUSTOMER: { category: 'FLEET', label: '✨ Bàn giao Bot cho khách mới', icon: '✨', color: 'var(--purple)' },
-
-    // USER & SUBSCRIPTION MANAGEMENT
-    USER_CREATE: { category: 'USER_MGMT', label: '👤 Tạo tài khoản Khách thuê mới', icon: '👤', color: 'var(--green)' },
-    USER_UPDATE: { category: 'USER_MGMT', label: '✏️ Cập nhật thông tin Khách thuê', icon: '✏️', color: 'var(--yellow)' },
-    USER_DELETE: { category: 'USER_MGMT', label: '🗑 Xóa tài khoản Khách thuê', icon: '🗑', color: 'var(--red)' },
-    ADMIN_EXTEND_RENTAL: { category: 'USER_MGMT', label: '⏳ Admin gia hạn gói thuê', icon: '⏳', color: 'var(--green)' },
-    USER_RENTAL_EXPIRED: { category: 'USER_MGMT', label: '⏰ Gói thuê hết hạn - Thu hồi Bot', icon: '⏰', color: 'var(--red)' },
-
-    // LICENSE KEYS
-    LICENSE_KEYS_CREATE: { category: 'LICENSE_KEY', label: '🔑 Tạo mã kích hoạt (Giftcode)', icon: '🔑', color: 'var(--green)' },
-    LICENSE_KEY_DELETE: { category: 'LICENSE_KEY', label: '🗑 Xóa mã kích hoạt (Giftcode)', icon: '🗑', color: 'var(--red)' },
-    RENTAL_RENEW_KEY: { category: 'LICENSE_KEY', label: '⚡ Kích hoạt gia hạn bằng Giftcode', icon: '⚡', color: 'var(--green)' },
-
-    // SYSTEM & NOTIFICATIONS
-    ANNOUNCEMENT_UPDATE: { category: 'SYSTEM', label: '📢 Cập nhật Thông báo Toàn hệ thống', icon: '📢', color: 'var(--cyan)' },
-    WEBHOOK_CONFIG_UPDATE: { category: 'SYSTEM', label: '🔔 Cập nhật Cấu hình Webhook', icon: '🔔', color: 'var(--cyan)' },
-    WEBHOOK_TEST_SEND: { category: 'SYSTEM', label: '🧪 Gửi thử nghiệm Webhook', icon: '🧪', color: 'var(--cyan)' },
-    BACKUP_CREATED: { category: 'SYSTEM', label: '💾 Tạo bản sao lưu hệ thống', icon: '💾', color: 'var(--green)' },
-    SELF_HEAL_USERS: { category: 'SYSTEM', label: '🛡️ Tự phục hồi dữ liệu Users', icon: '🛡️', color: 'var(--red)' },
-    SELF_HEAL_REGISTRY: { category: 'SYSTEM', label: '🛡️ Tự phục hồi dữ liệu Registry', icon: '🛡️', color: 'var(--red)' },
-    FLEET_AUTO_HEAL: { category: 'SYSTEM', label: '⚡ Tự động kết nối lại Bot rớt mạng', icon: '⚡', color: 'var(--yellow)' },
-    LOG_ROTATED: { category: 'SYSTEM', label: '♻️ Xoay vòng file Audit Log', icon: '♻️', color: 'var(--muted)' },
-    AUDIT_LOGS_CLEAR: { category: 'SYSTEM', label: '🗑 Xóa sạch Lịch sử Nhật ký', icon: '🗑', color: 'var(--red)' }
-};
-
-let auditLogWriteCount = 0;
-function checkRotateAuditLogFile() {
-    try {
-        if (!fs.existsSync(AUDIT_LOG_FILE)) return;
-        const stats = fs.statSync(AUDIT_LOG_FILE);
-        if (stats.size > 2 * 1024 * 1024) {
-            const raw = fs.readFileSync(AUDIT_LOG_FILE, 'utf8');
-            const lines = raw.trim().split('\n').filter(Boolean);
-            if (lines.length > 2000) {
-                const kept = lines.slice(-1000);
-                fs.writeFileSync(AUDIT_LOG_FILE, kept.join('\n') + '\n', 'utf8');
-            }
-        }
-    } catch (_) {}
-}
-
-function redactSensitiveAuditData(data, depth = 0) {
-    if (depth > 6 || data === null || data === undefined) return data;
-    if (typeof data === 'string') {
-        return data
-            .replace(/(password["':\s=]+)([^"',\s}]+)/gi, '$1********')
-            .replace(/(bot_?secret["':\s=]+)([^"',\s}]+)/gi, '$1********')
-            .replace(/(telegramToken["':\s=]+)([^"',\s}]+)/gi, '$1********');
-    }
-    if (Array.isArray(data)) {
-        return data.map(item => redactSensitiveAuditData(item, depth + 1));
-    }
-    if (typeof data === 'object') {
-        const sensitiveRegex = /^(password|pass|secret|bot_secret|token|apikey|credential|proxy_pass)$/i;
-        const out = {};
-        for (const [k, v] of Object.entries(data)) {
-            if (sensitiveRegex.test(k)) {
-                out[k] = '********';
-            } else if (typeof v === 'object' && v !== null) {
-                out[k] = redactSensitiveAuditData(v, depth + 1);
-            } else if (typeof v === 'string') {
-                out[k] = redactSensitiveAuditData(v, depth + 1);
-            } else {
-                out[k] = v;
-            }
-        }
-        return out;
-    }
-    return data;
-}
-
-function logAuditEvent({ req, action, target, details, status = 'SUCCESS', durationMs = 0, category = null, actionLabel = null }) {
-    try {
-        const session = req ? getSessionUser(req) : null;
-        const ip = req ? getClientIp(req) : '127.0.0.1';
-        const actionStr = String(action || 'UNKNOWN');
-        const meta = AUDIT_ACTION_METADATA[actionStr] || {};
-        const cat = category || meta.category || 'SYSTEM';
-        const lbl = actionLabel || meta.label || actionStr;
-
-        const sanitizedDetails = redactSensitiveAuditData(details);
-        let detailsStr = '';
-        if (typeof sanitizedDetails === 'string') {
-            detailsStr = sanitizedDetails;
-        } else if (sanitizedDetails && typeof sanitizedDetails === 'object') {
-            try {
-                detailsStr = Object.entries(sanitizedDetails).map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`).join(' | ');
-            } catch (_) {
-                detailsStr = JSON.stringify(sanitizedDetails);
-            }
-        }
-
-        // Phân loại Log rõ ràng: 'BOT' (Tài khoản Minecraft, mật khẩu, proxy, tọa độ) vs 'SYSTEM' (Người dùng bấm nút, login, logout, gia hạn key, v.v.)
-        let logType = 'SYSTEM';
-        if (
-            cat === 'BOT_ACCOUNT' ||
-            cat === 'BOT_SETTINGS' ||
-            cat === 'BOT_COORDS' ||
-            cat === 'BOT_INVENTORY' ||
-            actionStr.startsWith('BOT_ACCOUNT') ||
-            actionStr.startsWith('BOT_PROXY') ||
-            actionStr === 'BOT_POSITION_UPDATE' ||
-            actionStr === 'BOT_DEATH'
-        ) {
-            logType = 'BOT';
-        }
-
-        const entry = {
-            id: 'aud_' + Date.now() + '_' + Math.floor(Math.random() * 10000),
-            logType,
-            timestamp: new Date().toISOString(),
-            actor: {
-                userId: session ? session.userId : (req ? 'anonymous' : 'system'),
-                username: session ? session.username : 'system',
-                role: session ? session.role : 'system',
-                ip
-            },
-            category: cat,
-            action: actionStr,
-            actionLabel: lbl,
-            target: target || null,
-            details: detailsStr || null,
-            status,
-            durationMs: Number(durationMs || 0)
+// Giao dịch tiêu thụ Key/Giftcode NGUYÊN TỐ:
+// 1. Đọc lại trạng thái key mới nhất từ Cloud (không tin cậy snapshot RAM).
+// 2. Xác thực lại key ngay trước khi trừ lượt.
+// 3. Trừ lượt bằng PATCH có điều kiện cuối Cloud (CAS 1 lệnh SQL) — an toàn
+//    kể cả khi có nhiều instance Manager cùng chạy.
+// Key usage and the entitlement snapshot are committed by one PostgreSQL RPC.
+// No RAM fallback or compensating full-snapshot write is allowed on failure.
+async function commitKeyConsumptionAtomic(keyObj, username, users = null) {
+    const code = String(keyObj?.key || keyObj?.code || '').trim().toUpperCase();
+    const normalizedUser = String(username || '').trim().toLowerCase();
+    if (!code || !normalizedUser) return { ok: false, status: 400, error: 'Mã Key hoặc tài khoản không hợp lệ.' };
+    if (!supabaseAdapter?.isEnabled?.()) {
+        const freshKey = cachedKeys.find(k => normalizeKeyCode(k) === code || String(k.id || '') === String(keyObj?.id || ''));
+        if (!freshKey) return { ok: false, status: 409, error: 'Mã Key không tồn tại trên hệ thống.' };
+        const freshCheck = checkKeyValidity(freshKey, normalizedUser);
+        if (!freshCheck.ok) return { ok: false, status: 409, conflict: true, error: freshCheck.error };
+        const maxUses = normalizeMaxUses(freshKey.maxUses);
+        const usedCount = (freshKey.usedCount || 0) + 1;
+        const usedUsers = Array.isArray(freshKey.usedUsers) ? [...freshKey.usedUsers, normalizedUser] : [normalizedUser];
+        const applied = {
+            used: maxUses > 0 && usedCount >= maxUses,
+            usedCount,
+            usedUsers,
+            usedBy: usedUsers.join(', '),
+            usedAt: new Date().toISOString()
         };
-
-        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
-            void supabaseAdapter.insertAuditLog(entry);
+        Object.assign(freshKey, applied);
+        if (keyObj && typeof keyObj === 'object') Object.assign(keyObj, applied);
+        if (Array.isArray(users)) {
+            setUsersCache(users);
         }
-        fs.appendFile(AUDIT_LOG_FILE, JSON.stringify(entry) + '\n', 'utf8', (err) => {
-            if (err) console.error('[AUDIT] Lỗi ghi file audit log:', err.message);
-        });
-        auditLogWriteCount = (auditLogWriteCount || 0) + 1;
-        if (auditLogWriteCount >= 100) {
-            auditLogWriteCount = 0;
-            checkRotateAuditLogFile();
-        }
-        return entry;
-    } catch (err) {
-        console.error('[AUDIT] Lỗi ghi audit log:', err.message);
+        return { ok: true, keysList: cachedKeys, mode: 'memory' };
     }
+    if (!supabaseStorageReady) return { ok: false, status: 503, error: 'Supabase chưa sẵn sàng; không thể ghi lượt dùng Key một cách an toàn.' };
+    const freshList = await loadKeysFresh();
+    if (!Array.isArray(freshList)) return { ok: false, status: 502, error: 'Không đọc được trạng thái mã Key từ Cloud; chưa tiêu thụ lượt nào.' };
+    const freshKey = freshList.find(k => normalizeKeyCode(k) === code || String(k.id || '') === String(keyObj.id || ''));
+    if (!freshKey) return { ok: false, status: 409, error: 'Mã Key vừa bị xóa khỏi hệ thống trong lúc giao dịch.' };
+    const freshCheck = checkKeyValidity(freshKey, normalizedUser);
+    if (!freshCheck.ok) return { ok: false, status: 409, conflict: true, error: freshCheck.error };
+    let result;
+    if (Array.isArray(users)) {
+        const expectedRevision = userSnapshotRevisions.get(users);
+        if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+            return { ok: false, status: 409, error: 'Không có revision Cloud gắn với users; hãy tải lại trước khi redeem.' };
+        }
+        result = await supabaseAdapter.redeemKeyAndSaveUsersAtomic(code, normalizedUser, users, expectedRevision);
+    } else {
+        result = await supabaseAdapter.consumeKeyUsageAtomic(code, normalizedUser);
+    }
+    if (!result || result.ok !== true) {
+        return { ok: false, status: result?.missingRpc ? 503 : (result?.uncertain ? 503 : 409), conflict: result?.error === 'EXHAUSTED' || result?.error === 'ALREADY_USED', uncertain: result?.uncertain === true, error: result?.error || 'Supabase chưa xác nhận được giao dịch CAS; không dùng snapshot cũ để fallback.' };
+    }
+    if (Array.isArray(users)) {
+        const committedRevision = Number(result.userRevision);
+        if (!Number.isSafeInteger(committedRevision) || committedRevision < 1) {
+            return { ok: false, status: 503, uncertain: true, error: 'Cloud đã nhận giao dịch nhưng không trả revision user để xác nhận kết quả.' };
+        }
+        userSnapshotRevisions.set(users, committedRevision);
+        setUsersCache(users);
+    }
+    const row = result.row || {};
+    const applied = {
+        used: row.used === true,
+        usedCount: Number(row.used_count ?? row.usedCount ?? freshCheck.usedCount + 1),
+        usedUsers: Array.isArray(row.used_users) ? row.used_users : [...(freshCheck.usedUsers || []), normalizedUser],
+        usedBy: row.used_by || '',
+        usedAt: row.used_at || new Date().toISOString(),
+        maxUses: normalizeMaxUses(row.max_uses ?? freshKey.maxUses)
+    };
+    Object.assign(freshKey, applied);
+    Object.assign(keyObj, applied);
+    const cachedKey = cachedKeys.find(k => normalizeKeyCode(k) === code || String(k.id || '') === String(freshKey.id || ''));
+    if (cachedKey) Object.assign(cachedKey, applied);
+    setKeysCache(freshList);
+    return { ok: true, keysList: freshList, mode: 'cas', transactionId: result.transactionId, reconciled: result.reconciled === true };
 }
 
-function readAuditLogs({ limit = 50, page = 1, q = '', category = '', status = '', actor = '', botId = '', logType = '' } = {}) {
+async function flushPendingAuditLogs() {
+    if (!pendingAuditLogs.length || !supabaseAdapter?.isEnabled() || !supabaseStorageReady) return true;
+    if (flushPendingAuditLogs.inFlight) return false;
+    flushPendingAuditLogs.inFlight = true;
+    const batch = pendingAuditLogs.slice(0, 200);
     try {
-        if (!fs.existsSync(AUDIT_LOG_FILE)) return { logs: [], total: 0, page: 1, limit, totalPages: 1 };
-        const raw = fs.readFileSync(AUDIT_LOG_FILE, 'utf8');
-        const lines = raw.trim().split('\n').filter(Boolean);
-        const entries = [];
-        const searchKeyword = q ? String(q).toLowerCase() : '';
-        const catFilter = category ? String(category).toUpperCase() : '';
-        const statusFilter = status ? String(status).toUpperCase() : '';
-        const actorFilter = actor ? String(actor).toLowerCase() : '';
-        const botIdFilter = botId ? String(botId) : '';
-
-        for (let i = lines.length - 1; i >= 0; i--) {
-            try {
-                const parsed = JSON.parse(lines[i]);
-                const entryLogType = parsed.logType || ((parsed.category === 'BOT_ACCOUNT' || parsed.category === 'BOT_SETTINGS' || parsed.category === 'BOT_COORDS' || parsed.category === 'BOT_INVENTORY') ? 'BOT' : 'SYSTEM');
-                if (logType && entryLogType !== logType) continue;
-                if (catFilter && parsed.category !== catFilter) continue;
-                if (statusFilter && parsed.status !== statusFilter) continue;
-                if (actorFilter && (!parsed.actor?.username || !parsed.actor.username.toLowerCase().includes(actorFilter))) continue;
-                if (botIdFilter && String(parsed.target?.botId || parsed.target?.id || '') !== botIdFilter) continue;
-                if (searchKeyword) {
-                    const match = (parsed.action && parsed.action.toLowerCase().includes(searchKeyword)) ||
-                                  (parsed.actionLabel && parsed.actionLabel.toLowerCase().includes(searchKeyword)) ||
-                                  (parsed.actor?.username && parsed.actor.username.toLowerCase().includes(searchKeyword)) ||
-                                  (parsed.actor?.ip && parsed.actor.ip.toLowerCase().includes(searchKeyword)) ||
-                                  (parsed.details && parsed.details.toLowerCase().includes(searchKeyword)) ||
-                                  (parsed.target && JSON.stringify(parsed.target).toLowerCase().includes(searchKeyword));
-                    if (!match) continue;
-                }
-                entries.push(parsed);
-            } catch (_) {}
+        if (!(await supabaseAdapter.syncAuditLogs(batch))) {
+            if (typeof schedulePendingAuditFlush === 'function') schedulePendingAuditFlush(5000);
+            return false;
         }
-
-        const total = entries.length;
-        const totalPages = Math.max(1, Math.ceil(total / limit));
-        const safePage = Math.max(1, Math.min(page, totalPages));
-        const offset = (safePage - 1) * limit;
-        const paged = entries.slice(offset, offset + limit);
-
-        return { logs: paged, total, page: safePage, limit, totalPages };
-    } catch (err) {
-        console.error('[AUDIT] Lỗi đọc audit logs:', err.message);
-        return { logs: [], total: 0, page: 1, limit, totalPages: 1 };
+        const flushedIds = new Set(batch.map(entry => entry.id));
+        for (let i = pendingAuditLogs.length - 1; i >= 0; i--) {
+            if (flushedIds.has(pendingAuditLogs[i].id)) pendingAuditLogs.splice(i, 1);
+        }
+        if (pendingAuditLogs.length) schedulePendingAuditFlush();
+        return true;
+    } finally {
+        flushPendingAuditLogs.inFlight = false;
     }
 }
 
-function exportAuditLogsFile(format = 'csv') {
-    if (!fs.existsSync(AUDIT_LOG_FILE)) return '';
-    const raw = fs.readFileSync(AUDIT_LOG_FILE, 'utf8');
-    if (format === 'jsonl') return raw;
+function readAuditLogs({ limit = 50, page = 1 } = {}) {
+    const total = pendingAuditLogs.length;
+    const safeLimit = readPositiveInt(limit, 50, 1, 1000);
+    const safePage = readPositiveInt(page, 1, 1, 1000000);
+    const totalPages = Math.max(1, Math.ceil(total / safeLimit));
+    return { logs: pendingAuditLogs.slice((safePage - 1) * safeLimit, safePage * safeLimit), total, page: safePage, limit: safeLimit, totalPages };
+}
 
-    const lines = raw.trim().split('\n').filter(Boolean);
+function exportAuditLogsFile(format = 'csv', entries = []) {
+    if (format === 'jsonl') return entries.map(entry => JSON.stringify(entry)).join('\n') + (entries.length ? '\n' : '');
     const headers = ['Thời Gian', 'Người Thực Hiện', 'Vai Trò', 'IP', 'Danh Mục', 'Hành Động', 'Mục Tiêu', 'Chi Tiết Thao Tác', 'Trạng Thái'];
+    const escapeCsv = value => '"' + String(value ?? '').replace(/"/g, '""') + '"';
     const rows = [headers.join(',')];
-
-    function escapeCsv(val) {
-        if (val === null || val === undefined) return '""';
-        const str = String(val).replace(/"/g, '""');
-        return `"${str}"`;
+    for (const e of entries) {
+        let target = '';
+        if (e.target && typeof e.target === 'object') {
+            const maskedTarget = { ...e.target };
+            if (maskedTarget.key) maskedTarget.key = maskLicenseKey(maskedTarget.key);
+            if (maskedTarget.licenseKey) maskedTarget.licenseKey = maskLicenseKey(maskedTarget.licenseKey);
+            target = maskedTarget.label || maskedTarget.username || (maskedTarget.key ? maskedTarget.key : JSON.stringify(maskedTarget));
+        } else {
+            target = String(e.target || '');
+        }
+        rows.push([e.timestamp ? new Date(e.timestamp).toLocaleString('vi-VN') : '', e.actor?.username || 'system', e.actor?.role || 'system', e.actor?.ip || '', e.category || 'SYSTEM', e.actionLabel || e.action || '', target, e.details || '', e.status || 'SUCCESS'].map(escapeCsv).join(','));
     }
-
-    for (let i = lines.length - 1; i >= 0; i--) {
-        try {
-            const e = JSON.parse(lines[i]);
-            const timeStr = e.timestamp ? new Date(e.timestamp).toLocaleString('vi-VN') : '';
-            const actor = e.actor?.username || 'system';
-            const role = e.actor?.role === 'admin' ? 'Quản trị viên' : (e.actor?.role === 'user' ? 'Khách thuê' : 'Hệ thống');
-            const ip = e.actor?.ip || '';
-            const cat = e.category || 'SYSTEM';
-            const action = e.actionLabel || e.action || '';
-            let target = '';
-            if (e.target) {
-                if (typeof e.target === 'object') {
-                    target = e.target.label || e.target.username || e.target.key || JSON.stringify(e.target);
-                } else target = String(e.target);
-            }
-            const details = e.details || '';
-            const status = e.status || 'SUCCESS';
-
-            rows.push([
-                escapeCsv(timeStr),
-                escapeCsv(actor),
-                escapeCsv(role),
-                escapeCsv(ip),
-                escapeCsv(cat),
-                escapeCsv(action),
-                escapeCsv(target),
-                escapeCsv(details),
-                escapeCsv(status)
-            ].join(','));
-        } catch (_) {}
-    }
-
     return '\uFEFF' + rows.join('\r\n');
 }
 
 function clearAuditLogsFile(session, req) {
+    const tombstone = makeAuditEntry({ req, action: 'AUDIT_LOGS_CLEAR', category: 'SYSTEM', target: { scope: 'all' }, details: `Quản trị viên "${session?.username || 'admin'}" đã xóa sạch toàn bộ lịch sử nhật ký hoạt động trước đó.`, status: 'SUCCESS' });
     try {
-        const adminName = session ? session.username : 'admin';
-        const clientIp = req ? getClientIp(req) : '127.0.0.1';
-        const entry = {
-            id: 'aud_' + Date.now() + '_clear',
-            timestamp: new Date().toISOString(),
-            actor: {
-                userId: session ? session.userId : 'admin',
-                username: adminName,
-                role: 'admin',
-                ip: clientIp
-            },
-            category: 'SYSTEM',
-            action: 'AUDIT_LOGS_CLEAR',
-            actionLabel: '🗑 Xóa sạch Lịch sử Nhật ký',
-            target: { scope: 'all' },
-            details: `Quản trị viên "${adminName}" đã xóa sạch toàn bộ lịch sử nhật ký hoạt động trước đó.`,
-            status: 'SUCCESS',
-            durationMs: 0
+        if (typeof AUDIT_LOG_FILE === 'string') {
+            fs.writeFileSync(AUDIT_LOG_FILE, JSON.stringify(tombstone) + '\n', 'utf8');
+        }
+    } catch (_) {}
+    if (Array.isArray(pendingAuditLogs)) {
+        pendingAuditLogs.length = 0;
+    }
+    return { ok: true, entry: tombstone };
+}
+
+async function deleteSystemBackupFile(filename) {
+    if (!filename || typeof filename !== 'string' || !/^backup-[A-Za-z0-9._-]+\.json$/.test(filename)) return { ok: false, error: 'Tên bản sao lưu không hợp lệ.' };
+    const ok = await supabaseAdapter.deleteBackup(filename);
+    return ok ? { ok: true } : { ok: false, error: 'Không thể xóa bản sao lưu trên Supabase.' };
+}
+
+const cachedBackups = [];
+
+async function listSystemBackups() {
+    if (!supabaseAdapter?.isEnabled()) return cachedBackups.map(b => ({ filename: b.filename, createdAt: b.createdAt, sizeBytes: b.sizeBytes, mtimeMs: b.mtimeMs }));
+    return await supabaseAdapter.fetchBackups() || [];
+}
+
+function loadUsersRaw() { return loadUsers(); }
+function tryRestoreFromBackup() { return null; }
+
+function normalizeRestoreCredentials(payload) {
+    if (!payload || typeof payload !== 'object') return payload;
+    const safe = JSON.parse(JSON.stringify(payload));
+    for (const user of safe.users || []) {
+        if (user.password && typeof user.password === 'string' && !isStoredCredentialCiphertext(user.password)) {
+            user.password = encryptUserPassword(user.password);
+        }
+    }
+    for (const id of Object.keys(safe.botSettings || {})) {
+        const row = safe.botSettings[id] || {};
+        if (row.password && typeof row.password === 'string' && !isStoredCredentialCiphertext(row.password)) {
+            row.password = encryptUserPassword(row.password);
+        }
+        if (row.proxy?.password && typeof row.proxy.password === 'string' && !isStoredCredentialCiphertext(row.proxy.password)) {
+            row.proxy.password = encryptUserPassword(row.proxy.password);
+        }
+        if (row.settings?.proxy?.password && typeof row.settings.proxy.password === 'string' && !isStoredCredentialCiphertext(row.settings.proxy.password)) {
+            row.settings.proxy.password = encryptUserPassword(row.settings.proxy.password);
+        }
+    }
+    return safe;
+}
+
+function isValidAdminHash(value) {
+    if (typeof value !== 'string') return false;
+    const candidate = value.trim();
+    if (!candidate.startsWith('scrypt$')) return false;
+    const parts = candidate.split('$');
+    if (parts.length === 4) {
+        return parts[2].length > 0 && /^[a-f0-9]+$/i.test(parts[3]);
+    }
+    if (parts.length === 6) {
+        return /^N=\d+,r=\d+,p=\d+$/i.test(parts[1]) && parts[4].length > 0 && /^[a-f0-9]+$/i.test(parts[5]);
+    }
+    return false;
+}
+
+function hashAdminPassword(password) {
+    const salt = crypto.randomBytes(16).toString('hex');
+    const derived = crypto.scryptSync(String(password), salt, 64, { N: 16384, r: 8, p: 1 });
+    return `scrypt$N=16384,r=8,p=1$${salt}$${derived.toString('hex')}`;
+}
+
+function verifyAdminPassword(password, storedValue) {
+    const stored = String(storedValue || '').trim();
+    if (!stored) return false;
+    if (!stored.startsWith('scrypt$')) return String(password) === stored;
+    const parts = stored.split('$');
+    let salt;
+    let expectedHex;
+    let options = { N: 16384, r: 8, p: 1 };
+    if (parts.length === 4 && /^N=\d+,r=\d+,p=\d+$/i.test(parts[1])) {
+        const params = Object.fromEntries(parts[1].split(',').map(part => part.split('=')));
+        options = { N: Number(params.N), r: Number(params.r), p: Number(params.p) };
+        salt = parts[2]; expectedHex = parts[3];
+    } else if (parts.length === 6 && /^N=\d+,r=\d+,p=\d+$/i.test(parts[1])) {
+        const params = Object.fromEntries(parts[1].split(',').map(part => part.split('=')));
+        options = { N: Number(params.N), r: Number(params.r), p: Number(params.p) };
+        salt = parts[4]; expectedHex = parts[5];
+    } else return false;
+    if (!Number.isSafeInteger(options.N) || options.N < 1024 || options.N > 262144 ||
+        !Number.isSafeInteger(options.r) || options.r < 1 || options.r > 16 ||
+        !Number.isSafeInteger(options.p) || options.p < 1 || options.p > 4 ||
+        !salt || !/^[a-f0-9]+$/i.test(expectedHex || '') || expectedHex.length % 2 !== 0) return false;
+    try {
+        const expected = Buffer.from(expectedHex, 'hex');
+        const actual = crypto.scryptSync(String(password), salt, expected.length, options);
+        return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+    } catch (_) { return false; }
+}
+
+function timingSafeStringEquals(a, b) {
+    if (typeof a !== 'string' || typeof b !== 'string') return false;
+    const bufA = Buffer.from(a);
+    const bufB = Buffer.from(b);
+    if (bufA.length !== bufB.length) return false;
+    return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function verifyUserPassword(password, storedValue) {
+    const stored = String(storedValue || '').trim();
+    const candidate = String(password || '');
+    if (!stored || !candidate) return false;
+    if (isStoredCredentialCiphertext(stored)) {
+        const plain = decryptUserPassword(stored);
+        return plain !== null && timingSafeStringEquals(candidate, plain);
+    }
+    if (stored.startsWith('scrypt$')) {
+        return verifyAdminPassword(candidate, stored);
+    }
+    return timingSafeStringEquals(candidate, stored);
+}
+
+function isLegacyPlaintextAdminPassword(value) {
+    if (typeof value !== 'string') return false;
+    const candidate = value.trim();
+    if (!candidate || candidate.startsWith('scrypt$')) return false;
+    if (isStoredCredentialCiphertext(candidate) || isUnsupportedCredentialCiphertext(candidate)) return false;
+    return candidate.length <= 200;
+}
+
+function validateRestorePayload(payload, { allowEmpty = false } = {}) {
+    if (!payload || typeof payload !== 'object') return { ok: false, error: 'Backup không phải object.' };
+    if (![1, 2, 3].includes(Number(payload.version))) return { ok: false, error: 'Phiên bản backup không được hỗ trợ.' };
+    if (!Array.isArray(payload.users) || !Array.isArray(payload.keys) || !payload.registry || typeof payload.registry !== 'object' ||
+        !payload.botSettings || typeof payload.botSettings !== 'object' || Array.isArray(payload.botSettings)) {
+        return { ok: false, error: 'Backup thiếu users, keys, registry hoặc botSettings.' };
+    }
+    if (!isValidAdminHash(payload.registry.adminPassword) && !isLegacyPlaintextAdminPassword(payload.registry.adminPassword)) {
+        return { ok: false, error: 'Backup thiếu admin hash hợp lệ; không khôi phục để tránh mất quyền quản trị.' };
+    }
+    const emptyFields = [];
+    if (payload.users.length === 0) emptyFields.push('users');
+    if (payload.keys.length === 0) emptyFields.push('keys');
+    for (const user of payload.users) {
+        if (!user || !String(user.id || '').trim() || !String(user.username || '').trim()) return { ok: false, error: 'Backup có user thiếu id hoặc username.' };
+        if (user.password && isUnsupportedCredentialCiphertext(String(user.password))) return { ok: false, error: 'Backup có password user dùng định dạng mã hóa không được hỗ trợ.' };
+        if (user.password && isStoredCredentialCiphertext(String(user.password)) && decryptUserPassword(String(user.password)) === null) return { ok: false, error: 'Backup có password user không giải mã được bằng khóa hiện tại.' };
+    }
+    for (const key of payload.keys) {
+        if (!key || !String(key.id || key.key || key.code || '').trim()) return { ok: false, error: 'Backup có key thiếu định danh.' };
+    }
+    for (const field of ['discordUrl', 'telegramToken']) {
+        const credential = payload.registry.webhook?.[field];
+        if (credential && isUnsupportedCredentialCiphertext(String(credential))) {
+            return { ok: false, error: 'Backup có webhook credential dùng định dạng mã hóa không được hỗ trợ.' };
+        }
+        if (credential && isStoredCredentialCiphertext(String(credential)) && decryptUserPassword(String(credential)) === null) {
+            return { ok: false, error: 'Backup có webhook credential không giải mã được bằng khóa hiện tại.' };
+        }
+    }
+    const botIds = Object.keys(payload.botSettings);
+    if (!botIds.length) {
+        emptyFields.push('bot_settings');
+    } else {
+        for (const id of botIds) {
+            const row = payload.botSettings[id];
+            if (!/^[1-9][0-9]{0,8}$/.test(id) || !row || String(row.bot_id || id) !== id) return { ok: false, error: 'Backup có bot_settings thiếu hoặc sai BOT_ID.' };
+            for (const credential of [row.password, row.proxy?.password, row.settings?.proxy?.password]) {
+                if (!credential) continue;
+                const value = String(credential);
+                if (isUnsupportedCredentialCiphertext(value)) return { ok: false, error: 'Backup có credential bot/proxy dùng định dạng mã hóa không được hỗ trợ.' };
+                if (isStoredCredentialCiphertext(value) && decryptUserPassword(value) === null) return { ok: false, error: 'Backup có credential bot/proxy không giải mã được bằng khóa hiện tại.' };
+            }
+        }
+    }
+    if (!allowEmpty && emptyFields.length) {
+        return {
+            ok: false,
+            code: 'EMPTY_SNAPSHOT',
+            allowEmptyRequired: true,
+            emptyFields,
+            error: 'Backup có snapshot rỗng (' + emptyFields.join(', ') + '); từ chối để tránh xóa sạch dữ liệu. Chỉ khôi phục khi có xác nhận allowEmpty rõ ràng.'
         };
-        fs.writeFileSync(AUDIT_LOG_FILE, JSON.stringify(entry) + '\n', 'utf8');
-        return { ok: true, message: 'Đã xóa toàn bộ nhật ký cũ thành công.', entry };
-    } catch (err) {
-        return { ok: false, error: err.message };
     }
+    return { ok: true };
 }
 
+async function restoreSystemBackup(filename, { allowEmpty = false } = {}) {
+    const payload = await supabaseAdapter.fetchBackupPayload(filename);
+    const validated = validateRestorePayload(payload, { allowEmpty });
+    if (!validated.ok) return validated;
+    const safePayload = sanitizeBackupPayload(payload);
+    const normalized = normalizeRestoreCredentials(safePayload);
+    const safetyBackup = await createSystemBackup('pre-restore');
+    if (!safetyBackup.ok) return { ok: false, error: 'Không tạo được backup dự phòng; chưa khôi phục dữ liệu.' };
 
-// ----------------------------------------------------------------------------
-// ENTERPRISE DISASTER RECOVERY: BACKUP ENGINE & SELF-HEALING
-// ----------------------------------------------------------------------------
-function pruneOldBackups(maxKeep = 30) {
+    const applyPayload = async (data, { allowEmpty: replaceEmpty = false } = {}) => {
+        if (!data || !Array.isArray(data.users) || !Array.isArray(data.keys) || !data.registry || !data.botSettings) throw new Error('Backup dự phòng không hợp lệ.');
+        if (!(await supabaseAdapter.replaceUsersSnapshot(data.users, { allowEmpty: replaceEmpty }))) throw new Error('Không khôi phục được users lên Supabase.');
+        if (!(await supabaseAdapter.replaceKeysSnapshot(data.keys, { allowEmpty: replaceEmpty }))) throw new Error('Khôi phục keys lên Supabase thất bại' + (replaceEmpty ? '.' : ' hoặc backup rỗng chưa được xác nhận.'));
+        if (!(await supabaseAdapter.saveRegistry(data.registry))) throw new Error('Không ghi được registry lên Supabase.');
+        if (!(await supabaseAdapter.replaceBotSettingsSnapshot(data.botSettings, { allowEmpty: replaceEmpty }))) throw new Error('Không khôi phục được bot_settings lên Supabase.');
+    };
     try {
-        if (!fs.existsSync(BACKUP_DIR)) return;
-        const files = fs.readdirSync(BACKUP_DIR)
-            .filter(f => f.startsWith('backup-') && f.endsWith('.json'))
-            .map(f => {
-                const fullPath = path.join(BACKUP_DIR, f);
-                return { name: f, fullPath, time: fs.statSync(fullPath).mtimeMs };
-            })
-            .sort((a, b) => b.time - a.time);
-        if (files.length > maxKeep) {
-            files.slice(maxKeep).forEach(item => {
-                try { fs.unlinkSync(item.fullPath); } catch (_) {}
-            });
-        }
-    } catch (_) {}
-}
+        await applyPayload(normalized, { allowEmpty });
+        if (!(await initSupabaseCloud())) throw new Error('Cloud đã nhận dữ liệu nhưng Manager không thể tải lại trạng thái.');
 
-function deleteSystemBackupFile(filename) {
-    if (!filename || typeof filename !== 'string' || !/^backup-[A-Za-z0-9._-]+\.json$/.test(filename)) {
-        return { ok: false, error: 'Tên file bản sao lưu không hợp lệ.' };
-    }
-    const resolvedPath = path.resolve(BACKUP_DIR, filename);
-    const resolvedDir = path.resolve(BACKUP_DIR);
-    if (!resolvedPath.startsWith(resolvedDir + path.sep)) {
-        return { ok: false, error: 'Đường dẫn file bản sao lưu không an toàn.' };
-    }
-    if (!fs.existsSync(resolvedPath)) {
-        return { ok: false, error: 'File bản sao lưu không tồn tại.' };
-    }
-    try {
-        fs.unlinkSync(resolvedPath);
-        return { ok: true };
-    } catch (err) {
-        return { ok: false, error: err.message };
-    }
-}
-function listSystemBackups() {
-    try {
-        if (!fs.existsSync(BACKUP_DIR)) return [];
-        return fs.readdirSync(BACKUP_DIR)
-            .filter(f => f.startsWith('backup-') && f.endsWith('.json'))
-            .map(f => {
-                const fullPath = path.join(BACKUP_DIR, f);
-                const stat = fs.statSync(fullPath);
-                return {
-                    filename: f,
-                    sizeBytes: stat.size,
-                    createdAt: stat.mtime.toISOString(),
-                    mtimeMs: stat.mtimeMs
-                };
-            })
-            .sort((a, b) => b.mtimeMs - a.mtimeMs);
-    } catch (_) {
-        return [];
-    }
-}
-
-function loadUsersRaw() {
-    try {
-        const f = resolveUsersFile();
-        if (fs.existsSync(f)) {
-            const raw = fs.readFileSync(f, 'utf8');
-            const data = JSON.parse(raw);
-            if (Array.isArray(data)) return data;
-            if (Array.isArray(data.users)) return data.users;
-        }
-    } catch (_) {}
-    return [];
-}
-
-function tryRestoreFromBackup(targetType) {
-    try {
-        const backups = listSystemBackups();
-        for (const b of backups) {
+        const workers = [];
+        for (const bot of BOT_CONFIG || []) {
             try {
-                const raw = fs.readFileSync(path.join(BACKUP_DIR, b.filename), 'utf8');
-                const parsed = JSON.parse(raw);
-                if (targetType === 'users' && Array.isArray(parsed.users) && parsed.users.length > 0) {
-                    if (cachedUsers && cachedUsers.length >= parsed.users.length) {
-                        return cachedUsers;
-                    }
-                    const decrypted = parsed.users.map(u => ({
-                        ...u,
-                        password: decryptUserPassword(u.password)
-                    }));
-                    saveUsers(decrypted);
-                    console.log(`[SELF-HEAL] 🛡️ Đã tự động phục hồi USERS từ bản backup: ${b.filename}`);
-                    logAuditEvent({ action: 'SELF_HEAL_USERS', details: { restoredFrom: b.filename } });
-                    return decrypted;
-                }
-                if (targetType === 'registry' && parsed.registry && typeof parsed.registry === 'object') {
-                    console.log(`[SELF-HEAL] 🛡️ Đã tự động phục hồi REGISTRY từ bản backup: ${b.filename}`);
-                    logAuditEvent({ action: 'SELF_HEAL_REGISTRY', details: { restoredFrom: b.filename } });
-                    return parsed.registry;
-                }
-            } catch (_) {}
+                const result = await fetchChild(bot, '/api/bot/supabase/reload', {
+                    method: 'POST', body: {}, timeoutMs: 8000, headers: { 'X-Manager-Role': 'admin' }
+                });
+                workers.push({ botId: String(bot.id), ok: !!(result.ok && result.data?.ok && String(result.data.botId) === String(bot.id)), error: result.data?.error || (result.ok ? '' : 'Worker chưa kết nối.') });
+            } catch (err) {
+                workers.push({ botId: String(bot.id), ok: false, error: err.message || 'Worker chưa kết nối.' });
+            }
         }
-    } catch (e) {
-        console.error('[SELF-HEAL] Lỗi trong quá trình quét backup:', e.message);
+        const auth = await syncAuthToAllBotsDetailed(true);
+        const failed = [...workers.filter(item => !item.ok).map(item => '#' + item.botId + ': ' + item.error), ...auth.results.filter(item => !item.ok).map(item => '#' + item.botId + ' auth: ' + item.error)];
+        logAuditEvent({ action: 'BACKUP_RESTORED', target: { filename }, details: { safetyBackup: safetyBackup.filename, failedWorkers: failed.length }, status: failed.length ? 'PARTIAL' : 'SUCCESS' });
+        return { ok: true, safetyBackup: safetyBackup.filename, workers, authWorkers: auth.results, partial: failed.length > 0, message: failed.length ? 'Cloud đã khôi phục; một số worker chưa đồng bộ: ' + failed.join('; ') : 'Đã khôi phục backup và đồng bộ worker.' };
+    } catch (err) {
+        try {
+            const before = await supabaseAdapter.fetchBackupPayload(safetyBackup.filename);
+            await applyPayload(before, { allowEmpty: true });
+            if (!(await initSupabaseCloud())) throw new Error('Manager chưa tải lại được dữ liệu sau rollback.');
+            return { ok: false, safetyBackup: safetyBackup.filename, error: err.message + ' Đã rollback theo backup dự phòng.' };
+        } catch (rollbackErr) {
+            return { ok: false, safetyBackup: safetyBackup.filename, error: err.message + ' Rollback tự động cũng lỗi: ' + rollbackErr.message + '. Backup dự phòng: ' + safetyBackup.filename };
+        }
     }
-    return null;
 }
 
-function createSystemBackup(reason = 'scheduled') {
-    try {
-        if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
-        const now = new Date();
-        const dateStr = now.toISOString().replace(/[:.]/g, '-');
-        const filename = `backup-${dateStr}-${reason}.json`;
-        const filePath = path.join(BACKUP_DIR, filename);
+function redactAuditValue(value, key = '') {
+    if (/password|secret|token|authorization|credential|service.?role.?key|api.?key/i.test(String(key))) return value ? '********' : '';
+    if (Array.isArray(value)) return value.map(item => redactAuditValue(item));
+    if (value && typeof value === 'object') {
+        return Object.fromEntries(Object.entries(value).map(([childKey, child]) => [childKey, redactAuditValue(child, childKey)]));
+    }
+    if (typeof value === 'string') return value.replace(/(\/(?:login|register|changepass(?:word)?)\s+)\S+/gi, '$1********');
+    return value;
+}
 
-        const currentUsers = loadUsersRaw();
-        const currentRegistry = (typeof registry !== 'undefined' && registry) ? registry : null;
-        let sanitizedRegistry = null;
-        if (currentRegistry && typeof currentRegistry === 'object') {
-            sanitizedRegistry = JSON.parse(JSON.stringify(currentRegistry));
-            if (sanitizedRegistry.supabase) {
-                delete sanitizedRegistry.supabase.key;
-            }
-            if (sanitizedRegistry.webhook) {
-                delete sanitizedRegistry.webhook.telegramToken;
-                if (sanitizedRegistry.webhook.discordUrl) {
-                    sanitizedRegistry.webhook.discordUrl = '[CONFIGURED]';
-                }
-            }
+const ALWAYS_STRIP_SECRET_FIELDS = new Set([
+    'supabasekey', 'supabaseservicerolekey', 'supabaseanonkey', 'servicerolekey',
+    'servicerole', 'anonkey', 'apikey', 'secretkey', 'privatekey'
+]);
+const SUPABASE_CONTEXT_SECRET_FIELDS = new Set(['key', 'secret', 'password', 'token', 'accesstoken']);
+
+function normalizeBackupFieldName(value) {
+    return String(value || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+}
+
+function stripBackupSecrets(node, parentKey = '', inSupabaseContext = false) {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+        for (const item of node) stripBackupSecrets(item, parentKey, inSupabaseContext);
+        return;
+    }
+    const parentName = normalizeBackupFieldName(parentKey);
+    const ownFieldNames = Object.keys(node).map(normalizeBackupFieldName);
+    const looksLikeSupabaseConfig = typeof node.url === 'string' &&
+        (ownFieldNames.includes('key') || ownFieldNames.some(name => ALWAYS_STRIP_SECRET_FIELDS.has(name))) &&
+        (Object.prototype.hasOwnProperty.call(node, 'enabled') || ownFieldNames.includes('url'));
+    const nextSupabaseContext = inSupabaseContext || parentName.includes('supabase') || looksLikeSupabaseConfig;
+    for (const key of Object.keys(node)) {
+        const normalizedKey = normalizeBackupFieldName(key);
+        if (ALWAYS_STRIP_SECRET_FIELDS.has(normalizedKey) ||
+            (nextSupabaseContext && SUPABASE_CONTEXT_SECRET_FIELDS.has(normalizedKey))) {
+            delete node[key];
         }
+    }
+    for (const [key, value] of Object.entries(node)) stripBackupSecrets(value, key, nextSupabaseContext);
+}
 
-        const snapshot = {
-            version: 2,
-            createdAt: now.toISOString(),
-            reason,
-            registry: sanitizedRegistry,
-            users: currentUsers,
-            activeSessionsCount: activeSessions.size
-        };
-
-        const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
-        fs.writeFileSync(tmp, JSON.stringify(snapshot, null, 2), 'utf8');
-        try {
-            fs.renameSync(tmp, filePath);
-        } catch (_) {
-            fs.copyFileSync(tmp, filePath);
-            try { fs.unlinkSync(tmp); } catch (_) {}
+function sanitizeBackupPayload(payload) {
+    const safe = JSON.parse(JSON.stringify(payload || {}));
+    stripBackupSecrets(safe);
+    if (safe.registry && typeof safe.registry === 'object') {
+        if (safe.registry.supabase && typeof safe.registry.supabase === 'object') {
+            delete safe.registry.supabase.key;
+            delete safe.registry.supabase.serviceRoleKey;
+            delete safe.registry.supabase.apiKey;
         }
-        pruneOldBackups(30);
-
-        logAuditEvent({
-            action: 'BACKUP_CREATED',
-            details: { filename, reason, userCount: currentUsers.length }
+        // Operational reset state is not configuration data; restoring an old
+        // backup must never resume a stale reset.
+        delete safe.registry.pendingResets;
+        for (const key of ['supabaseKey', 'serviceRoleKey', 'service_role_key', 'apiKey', 'api_key']) delete safe.registry[key];
+    }
+    delete safe.supabaseKey;
+    delete safe.serviceRoleKey;
+    delete safe.service_role_key;
+    delete safe.apiKey;
+    delete safe.api_key;
+    delete safe.secretKey;
+    delete safe.privateKey;
+    if (Array.isArray(safe.users)) {
+        safe.users = safe.users.map(user => {
+            const row = { ...user };
+            const password = String(row.password || '');
+            row.password = !password || isStoredCredentialCiphertext(password) ? password : encryptUserPassword(password);
+            return row;
         });
-        console.log(`[BACKUP] ✅ Đã tạo bản sao lưu an toàn: ${filename} (Lý do: ${reason})`);
+    }
+    if (safe.registry && typeof safe.registry === 'object') {
+        if (safe.registry.adminPassword && !String(safe.registry.adminPassword).startsWith('scrypt$')) {
+            safe.registry.adminPassword = hashAdminPassword(String(safe.registry.adminPassword));
+        }
+        if (safe.registry.webhook && typeof safe.registry.webhook === 'object') {
+            for (const field of ['discordUrl', 'telegramToken']) {
+                const value = String(safe.registry.webhook[field] || '');
+                if (value && !isStoredCredentialCiphertext(value)) safe.registry.webhook[field] = encryptUserPassword(value);
+            }
+        }
+        safe.registry.botRentalDisabled = normalizeBotRentalDisabled(safe.registry.botRentalDisabled);
+    }
+    if (safe.botSettings && typeof safe.botSettings === 'object') {
+        for (const [botId, settingsRow] of Object.entries(safe.botSettings)) {
+            if (!settingsRow || typeof settingsRow !== 'object') continue;
+            const row = { ...settingsRow };
+            const password = String(row.password || '');
+            row.password = !password || isStoredCredentialCiphertext(password) ? password : encryptUserPassword(password);
+            const proxy = row.proxy && typeof row.proxy === 'object' ? { ...row.proxy } : {};
+            const nestedProxy = row.settings?.proxy && typeof row.settings.proxy === 'object' ? { ...row.settings.proxy } : null;
+            const proxyPassword = String(proxy.password || nestedProxy?.password || '');
+            proxy.password = !proxyPassword || isStoredCredentialCiphertext(proxyPassword) ? proxyPassword : encryptUserPassword(proxyPassword);
+            row.proxy = proxy;
+            if (nestedProxy) row.settings = { ...row.settings, proxy: { ...nestedProxy, password: proxy.password } };
+            safe.botSettings[botId] = row;
+        }
+    }
+    if (safe.registry?.adminPassword && !isValidAdminHash(safe.registry.adminPassword)) {
+        safe.registry.adminPassword = hashAdminPassword(String(safe.registry.adminPassword));
+    }
+    return safe;
+}
+
+async function createSystemBackup(reason = 'scheduled') {
+    try {
+        if (!supabaseAdapter?.isEnabled()) {
+            const createdAt = new Date().toISOString();
+            const safeReason = String(reason).replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 64) || 'scheduled';
+            const filename = `backup-${createdAt.replace(/[:.]/g, '-')}-${safeReason}.json`;
+            const payload = { version: 3, createdAt, reason: safeReason, registry, users: cachedUsers, keys: cachedKeys };
+            cachedBackups.unshift({ filename, createdAt, sizeBytes: JSON.stringify(payload).length, mtimeMs: Date.now(), payload });
+            while (cachedBackups.length > 5) cachedBackups.pop();
+            return { ok: true, filename, message: 'Đã tạo bản sao lưu thành công!' };
+        }
+        if (!supabaseStorageReady) return { ok: false, error: 'Supabase chưa sẵn sàng để tạo bản sao lưu.' };
+        const createdAt = new Date().toISOString();
+        const safeReason = String(reason).replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 64) || 'scheduled';
+        const filename = `backup-${createdAt.replace(/[:.]/g, '-')}-${safeReason}.json`;
+        const safeRegistry = JSON.parse(JSON.stringify(registry));
+        if (safeRegistry.supabase) delete safeRegistry.supabase.key;
+        const allBotSettings = await supabaseAdapter.fetchAllBotSettings();
+        if (!Array.isArray(allBotSettings)) return { ok: false, error: 'Không thể đọc đầy đủ bot_settings từ Supabase để tạo safety backup.' };
+        const cloudUsers = await supabaseAdapter.fetchUsers();
+        const cloudKeys = await supabaseAdapter.fetchKeys();
+        const cloudRegistry = await supabaseAdapter.fetchRegistry();
+        if (!Array.isArray(cloudUsers) || !Array.isArray(cloudKeys) || !cloudRegistry || typeof cloudRegistry !== 'object') {
+            return { ok: false, error: 'Không thể tải users/keys/registry từ Supabase để tạo safety backup đầy đủ.' };
+        }
+        const botSettings = {};
+        for (const settings of allBotSettings) {
+            const id = String(settings?.bot_id || '');
+            if (!/^[1-9][0-9]{0,8}$/.test(id)) {
+                return { ok: false, error: 'bot_settings trên Supabase có row với BOT_ID không hợp lệ; không tạo safety backup để tránh bỏ sót dữ liệu.' };
+            }
+            if (Object.prototype.hasOwnProperty.call(botSettings, id)) {
+                return { ok: false, error: 'bot_settings trên Supabase có BOT_ID trùng lặp; không tạo safety backup để tránh ghi đè dữ liệu.' };
+            }
+            botSettings[id] = settings;
+        }
+        const payload = sanitizeBackupPayload({ version: 3, createdAt, reason: safeReason, registry: { ...safeRegistry, ...cloudRegistry, botRentalDisabled: normalizeBotRentalDisabled(cloudRegistry.botRentalDisabled || safeRegistry.botRentalDisabled) }, users: cloudUsers, keys: cloudKeys, botSettings, activeSessionsCount: activeSessions?.size || 0 });
+        const saved = await supabaseAdapter.saveBackup(filename, payload);
+        if (!saved) return { ok: false, error: 'Supabase không xác nhận lưu bản sao lưu.' };
+        if (!(await supabaseAdapter.pruneBackups(30))) console.warn('[BACKUP] Đã tạo backup nhưng xoay vòng 30 bản gần nhất chưa hoàn tất.');
+        logAuditEvent({ action: 'BACKUP_CREATED', target: { filename }, details: { reason: safeReason, userCount: payload.users.length } });
         return { ok: true, filename };
     } catch (err) {
-        console.error('[BACKUP] ❌ Lỗi sao lưu hệ thống:', err.message);
+        console.error('[BACKUP] Không thể tạo bản sao lưu Supabase:', err.message);
         return { ok: false, error: err.message };
     }
 }
-
-let cachedUsers = null;
+let cachedUsers = [];
 let cachedUsersTime = 0;
-let cachedUsersMtime = 0;
+const userSnapshotRevisions = new WeakMap();
+let lastUserSaveError = '';
 const USERS_CACHE_TTL_MS = 5000;
 
 const USERS_CANDIDATES = [
@@ -2031,202 +2621,172 @@ const USERS_CANDIDATES = [
 ].filter((val, idx, arr) => val && arr.indexOf(val) === idx);
 
 function resolveUsersFile() {
-    let bestFile = null;
-    let maxUserCount = -1;
-
-    for (const f of USERS_CANDIDATES) {
-        if (fs.existsSync(f)) {
-            try {
-                const raw = fs.readFileSync(f, 'utf8');
-                const data = JSON.parse(raw);
-                const list = Array.isArray(data) ? data : (Array.isArray(data.users) ? data.users : []);
-                if (list.length > maxUserCount) {
-                    maxUserCount = list.length;
-                    bestFile = f;
-                }
-            } catch (_) {}
-        }
-    }
-
-    if (bestFile) return bestFile;
     return USERS_FILE;
 }
 
 function loadUsers(forceReload = false) {
-    const now = Date.now();
-    const resolvedPath = resolveUsersFile();
-    let currentMtime = 0;
-    try {
-        if (fs.existsSync(resolvedPath)) {
-            currentMtime = fs.statSync(resolvedPath).mtimeMs;
-        }
-    } catch (_) {}
-
-    if (!forceReload && cachedUsers && (now - cachedUsersTime < USERS_CACHE_TTL_MS) && currentMtime > 0 && currentMtime === cachedUsersMtime) {
-        return cachedUsers;
-    }
-    try {
-        if (!fs.existsSync(resolvedPath)) {
-            const restored = tryRestoreFromBackup('users');
-            if (restored && Array.isArray(restored) && restored.length > 0) {
-                cachedUsers = restored;
-                cachedUsersTime = now;
-                cachedUsersMtime = 0;
-                return restored;
-            }
-            const initial = { version: 2, users: [], updatedAt: new Date().toISOString() };
-            fs.writeFileSync(USERS_FILE, JSON.stringify(initial, null, 2), 'utf8');
-            cachedUsers = [];
-            cachedUsersTime = now;
-            try { cachedUsersMtime = fs.statSync(USERS_FILE).mtimeMs; } catch (_) {}
-            return cachedUsers;
-        }
-        const raw = fs.readFileSync(resolvedPath, 'utf8');
-        const data = JSON.parse(raw);
-        const rawList = Array.isArray(data) ? data : (Array.isArray(data.users) ? data.users : []);
-        cachedUsers = rawList.map(u => {
-            let pass = u.password;
-            try { pass = decryptUserPassword(u.password); } catch (_) {}
-            return {
-                ...u,
-                password: pass
-            };
-        });
-        cachedUsersTime = now;
-        cachedUsersMtime = currentMtime;
-        return cachedUsers;
-    } catch (e) {
-        console.error('[USERS] Lỗi đọc manager_users.json:', e.message);
-        // Giữ vững bộ nhớ người dùng hiện tại nếu có, không để glitch đọc file làm mất danh sách user
-        if (cachedUsers && cachedUsers.length > 0) {
-            return cachedUsers;
-        }
-        const restored = tryRestoreFromBackup('users');
-        if (restored) {
-            cachedUsers = restored;
-            cachedUsersTime = now;
-            return restored;
-        }
-    }
-    if (cachedUsers && cachedUsers.length > 0) return cachedUsers;
-    return [];
+    return Array.isArray(cachedUsers) ? JSON.parse(JSON.stringify(cachedUsers)) : [];
 }
 
-function saveUsers(users) {
-    if (!Array.isArray(users)) {
-        console.error('[USERS] saveUsers: Tham số users không phải mảng!');
-        return false;
+// Load a versioned Cloud snapshot for every read-modify-write or permission flow.
+// Cached reads remain available for display only and never carry write authority.
+async function loadUsersFresh() {
+    if (!supabaseAdapter?.isEnabled?.()) {
+        const users = loadUsers();
+        userSnapshotRevisions.set(users, 1);
+        return users;
     }
-    try {
-        const encryptedUsers = users.map(u => ({
-            ...u,
-            password: encryptUserPassword(u.password)
-        }));
-        const content = JSON.stringify({ version: 2, users: encryptedUsers, updatedAt: new Date().toISOString() }, null, 2);
-        const tmp = `${USERS_FILE}.tmp-${process.pid}-${Date.now()}`;
-        fs.writeFileSync(tmp, content, 'utf8');
-        try {
-            fs.renameSync(tmp, USERS_FILE);
-        } catch (renameErr) {
-            try {
-                fs.copyFileSync(tmp, USERS_FILE);
-                fs.unlinkSync(tmp);
-            } catch (copyErr) {
-                console.error('[USERS] Lỗi ghi đè USERS_FILE:', copyErr.message);
-                throw copyErr;
-            }
-        }
-        cachedUsers = users.map(u => ({ ...u }));
-        cachedUsersTime = Date.now();
-        try { cachedUsersMtime = fs.statSync(USERS_FILE).mtimeMs; } catch (_) {}
-        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
-            void supabaseAdapter.syncAllUsers(users);
-        }
+    if (!supabaseStorageReady) return null;
+    const snapshot = await supabaseAdapter.fetchUsersSnapshot();
+    if (!snapshot || !Array.isArray(snapshot.users)) return null;
+    const users = snapshot.users.map(user => JSON.parse(JSON.stringify(user)));
+    userSnapshotRevisions.set(users, snapshot.revision);
+    setUsersCache(users);
+    return users;
+}
+
+async function loadUsersFreshOrThrow() {
+    const users = await loadUsersFresh();
+    if (!Array.isArray(users)) throw new Error('Không đọc được users mới nhất từ Supabase; thao tác đã dừng an toàn.');
+    return users;
+}
+
+function deriveUsersSnapshot(sourceUsers, derivedUsers) {
+    const revision = Array.isArray(sourceUsers) ? userSnapshotRevisions.get(sourceUsers) : undefined;
+    if (Array.isArray(derivedUsers) && Number.isSafeInteger(revision) && revision > 0) {
+        userSnapshotRevisions.set(derivedUsers, revision);
+    }
+    return derivedUsers;
+}
+
+function setUsersCache(users) {
+    cachedUsers = Array.isArray(users) ? users.map(user => ({ ...user })) : [];
+    cachedUsersTime = Date.now();
+    return cachedUsers;
+}
+
+async function saveUsers(users) {
+    if (!Array.isArray(users)) return false;
+    if (!supabaseAdapter || !supabaseAdapter.isEnabled()) {
+        const rev = (userSnapshotRevisions.get(users) || 1) + 1;
+        userSnapshotRevisions.set(users, rev);
+        lastUserSaveError = '';
+        setUsersCache(users);
         return true;
-    } catch (e) {
-        console.error('[USERS] Lỗi ghi manager_users.json:', e.message);
+    }
+    if (!supabaseStorageReady) return false;
+    const expectedRevision = userSnapshotRevisions.get(users);
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+        lastUserSaveError = 'Không có revision Cloud gắn với snapshot users; hãy tải lại từ Supabase trước khi sửa.';
         return false;
     }
+    const result = await supabaseAdapter.saveUsersSnapshot(users, expectedRevision, {
+        allowEmpty: users.length === 0
+    });
+    if (!result?.ok) {
+        lastUserSaveError = String(result?.error || 'Supabase chưa xác nhận lưu users.');
+        if (result?.error === 'REVISION_CONFLICT') lastUserSaveError = 'REVISION_CONFLICT: users vừa được thay đổi trên Cloud; thao tác đã dừng, hãy tải lại và thử lại.';
+        return false;
+    }
+    const committedRevision = Number(result.revision);
+    if (!Number.isSafeInteger(committedRevision) || committedRevision < 1) {
+        lastUserSaveError = 'Cloud xác nhận write nhưng không trả revision hợp lệ; tải lại snapshot trước thao tác tiếp theo.';
+        return false;
+    }
+    userSnapshotRevisions.set(users, committedRevision);
+    lastUserSaveError = '';
+    setUsersCache(users);
+    return true;
 }
 
 const activeSessions = new Map();
+let persistedSessionHashes = new Set();
+let expiredSessionCleanupPending = false;
 
 function hashSessionToken(token) {
     if (!token || typeof token !== 'string') return '';
     return crypto.createHash('sha256').update(token.trim()).digest('hex');
 }
 
-function loadSessions() {
-    try {
-        if (fs.existsSync(SESSIONS_FILE)) {
-            const raw = fs.readFileSync(SESSIONS_FILE, 'utf8');
-            const data = JSON.parse(raw);
-            if (Array.isArray(data.sessions)) {
-                const now = Date.now();
-                activeSessions.clear();
-                for (const s of data.sessions) {
-                    if (!s || s.expiresAt <= now) continue;
-                    const tokenHash = s.tokenHash || (s.token ? hashSessionToken(s.token) : null);
-                    if (tokenHash) {
-                        activeSessions.set(tokenHash, {
-                            ...s,
-                            tokenHash,
-                            token: undefined
-                        });
-                    }
-                }
-            }
-        }
-    } catch (e) {
-        console.error('[SESSIONS] Lỗi đọc manager_sessions.json:', e.message);
+function setSessionsCache(sessions) {
+    activeSessions.clear();
+    const now = Date.now();
+    const source = Array.isArray(sessions) ? sessions : [];
+    expiredSessionCleanupPending = source.some(session => Number(session?.expiresAt) <= now);
+    for (const session of Array.isArray(sessions) ? sessions : []) {
+        const tokenHash = String(session?.tokenHash || '').trim();
+        if (!tokenHash || Number(session.expiresAt) <= now) continue;
+        activeSessions.set(tokenHash, { ...session, tokenHash });
     }
+    persistedSessionHashes = new Set(source.map(session => String(session?.tokenHash || '').trim()).filter(Boolean));
 }
 
-function saveSessions() {
-    try {
-        const sessions = [];
-        const now = Date.now();
-        for (const [tokenHash, session] of activeSessions.entries()) {
-            if (session.expiresAt > now) {
-                // Không bao giờ lưu token thô xuống đĩa, chỉ lưu giá trị băm tokenHash
-                sessions.push({
-                    tokenHash: session.tokenHash || tokenHash,
-                    userId: session.userId,
-                    username: session.username,
-                    role: session.role,
-                    assignedBotIds: session.assignedBotIds,
-                    expiresAt: session.expiresAt,
-                    expiresAtRental: session.expiresAtRental || null,
-                    planName: session.planName || 'Gói thường',
-                    allowAccountChange: session.allowAccountChange !== false,
-                    status: session.status || 'active'
-                });
+function loadSessions() {
+    activeSessions.clear();
+}
+
+async function saveSessions() {
+    if (!supabaseAdapter || !supabaseAdapter.isEnabled() || !supabaseStorageReady) return false;
+    const currentHashes = new Set(activeSessions.keys());
+    for (const tokenHash of persistedSessionHashes) {
+        if (!currentHashes.has(tokenHash) && !(await supabaseAdapter.deleteSession(tokenHash))) return false;
+    }
+    if (!(await supabaseAdapter.syncAllSessions(activeSessions))) return false;
+    persistedSessionHashes = currentHashes;
+    expiredSessionCleanupPending = false;
+    return true;
+}
+
+async function revokeUserSessions(user, { excludeTokenHash = '' } = {}) {
+    const userId = String(user?.id || '');
+    const username = String(user?.username || '').toLowerCase();
+    if (!userId && !username) return { ok: false, error: 'Thiếu định danh user để thu hồi session.' };
+    if (!supabaseAdapter?.isEnabled()) {
+        let count = 0;
+        for (const [hash, session] of activeSessions.entries()) {
+            if (((userId && String(session.userId || '') === userId) ||
+                (username && String(session.username || '').toLowerCase() === username)) && hash !== excludeTokenHash) {
+                activeSessions.delete(hash);
+                count++;
             }
         }
-        const tmp = `${SESSIONS_FILE}.tmp-${process.pid}-${Date.now()}`;
-        fs.writeFileSync(tmp, JSON.stringify({ version: 2, sessions, updatedAt: new Date().toISOString() }, null, 2), 'utf8');
-        try {
-            fs.renameSync(tmp, SESSIONS_FILE);
-        } catch (renameErr) {
-            fs.copyFileSync(tmp, SESSIONS_FILE);
-            try { fs.unlinkSync(tmp); } catch (_) {}
-        }
-        if (typeof supabaseAdapter !== 'undefined' && supabaseAdapter && supabaseAdapter.isEnabled()) {
-            void supabaseAdapter.syncAllSessions(activeSessions);
-        }
-        return true;
-    } catch (e) {
-        console.error('[SESSIONS] Lỗi ghi manager_sessions.json:', e.message);
-        return false;
+        return { ok: true, revoked: count, mode: 'memory' };
     }
+    const cloudSessions = await supabaseAdapter?.fetchSessions?.();
+    if (!Array.isArray(cloudSessions)) return { ok: false, error: 'Không đọc được sessions từ Cloud; chưa thể xác nhận thu hồi.' };
+    const hashes = new Set();
+    for (const session of cloudSessions) {
+        if ((userId && String(session.userId || '') === userId) ||
+            (username && String(session.username || '').toLowerCase() === username)) {
+            const hash = String(session.tokenHash || '');
+            if (hash && hash !== excludeTokenHash) hashes.add(hash);
+        }
+    }
+    for (const [hash, session] of activeSessions.entries()) {
+        if (((userId && String(session.userId || '') === userId) ||
+            (username && String(session.username || '').toLowerCase() === username)) && hash !== excludeTokenHash) {
+            hashes.add(hash);
+        }
+    }
+    for (const hash of hashes) {
+        if (!(await supabaseAdapter.deleteSession(hash))) {
+            return { ok: false, error: 'Supabase chưa xác nhận thu hồi đầy đủ session user.' };
+        }
+        activeSessions.delete(hash);
+        persistedSessionHashes.delete(hash);
+    }
+    return { ok: true, revoked: hashes.size };
 }
 
 const saveSessionsFile = saveSessions;
-const saveUsersFile = (u = loadUsers()) => saveUsers(u);
+const saveUsersFile = async (inputUsers) => {
+    const users = Array.isArray(inputUsers) ? inputUsers : await loadUsersFresh();
+    return Array.isArray(users) ? saveUsers(users) : false;
+};
 
 loadSessions();
 
-setInterval(() => {
+setInterval(async () => {
     const now = Date.now();
     let changed = false;
     for (const [tokenHash, session] of activeSessions.entries()) {
@@ -2235,25 +2795,31 @@ setInterval(() => {
             changed = true;
         }
     }
-    if (changed) saveSessions();
+    if (changed || expiredSessionCleanupPending) await saveSessions();
 }, 600000);
 
-// Khởi tạo bản sao lưu đầu tiên nếu chưa có bản nào
-setTimeout(() => {
+let initialBackupCheckPromise = null;
+async function ensureInitialSystemBackup() {
+    if (!supabaseStorageReady) return false;
+    if (initialBackupCheckPromise) return initialBackupCheckPromise;
+    initialBackupCheckPromise = (async () => {
+        const backups = await listSystemBackups();
+        if (!Array.isArray(backups)) return false;
+        if (backups.length > 0) return true;
+        return (await createSystemBackup('initial-startup')).ok;
+    })();
     try {
-        if (listSystemBackups().length === 0) {
-            createSystemBackup('initial-startup');
-        }
-    } catch (_) {}
-}, 1000);
+        return await initialBackupCheckPromise;
+    } finally {
+        initialBackupCheckPromise = null;
+    }
+}
 
 // Tự động tạo bản sao lưu an toàn mỗi 6 giờ
 setInterval(() => {
-    try {
-        createSystemBackup('scheduled-interval-6h');
-    } catch (e) {
+    void createSystemBackup('scheduled-interval-6h').catch(e => {
         console.error('[BACKUP] Lỗi tạo backup định kỳ 6h:', e.message);
-    }
+    });
 }, 6 * 3600 * 1000);
 
 function parseCookies(req) {
@@ -2275,6 +2841,117 @@ function parseCookies(req) {
     return list;
 }
 
+function getClientIp(req) {
+    const rawIp = String(req?.ip || req?.socket?.remoteAddress || req?.connection?.remoteAddress || '').trim();
+    if (!rawIp) return 'unknown';
+    // Normalize IPv4-mapped IPv6 addresses for stable rate-limit keys and logs.
+    return rawIp.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
+}
+
+const managerLoginAttempts = new Map();
+function checkLoginRateLimit(clientIp, username) {
+    const key = String(clientIp || 'unknown') + ':' + String(username || '').toLowerCase();
+    const now = Date.now();
+    const entry = managerLoginAttempts.get(key);
+    if (!entry || now - entry.windowStart >= 15 * 60 * 1000) {
+        managerLoginAttempts.set(key, { windowStart: now, failures: 0 });
+        return { allowed: true };
+    }
+    if (entry.failures >= 10) return { allowed: false, error: 'Quá nhiều lần đăng nhập thất bại. Vui lòng thử lại sau 15 phút.' };
+    return { allowed: true };
+}
+function recordLoginAttempt(clientIp, username, success) {
+    const key = String(clientIp || 'unknown') + ':' + String(username || '').toLowerCase();
+    if (success) {
+        managerLoginAttempts.delete(key);
+        return;
+    }
+    const now = Date.now();
+    let entry = managerLoginAttempts.get(key);
+    if (!entry || now - entry.windowStart >= 15 * 60 * 1000) entry = { windowStart: now, failures: 0 };
+    entry.failures++;
+    managerLoginAttempts.set(key, entry);
+}
+class ManagerMemoryRateLimiter {
+    constructor({ maxFailures = 5, windowMs = 15 * 60 * 1000, maxEntries = 5000, message = 'Quá nhiều lần thử thất bại. Vui lòng thử lại sau.' } = {}) {
+        this.maxFailures = maxFailures; this.windowMs = windowMs; this.maxEntries = maxEntries;
+        this.message = message; this.attempts = new Map();
+    }
+    _keys(ip, identifier = '') {
+        const keys = ['ip:' + String(ip || 'unknown').trim().toLowerCase()];
+        const id = String(identifier || '').trim().toLowerCase();
+        if (id) keys.push('id:' + id);
+        return keys;
+    }
+    _clean(now = Date.now()) {
+        if (this.attempts.size <= this.maxEntries) return;
+        for (const [key, record] of this.attempts) {
+            if (this.attempts.size <= this.maxEntries) break;
+            if (now - record.lastAttempt >= this.windowMs && now >= record.lockedUntil) this.attempts.delete(key);
+        }
+    }
+    check(ip, identifier = '') {
+        const now = Date.now(); this._clean(now);
+        let lockedUntil = 0;
+        for (const key of this._keys(ip, identifier)) lockedUntil = Math.max(lockedUntil, this.attempts.get(key)?.lockedUntil || 0);
+        if (lockedUntil > now) return { allowed: false, error: this.message + ' (thử lại sau ' + Math.ceil((lockedUntil - now) / 1000) + ' giây)' };
+        return { allowed: true };
+    }
+    record(ip, identifier = '', success = false) {
+        const now = Date.now(); this._clean(now);
+        for (const key of this._keys(ip, identifier)) {
+            if (success) { this.attempts.delete(key); continue; }
+            const record = this.attempts.get(key) || { count: 0, lockedUntil: 0, lastAttempt: now };
+            record.count++; record.lastAttempt = now;
+            if (record.count >= this.maxFailures) record.lockedUntil = now + this.windowMs;
+            this.attempts.set(key, record);
+        }
+    }
+}
+const managerRegisterLimiter = new ManagerMemoryRateLimiter({ maxFailures: 5, message: 'Tạm khóa đăng ký do thử quá nhiều lần.' });
+const managerRenewLimiter = new ManagerMemoryRateLimiter({ maxFailures: 8, message: 'Tạm khóa gia hạn do thử quá nhiều lần.' });
+const verifyBotLimiter = new ManagerMemoryRateLimiter({ maxFailures: 10, message: 'Tạm khóa xác minh bot do thử quá nhiều lần.' });
+const changePassLimiter = new ManagerMemoryRateLimiter({ maxFailures: 5, message: 'Tạm khóa đổi mật khẩu do thử quá nhiều lần.' });
+function checkRegisterRateLimit(ip, username) { return managerRegisterLimiter.check(ip, username); }
+function recordRegisterAttempt(ip, username, success) { managerRegisterLimiter.record(ip, username, success); }
+function checkRenewRateLimit(req, username) { return managerRenewLimiter.check(getClientIp(req), username); }
+function recordRenewAttempt(req, username, success) { managerRenewLimiter.record(getClientIp(req), username, success); }
+
+const pendingAuditLogs = [];
+let pendingAuditFlushTimer = null;
+function makeAuditEntry({ req = null, action, actionLabel = '', category = 'SYSTEM', target = {}, details = '', status = 'SUCCESS' } = {}) {
+    const session = req ? getSessionUser(req) : null;
+    return {
+        id: 'aud_' + crypto.randomUUID(), botId: target?.botId ?? null, logType: 'MANAGER',
+        category: String(category || 'SYSTEM'), action: String(action || 'UNKNOWN'), actionLabel: String(actionLabel || action || ''),
+        actor: { username: session?.username || 'system', role: session?.role || 'system', ip: req ? getClientIp(req) : '127.0.0.1' },
+        target: target && typeof target === 'object' ? target : { value: String(target) },
+        details: String(details || ''), status: String(status || 'SUCCESS'), timestamp: new Date().toISOString()
+    };
+}
+function schedulePendingAuditFlush(delayMs = 1000) {
+    if (pendingAuditFlushTimer || !pendingAuditLogs.length || !supabaseStorageReady) return;
+    pendingAuditFlushTimer = setTimeout(() => {
+        pendingAuditFlushTimer = null;
+        void flushPendingAuditLogs().catch(err => console.error('[AUDIT] Lỗi flush hàng đợi:', err.message));
+    }, delayMs);
+    if (typeof pendingAuditFlushTimer.unref === 'function') pendingAuditFlushTimer.unref();
+}
+function logAuditEvent(event = {}) {
+    try {
+        const entry = makeAuditEntry(event);
+        pendingAuditLogs.push(entry);
+        try { fs.appendFileSync(AUDIT_LOG_FILE, JSON.stringify(entry) + '\n', 'utf8'); }
+        catch (err) { console.error('[AUDIT] Không ghi được audit log local:', err.message); }
+        schedulePendingAuditFlush();
+        console.log(`[AUDIT] ${entry.status} ${entry.action}`);
+        return entry;
+    } catch (err) {
+        console.error('[AUDIT] Không tạo được audit entry:', err.message);
+        return null;
+    }
+}
+
 function getSessionForToken(rawToken) {
     if (!rawToken || typeof rawToken !== 'string') return null;
     const tokenHash = hashSessionToken(rawToken);
@@ -2283,69 +2960,44 @@ function getSessionForToken(rawToken) {
     const sessionExpiresAt = Number(session.expiresAt);
     if (!Number.isFinite(sessionExpiresAt) || sessionExpiresAt <= Date.now()) {
         activeSessions.delete(tokenHash);
-        saveSessions();
+        void supabaseAdapter?.deleteSession(tokenHash);
         return null;
-    }
-    if (session.role === 'user') {
-        const users = loadUsers();
-        if (!users || users.length === 0) {
-            // Fail-closed: Nếu không thể xác minh danh sách người dùng, từ chối quyền khách thuê
-            return null;
-        }
-        const found = users.find(u => u.id === session.userId || u.username.toLowerCase() === session.username.toLowerCase());
-        if (!found) {
-            activeSessions.delete(tokenHash);
-            saveSessions();
-            return null;
-        }
-        const userStatus = found.status || 'active';
-        const rentalExpiresAt = found.expiresAt ? Date.parse(found.expiresAt) : NaN;
-        const isRentalExpired = Number.isFinite(rentalExpiresAt) && Date.now() > rentalExpiresAt;
-        if (userStatus === 'expired' || isRentalExpired) {
-            session.status = 'expired';
-        } else if (userStatus === 'disabled') {
-            session.status = 'disabled';
-        } else {
-            session.status = 'active';
-        }
-        session.assignedBotIds = Array.isArray(found.assignedBotIds) ? found.assignedBotIds.map(Number) : [];
-        session.planName = found.planName || 'Gói thường';
-        session.expiresAtRental = found.expiresAt || null;
-        session.allowAccountChange = found.allowAccountChange !== false;
     }
     return session;
 }
 
+function getRequestManagerSessionToken(req) {
+    const authHeader = String(req?.headers?.authorization || '');
+    if (authHeader.startsWith('Bearer ')) return authHeader.slice(7).trim();
+    return String(parseCookies(req).kingmc_mgr_session || '').trim();
+}
+
 function getAuthToken(req) {
-    const authHeader = req.headers?.authorization || '';
-    if (authHeader.startsWith('Bearer ')) {
-        const candidate = authHeader.slice(7).trim();
-        if (candidate && getSessionForToken(candidate)) {
-            return candidate;
-        }
-    }
-    const cookies = parseCookies(req);
-    if (cookies.kingmc_mgr_session && getSessionForToken(cookies.kingmc_mgr_session)) {
-        return cookies.kingmc_mgr_session;
-    }
-    return null;
+    const candidate = getRequestManagerSessionToken(req);
+    return candidate && getSessionUser(req) ? candidate : null;
 }
 
 function getSessionUser(req) {
-    const authHeader = req.headers?.authorization || '';
-    if (authHeader.startsWith('Bearer ')) {
-        const candidate = authHeader.slice(7).trim();
-        if (candidate) {
-            const session = getSessionForToken(candidate);
-            if (session) return session;
+    let session = null;
+    if (req?.managerAuthChecked === true) {
+        session = req.managerAuthSession || null;
+    } else {
+        const candidate = getRequestManagerSessionToken(req);
+        const localSession = candidate ? getSessionForToken(candidate) : null;
+        if (localSession) {
+            if (normalizeManagerRole(localSession.role) === 'admin') {
+                session = localSession;
+            } else if (!supabaseAdapter?.isEnabled()) {
+                session = localSession;
+            }
         }
     }
-    const cookies = parseCookies(req);
-    if (cookies.kingmc_mgr_session) {
-        const session = getSessionForToken(cookies.kingmc_mgr_session);
-        if (session) return session;
-    }
-    return null;
+    if (!session) return null;
+    const role = normalizeManagerRole(session.role);
+    if (role === session.role) return session;
+    const normalizedSession = { ...session, role };
+    if (req?.managerAuthChecked === true) req.managerAuthSession = normalizedSession;
+    return normalizedSession;
 }
 
 function checkBotPermission(req, botId) {
@@ -2353,11 +3005,9 @@ function checkBotPermission(req, botId) {
     if (!session) return { allowed: false, status: 401, error: 'Chưa đăng nhập hệ thống.' };
     if (session.role === 'admin') return { allowed: true, user: session };
 
-    // Kiểm tra trạng thái tài khoản User: Nếu bị tạm khóa hoặc hết hạn thuê thì chặn các thao tác bot
-    const users = loadUsers();
-    const liveUser = users.find(u => u.username.toLowerCase() === session.username.toLowerCase());
-    const userStatus = liveUser ? liveUser.status : session.status;
-    const isExpired = userStatus === 'expired' || session.status === 'expired' || (liveUser?.expiresAt && Date.now() > Date.parse(liveUser.expiresAt)) || (session?.expiresAtRental && Date.now() > Date.parse(session.expiresAtRental));
+    // getSessionUser returns a per-request Cloud-validated session for users.
+    const userStatus = session.status;
+    const isExpired = userStatus === 'expired' || (session?.expiresAtRental && Date.now() > Date.parse(session.expiresAtRental));
     if (userStatus === 'disabled' || session.status === 'disabled') {
         return { allowed: false, status: 403, error: 'Tài khoản của bạn đang bị tạm khóa bởi Quản trị viên.' };
     }
@@ -2639,287 +3289,160 @@ function normalizeRegistryUrl(value) {
     }
 }
 
-function loadRegistry() {
-    const defaultWebhook = {
-        enabled: !!(
-            MANAGER_CONFIG.DISCORD_WEBHOOK_URL ||
-            MANAGER_CONFIG.TELEGRAM_BOT_TOKEN ||
-            process.env.DISCORD_WEBHOOK_URL ||
-            process.env.TELEGRAM_BOT_TOKEN
-        ),
-        discordUrl: String(MANAGER_CONFIG.DISCORD_WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL || '').trim(),
-        telegramToken: String(MANAGER_CONFIG.TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '').trim(),
-        telegramChatId: String(MANAGER_CONFIG.TELEGRAM_CHAT_ID || process.env.TELEGRAM_CHAT_ID || '').trim(),
-        notifyOnOffline: true,
-        notifyOnLowTotem: true,
-        notifyOnLowHealth: true,
-        notifyOnDeath: true,
-        notifyOnRecover: true,
-        offlineThresholdMinutes: 5
-    };
-
-    const defaultAnnouncement = {
-        enabled: true,
-        id: 'ann_v11_6_customer',
-        title: '📢 THÔNG BÁO NÂNG CẤP HỆ THỐNG (V11.6 PRO)',
-        content: '🎉 Chào mừng bạn đến với KingMC Bot Manager V11.6 Enterprise (19.10.2026)!\n\n🚀 CÁC CẢI TIẾN & NÂNG CẤP DÀNH CHO BẠN:\n• ⚡ Tối Ưu Tốc Độ & Kết Nối: Tăng tốc độ phản hồi bảng điều khiển, dữ liệu bot cập nhật theo thời gian thực (Real-Time) không giật lag.\n• 🛡️ Nâng Cao Ổn Định AFK: Cải thiện cơ chế tự động kết nối lại (Auto-Reconnect) khi máy chủ bảo trì, đảm bảo bot cày cuốc liên tục 24/7 với Uptime 99.9%.\n• ⏱️ Hiển Thị Thời Hạn Chuẩn Xác: Hệ thống tính và hiển thị ngày hết hạn thuê bot minh bạch, chuẩn xác đến từng phút.\n• 📱 Trải Nghiệm Giao Diện Mượt Mà: Tối ưu hiển thị sắc nét trên cả điện thoại và máy tính, thao tác điều khiển bot nhanh chóng và tiện lợi.\n\nChúc quý khách có trải nghiệm AFK mượt mà và hiệu quả tại server KingMC!',
-        mode: 'daily',
-        startDate: '',
-        endDate: '',
-        updatedAt: new Date().toISOString()
-    };
-
-    const emptyRegistry = {
-        version: 3,
-        dynamicBots: [],
-        disabledEnvUrls: [],
-        disabledEnvIds: [],
-        overrides: [],
-        orderUrls: [],
-        order: [],
-        botIdMap: {},
-        botAliases: {},
-        botTags: {},
-        systemSettings: { trialGiftEnabled: true, trialDays: 1 },
-        lastBotId: 0,
-        supabase: null,
-        webhook: { ...defaultWebhook },
-        announcement: { ...defaultAnnouncement }
-    };
-
-    for (const candidate of REGISTRY_CANDIDATES) {
-        try {
-            if (!fs.existsSync(candidate)) continue;
-
-            const raw = fs.readFileSync(candidate, 'utf8');
-            const parsed = JSON.parse(raw);
-
-            REGISTRY_FILE = candidate;
-
-            const dynamicRaw = Array.isArray(parsed.dynamicBots)
-                ? parsed.dynamicBots
-                : (Array.isArray(parsed.bots) ? parsed.bots : []);
-
-            const dynamicBots = [];
-            const dynamicSeen = new Set();
-
-            for (const item of dynamicRaw) {
-                const url = normalizeRegistryUrl(item?.url);
-
-                if (!url || dynamicSeen.has(url)) continue;
-
-                dynamicSeen.add(url);
-                dynamicBots.push({
-                    label: String(item?.label || `Bot ${dynamicBots.length + 1}`).trim(),
-                    url
-                });
+function normalizeBotRentalDisabled(value) {
+    let candidates = [];
+    if (Array.isArray(value)) {
+        candidates = value.flatMap(item => {
+            if (item && typeof item === 'object') return [item.id ?? item.botId ?? item.bot_id];
+            return [item];
+        });
+    } else if (value && typeof value === 'object') {
+        for (const field of ['ids', 'botIds', 'disabledIds', 'botRentalDisabled']) {
+            if (Array.isArray(value[field])) candidates.push(...value[field]);
+        }
+        for (const [key, state] of Object.entries(value)) {
+            if (['ids', 'botIds', 'disabledIds', 'botRentalDisabled'].includes(key)) continue;
+            if (state === true || state === 1 || state === 'true' || state === 'disabled' || state?.disabled === true || state?.rentable === false) {
+                candidates.push(key);
             }
-
-            const disabledEnvUrls = Array.isArray(parsed.disabledEnvUrls)
-                ? parsed.disabledEnvUrls
-                    .map(normalizeRegistryUrl)
-                    .filter(Boolean)
-                : [];
-
-            const disabledEnvIds = Array.isArray(parsed.disabledEnvIds)
-                ? parsed.disabledEnvIds
-                    .map(Number)
-                    .filter(Number.isInteger)
-                : [];
-
-            const overrides = [];
-
-            if (Array.isArray(parsed.overrides)) {
-                for (const item of parsed.overrides) {
-                    const sourceUrl = normalizeRegistryUrl(
-                        item?.sourceUrl ||
-                        item?.keyUrl ||
-                        item?.originalUrl ||
-                        ''
-                    );
-
-                    const url = normalizeRegistryUrl(item?.url);
-
-                    if (
-                        !sourceUrl &&
-                        !url &&
-                        !Number.isInteger(Number(item?.id))
-                    ) {
-                        continue;
-                    }
-
-                    overrides.push({
-                        sourceUrl,
-                        legacyId: Number.isInteger(Number(item?.id))
-                            ? Number(item.id)
-                            : null,
-                        url,
-                        label: String(item?.label || '').trim()
-                    });
-                }
-            }
-
-            const orderUrls = Array.isArray(parsed.orderUrls)
-                ? parsed.orderUrls
-                    .map(normalizeRegistryUrl)
-                    .filter(Boolean)
-                : [];
-
-            const order = Array.isArray(parsed.order)
-                ? parsed.order
-                    .map(Number)
-                    .filter(Number.isInteger)
-                : [];
-
-            const webhook = {
-                enabled: typeof parsed.webhook?.enabled === 'boolean' ? parsed.webhook.enabled : defaultWebhook.enabled,
-                discordUrl: String(parsed.webhook?.discordUrl || defaultWebhook.discordUrl).trim(),
-                telegramToken: String(parsed.webhook?.telegramToken || defaultWebhook.telegramToken).trim(),
-                telegramChatId: String(parsed.webhook?.telegramChatId || defaultWebhook.telegramChatId).trim(),
-                notifyOnOffline: parsed.webhook?.notifyOnOffline !== false,
-                notifyOnLowTotem: parsed.webhook?.notifyOnLowTotem !== false,
-                notifyOnLowHealth: parsed.webhook?.notifyOnLowHealth !== false,
-                notifyOnDeath: parsed.webhook?.notifyOnDeath !== false,
-                notifyOnRecover: parsed.webhook?.notifyOnRecover !== false,
-                offlineThresholdMinutes: Math.max(1, Math.min(60, Number(parsed.webhook?.offlineThresholdMinutes || 5)))
-            };
-
-            const announcement = parsed.announcement && typeof parsed.announcement === 'object'
-                ? {
-                    enabled: parsed.announcement.enabled !== false,
-                    id: String(parsed.announcement.id || defaultAnnouncement.id),
-                    title: String(parsed.announcement.title || defaultAnnouncement.title).trim(),
-                    content: String(parsed.announcement.content || defaultAnnouncement.content).trim(),
-                    mode: ['daily', 'every_login', 'time_range'].includes(parsed.announcement.mode) ? parsed.announcement.mode : 'daily',
-                    startDate: String(parsed.announcement.startDate || '').trim(),
-                    endDate: String(parsed.announcement.endDate || '').trim(),
-                    updatedAt: String(parsed.announcement.updatedAt || new Date().toISOString())
-                }
-                : { ...defaultAnnouncement };
-
-            const adminPassword = parsed.adminPassword ? String(parsed.adminPassword).trim() : undefined;
-
-            const botIdMap = (parsed.botIdMap && typeof parsed.botIdMap === 'object' && !Array.isArray(parsed.botIdMap))
-                ? { ...parsed.botIdMap }
-                : {};
-
-            const botAliases = (parsed.botAliases && typeof parsed.botAliases === 'object' && !Array.isArray(parsed.botAliases))
-                ? { ...parsed.botAliases }
-                : {};
-
-            const botTags = (parsed.botTags && typeof parsed.botTags === 'object' && !Array.isArray(parsed.botTags))
-                ? { ...parsed.botTags }
-                : {};
-
-            const systemSettings = (parsed.systemSettings && typeof parsed.systemSettings === 'object')
-                ? {
-                    trialGiftEnabled: parsed.systemSettings.trialGiftEnabled !== false,
-                    trialDays: Math.max(1, Math.min(365, parseInt(parsed.systemSettings.trialDays, 10) || 1))
-                }
-                : { trialGiftEnabled: true, trialDays: 1 };
-
-            const lastBotId = Number(parsed.lastBotId) || 0;
-
-            let supabaseKey = loadSupabaseSecretKey();
-            if (!supabaseKey && parsed.supabase && parsed.supabase.key) {
-                supabaseKey = String(parsed.supabase.key).trim();
-                saveSupabaseSecretKey(supabaseKey);
-            }
-            const supabaseConfig = (parsed.supabase && typeof parsed.supabase === 'object')
-                ? {
-                    url: String(parsed.supabase.url || '').trim(),
-                    key: supabaseKey,
-                    enabled: !!(parsed.supabase.url && supabaseKey)
-                }
-                : null;
-
-            const loaded = {
-                version: 3,
-                adminPassword,
-                dynamicBots,
-                disabledEnvUrls: [...new Set(disabledEnvUrls)],
-                disabledEnvIds: [...new Set(disabledEnvIds)],
-                overrides,
-                orderUrls: [...new Set(orderUrls)],
-                order,
-                botIdMap,
-                botAliases,
-                botTags,
-                systemSettings,
-                lastBotId,
-                supabase: supabaseConfig,
-                webhook,
-                announcement,
-                mustChangePassword: parsed.mustChangePassword === true
-            };
-
-            console.log(
-                `[REGISTRY] Loaded ${loaded.dynamicBots.length} dynamic bot(s) from ${REGISTRY_FILE}`
-            );
-
-            return loaded;
-        } catch (err) {
-            console.error(
-                `[REGISTRY] Không đọc được ${candidate}: ${err.message}`
-            );
-            const restored = tryRestoreFromBackup('registry');
-            if (restored) return restored;
         }
     }
-
-    console.log(
-        '[REGISTRY] Không tìm thấy registry hợp lệ; bắt đầu với cấu hình ENV/dynamic rỗng.'
-    );
-
-    return emptyRegistry;
+    return [...new Set(candidates.map(Number).filter(id => Number.isSafeInteger(id) && id > 0))];
 }
 
-const LOCAL_REGISTRY_EXISTED_AT_BOOT = fs.existsSync(REGISTRY_FILE);
-const LOCAL_USERS_EXISTED_AT_BOOT = fs.existsSync(USERS_FILE);
-const LOCAL_KEYS_EXISTED_AT_BOOT = fs.existsSync(KEYS_FILE);
-const LOCAL_SESSIONS_EXISTED_AT_BOOT = fs.existsSync(SESSIONS_FILE);
+function loadRegistry() {
+    const defaultAnnouncement = {
+        enabled: true,
+        id: 'ann_v11_7_customer',
+        title: '📢 THÔNG BÁO VẬN HÀNH HỆ THỐNG (V11.7 PURE RENDER)',
+        content: '🎉 Chào mừng bạn đến với KingMC Bot Manager V11.7 Pure Render Edition!\n\n🚀 TÍNH NĂNG MỚI NỔI BẬT:\n• ⚡ Đồng Bộ Tức Thì: Mọi thao tác nạp key, đổi tên bot, tạo tài khoản đều hiển thị ngay lập tức, không cần F5.\n• 🎯 Giám Sát Chuẩn Xác: Phân biệt rõ ràng giữa bot Offline ingame và bot Lỗi kết nối để hỗ trợ kịp thời.\n• 💬 Hỗ Trợ Discord 24/7: Bấm ngay nút Discord ở chân trang để được đội ngũ kỹ thuật trợ giúp trực tiếp.\n• 🛡️ Tiết Kiệm Băng Thông Tối Đa: Tối ưu dữ liệu truyền tải mượt mà trên Render.\n\nChúc quý khách có trải nghiệm AFK hiệu quả tại máy chủ KingMC!',
+        mode: 'daily', startDate: '', endDate: '', updatedAt: new Date().toISOString()
+    };
+    return {
+        version: 3,
+        dynamicBots: [], disabledEnvUrls: [], disabledEnvIds: [], overrides: [],
+        orderUrls: [], order: [], botIdMap: {}, botAliases: {}, botTags: {}, botRentalDisabled: [],
+        systemSettings: { trialGiftEnabled: true, trialDays: 1 }, lastBotId: 0,
+        pendingResets: {},
+        supabase: null,
+        webhook: {
+            enabled: !!(MANAGER_CONFIG.DISCORD_WEBHOOK_URL || MANAGER_CONFIG.TELEGRAM_BOT_TOKEN || process.env.DISCORD_WEBHOOK_URL || process.env.TELEGRAM_BOT_TOKEN),
+            discordUrl: String(MANAGER_CONFIG.DISCORD_WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL || '').trim(),
+            telegramToken: String(MANAGER_CONFIG.TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '').trim(),
+            telegramChatId: String(MANAGER_CONFIG.TELEGRAM_CHAT_ID || process.env.TELEGRAM_CHAT_ID || '').trim(),
+            notifyOnOffline: true, notifyOnLowTotem: true, notifyOnLowHealth: true,
+            notifyOnDeath: true, notifyOnRecover: true, offlineThresholdMinutes: 5
+        },
+        announcement: defaultAnnouncement
+    };
+}
+
 const registry = loadRegistry();
-if (registry.supabase && registry.supabase.url && registry.supabase.key && !supabaseAdapter.isEnabled()) {
-    supabaseAdapter.updateConfig(registry.supabase.url, registry.supabase.key);
+let registryCloudBaseline = null;
+let registrySaveQueue = Promise.resolve();
+function stableRegistryJson(value) {
+    if (Array.isArray(value)) return '[' + value.map(stableRegistryJson).join(',') + ']';
+    if (value && typeof value === 'object') {
+        return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + stableRegistryJson(value[key])).join(',') + '}';
+    }
+    return JSON.stringify(value);
 }
+function stableJson(value) {
+    if (value === undefined) return 'null';
+    if (Array.isArray(value)) return '[' + value.map(stableJson).join(',') + ']';
+    if (value && typeof value === 'object') {
+        return '{' + Object.keys(value).filter(key => value[key] !== undefined).sort().map(key => JSON.stringify(key) + ':' + stableJson(value[key])).join(',') + '}';
+    }
+    return JSON.stringify(value);
+}
+registry.botRentalDisabled = normalizeBotRentalDisabled(registry.botRentalDisabled);
 let BOT_CONFIG = [];
 
-function initializeAdminPassword() {
+function initializeAdminPassword({ allowBootstrap = false } = {}) {
     const envPass = String(process.env.ADMIN_PASSWORD || process.env.MANAGER_ADMIN_PASSWORD || process.env.MANAGER_PASSWORD || '').trim();
     const configPass = String(MANAGER_CONFIG.ADMIN_PASSWORD || '').trim();
 
     if (envPass) {
         if (!verifyAdminPassword(envPass, registry.adminPassword)) {
             registry.adminPassword = hashAdminPassword(envPass);
-            saveRegistry();
-            console.log('[SECURITY] 🔑 Mật khẩu Admin đã được cập nhật từ biến môi trường ADMIN_PASSWORD.');
+            console.log('[SECURITY] 🔑 Mật khẩu Admin đã được áp dụng từ biến môi trường ADMIN_PASSWORD.');
         }
-    } else if (configPass) {
+        return { ok: true, source: 'env', created: false, password: '' };
+    }
+    if (configPass) {
         if (!verifyAdminPassword(configPass, registry.adminPassword)) {
             registry.adminPassword = hashAdminPassword(configPass);
-            saveRegistry();
-            console.log('[SECURITY] 🔑 Mật khẩu Admin đã được cập nhật từ MANAGER_CONFIG.ADMIN_PASSWORD.');
+            console.log('[SECURITY] 🔑 Mật khẩu Admin đã được áp dụng từ cấu hình môi trường.');
         }
-    } else if (registry.adminPassword) {
-        // Đã có mật khẩu Admin hợp lệ
-    } else {
-        // Khởi tạo ban đầu: Mặc định là 'admin123'
-        const defaultPass = 'admin123';
-        registry.adminPassword = hashAdminPassword(defaultPass);
-        registry.mustChangePassword = false;
-        saveRegistry();
-        console.log('================================================================================');
-        console.log('[SECURITY BOOTSTRAP] 🔑 KHỞI TẠO TÀI KHOẢN QUẢN TRỊ VIÊN (ADMIN) LẦN ĐẦU:');
-        console.log('  Tài khoản: admin');
-        console.log('  Mật khẩu mặc định: admin123');
-        console.log('  ⚠️ Vui lòng đổi mật khẩu quản trị ngay sau khi đăng nhập để đảm bảo an toàn!');
-        console.log('================================================================================');
+        return { ok: true, source: 'config', created: false, password: '' };
     }
+    if (String(registry.adminPassword || '').trim()) {
+        return { ok: true, source: 'existing', created: false, password: '' };
+    }
+    if (!allowBootstrap) {
+        return { ok: true, source: 'missing', created: false, password: '' };
+    }
+    const bootstrapPassword = 'admin123';
+    registry.adminPassword = hashAdminPassword(bootstrapPassword);
+    registry.mustChangePassword = true;
+    return { ok: true, source: 'bootstrap', created: true, fileCreated: false, password: bootstrapPassword };
 }
-initializeAdminPassword();
+
+// Chỉ công bố mật khẩu bootstrap sau khi hash đã được xác nhận trên Cloud (hoặc đọc lại thấy đã ghi).
+async function persistAdminBootstrapIfNeeded() {
+    const bootstrap = initializeAdminPassword({ allowBootstrap: true });
+    if (!bootstrap.created && !bootstrap.usedStoredHash) return { persisted: false };
+    let saved = false;
+    try {
+        saved = await saveRegistry();
+    } catch (err) {
+        console.error('[SECURITY] Lỗi lưu Admin bootstrap lên Cloud:', err.message);
+    }
+    if (!saved) {
+        try {
+            const confirmed = await supabaseAdapter.fetchRegistry();
+            saved = !!(confirmed && typeof confirmed.adminPassword === 'string' && confirmed.adminPassword === registry.adminPassword);
+        } catch (_) {}
+    }
+    if (!saved) {
+        if (bootstrap.fileCreated) {
+            try { fs.unlinkSync(ADMIN_BOOTSTRAP_HASH_FILE); } catch (_) {}
+        }
+        registry.adminPassword = '';
+        registry.mustChangePassword = false;
+        throw new Error('Không xác nhận được việc lưu mật khẩu Admin bootstrap lên Supabase; chưa công bố mật khẩu.');
+    }
+    if (bootstrap.password) {
+        console.warn('[SECURITY] Chưa cấu hình ADMIN_PASSWORD. Mật khẩu Admin khởi tạo một lần là: ' + bootstrap.password);
+        console.warn('[SECURITY] Hash đã được lưu và xác nhận trên Supabase Cloud. Hãy đăng nhập và đổi mật khẩu ngay.');
+    } else {
+        console.warn('[SECURITY] Đã lưu hash Admin bootstrap cục bộ lên Supabase Cloud. Dùng mật khẩu bootstrap đã in ở lần khởi tạo đầu tiên; nếu không còn giữ, hãy đặt ADMIN_PASSWORD hoặc khôi phục admin hash từ backup.');
+    }
+    return { persisted: true };
+}
+
+function encodeStoredCredentialForCloud(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    return encryptUserPassword(raw);
+}
 
 function saveRegistry() {
+    const run = () => saveRegistryUnlocked();
+    const operation = registrySaveQueue.then(run, run);
+    registrySaveQueue = operation.then(() => undefined, () => undefined);
+    return operation;
+}
+
+async function saveRegistryUnlocked() {
     try {
+        if (!supabaseAdapter || !supabaseAdapter.isEnabled()) {
+            return true;
+        }
+        if (!supabaseStorageReady) {
+            console.error('[REGISTRY] Supabase chưa sẵn sàng; từ chối lưu registry và không ghi file cục bộ.');
+            return false;
+        }
         let dynamicBotsToSave = [];
         if (typeof BOT_CONFIG !== 'undefined' && Array.isArray(BOT_CONFIG) && BOT_CONFIG.length > 0) {
             dynamicBotsToSave = BOT_CONFIG
@@ -2943,12 +3466,12 @@ function saveRegistry() {
             version: 3,
             dynamicBots: dynamicBotsToSave,
             disabledEnvUrls: [...new Set(
-                registry.disabledEnvUrls
+                (Array.isArray(registry.disabledEnvUrls) ? registry.disabledEnvUrls : [])
                     .map(normalizeRegistryUrl)
                     .filter(Boolean)
             )],
             disabledEnvIds: Array.isArray(registry.disabledEnvIds) ? [...new Set(registry.disabledEnvIds.map(Number).filter(Number.isInteger))] : [],
-            overrides: registry.overrides
+            overrides: (Array.isArray(registry.overrides) ? registry.overrides : [])
                 .map(item => ({
                     sourceUrl: normalizeRegistryUrl(item.sourceUrl),
                     url: normalizeRegistryUrl(item.url),
@@ -2960,11 +3483,15 @@ function saveRegistry() {
             botIdMap: registry.botIdMap || {},
             botAliases: registry.botAliases || {},
             botTags: registry.botTags || {},
+            botRentalDisabled: normalizeBotRentalDisabled(registry.botRentalDisabled),
             systemSettings: {
                 trialGiftEnabled: registry.systemSettings?.trialGiftEnabled !== false,
                 trialDays: Math.max(1, Math.min(365, parseInt(registry.systemSettings?.trialDays, 10) || 1))
             },
             lastBotId: Number(registry.lastBotId) || 0,
+            pendingResets: (registry.pendingResets && typeof registry.pendingResets === 'object' && !Array.isArray(registry.pendingResets))
+                ? registry.pendingResets
+                : {},
             supabase: registry.supabase ? {
                 url: registry.supabase.url,
                 enabled: !!registry.supabase.enabled
@@ -2983,9 +3510,9 @@ function saveRegistry() {
             },
             announcement: registry.announcement || {
                 enabled: true,
-                id: 'ann_v11_6_customer',
-                title: '📢 THÔNG BÁO NÂNG CẤP HỆ THỐNG (V11.6 PRO)',
-                content: '🎉 Chào mừng bạn đến với KingMC Bot Manager V11.6 Enterprise (19.10.2026)!\n\n🚀 CÁC CẢI TIẾN & NÂNG CẤP DÀNH CHO BẠN:\n• ⚡ Tối Ưu Tốc Độ & Kết Nối: Tăng tốc độ phản hồi bảng điều khiển, dữ liệu bot cập nhật theo thời gian thực (Real-Time) không giật lag.\n• 🛡️ Nâng Cao Ổn Định AFK: Cải thiện cơ chế tự động kết nối lại (Auto-Reconnect) khi máy chủ bảo trì, đảm bảo bot cày cuốc liên tục 24/7 với Uptime 99.9%.\n• ⏱️ Hiển Thị Thời Hạn Chuẩn Xác: Hệ thống tính và hiển thị ngày hết hạn thuê bot minh bạch, chuẩn xác đến từng phút.\n• 📱 Trải Nghiệm Giao Diện Mượt Mà: Tối ưu hiển thị sắc nét trên cả điện thoại và máy tính, thao tác điều khiển bot nhanh chóng và tiện lợi.\n\nChúc quý khách có trải nghiệm AFK mượt mà và hiệu quả tại server KingMC!',
+                id: 'ann_v11_7_customer',
+                title: '📢 THÔNG BÁO VẬN HÀNH HỆ THỐNG (V11.7 PURE RENDER)',
+                content: '🎉 Chào mừng bạn đến với KingMC Bot Manager V11.7 Pure Render Edition!\n\n🚀 TÍNH NĂNG MỚI NỔI BẬT:\n• ⚡ Đồng Bộ Tức Thì: Mọi thao tác nạp key, đổi tên bot, tạo tài khoản đều hiển thị ngay lập tức, không cần F5.\n• 🎯 Giám Sát Chuẩn Xác: Phân biệt rõ ràng giữa bot Offline ingame và bot Lỗi kết nối để hỗ trợ kịp thời.\n• 💬 Hỗ Trợ Discord 24/7: Bấm ngay nút Discord ở chân trang để được đội ngũ kỹ thuật trợ giúp trực tiếp.\n• 🛡️ Tiết Kiệm Băng Thông Tối Đa: Tối ưu dữ liệu truyền tải mượt mà trên Render.\n\nChúc quý khách có trải nghiệm AFK hiệu quả tại máy chủ KingMC!',
                 mode: 'daily',
                 startDate: '',
                 endDate: '',
@@ -2995,30 +3522,36 @@ function saveRegistry() {
             mustChangePassword: registry.mustChangePassword === true
         };
 
-        const tmpFile = `${REGISTRY_FILE}.tmp-${process.pid}-${Date.now()}`;
-
-        try {
-            fs.writeFileSync(
-                tmpFile,
-                JSON.stringify(payload, null, 2),
-                'utf8'
-            );
-            fs.renameSync(tmpFile, REGISTRY_FILE);
-        } catch (writeErr) {
-            try {
-                if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
-            } catch (_) {}
-            throw writeErr;
+        const baseline = registryCloudBaseline && typeof registryCloudBaseline === 'object' ? registryCloudBaseline : {};
+        const patch = {};
+        for (const [key, value] of Object.entries(payload)) {
+            if (key === 'pendingResets') continue;
+            if (stableRegistryJson(value) !== stableRegistryJson(baseline[key])) patch[key] = value;
         }
-
-        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
-            void supabaseAdapter.saveRegistry(payload);
+        const previousResets = baseline.pendingResets && typeof baseline.pendingResets === 'object' && !Array.isArray(baseline.pendingResets)
+            ? baseline.pendingResets : {};
+        const nextResets = payload.pendingResets && typeof payload.pendingResets === 'object' && !Array.isArray(payload.pendingResets)
+            ? payload.pendingResets : {};
+        const resetPatch = {};
+        const resetDeletes = [];
+        for (const key of new Set([...Object.keys(previousResets), ...Object.keys(nextResets)])) {
+            if (stableRegistryJson(previousResets[key]) === stableRegistryJson(nextResets[key])) continue;
+            if (Object.prototype.hasOwnProperty.call(nextResets, key)) resetPatch[key] = nextResets[key];
+            else resetDeletes.push(key);
         }
+        const saved = await supabaseAdapter.withManagerLock('registry-write', () =>
+            supabaseAdapter.patchRegistry(patch, resetPatch, resetDeletes), 900
+        );
+        if (!saved) throw new Error('Supabase không xác nhận lưu registry.');
+        const nextBaseline = { ...baseline, ...patch };
+        const nextBaselineResets = { ...previousResets };
+        for (const key of resetDeletes) delete nextBaselineResets[key];
+        Object.assign(nextBaselineResets, resetPatch);
+        nextBaseline.pendingResets = nextBaselineResets;
+        registryCloudBaseline = nextBaseline;
         return true;
     } catch (err) {
-        console.error(
-            `[REGISTRY] Không lưu được ${REGISTRY_FILE}: ${err.message}`
-        );
+        console.error(`[REGISTRY] Không lưu được lên Supabase: ${err.message}`);
         return false;
     }
 }
@@ -3028,6 +3561,7 @@ const saveRegistryFile = saveRegistry;
 BOT_CONFIG = [];
 
 function buildManagerBotConfig() {
+    registry.botRentalDisabled = normalizeBotRentalDisabled(registry.botRentalDisabled);
     const envBots = envBotConfig()
         .filter(bot => {
             const sourceUrl = normalizeRegistryUrl(bot.sourceUrl || bot.url);
@@ -3109,7 +3643,7 @@ function buildManagerBotConfig() {
     }
 
     // Hỗ trợ cấu hình bot ban đầu qua biến môi trường BOT_URL nếu được khai báo rõ ràng
-    if (finalBots.length === 0 && Number(registry.lastBotId || 0) === 0 && !LOCAL_REGISTRY_EXISTED_AT_BOOT && process.env.BOT_URL) {
+    if (finalBots.length === 0 && Number(registry.lastBotId || 0) === 0 && process.env.BOT_URL) {
         const envBotUrl = String(process.env.BOT_URL).trim();
         if (envBotUrl) {
             finalBots.push({
@@ -3165,7 +3699,7 @@ function buildManagerBotConfig() {
     }
 
     // 3. Với các bot chưa có ID, cấp ID nhỏ nhất còn trống bắt đầu từ 1
-    const rentalDisabledSet = new Set((registry.botRentalDisabled || []).map(Number));
+    const rentalDisabledSet = new Set(registry.botRentalDisabled);
     const mapped = finalBots.map((bot) => {
         let assignedId = registry.botIdMap[bot.url];
         if (!assignedId || !Number.isInteger(Number(assignedId)) || Number(assignedId) <= 0) {
@@ -3179,9 +3713,16 @@ function buildManagerBotConfig() {
             mapModified = true;
         }
         const bId = Number(assignedId);
+        let finalLabel = String(bot.label || '').trim();
+        const lowerLabel = finalLabel.toLowerCase();
+        // Nếu bot bị trùng tên mặc định như 'bot1', 'bot 1', hoặc không rõ ràng, chuẩn hóa theo Bot ID duy nhất
+        if (!finalLabel || lowerLabel === 'bot1' || lowerLabel === 'bot 1') {
+            finalLabel = `Bot ${bId}`;
+        }
         return {
             ...bot,
             id: bId,
+            label: finalLabel,
             tags: (registry.botTags && registry.botTags[bId]) || [],
             rentable: !rentalDisabledSet.has(bId)
         };
@@ -3195,7 +3736,7 @@ function buildManagerBotConfig() {
 
     if (mapModified) {
         BOT_CONFIG = mapped;
-        saveRegistry();
+        registryNeedsSave = true;
     }
     return mapped;
 }
@@ -3220,6 +3761,22 @@ function sanitizeBotForSession(botData, session) {
     return copy;
 }
 
+function finiteNonNegativeNumberOrNull(value) {
+    if (
+        value === null ||
+        value === undefined ||
+        (typeof value === 'string' && value.trim() === '')
+    ) {
+        return null;
+    }
+
+    const number = Number(value);
+
+    return Number.isFinite(number) && number >= 0
+        ? number
+        : null;
+}
+
 function buildUnavailableSummary(botConfig, error = 'Chưa kết nối được tới bot.') {
     return {
         id: botConfig.id,
@@ -3233,6 +3790,8 @@ function buildUnavailableSummary(botConfig, error = 'Chưa kết nối được 
         status: 'offline',
         ready: false,
         ping: null,
+        tps: null,
+        serverTps: null,
         uptime: '0h 0m 0s',
         uptimeSeconds: 0,
         reconnectCount: 0,
@@ -3314,6 +3873,31 @@ function clearCookieHeader(name, secure = false) {
 
 app.use(express.json({ limit: '512kb', strict: true }));
 
+// Lightweight Zero-Dependency Gzip Compression Middleware (Saves ~85% outbound bandwidth on Render)
+app.use((req, res, next) => {
+    const acceptEncoding = req.headers['accept-encoding'] || '';
+    if (!acceptEncoding.includes('gzip')) return next();
+    const originalSend = res.send;
+    res.send = function (body) {
+        if (res.headersSent || !body) return originalSend.call(this, body);
+        const contentType = String(res.getHeader('Content-Type') || '');
+        const isCompressible = contentType.includes('json') || contentType.includes('html') || contentType.includes('text') || contentType.includes('javascript') || contentType.includes('css');
+        if (!isCompressible) return originalSend.call(this, body);
+        const buffer = Buffer.isBuffer(body) ? body : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
+        if (buffer.length < 512) return originalSend.call(this, body);
+        try {
+            const compressed = zlib.gzipSync(buffer, { level: 5 });
+            res.setHeader('Content-Encoding', 'gzip');
+            res.removeHeader('Content-Length');
+            return originalSend.call(this, compressed);
+        } catch (_) {
+            res.removeHeader('Content-Encoding');
+            return originalSend.call(this, body);
+        }
+    };
+    next();
+});
+
 app.use((req, res, next) => {
     // Security Headers
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -3335,6 +3919,17 @@ app.use((req, res, next) => {
     }
     next();
 });
+
+// Authenticate private worker-to-manager requests. Keep the check fail-closed
+// when no shared secret is configured, matching bot.js's X-Bot-Secret header.
+function isBotSecretRequest(req) {
+    const expected = String(process.env.BOT_SECRET_KEY || MANAGER_CONFIG.BOT_SECRET_KEY || '').trim();
+    const incoming = String(req?.headers?.['x-bot-secret'] || '').trim();
+    if (!expected || !incoming) return false;
+    const expectedBuffer = Buffer.from(expected);
+    const incomingBuffer = Buffer.from(incoming);
+    return expectedBuffer.length === incomingBuffer.length && crypto.timingSafeEqual(expectedBuffer, incomingBuffer);
+}
 
 // CSRF Protection Middleware for Browser state-changing requests
 app.use((req, res, next) => {
@@ -3378,12 +3973,146 @@ app.use((req, res, next) => {
     next();
 });
 
+// A session token is checked against Cloud on every dynamic request. This makes
+// logout/revocation visible across Manager instances and refreshes user ownership
+// before any route can grant access to a bot.
+app.use((req, res, next) => {
+    if (!(req.path === '/' || req.path.startsWith('/api/')) || isBotSecretRequest(req)) return next();
+    const rawToken = getRequestManagerSessionToken(req);
+    if (!rawToken) return next();
+    const tokenHash = hashSessionToken(rawToken);
+    // Offline/local test mode has no Cloud session endpoint. Validate sessions
+    // against memory cache for seamless local testing and admin operations.
+    if (!supabaseAdapter?.isEnabled()) {
+        const localSession = activeSessions.get(tokenHash);
+        req.managerAuthChecked = true;
+        if (!localSession || Number(localSession.expiresAt) <= Date.now()) {
+            activeSessions.delete(tokenHash);
+            req.managerAuthSession = null;
+            return next();
+        }
+        if (normalizeManagerRole(localSession.role) === 'admin') {
+            req.managerAuthSession = { ...localSession, role: 'admin' };
+            return next();
+        }
+        // In local/offline mode, validate non-admin against cachedUsers
+        const user = Array.isArray(cachedUsers)
+            ? cachedUsers.find(u => String(u.id) === String(localSession.userId) || String(u.username).toLowerCase() === String(localSession.username).toLowerCase())
+            : null;
+        const expiry = user?.expiresAt ? Date.parse(user.expiresAt) : NaN;
+        const invalidUser = !user || user.status !== 'active' || (user.expiresAt && (!Number.isFinite(expiry) || expiry <= Date.now()));
+        if (invalidUser) {
+            activeSessions.delete(tokenHash);
+            req.managerAuthSession = null;
+            return next();
+        }
+        localSession.assignedBotIds = user.assignedBotIds || [];
+        localSession.status = 'active';
+        localSession.planName = user.planName || '';
+        localSession.expiresAtRental = user.expiresAt;
+        localSession.allowAccountChange = user.allowAccountChange;
+        localSession.lockReason = user.lockReason;
+        localSession.role = 'user';
+        req.managerAuthSession = localSession;
+        return next();
+    }
+    Promise.resolve().then(async () => {
+        const stored = await supabaseAdapter?.fetchManagerAuthorization?.(tokenHash);
+        if (!stored?.ok) {
+            return res.status(503).json({ ok: false, error: 'Không thể xác minh phiên đăng nhập trên Supabase; quyền truy cập đã bị tạm dừng.' });
+        }
+        const session = stored.session;
+        if (session) session.role = normalizeManagerRole(session.role);
+        if (!session || Number(session.expiresAt) <= Date.now()) {
+            activeSessions.delete(tokenHash);
+            req.managerAuthChecked = true;
+            req.managerAuthSession = null;
+            return next();
+        }
+        if (session.role !== 'admin') {
+            const user = stored.user;
+            const expiry = user?.expiresAt ? Date.parse(user.expiresAt) : NaN;
+            const invalidUser = !user || String(user.id) !== String(session.userId) ||
+                String(user.username).toLowerCase() !== String(session.username).toLowerCase() ||
+                user.status !== 'active' || (user.expiresAt && (!Number.isFinite(expiry) || expiry <= Date.now()));
+            if (invalidUser) {
+                activeSessions.delete(tokenHash);
+                await supabaseAdapter.deleteSession(tokenHash);
+                req.managerAuthChecked = true;
+                req.managerAuthSession = null;
+                return next();
+            }
+            session.assignedBotIds = user.assignedBotIds;
+            session.status = 'active';
+            session.planName = user.planName;
+            session.expiresAtRental = user.expiresAt;
+            session.allowAccountChange = user.allowAccountChange;
+            session.lockReason = user.lockReason;
+        }
+        req.managerAuthChecked = true;
+        req.managerAuthSession = session;
+        if (activeSessions.has(tokenHash)) activeSessions.set(tokenHash, { ...activeSessions.get(tokenHash), ...session });
+        next();
+    }).catch(next);
+});
+
 app.use((err, req, res, next) => {
     if (err && (err.type === 'entity.parse.failed' || err instanceof SyntaxError)) {
         return res.status(400).json({ ok: false, error: 'JSON request không hợp lệ.' });
     }
     return next(err);
 });
+
+function canChangeMinecraftAccount(user) {
+    if (!user) return false;
+    if (user.role === 'admin') return true;
+    return user.allowAccountChange !== false;
+}
+
+const RESTRICTED_MINECRAFT_ACCOUNT_COMMANDS = new Set([
+    '/register',
+    '/reg',
+    '/changepassword',
+    '/changepass',
+    '/cp',
+    '/unregister',
+    '/unreg',
+    '/authme',
+    '/user'
+]);
+
+function isRestrictedMinecraftAccountCommand(value) {
+    const command = String(value || '').trim().toLowerCase().split(/\s+/, 1)[0];
+    return RESTRICTED_MINECRAFT_ACCOUNT_COMMANDS.has(command);
+}
+
+function hasRestrictedMinecraftAccountCommand(schedules) {
+    return Array.isArray(schedules) && schedules.some(schedule =>
+        Array.isArray(schedule?.messages) && schedule.messages.some(isRestrictedMinecraftAccountCommand)
+    );
+}
+
+function parseSafeIsoDate(value) {
+    if (value === null || value === undefined || value === '') {
+        return { valid: true, value: null };
+    }
+    const ms = Date.parse(value);
+    if (!Number.isFinite(ms)) {
+        return { valid: false, error: 'Ngày hết hạn expiresAt không hợp lệ.' };
+    }
+    return { valid: true, value: new Date(ms).toISOString() };
+}
+
+function assignBotsExclusively(users, currentUserId, assignedBotIds) {
+    if (!Array.isArray(users) || !Array.isArray(assignedBotIds)) return;
+    const botIdSet = new Set(assignedBotIds.map(Number).filter(Number.isFinite));
+    if (botIdSet.size === 0) return;
+    for (const u of users) {
+        if (!u || !Array.isArray(u.assignedBotIds)) continue;
+        if (currentUserId && (u.id === currentUserId || u.username === currentUserId)) continue;
+        u.assignedBotIds = u.assignedBotIds.filter(id => !botIdSet.has(Number(id)));
+    }
+}
 
 function getBotConfig(id) {
     const numericId = Number(id);
@@ -3591,7 +4320,7 @@ function checkBotWebhookAlert(botConfig, summary) {
                 type: 'recover',
                 bot: { label: botConfig.label, username: summary.username, status: summary.status, url: botConfig.url, totemCount: summary.totemCount },
                 message: 'Bot đã trực tuyến trở lại và đang chạy ổn định.',
-                details: { '⏱ Uptime': summary.uptime || '0m', '📶 Ping': `${summary.ping || 0} ms` }
+                details: { '⏱ Uptime': summary.uptime || '0m', '📶 Ping': finiteNonNegativeNumberOrNull(summary.ping) === null ? '--' : `${finiteNonNegativeNumberOrNull(summary.ping)} ms` }
             });
         }
         state.offlineSince = null;
@@ -3675,74 +4404,80 @@ setInterval(async () => {
     } catch (_) {}
 }, Number(MANAGER_CONFIG.WATCHDOG_INTERVAL_MS || 60000));
 
-// Auto-Expiry Watchdog (Quét hạn thuê tài khoản mỗi 10 giây)
+// Auto-Expiry Watchdog (Quét hạn thuê tài khoản thông minh & tối ưu CPU/Network)
+let expiryWatchdogInFlight = false;
 setInterval(async () => {
+    if (expiryWatchdogInFlight) return;
+    expiryWatchdogInFlight = true;
     try {
         const now = Date.now();
-        let changed = false;
+        // Kiểm tra nhanh trên cachedUsers trong RAM: Nếu không có user nào sắp hết hạn trong 20s và cache còn mới (<60s)
+        const hasImminentExpiry = Array.isArray(cachedUsers) && cachedUsers.some(u =>
+            u.role !== 'admin' && u.status === 'active' && u.expiresAt && (Date.parse(u.expiresAt) <= now + 20000)
+        );
+        if (!hasImminentExpiry && (now - cachedUsersTime < 60000) && cachedUsers.length > 0) {
+            return;
+        }
+        const users = await loadUsersFresh();
+        if (!Array.isArray(users)) {
+            console.error('[AUTO-EXPIRY] Không đọc được snapshot users từ Supabase; đã bỏ qua lượt quét này.');
+            return;
+        }
         const expiredUsers = [];
-        const users = loadUsers();
 
         for (const user of users) {
             if (user.role === 'admin') continue;
             if (user.status === 'active' && user.expiresAt) {
                 const expTime = Date.parse(user.expiresAt);
-                if (!isNaN(expTime) && now > expTime) {
+                if (Number.isFinite(expTime) && now >= expTime) {
+                    const previous = { ...user, assignedBotIds: Array.isArray(user.assignedBotIds) ? [...user.assignedBotIds] : [] };
                     user.status = 'expired';
-                    changed = true;
-                    expiredUsers.push(user);
+                    user.updatedAt = new Date(now).toISOString();
+                    expiredUsers.push({ previous, user });
                 }
             }
         }
 
-        if (changed) {
-            saveUsers(users);
-            void syncAuthToAllBots(true);
-            for (const u of expiredUsers) {
-                // Đánh dấu phiên đăng nhập của user hết hạn để UI hiển thị overlay gia hạn
-                for (const [token, sess] of activeSessions.entries()) {
-                    if (sess.username?.toLowerCase() === u.username?.toLowerCase()) {
-                        sess.status = 'expired';
-                    }
+        if (expiredUsers.length) {
+            if (!(await saveUsers(users))) {
+                console.error('[AUTO-EXPIRY] Không lưu được trạng thái hết hạn theo revision hiện tại:', lastUserSaveError);
+                return;
+            }
+            let partial = false;
+            for (const { previous, user } of expiredUsers) {
+                const sessionResult = await revokeUserSessions(user);
+                if (!sessionResult.ok) {
+                    partial = true;
+                    console.error('[AUTO-EXPIRY] Không thu hồi đầy đủ session của ' + user.username + ': ' + sessionResult.error);
                 }
-                saveSessions();
-
-                // Dừng bot và tắt hẹn giờ bot nếu không còn ai active dùng chung
-                const userBots = u.assignedBotIds || [];
-                const otherActiveUsers = users.filter(o => o.username?.toLowerCase() !== u.username?.toLowerCase() && o.status === 'active');
-                for (const botId of userBots) {
-                    const isShared = otherActiveUsers.some(o => (o.assignedBotIds || []).includes(botId));
-                    if (!isShared) {
-                        const botConfig = getBotConfig(botId);
-                        if (botConfig && botConfig.url) {
-                            fetchChild(botConfig, '/api/bot/stop', { method: 'POST', body: { reason: 'Hết hạn gói thuê' } }).catch(() => {});
-                            fetchChild(botConfig, '/api/bot-schedules', {
-                                method: 'POST',
-                                body: { enabled: false }
-                            }).catch(() => {});
-                        }
-                    }
+                const lifecycle = await reconcileUserBotLifecycle(previous, user, 'rental expiry');
+                if (!lifecycle.ok) {
+                    partial = true;
+                    console.error('[AUTO-EXPIRY] Không hoàn tất thu hồi bot của ' + user.username + ': ' + lifecycle.error);
                 }
-
-                // Ghi Audit Log & bắn Webhook
                 logAuditEvent({
                     action: 'USER_RENTAL_EXPIRED',
-                    target: { username: u.username, assignedBots: u.assignedBotIds },
-                    details: `Gói thuê [${u.planName || 'Thuê bot'}] của khách đã hết hạn. Đã thu hồi bot.`,
-                    status: 'SUCCESS'
+                    target: { username: user.username, assignedBots: previous.assignedBotIds },
+                    details: `Gói thuê [${user.planName || 'Thuê bot'}] của khách đã hết hạn.`,
+                    status: partial ? 'PARTIAL' : 'SUCCESS'
                 });
 
                 if (registry.webhook?.enabled) {
                     dispatchManagerWebhookAlert({
                         type: 'rental_expired',
-                        bot: { label: `Khách: ${u.username}`, username: u.username, status: 'EXPIRED' },
-                        message: `⏳ Gói thuê của khách **${u.username}** (${u.planName || 'Gói thường'}) đã hết hạn lúc ${new Date().toLocaleString('vi-VN')}. Hệ thống đã tự động dừng các bot liên quan.`
+                        bot: { label: `Khách: ${user.username}`, username: user.username, status: 'EXPIRED' },
+                        message: `⏳ Gói thuê của khách **${user.username}** (${user.planName || 'Gói thường'}) đã hết hạn lúc ${new Date().toLocaleString('vi-VN')}.`
                     });
                 }
+            }
+            if (!(await syncAuthToAllBots(true))) {
+                console.error('[AUTO-EXPIRY] Đã hết hạn user nhưng chưa đồng bộ auth tới toàn bộ bot.');
             }
         }
     } catch (e) {
         console.error('[AUTO-EXPIRY] Lỗi quét hạn thuê:', e.message);
+    } finally {
+        expiryWatchdogInFlight = false;
     }
 }, 10000);
 
@@ -3758,9 +4493,9 @@ function hashSyncUserPassword(userId, plainPassword) {
     if (userSyncHashCache.has(cacheKey)) {
         return userSyncHashCache.get(cacheKey);
     }
-    const salt = crypto.createHmac('sha256', SYSTEM_MASTER_SECRET)
-        .update('bot-sync-salt:' + userId + ':' + plainPassword)
-        .digest('hex').slice(0, 32);
+    const salt = SYSTEM_MASTER_SECRET
+        ? crypto.createHmac('sha256', SYSTEM_MASTER_SECRET).update('bot-sync-salt:' + userId + ':' + plainPassword).digest('hex').slice(0, 32)
+        : crypto.randomBytes(16).toString('hex');
     const derivedKey = crypto.scryptSync(plainPassword, salt, 64, { N: 16384, r: 8, p: 1 });
     const hash = 'scrypt$N=16384,r=8,p=1$' + salt + '$' + derivedKey.toString('hex');
     if (userSyncHashCache.size > 2000) userSyncHashCache.clear();
@@ -3774,72 +4509,124 @@ function getSyncAdminPasswordHash() {
     if (adminSyncHashCache.pass === adminPass && adminSyncHashCache.hash) {
         return adminSyncHashCache.hash;
     }
-    const salt = crypto.createHmac('sha256', SYSTEM_MASTER_SECRET)
-        .update('bot-sync-admin-salt:' + adminPass)
-        .digest('hex').slice(0, 32);
+    const salt = SYSTEM_MASTER_SECRET
+        ? crypto.createHmac('sha256', SYSTEM_MASTER_SECRET).update('bot-sync-admin-salt:' + adminPass).digest('hex').slice(0, 32)
+        : crypto.randomBytes(16).toString('hex');
     const derivedKey = crypto.scryptSync(adminPass, salt, 64, { N: 16384, r: 8, p: 1 });
     const hash = 'scrypt$N=16384,r=8,p=1$' + salt + '$' + derivedKey.toString('hex');
     adminSyncHashCache = { pass: adminPass, hash };
     return hash;
 }
 
-function buildBotAuthSyncPayload(botConfig) {
+// Revision auth phải tăng đơn điệu tuyệt đối trong cùng process: Date.now()
+// có thể trùng ở 2 lần sync liên tiếp, khiến worker so sánh "cùng revision"
+// rồi chấp nhận/ghi đè lẫn nhau. Worker còn từ chối cùng revision khác chữ ký.
+let lastAuthSyncRevision = 0;
+function nextAuthSyncRevision(minimumExclusive = 0) {
+    const floor = Number(minimumExclusive || 0);
+    if (!Number.isSafeInteger(floor) || floor < 0) throw new Error('Worker trả authRevision không hợp lệ; dừng đồng bộ auth.');
+    const next = Math.max(Date.now(), lastAuthSyncRevision + 1, floor + 1);
+    if (!Number.isSafeInteger(next)) throw new Error('Không thể tạo authRevision đơn điệu an toàn.');
+    lastAuthSyncRevision = next;
+    return lastAuthSyncRevision;
+}
+
+async function buildBotAuthSyncPayload(botConfig, options = {}) {
     const botId = Number(botConfig.id);
-    const users = loadUsers();
+    const users = await loadUsersFresh();
+    if (!Array.isArray(users)) throw new Error('Không đọc được users đã xác nhận từ Supabase; dừng auth-sync để tránh cấp quyền bằng cache cũ.');
+    const botSettings = supabaseAdapter?.isEnabled?.() ? (await supabaseAdapter.fetchBotSettingsStrict(String(botId))) : null;
+    const syncedAuth = botSettings?.synced_auth || {};
     const syncedUsers = [];
     for (const u of users) {
         const assigned = Array.isArray(u.assignedBotIds) ? u.assignedBotIds.map(Number) : [];
-        if (assigned.includes(botId)) {
-            const plainPass = decryptUserPassword(u.password);
-            syncedUsers.push({
-                username: u.username,
-                passwordHash: hashSyncUserPassword(u.id || u.username, plainPass),
-                status: u.status || 'active',
-                expiresAt: u.expiresAt || null,
-                allowAccountChange: u.allowAccountChange !== false,
-                assignedBotIds: assigned
-            });
+        if (!assigned.includes(botId)) continue;
+        const plainPass = decryptUserPassword(u.password);
+        if (plainPass === null) {
+            console.error('[AUTH_SYNC] Bỏ qua user "' + (u.username || u.id || '?') + '" vì không giải mã được mật khẩu bằng khóa hiện tại; không cấp quyền với hash sai.');
+            continue;
         }
+        syncedUsers.push({
+            username: u.username,
+            passwordHash: hashSyncUserPassword(u.id || u.username, plainPass),
+            status: u.status || 'active',
+            expiresAt: u.expiresAt || null,
+            allowAccountChange: u.allowAccountChange !== false,
+            assignedBotIds: assigned
+        });
     }
-    return {
+    const payload = {
         managerBotId: botId,
-        authRevision: Date.now(),
+        authRevision: nextAuthSyncRevision(),
         adminPasswordHash: getSyncAdminPasswordHash(),
         users: syncedUsers,
+        pendingCustomerResetId: Object.prototype.hasOwnProperty.call(options, 'pendingCustomerResetId')
+            ? options.pendingCustomerResetId : (syncedAuth.pendingCustomerResetId || null),
+        credentialsResetAt: syncedAuth.credentialsResetAt || null,
+        lastCustomerResetId: syncedAuth.lastCustomerResetId || null,
+        customerResetLogCutoff: syncedAuth.customerResetLogCutoff || null,
         updatedAt: new Date().toISOString()
     };
+    const resetMarker = String(options.resetMarker || syncedAuth.resetMarker || '');
+    if (/^[a-f0-9]{32}$/i.test(resetMarker)) payload.resetMarker = resetMarker;
+    return payload;
 }
 
 const lastAuthSyncSignatures = new Map();
 const syncInFlight = new Set();
+const lastAuthSyncErrors = new Map();
 
-async function syncAuthToBot(botConfig, force = false) {
-    if (!botConfig || !botConfig.url) return false;
+async function syncAuthToBot(botConfig, force = false, options = {}) {
+    if (supabaseAdapter?.isEnabled?.() && !supabaseStorageReady) { lastAuthSyncErrors.set(Number(botConfig?.id), 'Supabase auth chưa được khôi phục vào Manager.'); return false; }
+    if (!botConfig || !botConfig.url) { lastAuthSyncErrors.set(Number(botConfig?.id), 'Worker chưa cấu hình URL.'); return false; }
     const botId = Number(botConfig.id);
-    if (syncInFlight.has(botId)) return false;
+    if (syncInFlight.has(botId)) { lastAuthSyncErrors.set(botId, 'Đang có yêu cầu auth-sync khác chạy.'); return false; }
     try {
         syncInFlight.add(botId);
-        const payload = buildBotAuthSyncPayload(botConfig);
-        const sigData = JSON.stringify({
-            managerBotId: payload.managerBotId,
-            adminPasswordHash: payload.adminPasswordHash,
-            users: payload.users
-        });
-        const sig = crypto.createHash('sha256').update(sigData).digest('hex');
-        if (!force && lastAuthSyncSignatures.get(botId) === sig) {
-            return true;
-        }
-        const res = await fetchChild(botConfig, '/api/bot/auth-sync', {
-            method: 'POST',
-            body: payload,
-            timeoutMs: 5000
-        });
-        if (res.ok) {
-            lastAuthSyncSignatures.set(botId, sig);
-            return true;
-        }
-        return false;
-    } catch (_) {
+        const prepare = async () => {
+            const payload = await buildBotAuthSyncPayload(botConfig, options);
+            const sigData = JSON.stringify({
+                managerBotId: payload.managerBotId,
+                adminPasswordHash: payload.adminPasswordHash,
+                users: payload.users,
+                resetMarker: payload.resetMarker || '',
+                pendingCustomerResetId: payload.pendingCustomerResetId || '',
+                credentialsResetAt: payload.credentialsResetAt || '',
+                lastCustomerResetId: payload.lastCustomerResetId || '',
+                customerResetLogCutoff: payload.customerResetLogCutoff || ''
+            });
+            return { payload, signature: crypto.createHash('sha256').update(sigData).digest('hex') };
+        };
+        const isCurrent = async (signature) => {
+            const status = await fetchChild(botConfig, '/api/bot/auth-sync/status', { timeoutMs: 3000 });
+            return status.ok && status.data?.ok === true && Number(status.data.botId) === botId && status.data.authSignature === signature;
+        };
+        const initial = await prepare();
+        if (!force && lastAuthSyncSignatures.get(botId) === initial.signature && await isCurrent(initial.signature)) return true;
+        const sendLatest = async () => {
+            const latest = await prepare(); // Cloud users/settings reread after acquiring the distributed lock.
+            const status = await fetchChild(botConfig, '/api/bot/auth-sync/status', { timeoutMs: 3000 });
+            if (!force && status.ok && status.data?.ok === true && Number(status.data.botId) === botId && status.data.authSignature === latest.signature) {
+                lastAuthSyncSignatures.set(botId, latest.signature);
+                lastAuthSyncErrors.delete(botId);
+                return true;
+            }
+            const workerRevision = Number(status.data?.authRevision || 0);
+            latest.payload.authRevision = nextAuthSyncRevision(workerRevision);
+            latest.payload.authSignature = latest.signature;
+            const res = await fetchChild(botConfig, '/api/bot/auth-sync', { method: 'POST', body: latest.payload, timeoutMs: 5000 });
+            if (res.ok && res.data?.ok === true && Number(res.data.managerBotId) === botId && Number(res.data.syncedUsersCount) === latest.payload.users.length && res.data.authSignature === latest.signature) {
+                lastAuthSyncSignatures.set(botId, latest.signature);
+                lastAuthSyncErrors.delete(botId);
+                return true;
+            }
+            lastAuthSyncErrors.set(botId, res.data?.error || ('Worker auth-sync response không khớp (HTTP ' + res.status + ').'));
+            return false;
+        };
+        if (options.distributedAuthLockHeld === true || !supabaseAdapter?.isEnabled?.()) return await sendLatest();
+        return await supabaseAdapter.withManagerLock('bot-auth-sync-' + botId, sendLatest, 120);
+    } catch (err) {
+        lastAuthSyncErrors.set(botId, err.message || 'Không kết nối được worker.');
         return false;
     } finally {
         syncInFlight.delete(botId);
@@ -3849,12 +4636,39 @@ async function syncAuthToBot(botConfig, force = false) {
 async function syncAuthToAllBots(force = false) {
     const bots = Array.isArray(BOT_CONFIG) ? BOT_CONFIG : [];
     const promises = bots.map(b => syncAuthToBot(b, force).catch(() => false));
-    await Promise.all(promises);
+    return (await Promise.all(promises)).every(Boolean);
+}
+
+async function syncAuthToAllBotsDetailed(force = false) {
+    const bots = Array.isArray(BOT_CONFIG) ? BOT_CONFIG : [];
+    const results = await Promise.all(bots.map(async bot => {
+        const botId = String(bot.id || '');
+        const ok = await syncAuthToBot(bot, force).catch(err => {
+            lastAuthSyncErrors.set(Number(botId), err.message || 'Lỗi auth-sync không xác định.');
+            return false;
+        });
+        return { botId, ok, error: ok ? '' : (lastAuthSyncErrors.get(Number(botId)) || 'Worker chưa xác nhận dữ liệu auth.') };
+    }));
+    return { ok: results.every(result => result.ok), results };
+}
+
+// Sau reset phải chờ auth-sync đang chạy (nếu có) kết thúc, rồi ép đồng bộ lại để
+// payload cũ không thể được worker áp dụng sau khi quyền đã bị thu hồi.
+async function syncAuthToBotAfterOwnershipChange(botConfig, options = {}) {
+    const botId = Number(botConfig?.id);
+    if (!botConfig || !Number.isSafeInteger(botId)) return { ok: false, error: 'Bot không hợp lệ để auth-sync.' };
+    const deadline = Date.now() + 10000;
+    while (syncInFlight.has(botId) && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    if (syncInFlight.has(botId)) return { ok: false, error: 'Auth-sync trước đó chưa kết thúc.' };
+    const ok = await syncAuthToBot(botConfig, true, options);
+    return { ok, error: ok ? '' : (lastAuthSyncErrors.get(botId) || 'Worker chưa xác nhận dữ liệu auth.') };
 }
 
 setInterval(() => {
     syncAuthToAllBots(false).catch(() => {});
-}, 15000);
+}, 60000);
 const safeHostDnsCache = new Map();
 
 async function assertSafeChildUrl(childUrl) {
@@ -3928,32 +4742,70 @@ async function fetchChild(botConfig, path, options = {}) {
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     const botSecret = String(botConfig.secretKey || BOT_SECRET_KEY || '').trim();
-    const headers = {
-        'Accept': 'application/json',
-        ...(options.headers || {}),
-        'X-Bot-Secret': botSecret,
-        'X-Manager-Bot-Id': String(botConfig.id || '')
+    const botIdHeaders = options.omitBotIdHeaders ? {} : {
+        'X-Manager-Bot-Id': String(botConfig.id || ''),
+        'X-Expected-Bot-ID': String(botConfig.id || '')
+    };
+    let secretHeaders = {
+        'X-Bot-Secret': botSecret
     };
 
-    if (options.body !== undefined) {
-        headers['Content-Type'] = 'application/json';
-    }
-
     try {
-        const response = await fetch(
-            `${botConfig.url}${path}`,
-            {
-                method: options.method || 'GET',
-                headers,
-                body:
-                    options.body !== undefined
-                        ? JSON.stringify(options.body)
-                        : undefined,
-                cache: 'no-store',
-                redirect: 'follow',
-                signal: controller.signal
+        // Redirect được xử lý thủ công: fetchChild phải KHÔNG tự động chuyển tiếp
+        // X-Bot-Secret sang một origin khác (redirect 30x do proxy/outside gây ra
+        // có thể rò rỉ khóa dịch vụ). Chỉ giữ secret khi đích cùng origin gốc hoặc
+        // là nâng cấp https trên cùng hostname đã được xác minh SSRF.
+        const cleanBaseUrl = String(botConfig.url || '').trim().replace(/\/+$/, '');
+        const cleanPath = String(path || '').startsWith('/') ? String(path || '') : '/' + String(path || '');
+        let currentUrl = `${cleanBaseUrl}${cleanPath}`;
+        let currentOrigin = '';
+        try { currentOrigin = new URL(cleanBaseUrl).origin; } catch (_) { currentOrigin = ''; }
+        const secretAllowed = (nextUrl) => nextUrl.origin === currentOrigin;
+        let method = options.method || 'GET';
+        let payloadBody = options.body !== undefined ? JSON.stringify(options.body) : undefined;
+        let response = null;
+
+        for (let hop = 0; hop <= 5; hop++) {
+            const requestHeaders = {
+                'Accept': 'application/json',
+                ...(options.headers || {}),
+                ...botIdHeaders,
+                ...secretHeaders,
+                ...(payloadBody !== undefined ? { 'Content-Type': 'application/json' } : {})
+            };
+            response = await fetch(
+                currentUrl,
+                {
+                    method,
+                    headers: requestHeaders,
+                    body: payloadBody,
+                    cache: 'no-store',
+                    redirect: 'manual',
+                    signal: controller.signal
+                }
+            );
+            if (![301, 302, 303, 307, 308].includes(response.status)) break;
+            const location = response.headers.get('location');
+            if (!location) break; // không có địa chỉ đích: trả về 3xx như một lỗi HTTP thông thường.
+            let nextUrl;
+            try {
+                nextUrl = new URL(location, currentUrl);
+            } catch (_) {
+                throw new Error('Redirect của bot trả về địa chỉ không hợp lệ: ' + location);
             }
-        );
+            // Đích redirect phải vượt qua kiểm tra SSRF như URL bot gốc.
+            if (!secretAllowed(nextUrl)) throw new Error('Từ chối redirect khác origin để bảo vệ dữ liệu trong request body.');
+            await assertSafeChildUrl(nextUrl.href);
+            if ([301, 302, 303].includes(response.status) && method !== 'GET' && method !== 'HEAD') {
+                method = 'GET';
+                payloadBody = undefined;
+            }
+            currentUrl = nextUrl.href;
+            currentOrigin = nextUrl.origin;
+        }
+        if (!response || response.status === undefined) {
+            throw new Error('Không nhận được phản hồi từ bot.');
+        }
 
         const text = await response.text();
         let data = null;
@@ -3995,7 +4847,9 @@ function normalizeSnapshotToSummary(botConfig, snapshotData) {
         username: String(data.username || ''),
         status: String(data.status || 'offline'),
         ready: !!data.ready,
-        ping: data.ping == null ? null : Number(data.ping),
+        ping: finiteNonNegativeNumberOrNull(data.ping),
+        tps: finiteNonNegativeNumberOrNull(data.tps ?? data.serverTps),
+        serverTps: finiteNonNegativeNumberOrNull(data.serverTps ?? data.tps),
         uptime: String(data.uptime || '0h 0m 0s'),
         uptimeSeconds: Number(data.uptimeSeconds || 0),
         reconnectCount: Number(data.reconnectCount || 0),
@@ -4029,74 +4883,66 @@ function normalizeSnapshotToSummary(botConfig, snapshotData) {
 // ----------------------------------------------------------------------------
 // BOT COORDINATE TRACKING & LOBBY/LOGIN FILTER ENGINE
 // ----------------------------------------------------------------------------
-const lastLoggedBotCoords = new Map(); // botId -> { x, y, z, at, dimension }
 const AUTH_COORDS_CONST = { x: 5, y: 119, z: 4 };
 const LOBBY_COORDS_CONST = { x: 1, y: 41, z: 1 };
-
 function isLobbyOrAuthCoordinate(pos) {
-    if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y) || !Number.isFinite(pos.z)) return true;
-    const rx = Math.round(pos.x);
-    const ry = Math.round(pos.y);
-    const rz = Math.round(pos.z);
-    if (rx === AUTH_COORDS_CONST.x && ry === AUTH_COORDS_CONST.y && rz === AUTH_COORDS_CONST.z) return true;
-    if (rx === LOBBY_COORDS_CONST.x && ry === LOBBY_COORDS_CONST.y && rz === LOBBY_COORDS_CONST.z) return true;
-    return false;
+    if (!pos || !Number.isFinite(Number(pos.x)) || !Number.isFinite(Number(pos.y)) || !Number.isFinite(Number(pos.z))) return true;
+    const rx = Math.round(Number(pos.x)), ry = Math.round(Number(pos.y)), rz = Math.round(Number(pos.z));
+    return (rx === AUTH_COORDS_CONST.x && ry === AUTH_COORDS_CONST.y && rz === AUTH_COORDS_CONST.z) ||
+        (rx === LOBBY_COORDS_CONST.x && ry === LOBBY_COORDS_CONST.y && rz === LOBBY_COORDS_CONST.z);
 }
+const lastRecordedBotPositions = new Map();
+const lastPositionWarnLog = new Map();
 
 function checkAndRecordBotCoordinates(botConfig, data) {
-    if (!botConfig || !data || !data.available) return;
-    
+    if (!botConfig || !data || !data.available || !supabaseAdapter?.isEnabled() || !supabaseStorageReady) return;
+    const botId = String(botConfig.id || '');
+    if (data.botId !== undefined && String(data.botId) !== botId) {
+        const now = Date.now();
+        const lastWarn = lastPositionWarnLog.get('mismatch_' + botId) || 0;
+        if (now - lastWarn > 300000) {
+            console.warn('[POSITION] Bỏ qua tọa độ có BOT_ID (' + data.botId + ') không khớp với Manager (ID: ' + botId + '). (Log rút gọn 5p/lần chống spam)');
+            lastPositionWarnLog.set('mismatch_' + botId, now);
+        }
+        return;
+    }
     const status = String(data.status || '').toLowerCase();
     const locState = String(data.locationState || '').toLowerCase();
-    
-    // BỎ QUA HOÀN TOÀN TỌA ĐỘ LÚC LOGIN VÀ Ở SẢNH (LOBBY/SPAWN) THEO YÊU CẦU NGƯỜI DÙNG
-    if (
-        locState === 'login' ||
-        locState === 'lobby' ||
-        status === 'connecting' ||
-        status === 'authenticating' ||
-        status === 'logging_in' ||
-        status === 'entering'
-    ) {
-        return; // BỎ QUA KHÔNG GHI LOG
-    }
-    
-    const pos = data.position || data.roundedLocation;
-    if (!pos || isLobbyOrAuthCoordinate(pos)) {
-        return; // BỎ QUA KHÔNG GHI LOG NẾU TRÙNG TỌA ĐỘ SẢNH/LOGIN
-    }
-    
-    const rx = Math.round(pos.x);
-    const ry = Math.round(pos.y);
-    const rz = Math.round(pos.z);
-    const dim = data.dimension || 'overworld';
-    const botId = String(botConfig.id);
-    const prev = lastLoggedBotCoords.get(botId);
-    const now = Date.now();
-    
-    let shouldLog = false;
-    if (!prev) {
-        shouldLog = true;
-    } else {
-        const distSq = Math.pow(rx - prev.x, 2) + Math.pow(ry - prev.y, 2) + Math.pow(rz - prev.z, 2);
-        // Ghi nhận khi bot di chuyển cách xa > 5 blocks hoặc sau 5 phút nếu có thay đổi tọa độ
-        if (distSq >= 25 || (distSq > 0 && now - prev.at >= 300000)) {
-            shouldLog = true;
+    if (['login', 'lobby'].includes(locState) || ['connecting', 'authenticating', 'logging_in', 'entering'].includes(status)) return;
+    const candidates = [data.position, data.roundedLocation];
+    const pos = candidates.find(p => p && [p.x, p.y, p.z].every(v => Number.isFinite(Number(v))));
+    if (!pos || isLobbyOrAuthCoordinate(pos)) return;
+    const position = { x: Math.round(Number(pos.x)), y: Math.round(Number(pos.y)), z: Math.round(Number(pos.z)) };
+    const dimension = String(data.dimension || 'overworld');
+
+    // Kiểm tra xem bot có thực sự di chuyển không (tránh gửi request Supabase và log liên tục khi bot đứng yên)
+    const prev = lastRecordedBotPositions.get(botId);
+    if (prev && prev.dimension === dimension) {
+        const dx = Math.abs(prev.position.x - position.x);
+        const dy = Math.abs(prev.position.y - position.y);
+        const dz = Math.abs(prev.position.z - position.z);
+        if (dx < 3 && dy < 3 && dz < 3) {
+            return;
         }
     }
-    
-    if (shouldLog) {
-        lastLoggedBotCoords.set(botId, { x: rx, y: ry, z: rz, at: now, dimension: dim });
-        logAuditEvent({
-            action: 'BOT_POSITION_UPDATE',
-            category: 'BOT_COORDS',
-            actionLabel: '📍 Tọa độ Bot sinh tồn',
-            target: { botId: botConfig.id, label: botConfig.label },
-            details: `Tọa độ bot "${botConfig.label || 'Bot ' + botConfig.id}": X=${rx}, Y=${ry}, Z=${rz} (Thế giới: ${dim})`,
-            status: 'SUCCESS'
-        });
-    }
+    lastRecordedBotPositions.set(botId, { position, dimension, at: Date.now() });
+
+    void supabaseAdapter.recordBotPositionChange({
+        botId, position, dimension, locationState: data.locationState || 'Unknown',
+        reason: 'SNAPSHOT', eventKey: 'pos_' + crypto.randomUUID(), changedAt: new Date().toISOString()
+    }).then(result => {
+        if (!result.ok) {
+            const now = Date.now();
+            const lastWarn = lastPositionWarnLog.get('record_' + botId) || 0;
+            if (now - lastWarn > 300000) {
+                console.warn('[POSITION] Không thể ghi tọa độ bot #' + botId + ': ' + result.error + ' (Log rút gọn 5p/lần chống spam)');
+                lastPositionWarnLog.set('record_' + botId, now);
+            }
+        }
+    });
 }
+
+const botLastRevMap = new Map();
 
 async function fetchBotSummary(botConfig) {
     if (!botConfig.url) {
@@ -4107,7 +4953,19 @@ async function fetchBotSummary(botConfig) {
     }
 
     try {
-        const snapshotRes = await fetchChild(botConfig, '/api/snapshot', { timeoutMs: 10000 });
+        const lastRev = botLastRevMap.get(botConfig.id);
+        const snapshotPath = lastRev ? `/api/snapshot?rev=${encodeURIComponent(lastRev)}` : '/api/snapshot';
+        const snapshotRes = await fetchChild(botConfig, snapshotPath, {
+            timeoutMs: 10000,
+            headers: lastRev ? { 'If-None-Match': `"${lastRev}"` } : {}
+        });
+        if (snapshotRes.ok && snapshotRes.data?.unchanged) {
+            const cached = summaryCache.get(botConfig.id)?.data;
+            if (cached) return cached;
+        }
+        if (snapshotRes.ok && snapshotRes.data?.rev) {
+            botLastRevMap.set(botConfig.id, snapshotRes.data.rev);
+        }
         if (snapshotRes.ok && snapshotRes.data?.bot) {
             const data = snapshotRes.data.bot;
             const inv = snapshotRes.data.inventory || {};
@@ -4122,7 +4980,9 @@ async function fetchBotSummary(botConfig) {
                 username: String(data.username || ''),
                 status: String(data.status || 'offline'),
                 ready: !!data.ready,
-                ping: data.ping == null ? null : Number(data.ping),
+                ping: finiteNonNegativeNumberOrNull(data.ping),
+                tps: finiteNonNegativeNumberOrNull(data.tps ?? data.serverTps),
+                serverTps: finiteNonNegativeNumberOrNull(data.serverTps ?? data.tps),
                 uptime: String(data.uptime || '0h 0m 0s'),
                 uptimeSeconds: Number(data.uptimeSeconds || 0),
                 reconnectCount: Number(data.reconnectCount || 0),
@@ -4156,6 +5016,49 @@ async function fetchBotSummary(botConfig) {
         const result = await fetchChild(botConfig, '/api/bot', { timeoutMs: 12000 });
 
         if (!result.ok || !result.data) {
+            try {
+                const healthRes = await fetchChild(botConfig, '/health', { timeoutMs: 8000, omitBotIdHeaders: true });
+                if (healthRes.ok && healthRes.data) {
+                    const hData = healthRes.data;
+                    const sec = Number(hData.uptime || 0);
+                    const h = Math.floor(sec / 3600);
+                    const m = Math.floor((sec % 3600) / 60);
+                    const s = sec % 60;
+                    return {
+                        id: botConfig.id,
+                        url: botConfig.url || '',
+                        source: botConfig.source || 'unknown',
+                        botId: String(botConfig.id),
+                        label: String(botConfig.label || `Bot ${botConfig.id}`),
+                        configured: true,
+                        available: true,
+                        username: '',
+                        status: String(hData.botStatus || (hData.online ? 'online' : 'offline')),
+                        ready: !!hData.online,
+                        ping: null,
+                        tps: null,
+                        serverTps: null,
+                        uptime: `${h}h ${m}m ${s}s`,
+                        uptimeSeconds: sec,
+                        reconnectCount: 0,
+                        host: '',
+                        port: null,
+                        position: null,
+                        dimension: null,
+                        ipAddress: '',
+                        locationState: 'unknown',
+                        roundedLocation: null,
+                        settings: null,
+                        totemCount: 0,
+                        foodCount: 0,
+                        memory: null,
+                        rssMb: 0,
+                        heapMb: 0,
+                        error: null
+                    };
+                }
+            } catch (_) {}
+
             const isWaking = result.status === 502 || result.status === 503;
             return {
                 id: botConfig.id,
@@ -4169,6 +5072,8 @@ async function fetchBotSummary(botConfig) {
                 status: isWaking ? 'waking' : 'offline',
                 ready: false,
                 ping: null,
+                tps: null,
+                serverTps: null,
                 uptime: '0h 0m 0s',
                 uptimeSeconds: 0,
                 reconnectCount: 0,
@@ -4204,7 +5109,9 @@ async function fetchBotSummary(botConfig) {
             username: String(data.username || ''),
             status: String(data.status || 'offline'),
             ready: !!data.ready,
-            ping: data.ping == null ? null : Number(data.ping),
+            ping: finiteNonNegativeNumberOrNull(data.ping),
+            tps: finiteNonNegativeNumberOrNull(data.tps ?? data.serverTps),
+            serverTps: finiteNonNegativeNumberOrNull(data.serverTps ?? data.tps),
             uptime: String(data.uptime || '0h 0m 0s'),
             uptimeSeconds: Number(data.uptimeSeconds || 0),
             reconnectCount: Number(data.reconnectCount || 0),
@@ -4247,6 +5154,8 @@ async function fetchBotSummary(botConfig) {
             status: isTimeout ? 'waking' : 'offline',
             ready: false,
             ping: null,
+            tps: null,
+            serverTps: null,
             uptime: '0h 0m 0s',
             uptimeSeconds: 0,
             reconnectCount: 0,
@@ -4297,6 +5206,8 @@ async function getBotSummary(botConfig, options = {}) {
             if (!current || current.url !== requestUrl) {
                 return data;
             }
+            const lastApplied = summaryLastAppliedSeq.get(id) || 0;
+            if (seq < lastApplied) return cached?.data || data;
             if (cached && !cached.data?.available && data.available) {
                 lastAuthSyncSignatures.delete(id);
                 void syncAuthToBot(current, true);
@@ -4304,11 +5215,8 @@ async function getBotSummary(botConfig, options = {}) {
             recordBotMetrics(id, data);
             checkBotWebhookAlert(current, data);
             checkAndRecordBotCoordinates(current, data);
-            const lastApplied = summaryLastAppliedSeq.get(id) || 0;
-            if (seq >= lastApplied) {
-                summaryLastAppliedSeq.set(id, seq);
-                summaryCache.set(id, { at: Date.now(), data });
-            }
+            summaryLastAppliedSeq.set(id, seq);
+            summaryCache.set(id, { at: Date.now(), data });
             return data;
         })
         .catch(err => {
@@ -4364,7 +5272,7 @@ async function refreshAllSummaries() {
     await Promise.all(workers);
 }
 
-async function runChildAction(id, path, body, extraHeaders = {}, method = 'POST') {
+async function runChildAction(id, path, body, extraHeaders = {}, method = 'POST', options = {}) {
     const botConfig = getBotConfig(id);
 
     if (!botConfig) {
@@ -4392,7 +5300,10 @@ async function runChildAction(id, path, body, extraHeaders = {}, method = 'POST'
         const result = await fetchChild(
             botConfig,
             path,
-            fetchOpts
+            {
+                ...fetchOpts,
+                ...(Number.isFinite(Number(options.timeoutMs)) ? { timeoutMs: Number(options.timeoutMs) } : {})
+            }
         );
 
         return {
@@ -5038,7 +5949,7 @@ button:active, button:active:not(:disabled) {
   transform: scale(0.97);
 }
 
-button:focus-visible, input:focus-visible {
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
   outline: 2px solid var(--blue);
   outline-offset: 2px;
 }
@@ -5780,7 +6691,7 @@ input:focus, select:focus, textarea:focus {
   align-items: center;
   justify-content: center;
   padding: 16px;
-  z-index: 100;
+  z-index: 1000;
 }
 
 @keyframes modalZoomIn {
@@ -5790,6 +6701,9 @@ input:focus, select:focus, textarea:focus {
 
 .modal-card {
   width: min(520px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   background: rgba(18, 27, 40, 0.96);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 18px;
@@ -6544,7 +7458,7 @@ input:focus, select:focus, textarea:focus {
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-  z-index: 200;
+  z-index: 2000;
   font-size: 13px;
   font-weight: 600;
   animation: toastSlideIn 0.22s cubic-bezier(0.16, 1, 0.3, 1);
@@ -7005,6 +7919,30 @@ input:focus, select:focus, textarea:focus {
   border-color: rgba(56, 189, 248, 0.4) !important;
   color: #38bdf8 !important;
 }
+.footer-discord-btn {
+  background: #5865F2 !important;
+  border: 1px solid #7983f5 !important;
+  color: #ffffff !important;
+  font-size: 11.5px !important;
+  font-weight: 700 !important;
+  padding: 6px 12px !important;
+  border-radius: 8px !important;
+  cursor: pointer !important;
+  transition: all 0.2s ease !important;
+  white-space: nowrap;
+  text-decoration: none !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  box-shadow: 0 2px 8px rgba(88, 101, 242, 0.35) !important;
+}
+.footer-discord-btn:hover {
+  background: #4752c4 !important;
+  border-color: #5865F2 !important;
+  color: #ffffff !important;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(88, 101, 242, 0.5) !important;
+}
 .footer-copy {
   margin-top: 10px;
   padding-top: 10px;
@@ -7120,6 +8058,14 @@ input:focus, select:focus, textarea:focus {
   .bot-card { width: 100%; max-width: 100%; padding: 12px; }
   .info, .inventory-grid { grid-template-columns: 1fr; }
   .equipment-row { grid-template-columns: repeat(5, minmax(48px, 1fr)); }
+  .bot-mini-btn {
+    min-height: 34px;
+    padding: 5px 9px;
+    font-size: 11px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
 }
 
 .vip-pill {
@@ -7298,6 +8244,13 @@ input:focus, select:focus, textarea:focus {
 @media (max-width: 480px) {
   .fleet-resource-bar {
     grid-template-columns: 1fr;
+  }
+  .toast {
+    left: 12px !important;
+    right: 12px !important;
+    bottom: 14px !important;
+    max-width: calc(100% - 24px) !important;
+    text-align: center;
   }
 }
 
@@ -7708,7 +8661,7 @@ input:focus, select:focus, textarea:focus {
 .global-header {
   position: sticky;
   top: 0;
-  z-index: 1000;
+  z-index: 100;
   width: 100%;
   display: flex;
   justify-content: space-between;
@@ -7957,7 +8910,7 @@ input:focus, select:focus, textarea:focus {
   border-radius: 4px;
 }
 .password-text.masked {
-  color: #64748b;
+  color: #94a3b8;
   letter-spacing: 2px;
 }
 .btn-peek {
@@ -8076,8 +9029,45 @@ input:focus, select:focus, textarea:focus {
 }
 
 @media (max-width: 768px) {
+  .global-header {
+    flex-wrap: wrap;
+    padding: 8px 12px;
+    gap: 8px;
+  }
+  .global-header-left {
+    display: contents;
+  }
+  .global-header-brand {
+    order: 1;
+  }
+  .global-header-right {
+    order: 2;
+    gap: 6px;
+  }
   .global-nav-pills {
-    display: none !important;
+    display: flex !important;
+    order: 3;
+    width: 100%;
+    margin-left: 0;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    flex-wrap: nowrap;
+    gap: 6px;
+    padding: 4px 2px 2px 2px;
+  }
+  .global-nav-pills::-webkit-scrollbar {
+    display: none;
+  }
+  .nav-pill-btn {
+    white-space: nowrap;
+    flex-shrink: 0;
+    padding: 7px 11px;
+    font-size: 11.5px;
+    min-height: 36px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
   }
   .full-page-section {
     padding: 12px 10px;
@@ -8085,6 +9075,58 @@ input:focus, select:focus, textarea:focus {
   .mgmt-filter-bar {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  /* Ergonomic Touch Targets & Responsive Polish */
+  .bot-mini-btn {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 8px 12px;
+    font-size: 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .quick-renew-btn {
+    min-height: 44px;
+    padding: 8px 12px;
+    font-size: 12.5px;
+    display: inline-flex;
+    align-items: center;
+  }
+  .btn-peek {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 6px 12px;
+    font-size: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .password-toggle-btn {
+    min-width: 44px;
+    min-height: 44px;
+    font-size: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .slot-grid {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    display: grid;
+    grid-template-columns: repeat(9, minmax(42px, 1fr));
+    padding-bottom: 8px;
+  }
+  .inventory-slot {
+    min-height: 56px;
+    min-width: 42px;
+  }
+  .log, .chat-log {
+    height: min(320px, 42vh);
+  }
+  .slot-index, .slot-name, .equip-label, .vital-label, .summary-label {
+    font-size: 11px;
   }
 }
 
@@ -8570,19 +9612,19 @@ input:focus, select:focus, textarea:focus {
       </div>
       <div class="kpi-card kpi-offline">
         <div class="kpi-header">
-          <span class="kpi-title">Offline / Lỗi / Kicked</span>
+          <span class="kpi-title">Offline / Kicked</span>
           <span class="kpi-icon">🔴</span>
         </div>
         <div id="kpiOffline" class="kpi-value" style="color:var(--red)">0</div>
-        <div class="kpi-sub">Cần kết nối lại hoặc đang dừng</div>
+        <div class="kpi-sub">Mất kết nối server / Bị kick</div>
       </div>
-      <div class="kpi-card kpi-totem">
+      <div class="kpi-card kpi-unreachable">
         <div class="kpi-header">
-          <span class="kpi-title">Tổng Totem Cứu Sinh</span>
-          <span class="kpi-icon">🪙</span>
+          <span class="kpi-title">Lỗi / Unreachable</span>
+          <span class="kpi-icon">⚠️</span>
         </div>
-        <div id="kpiTotem" class="kpi-value" style="color:var(--gold)">0</div>
-        <div class="kpi-sub">Bảo hiểm tính mạng toàn đội</div>
+        <div id="kpiUnreachable" class="kpi-value" style="color:#f97316">0</div>
+        <div class="kpi-sub">Mất kết nối máy chủ bot con</div>
       </div>
     </div>
 
@@ -8612,7 +9654,8 @@ input:focus, select:focus, textarea:focus {
         <button class="tab-btn active" id="tabAll" onclick="setStatusFilter('all')">Tất cả (<span id="countAll">0</span>)</button>
         <button class="tab-btn" id="tabAfk" onclick="setStatusFilter('afk')">🟢 Đang AFK (<span id="countAfk">0</span>)</button>
         <button class="tab-btn" id="tabOnline" onclick="setStatusFilter('online')">🟡 Online/Chờ (<span id="countOnline">0</span>)</button>
-        <button class="tab-btn" id="tabOffline" onclick="setStatusFilter('offline')">🔴 Offline/Lỗi (<span id="countOffline">0</span>)</button>
+        <button class="tab-btn" id="tabOffline" onclick="setStatusFilter('offline')">🔴 Offline/Kicked (<span id="countOffline">0</span>)</button>
+        <button class="tab-btn" id="tabUnreachable" onclick="setStatusFilter('unreachable')">⚠️ Lỗi/Unreachable (<span id="countUnreachable">0</span>)</button>
       </div>
       <div class="fleet-search-sort-wrap">
         <input id="searchInput" class="search-box" placeholder="🔍 Tìm bot (tên, user ingame, IP...)" oninput="filterBots()">
@@ -8665,7 +9708,7 @@ input:focus, select:focus, textarea:focus {
           <div class="info-item copyable" onclick="copyToClipboard(document.getElementById('detailUsername')?.innerText, 'Username')" title="Click để copy Username"><div class="info-label">USERNAME 📋</div><div id="detailUsername" class="info-value">-</div></div>
           <div class="info-item"><div class="info-label">SERVER</div><div id="detailHost" class="info-value">-</div></div>
           <div class="info-item"><div class="info-label">PING</div><div id="detailPing" class="info-value">-</div></div>
-          <div class="info-item"><div class="info-label">SERVER TPS ⚡</div><div id="detailTps" class="info-value" style="color:var(--green);font-weight:700;">20.0</div></div>
+          <div class="info-item"><div class="info-label">SERVER TPS ⚡</div><div id="detailTps" class="info-value" style="color:var(--green);font-weight:700;">--</div></div>
           <div class="info-item"><div class="info-label">RAM MÁY HOST 🧠</div><div id="detailHostRam" class="info-value" style="color:var(--green);font-weight:700;">-</div></div>
           <div class="info-item"><div class="info-label">CPU MÁY HOST ⚡</div><div id="detailHostCpu" class="info-value" style="color:#38bdf8;font-weight:700;">-</div></div>
           <div class="info-item"><div class="info-label">LƯU LƯỢNG MẠNG 📶</div><div id="detailHostNet" class="info-value" style="color:var(--yellow);font-weight:700;">-</div></div>
@@ -8681,6 +9724,10 @@ input:focus, select:focus, textarea:focus {
           <button id="detailStopButton" class="danger" onclick="detailAction('stop')">■ Dừng</button>
           <button id="detailRestartButton" onclick="detailAction('restart')">↻ Chạy lại</button>
           <button id="detailResetCustomerBtn" class="danger admin-only" onclick="resetCustomerBot()" style="margin-left:auto;background:rgba(239,68,68,0.2);border-color:rgba(239,68,68,0.5);" title="Dừng bot, xóa trắng tài khoản và lịch sử để bàn giao khách mới">🧹 Reset Bàn Giao Khách Mới</button>
+        </div>
+        <div class="note" style="margin-top:12px;">
+          <div style="font-weight:700;margin-bottom:6px;">Lịch sử tọa độ gần nhất</div>
+          <div id="detailPositionHistory" style="max-height:180px;overflow:auto;line-height:1.6;">Đang tải lịch sử...</div>
         </div>
       </div>
 
@@ -9126,8 +10173,8 @@ input:focus, select:focus, textarea:focus {
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
         <button class="small" onclick="navigateTo('dashboard')">← Về Dashboard</button>
         <div>
-          <h2 class="full-page-title">💾 Quản Lý Bản Sao Lưu &amp; Phục Hồi (Disaster Recovery)</h2>
-          <div class="full-page-subtitle">Tự động snapshot xoay vòng 30 bản định kỳ 6 tiếng và trước các thao tác quan trọng để bảo vệ dữ liệu.</div>
+          <h2 class="full-page-title">💾 Quản Lý Bản Sao Lưu Supabase</h2>
+          <div class="full-page-subtitle">Snapshot lưu trong Supabase, giữ tối đa 30 bản gần nhất; tạo định kỳ và trước các thao tác quan trọng.</div>
         </div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
@@ -9137,7 +10184,7 @@ input:focus, select:focus, textarea:focus {
     </div>
 
     <div style="background:rgba(56,189,248,0.08);border:1px solid rgba(56,189,248,0.25);border-radius:10px;padding:12px 16px;margin-bottom:16px;font-size:12.5px;color:var(--cyan);line-height:1.5;">
-      🛡️ <strong>Cơ chế Tự Phục Hồi (Self-Healing) đang hoạt động:</strong> Nếu file registry hoặc user bị lỗi cú pháp / crash rỗng, hệ thống sẽ tự động khôi phục từ bản backup gần nhất mà không làm mất dữ liệu tài khoản khách.
+      ☁️ <strong>Nguồn dữ liệu chính thức là Supabase.</strong> Khôi phục sẽ tạo backup dự phòng trước, thay thế Users, Keys, Registry và Bot Settings theo snapshot. Audit Logs và Sessions không nằm trong backup nên được giữ nguyên.
     </div>
 
     <div class="user-table-wrap" style="overflow-y:auto;max-height:60vh;">
@@ -9658,12 +10705,30 @@ input:focus, select:focus, textarea:focus {
     </div>
 
     <div class="changelog-body">
-      <!-- V11.6 -->
+      <!-- V11.7 -->
       <div class="timeline-item latest">
         <div class="timeline-node"></div>
         <div class="timeline-header">
+          <span class="timeline-version">🚀 KBOT Commercial Enterprise Edition V11.7 (Pure Render Production)</span>
+          <span class="timeline-badge current">ZERO BANDWIDTH WASTE • REALTIME SYNC • DISCORD SUPPORT • 99.9% UPTIME</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Đồng Bộ Dữ Liệu Tức Thì (Không Cần F5):</strong> Toàn bộ thao tác nạp key gia hạn, đổi biệt danh bot, tạo tài khoản hay cập nhật từ Supabase Cloud đều hiển thị ngay lập tức trên màn hình một cách mượt mà và liền mạch.</li>
+            <li><strong>Bảng Trạng Thái Phân Tách Chuẩn Xác:</strong> Tách biệt rõ ràng giữa <code>Offline / Kicked</code> (bot bị ngắt kết nối Minecraft) và <code>Lỗi / Unreachable</code> (máy chủ bot con mất kết nối web), giúp theo dõi hạm đội chuẩn xác 100%.</li>
+            <li><strong>Đảm Bảo Bot Luôn Kết Nối (Always Connected):</strong> Tối ưu hóa giao thức kết nối nội bộ giữa Manager và Bot con; tự động fallback qua cổng sức khỏe <code>/health</code>, loại bỏ hoàn toàn tình trạng link bot con sống nhưng manager báo nhầm Unreachable.</li>
+            <li><strong>Nút Hỗ Trợ Discord Tiện Lợi:</strong> Bổ sung nút bấm Discord trực tiếp ở chân trang, giúp khách thuê và admin liên hệ hỗ trợ kỹ thuật hoặc cập nhật thông báo cộng đồng nhanh chóng.</li>
+            <li><strong>Siêu Tiết Kiệm Băng Thông (Render 5GB/tháng):</strong> Tối ưu hóa chu kỳ kiểm tra ETag, loại bỏ dữ liệu thừa và nén dữ liệu cấp độ cao, đảm bảo hệ thống vận hành liên tục 24/7 suốt cả tháng mà không lo cạn kiệt băng thông Render.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V11.6 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
           <span class="timeline-version">👑 KBOT Commercial Enterprise Edition V11.6 (Performance & Experience Evolution)</span>
-          <span class="timeline-badge current">HIGH-SPEED REAL-TIME • 99.9% AFK UPTIME • SMART RECONNECT • SEAMLESS MOBILE UI</span>
+          <span class="timeline-badge">HIGH-SPEED REAL-TIME • 99.9% AFK UPTIME • SMART RECONNECT • SEAMLESS MOBILE UI</span>
         </div>
         <div class="timeline-content">
           <ul>
@@ -9836,10 +10901,10 @@ input:focus, select:focus, textarea:focus {
         </div>
         <div class="timeline-content">
           <ul>
-            <li><strong>Bảo Mật Scrypt & AES-256-GCM:</strong> Băm mật khẩu Admin bằng thuật toán <code>scrypt</code> có muối ngẫu nhiên; mã hóa mật khẩu User trên đĩa bằng <code>AES-256-GCM</code> chống lộ file an toàn tuyệt đối.</li>
+            <li><strong>Bảo Mật Mật Khẩu:</strong> Mật khẩu Admin được băm bằng <code>scrypt</code>; mật khẩu tài khoản và thông tin đăng nhập bot được bảo vệ khi lưu trên Supabase bằng khóa cấu hình môi trường.</li>
             <li><strong>Chống Brute-Force Đăng Nhập:</strong> Giới hạn 5 lần thử trong 15 phút, khóa IP và độ trễ lũy thừa bảo vệ cổng đăng nhập.</li>
-            <li><strong>Tự Động Sao Lưu (Auto-Backup) & Tự Phục Hồi (Self-Healing):</strong> Tự động snapshot xoay vòng 30 bản định kỳ 6 tiếng và trước các thao tác lớn; tự động khôi phục cấu hình nếu file JSON bị lỗi.</li>
-            <li><strong>Nhật Ký Quản Trị Toàn Diện (Audit Trail):</strong> Ghi nhận mọi hành vi đăng nhập, điều khiển bot và can thiệp hệ thống vào file stream <code>manager_audit.jsonl</code> kèm giao diện tra cứu trên Web cho Admin.</li>
+            <li><strong>Sao Lưu Cloud:</strong> Tạo snapshot vào Supabase định kỳ, trước thao tác lớn và giữ tối đa 30 bản gần nhất.</li>
+            <li><strong>Audit Trail:</strong> Ghi nhận hoạt động quản trị vào bảng <code>audit_logs</code> trên Supabase, có phân trang và lọc trên giao diện Admin.</li>
           </ul>
         </div>
       </div>
@@ -9872,7 +10937,7 @@ input:focus, select:focus, textarea:focus {
           <ul>
             <li><strong>Phân Quyền Đa Người Dùng (RBAC):</strong> Tách biệt Quản trị viên (Admin) và Operator; phân quyền chỉ định bot con cho từng thành viên.</li>
             <li><strong>Hệ Thống Thông Báo Sentinel:</strong> Popup thông báo admin thông minh với 3 chế độ (Hằng ngày 1 lần/ngày, Mọi lần vào, Khung thời gian).</li>
-            <li><strong>Bảo Mật Phiên 30 Ngày:</strong> Lưu trữ phiên bền vững qua cookie an toàn và file JSON trên đĩa; không bao giờ bị mất phiên khi F5 hoặc restart server.</li>
+            <li><strong>Bảo Mật Phiên 30 Ngày:</strong> Lưu phiên bền vững trong bảng <code>manager_sessions</code> trên Supabase; không phụ thuộc filesystem host.</li>
             <li><strong>Đồng Bộ HUD Toàn Diện:</strong> Huy hiệu PRO V7.1, Role badge, Platform và RAM Manager hiển thị sắc nét xuyên suốt từ Dashboard đến chi tiết bot con.</li>
             <li><strong>Bảo Mật Dữ Liệu Bot:</strong> Ẩn hoàn toàn form tài khoản/mật khẩu bot con đối với tài khoản User thường.</li>
           </ul>
@@ -10046,7 +11111,8 @@ input:focus, select:focus, textarea:focus {
       <button type="button" onclick="closeSupabaseModal()">Đóng</button>
       <button type="button" class="secondary" id="supabaseSchemaBtn" onclick="copySupabaseSchemaSql()">📋 Sao chép SQL tạo bảng</button>
       <button type="button" class="secondary" id="supabaseTestBtn" onclick="testSupabaseConnection()">🧪 Kiểm tra kết nối</button>
-      <button type="button" class="secondary" id="supabaseSyncBtn" onclick="syncAllToSupabase()">🔄 Đồng bộ ngay (Sync Now)</button>
+      <button type="button" class="secondary" id="supabaseSyncBtn" onclick="syncAllToSupabase()">⬆ Tải lên Supabase Cloud</button>
+      <button type="button" class="secondary" id="supabaseSyncDownBtn" onclick="syncDownFromSupabase()">⬇ Đồng bộ xuống</button>
       <button type="button" class="primary" id="supabaseSaveBtn" onclick="saveSupabaseConfig()">💾 Lưu cấu hình</button>
     </div>
   </div>
@@ -10055,10 +11121,16 @@ input:focus, select:focus, textarea:focus {
 <div class="app-footer">
   <div class="footer-recent-wrap">
     <div class="footer-recent-left">
-      <span class="footer-recent-tag">🚀 KBOT V11.6 COMMERCIAL ENTERPRISE</span>
-      <span class="footer-recent-desc">Nền Tảng Cho Thuê Bot AFK KingMC Thương Mại Số 1 • Pure Render Native • Session Revocation • Atomic Rollback.</span>
+      <span class="footer-recent-tag">🚀 KBOT V11.7 COMMERCIAL ENTERPRISE</span>
+      <span class="footer-recent-desc">Nền Tảng Cho Thuê Bot AFK KingMC Thương Mại Số 1 • Pure Render Native • Zero Bandwidth Waste • 99.9% Uptime.</span>
     </div>
-    <button class="footer-changelog-btn" onclick="openChangelogModal()">📜 Xem Lịch Sử Cập Nhật (V1.0 - V11.6)</button>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <a href="https://discord.gg/kingmc" target="_blank" rel="noopener noreferrer" class="footer-discord-btn" title="Tham gia máy chủ Discord hỗ trợ KingMC">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994.021-.041.001-.09-.041-.106a13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.929 1.793 8.18 1.793 12.061 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.894.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.028zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
+        Discord
+      </a>
+      <button class="footer-changelog-btn" onclick="openChangelogModal()">📜 Xem Lịch Sử Cập Nhật (V1.0 - V11.7)</button>
+    </div>
   </div>
   <div class="footer-copy">© 2026 KBOT — Hệ Thống Cho Thuê Bot AFK KingMC Thương Mại Cao Cấp. All rights reserved.</div>
 </div>
@@ -10081,6 +11153,8 @@ let routeResolving = false;
 let detailRequestInFlight = false;
 let lastEventRevision = -1;
 let lastChatRevision = -1;
+let lastPositionHistoryRevision = -1;
+let lastPositionHistoryFetchedAt = 0;
 let eventLoading = false;
 let chatLoading = false;
 let uptimeSyncAt = Date.now();
@@ -10248,12 +11322,45 @@ function botCardHtml(bot) {
   if (!bot) return '';
   const [color, label] = statusMeta(bot.status, bot.available, !!bot.manuallyStopped);
   const username = bot.username || 'Chưa đặt';
-  const pingVal = Number(bot.ping);
-  const ping = Number.isFinite(pingVal) ? pingVal + ' ms' : '--';
-  const tpsVal = Number(bot.tps ?? bot.serverTps ?? 20.0);
-  const tpsColor = tpsVal >= 18.5 ? 'var(--green)' : (tpsVal >= 14.0 ? 'var(--yellow)' : 'var(--red)');
-  const pos = bot.position && Number.isFinite(Number(bot.position.x)) && Number.isFinite(Number(bot.position.y)) && Number.isFinite(Number(bot.position.z))
-    ? (Math.round(Number(bot.position.x)) + ' ' + Math.round(Number(bot.position.y)) + ' ' + Math.round(Number(bot.position.z)))
+  const pingRaw = bot.ping;
+
+  const pingVal =
+      pingRaw === null ||
+      pingRaw === undefined ||
+      String(pingRaw).trim() === ''
+          ? NaN
+          : Number(pingRaw);
+
+  const ping =
+      Number.isFinite(pingVal) && pingVal >= 0
+          ? pingVal + ' ms'
+          : '--';
+
+  const tpsRaw = bot.tps ?? bot.serverTps;
+
+  const tpsVal =
+      tpsRaw === null ||
+      tpsRaw === undefined ||
+      String(tpsRaw).trim() === ''
+          ? NaN
+          : Number(tpsRaw);
+
+  const hasTps = Number.isFinite(tpsVal) && tpsVal >= 0;
+
+  const tpsText = hasTps
+      ? tpsVal.toFixed(1) + ' TPS'
+      : '-- TPS';
+
+  const tpsColor = !hasTps
+      ? 'var(--muted)'
+      : tpsVal >= 18.5
+          ? 'var(--green)'
+          : tpsVal >= 14.0
+              ? 'var(--yellow)'
+              : 'var(--red)';
+  const posObj = bot.position || bot.roundedLocation;
+  const pos = posObj && Number.isFinite(Number(posObj.x)) && Number.isFinite(Number(posObj.y)) && Number.isFinite(Number(posObj.z))
+    ? (Math.round(Number(posObj.x)) + ' ' + Math.round(Number(posObj.y)) + ' ' + Math.round(Number(posObj.z)))
     : '-';
   const id = Number(bot.id);
   const totems = Number(bot.totemCount || 0);
@@ -10381,7 +11488,7 @@ function botCardHtml(bot) {
       '<div class="vital-card ping-card">' +
         '<div class="vital-label-row">' +
           '<span class="vital-label">📶 PING / TPS ⚡</span>' +
-          '<span class="vital-val" style="color:#38bdf8;">' + escapeHtml(ping) + ' <small style="color:' + tpsColor + ';font-weight:700;">(' + tpsVal.toFixed(1) + ' TPS)</small></span>' +
+          '<span class="vital-val" style="color:#38bdf8;">' + escapeHtml(ping) + ' <small style="color:' + tpsColor + ';font-weight:700;">(' + escapeHtml(tpsText) + ')</small></span>' +
         '</div>' +
         '<div class="sparkline-container">' + pingSpark + '</div>' +
       '</div>' +
@@ -10477,19 +11584,43 @@ async function saveEditBot(){
   const rawTags=document.getElementById('editBotTags')?.value || '';
   const tags = rawTags.split(/[,;\s]+/).map(t => t.trim().toLowerCase().replace(/^#/, '')).filter(Boolean);
   const rentable = document.getElementById('editBotRentable') ? document.getElementById('editBotRentable').checked : true;
-  if(!url){showToast('URL không được trống.');return;}
+  if(currentUser?.role !== 'user' && !url){showToast('URL không được trống.');return;}
   try{
-    const result=await requestJson('/api/manager/bot/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,label,tags,rentable})});
-    const data=result.data||{};
-    if(!result.ok)throw new Error(data.error||'Không thể sửa bot.');
+    let data;
+    if (currentUser?.role === 'user') {
+      const result = await requestJson('/api/manager/bot/' + id + '/alias', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label })
+      });
+      data = result.data || {};
+      if (!result.ok) throw new Error(data.error || 'Không thể đổi tên bot.');
+      const found = bots.find(b => Number(b.id) === id);
+      if (found) found.label = data.label || label || ('bot' + id);
+      if (detailBot && Number(detailBot.id) === id) {
+        detailBot.label = data.label || label || ('bot' + id);
+        const titleEl = document.getElementById('detailTitle');
+        if (titleEl) titleEl.textContent = detailBot.label;
+      }
+    } else {
+      const result=await requestJson('/api/manager/bot/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,label,tags,rentable})});
+      data=result.data||{};
+      if(!result.ok)throw new Error(data.error||'Không thể sửa bot.');
+      const found = bots.find(b => Number(b.id) === id);
+      if (found && data.bot) {
+        if (data.bot.label) found.label = data.bot.label;
+        if (data.bot.tags) found.tags = data.bot.tags;
+        found.rentable = data.bot.rentable !== false;
+      }
+      if (detailBot && Number(detailBot.id) === id && data.bot?.label) {
+        detailBot.label = data.bot.label;
+        const titleEl = document.getElementById('detailTitle');
+        if (titleEl) titleEl.textContent = detailBot.label;
+      }
+    }
     closeEditBotModal();
     showToast(data.message||'Đã lưu thông tin bot.');
-    const found = bots.find(b => Number(b.id) === id);
-    if (found && data.bot) {
-      if (data.bot.label) found.label = data.bot.label;
-      if (data.bot.tags) found.tags = data.bot.tags;
-      found.rentable = data.bot.rentable !== false;
-    }
+    lastHomeSig = '';
     updateTagPills();
     filterBots();
     await refreshHome();
@@ -10648,8 +11779,8 @@ async function handleLoginSubmit(event) {
     }
 
     if (alertEl) {
-      alertEl.textContent = '✅ ' + (data.message || 'Đăng nhập thành công!');
-      alertEl.className = 'login-alert success';
+      alertEl.textContent = (data.partial ? '⚠️ ' : '✅ ') + (data.warning || data.message || 'Đăng nhập thành công!');
+      alertEl.className = 'login-alert ' + (data.partial ? 'error' : 'success');
     }
 
     setTimeout(async () => {
@@ -11010,11 +12141,20 @@ function renderAuditLogs(items, total, page, totalPages, limit) {
     let targetText = '-';
     if (item.target) {
       if (typeof item.target === 'object') {
-        if (item.target.label) targetText = '🤖 ' + item.target.label + ' (#' + (item.target.botId || '') + ')';
-        else if (item.target.username) targetText = '👤 ' + item.target.username;
-        else if (item.target.key) targetText = '🔑 ' + item.target.key;
-        else if (item.target.botId !== undefined) targetText = '🤖 Bot #' + item.target.botId;
-        else targetText = JSON.stringify(item.target);
+        if (item.target.botId !== undefined && item.target.botId !== null && item.target.botId !== '') {
+          const bNum = item.target.botId;
+          const lbl = item.target.label;
+          const hasCustom = lbl && lbl !== ('Bot ' + bNum) && lbl !== ('bot' + bNum) && lbl !== ('Bot #' + bNum);
+          targetText = '🤖 Bot #' + bNum + (hasCustom ? ' (' + lbl + ')' : '');
+        } else if (item.target.username) {
+          targetText = '👤 ' + item.target.username;
+        } else if (item.target.key) {
+          targetText = '🔑 ' + item.target.key;
+        } else if (item.target.label) {
+          targetText = '🤖 ' + item.target.label;
+        } else {
+          targetText = JSON.stringify(item.target);
+        }
       } else {
         targetText = String(item.target);
       }
@@ -11139,6 +12279,7 @@ async function refreshBackupList() {
           '<td style="color:var(--muted);font-size:11px;">' + escapeHtml(sizeKb) + '</td>' +
           '<td style="text-align:right;white-space:nowrap;">' +
             '<span style="color:var(--green);font-size:10.5px;font-weight:700;background:rgba(34,197,94,0.15);padding:2px 8px;border-radius:999px;">✓ An toàn</span> ' +
+            '<button type="button" class="small btn-restore-backup" data-filename="' + escapeHtml(b.filename) + '" style="margin-left:6px;padding:2px 8px;">↩ Khôi phục</button>' +
             '<button type="button" class="small danger btn-delete-backup" data-filename="' + escapeHtml(b.filename) + '" style="margin-left:6px;padding:2px 8px;">🗑 Xóa</button>' +
           '</td>' +
         '</tr>';
@@ -11146,6 +12287,12 @@ async function refreshBackupList() {
       if (!tbody._delegationInit) {
         tbody._delegationInit = true;
         tbody.addEventListener('click', function(e) {
+          const restoreBtn = e.target.closest('button.btn-restore-backup');
+          if (restoreBtn) {
+            const restoreName = restoreBtn.getAttribute('data-filename');
+            if (restoreName) restoreBackupFile(restoreName);
+            return;
+          }
           const btn = e.target.closest('button.btn-delete-backup');
           if (!btn) return;
           const fn = btn.getAttribute('data-filename');
@@ -11171,6 +12318,36 @@ async function deleteBackupFile(filename) {
   }
 }
 window.deleteBackupFile = deleteBackupFile;
+async function restoreBackupFile(filename) {
+  if (!filename || !confirm('Khôi phục "' + filename + '"? Hệ thống sẽ tạo backup dự phòng rồi thay thế Users, Keys, Registry và Bot Settings theo snapshot. Audit Logs và Sessions được giữ nguyên.')) return;
+  const sendRestore = allowEmpty => requestJson('/api/manager/backups/' + encodeURIComponent(filename) + '/restore', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ allowEmpty: allowEmpty === true }),
+    timeoutMs: 30000
+  });
+  try {
+    showToast('Đang khôi phục backup và đồng bộ worker...');
+    let res = await sendRestore(false);
+    if (!res.ok && res.data?.code === 'EMPTY_SNAPSHOT') {
+      const emptyFields = Array.isArray(res.data?.emptyFields) && res.data.emptyFields.length
+        ? res.data.emptyFields.join(', ')
+        : 'users, keys hoặc bot_settings';
+      const confirmed = confirm('⚠️ CẢNH BÁO DỮ LIỆU RỖNG\n\nBackup này có snapshot rỗng: ' + emptyFields + '.\nNếu tiếp tục, dữ liệu tương ứng trên Cloud sẽ bị xóa sạch (không thể hoàn tác ngoài bản backup dự phòng).\n\nBạn đã kiểm tra đúng backup và thực sự muốn tiếp tục?');
+      if (!confirmed) {
+        showToast('Đã hủy khôi phục backup rỗng.');
+        return;
+      }
+      res = await sendRestore(true);
+    }
+    if (!res.ok) throw new Error(res.data?.error || res.data?.message || 'Khôi phục backup thất bại.');
+    showToast((res.data?.partial ? '⚠️ ' : '✅ ') + (res.data?.message || 'Đã khôi phục backup.'));
+    await Promise.all([refreshBackupList(), refreshHome()]);
+  } catch (err) {
+    showToast('❌ ' + err.message);
+  }
+}
+window.restoreBackupFile = restoreBackupFile;
 async function triggerCreateBackup() {
   try {
     showToast('Đang tạo bản sao lưu hệ thống...');
@@ -11443,8 +12620,8 @@ async function redeemKeyFromExpiredOverlay() {
     if (!res.ok) {
       throw new Error(res.data?.error || 'Mã Key không hợp lệ hoặc đã qua sử dụng.');
     }
-    showToast('🎉 Kích hoạt Key thành công! Đang tải lại phiên làm việc...');
-    setTimeout(() => { window.location.reload(); }, 800);
+    showToast((res.data?.partial ? '⚠️ ' : '🎉 ') + (res.data?.warning || 'Kích hoạt Key thành công! Đang tải lại phiên làm việc...'));
+    setTimeout(() => { window.location.reload(); }, res.data?.partial ? 1800 : 800);
   } catch (err) {
     if (alertEl) {
       alertEl.className = 'login-alert error';
@@ -11706,8 +12883,9 @@ function renderUserTable() {
     const assignedIds = Array.isArray(u.assignedBotIds) ? u.assignedBotIds : [];
     const botBadges = assignedIds.length
       ? assignedIds.map(id => {
-          const b = userManagementAvailableBots.find(x => Number(x.id) === Number(id));
-          const name = b ? b.label : ('Bot ' + id);
+          const numId = Number(id);
+          const b = userManagementAvailableBots.find(x => Number(x.id) === numId);
+          const name = b ? b.label : ('Bot #' + numId);
           return '<span class="badge-tag" style="background:rgba(56,189,248,0.15);color:#38bdf8;padding:2px 6px;border-radius:4px;margin:2px;display:inline-block;font-size:11px;font-weight:700;">🤖 ' + escapeHtml(name) + '</span>';
         }).join('')
       : '<span style="color:var(--muted);font-style:italic;font-size:11.5px;">Chưa gán bot nào</span>';
@@ -11971,12 +13149,13 @@ function renderUserFormBotsCheckboxes(selectedIds, targetUserId) {
     const owner = userManagementBotOwnership[botId] || b.currentOwner;
     const isOccupiedByOther = owner && owner.userId && (!targetUserId || owner.userId !== targetUserId);
 
+    const displayName = b.label || ('Bot #' + botId);
     const nonRentableBadge = b.rentable === false ? '<span style="font-size:10px;color:#f87171;margin-left:4px;font-weight:600;">[Không cho thuê]</span>' : '';
     if (isOccupiedByOther) {
       return '<label class="bot-check-item bot-occupied" style="position:relative;">' +
-        '<input type="checkbox" class="user-bot-chk" value="' + botId + '" ' + (isChecked ? 'checked' : '') + ' data-occupied="1" data-bot-id="' + botId + '" data-bot-label="' + escapeHtml(b.label || 'Bot #' + botId) + '" data-owner="' + escapeHtml(owner.username) + '" onclick="handleOccupiedBotClick(event)">' +
+        '<input type="checkbox" class="user-bot-chk" value="' + botId + '" ' + (isChecked ? 'checked' : '') + ' data-occupied="1" data-bot-id="' + botId + '" data-bot-label="' + escapeHtml(displayName) + '" data-owner="' + escapeHtml(owner.username) + '" onclick="handleOccupiedBotClick(event)">' +
         '<div>' +
-          '<span><strong>' + escapeHtml(b.label || 'Bot #' + botId) + '</strong> (ID: ' + botId + ')' + nonRentableBadge + '</span>' +
+          '<span><strong style="color:#38bdf8;font-size:13px;">[' + escapeHtml(displayName) + ']</strong>' + nonRentableBadge + '</span>' +
           '<span class="badge-occupied">👤 Đang cấp cho: ' + escapeHtml(owner.username) + '</span>' +
         '</div>' +
       '</label>';
@@ -11984,7 +13163,7 @@ function renderUserFormBotsCheckboxes(selectedIds, targetUserId) {
 
     return '<label class="bot-check-item">' +
       '<input type="checkbox" class="user-bot-chk" value="' + botId + '" ' + (isChecked ? 'checked' : '') + '>' +
-      '<span><strong>' + escapeHtml(b.label || 'Bot #' + botId) + '</strong> (ID: ' + botId + ')' + nonRentableBadge + '</span>' +
+      '<span><strong style="color:#38bdf8;font-size:13px;">[' + escapeHtml(displayName) + ']</strong>' + nonRentableBadge + '</span>' +
     '</label>';
   }).join('');
 }
@@ -12075,9 +13254,10 @@ async function saveUserForm() {
       body: JSON.stringify(payload)
     });
     if (!res.ok) throw new Error(res.data?.error || 'Lỗi khi lưu user.');
-    showToast(res.data?.message || 'Đã lưu người dùng thành công.');
+    showToast((res.data?.partial ? '⚠️ ' : '') + (res.data?.warning || res.data?.message || 'Đã lưu người dùng thành công.'));
     closeUserEditModal();
-    await refreshUserManagementPage();
+    lastHomeSig = '';
+    await Promise.allSettled([refreshUserManagementPage(), refreshHome()]);
   } catch (err) {
     showToast('Lỗi: ' + err.message);
   } finally {
@@ -12092,7 +13272,8 @@ async function deleteUserPrompt(userId, username) {
     const res = await requestJson('/api/manager/users/' + encodeURIComponent(userId), { method: 'DELETE' });
     if (!res.ok) throw new Error(res.data?.error || 'Không thể xóa user.');
     showToast(res.data?.message || 'Đã xóa người dùng.');
-    await refreshUserManagementPage();
+    lastHomeSig = '';
+    await Promise.allSettled([refreshUserManagementPage(), refreshHome()]);
   } catch (err) {
     showToast('Lỗi xóa user: ' + err.message);
   }
@@ -12199,13 +13380,22 @@ window.quickBotAction = quickBotAction;
 let activeStatusFilter = 'all';
 function setStatusFilter(filter) {
   activeStatusFilter = filter;
-  ['all','afk','online','offline'].forEach(k => {
+  ['all','afk','online','offline','unreachable'].forEach(k => {
     const el = document.getElementById('tab' + k.charAt(0).toUpperCase() + k.slice(1));
     if (el) el.classList.toggle('active', k === filter);
   });
   filterBots();
 }
 window.setStatusFilter = setStatusFilter;
+
+function resetBotFilters() {
+  const searchInput = document.getElementById('searchInput');
+  if (searchInput) searchInput.value = '';
+  activeTagFilter = null;
+  setStatusFilter('all');
+  if (typeof renderTagFilterChips === 'function') renderTagFilterChips();
+}
+window.resetBotFilters = resetBotFilters;
 
 let soundAlertEnabled = localStorage.getItem('kingmc_mgr_sound') === '1';
 let previousOfflineSet = new Set();
@@ -12352,16 +13542,16 @@ window.changeBotSort = changeBotSort;
 
 function updateKpis() {
   const total = bots.length;
-  const afk = bots.filter(b => b.status === 'afk').length;
-  const online = bots.filter(b => ['online','connecting','authenticating','entering'].includes(b.status)).length;
-  const offline = bots.filter(b => !b.available || b.status === 'offline' || b.status === 'kicked').length;
-  const totems = bots.reduce((sum, b) => sum + Number(b.totemCount || 0), 0);
+  const afk = bots.filter(b => b.available && b.status === 'afk').length;
+  const online = bots.filter(b => b.available && ['online','connecting','authenticating','entering'].includes(b.status)).length;
+  const offline = bots.filter(b => b.available && (b.status === 'offline' || b.status === 'kicked')).length;
+  const unreachable = bots.filter(b => !b.available).length;
 
   const tEl = document.getElementById('kpiTotal'); if(tEl) tEl.textContent = String(total);
   const aEl = document.getElementById('kpiAfk'); if(aEl) aEl.textContent = String(afk);
   const oEl = document.getElementById('kpiOnline'); if(oEl) oEl.textContent = String(online);
   const fEl = document.getElementById('kpiOffline'); if(fEl) fEl.textContent = String(offline);
-  const ttEl = document.getElementById('kpiTotem'); if(ttEl) ttEl.textContent = String(totems);
+  const uEl = document.getElementById('kpiUnreachable'); if(uEl) uEl.textContent = String(unreachable);
 
   // Cập nhật Chỉ số Sức khỏe Hạm đội (Fleet Health Score)
   const healthPercent = total > 0 ? Math.round(((afk * 1.0 + online * 0.7) / total) * 100) : 100;
@@ -12426,6 +13616,7 @@ function updateKpis() {
   const cAfk = document.getElementById('countAfk'); if(cAfk) cAfk.textContent = String(afk);
   const cOn = document.getElementById('countOnline'); if(cOn) cOn.textContent = String(online);
   const cOff = document.getElementById('countOffline'); if(cOff) cOff.textContent = String(offline);
+  const cUn = document.getElementById('countUnreachable'); if(cUn) cUn.textContent = String(unreachable);
 
   // Âm thanh cảnh báo nếu có bot vừa mất kết nối
   const currentOfflineIds = new Set(bots.filter(b => (!b.available || b.status === 'offline' || b.status === 'kicked') && !b.manuallyStopped).map(b => b.id));
@@ -12485,7 +13676,8 @@ function filterBots() {
     // 1. Lọc theo Tab trạng thái
     if (activeStatusFilter === 'afk' && b.status !== 'afk') return false;
     if (activeStatusFilter === 'online' && !['online','connecting','authenticating','entering'].includes(b.status)) return false;
-    if (activeStatusFilter === 'offline' && (b.available && b.status !== 'offline' && b.status !== 'kicked')) return false;
+    if (activeStatusFilter === 'offline' && (!b.available || (b.status !== 'offline' && b.status !== 'kicked'))) return false;
+    if (activeStatusFilter === 'unreachable' && b.available) return false;
 
     // 2. Lọc theo Tag phân loại
     if (activeTagFilter) {
@@ -12514,7 +13706,14 @@ function filterBots() {
   }
 
   if(!filtered.length){
-    const emptyHtml='<div class="panel" style="grid-column:1/-1;text-align:center;color:var(--muted);padding:30px;">Không có bot nào khớp với tiêu chí tìm kiếm/bộ lọc.</div>';
+    const emptyHtml = '<div class="panel empty-filter-state" style="grid-column:1/-1;text-align:center;padding:42px 20px;background:rgba(15,23,42,0.65);border:1px dashed rgba(255,255,255,0.12);border-radius:16px;">' +
+      '<div style="font-size:36px;margin-bottom:10px;opacity:0.85;">🔍</div>' +
+      '<div style="font-size:15px;font-weight:750;color:var(--text);margin-bottom:6px;">Không tìm thấy bot nào</div>' +
+      '<div style="font-size:13px;color:var(--muted);max-width:380px;margin:0 auto 16px auto;line-height:1.5;">Không có bot nào khớp với tiêu chí tìm kiếm hoặc bộ lọc hiện tại.</div>' +
+      '<button type="button" class="btn btn-secondary" onclick="resetBotFilters()" style="padding:7px 16px;font-size:12px;font-weight:700;border-radius:8px;background:rgba(56,189,248,0.12);border:1px solid rgba(56,189,248,0.3);color:#38bdf8;cursor:pointer;">' +
+      '🔄 Xóa bộ lọc &amp; Hiện tất cả' +
+      '</button>' +
+      '</div>';
     if(grid.innerHTML!==emptyHtml) grid.innerHTML=emptyHtml;
     return;
   }
@@ -12725,6 +13924,7 @@ async function saveAnnouncementConfig() {
     if (res.ok) {
       showToast(res.data?.message || 'Đã lưu cấu hình thông báo!');
       closeAnnouncementAdminModal();
+      checkAndShowAnnouncement();
     } else {
       showToast(res.data?.error || 'Lỗi khi lưu thông báo.');
     }
@@ -12923,20 +14123,33 @@ async function testWebhookSettings() {
   }
 }
 
-function generateSparklineSvg(points, strokeColor, width=44, height=14) {
-  if(!Array.isArray(points) || points.length < 2) return '';
-  const min = Math.min(...points);
-  const max = Math.max(...points);
-  const range = (max - min) || 1;
-  const step = width / (points.length - 1);
-  const ptsArr = points.map((v, i) => {
+function generateSparklineSvg(points, strokeColor = '#38bdf8', width = 44, height = 14) {
+  if (!Array.isArray(points)) return '';
+  const validPts = points.filter(v => typeof v === 'number' && Number.isFinite(v) && v >= 0);
+  if (validPts.length < 2) return '';
+
+  const min = Math.min(...validPts);
+  const max = Math.max(...validPts);
+  const isFlat = min === max;
+  const range = isFlat ? 1 : (max - min);
+  const step = width / (validPts.length - 1);
+  const midY = Math.round((height / 2) * 10) / 10;
+
+  const ptsArr = validPts.map((v, i) => {
     const x = Math.round(i * step * 10) / 10;
-    const y = Math.round((height - 2 - ((v - min) / range) * (height - 4)) * 10) / 10;
+    const y = isFlat ? midY : Math.round((height - 2 - ((v - min) / range) * (height - 4)) * 10) / 10;
     return x + ',' + y;
   });
+
   const pts = ptsArr.join(' ');
   const areaPts = '0,' + height + ' ' + pts + ' ' + width + ',' + height;
-  return '<svg width="'+width+'" height="'+height+'" style="display:inline-block;vertical-align:middle;margin-left:3px;opacity:0.95;" title="Lịch sử: '+points.join(' -> ')+'"><polygon fill="'+strokeColor+'" fill-opacity="0.18" points="'+areaPts+'"/><polyline fill="none" stroke="'+strokeColor+'" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" points="'+pts+'"/></svg>';
+  const cleanColor = String(strokeColor || '#38bdf8').replace(/[^a-zA-Z0-9#(),. -]/g, '');
+  const titleValues = validPts.map(v => Math.round(v)).join(' → ');
+
+  return '<svg width="' + width + '" height="' + height + '" viewBox="0 0 ' + width + ' ' + height + '" style="display:inline-block;vertical-align:middle;margin-left:3px;opacity:0.95;overflow:visible;" title="Lịch sử: ' + titleValues + '">' +
+    '<polygon fill="' + cleanColor + '" fill-opacity="0.18" points="' + areaPts + '"/>' +
+    '<polyline fill="none" stroke="' + cleanColor + '" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" points="' + pts + '"/>' +
+  '</svg>';
 }
 
 async function exportBotLogs(event, botId) {
@@ -12957,9 +14170,12 @@ async function exportBotLogs(event, botId) {
   }
 }
 
+let lastHomeSig = '';
 async function getHomeBots() {
-  const result=await requestJson('/api/manager/bots');
+  const url = lastHomeSig ? ('/api/manager/bots?sig=' + encodeURIComponent(lastHomeSig)) : '/api/manager/bots';
+  const result = await requestJson(url);
   if(!result.ok){const error=new Error(result.data?.error||('HTTP '+result.status));error.status=result.status;throw error;}
+  if(result.data?.sig) lastHomeSig = result.data.sig;
   return result.data||{};
 }
 
@@ -12983,6 +14199,8 @@ async function getRegistryFallback() {
       status:'offline',
       ready:false,
       ping:null,
+      tps:null,
+      serverTps:null,
       uptime:'0h 0m 0s',
       uptimeSeconds:0,
       reconnectCount:0,
@@ -13012,8 +14230,33 @@ async function refreshHome() {
     try {
       data=await getHomeBots();
     }catch(primaryError){
+      lastHomeSig = '';
       try { data=await getRegistryFallback(); }
       catch(_){ throw primaryError; }
+    }
+    if (data.currentUser && currentUser) {
+      const prevExp = currentUser.expiresAt;
+      const prevBots = JSON.stringify(currentUser.assignedBotIds || []);
+      const prevStatus = currentUser.status;
+      const prevPlan = currentUser.planName;
+      Object.assign(currentUser, data.currentUser);
+      if (prevExp !== currentUser.expiresAt || prevBots !== JSON.stringify(currentUser.assignedBotIds || []) || prevStatus !== currentUser.status || prevPlan !== currentUser.planName) {
+        applyUserRoleUI();
+        updateUserHeaderCountdown();
+      }
+    }
+    if (data.unchanged) {
+      if (data.managerRamMb) {
+        const ramStr = data.managerRamMb + ' MB';
+        const r1 = document.getElementById('managerRamUsage');
+        const r2 = document.getElementById('detailManagerRamUsage');
+        const r3 = document.getElementById('globalManagerRam');
+        if (r1) r1.textContent = ramStr;
+        if (r2) r2.textContent = ramStr;
+        if (r3) r3.textContent = ramStr;
+      }
+      updateUserHeaderCountdown();
+      return;
     }
     bots=Array.isArray(data.bots)?data.bots:[];
     if (data.managerRamMb) {
@@ -13094,6 +14337,7 @@ async function addBotFromWeb() {
     if (!result.ok) throw new Error(data.error || 'Không thể thêm bot.');
     closeAddBotModal();
     showToast(data.message || 'Đã thêm bot thành công!');
+    lastHomeSig = '';
     await refreshHome();
   } catch (err) {
     showToast(err.message || 'Không thể thêm bot.');
@@ -13113,9 +14357,12 @@ async function deleteBot(event,id) {
   try {
     const result=await requestJson('/api/manager/bot/'+Number(id),{method:'DELETE'});
     const data=result.data||{};
-    if(!result.ok) throw new Error(data.error||'Không thể xóa bot.');
+    if(!result.ok && !data.partial) throw new Error(data.error||'Không thể xóa bot.');
     if(Number(selectedBotId)===Number(id)) goHome();
-    showToast(data.message||'Đã xóa bot.');
+    showToast(data.message || (data.partial ? ('Đã xóa ' + (bot.label || ('Bot #' + id)) + ' khỏi Supabase & Manager (bot còn lại offline sẽ tự đồng bộ sau).') : 'Đã xóa bot.'));
+    bots = bots.filter(x => Number(x.id) !== Number(id));
+    renderHome();
+    lastHomeSig = '';
     await refreshHome();
   } catch(err) {
     showToast(err.message||'Không thể xóa bot.');
@@ -13144,6 +14391,8 @@ function openBot(id) {
   document.getElementById('detailPage').classList.remove('hidden');
   lastEventRevision=-1;
   lastChatRevision=-1;
+lastPositionHistoryRevision=-1;
+lastPositionHistoryFetchedAt=0;
   detailInventory=null;
   detailSettingsDirty=false;
   detailAutoChatDirty=false;
@@ -13181,6 +14430,8 @@ async function resolveRouteFromUrl() {
           document.getElementById('detailPage').classList.remove('hidden');
           lastEventRevision=-1;
           lastChatRevision=-1;
+lastPositionHistoryRevision=-1;
+lastPositionHistoryFetchedAt=0;
           detailInventory=null;
           detailSettingsDirty=false;
           detailAutoChatDirty=false;
@@ -13208,6 +14459,8 @@ async function resolveRouteFromUrl() {
       document.getElementById('detailPage').classList.remove('hidden');
       lastEventRevision=-1;
       lastChatRevision=-1;
+lastPositionHistoryRevision=-1;
+lastPositionHistoryFetchedAt=0;
       detailInventory=null;
       detailSettingsDirty=false;
       detailAutoChatDirty=false;
@@ -13257,17 +14510,94 @@ function detailStatusHtml() {
   if(!detailBot) return;
   const [color,label]=statusMeta(detailBot.status,detailBot.available,!!detailBot.manuallyStopped);
   document.getElementById('detailStatus').innerHTML='<span class="dot '+color+'"></span>'+escapeHtml(label);
-  document.getElementById('detailTitle').textContent=detailBot.label||('Bot '+selectedBotId);
+  const numId = selectedBotId || detailBot.id;
+  const rawLbl = String(detailBot.label || '').trim();
+  const hasCustom = rawLbl && rawLbl !== ('Bot ' + numId) && rawLbl !== ('bot' + numId) && rawLbl !== ('Bot #' + numId);
+  const detailTitle = hasCustom ? ('Bot #' + numId + ' (' + rawLbl + ')') : ('Bot #' + numId);
+  document.getElementById('detailTitle').textContent = detailTitle;
   document.getElementById('detailUsername').textContent=detailBot.username||'Chưa đặt';
   document.getElementById('detailHost').textContent=detailBot.host?detailBot.host+':'+detailBot.port:'-';
-  document.getElementById('detailPing').textContent=Number.isFinite(Number(detailBot.ping))?Number(detailBot.ping)+' ms':'--';
-  const tpsEl = document.getElementById('detailTps');
-  if (tpsEl) {
-    const tpsVal = Number(detailBot.tps ?? detailBot.serverTps ?? 20.0);
-    tpsEl.textContent = tpsVal.toFixed(1);
-    tpsEl.style.color = tpsVal >= 18.5 ? 'var(--green)' : (tpsVal >= 14.0 ? 'var(--yellow)' : 'var(--red)');
+  const pingEl = document.getElementById('detailPing');
+  const pingRaw = detailBot.ping;
+
+  const pingVal =
+      pingRaw === null ||
+      pingRaw === undefined ||
+      String(pingRaw).trim() === ''
+          ? NaN
+          : Number(pingRaw);
+
+  if (pingEl) {
+      pingEl.textContent =
+          Number.isFinite(pingVal) && pingVal >= 0
+              ? pingVal + ' ms'
+              : '--';
   }
-  const pos=detailBot.position;
+
+  const tpsEl = document.getElementById('detailTps');
+
+  if (tpsEl) {
+      const tpsRaw = detailBot.tps ?? detailBot.serverTps;
+
+      const tpsVal =
+          tpsRaw === null ||
+          tpsRaw === undefined ||
+          String(tpsRaw).trim() === ''
+              ? NaN
+              : Number(tpsRaw);
+
+      const hasTps = Number.isFinite(tpsVal) && tpsVal >= 0;
+
+      tpsEl.textContent = hasTps
+          ? tpsVal.toFixed(1)
+          : '--';
+
+      tpsEl.style.color = !hasTps
+          ? 'var(--muted)'
+          : tpsVal >= 18.5
+              ? 'var(--green)'
+              : tpsVal >= 14.0
+                  ? 'var(--yellow)'
+                  : 'var(--red)';
+  }
+  // 1. Hiển thị tọa độ bot
+  const pos = detailBot.position || detailBot.roundedLocation;
+  const positionEl = document.getElementById('detailPosition');
+
+  if (positionEl) {
+    const validPosition = pos &&
+      [pos.x, pos.y, pos.z].every(
+        v => v !== null && v !== '' && Number.isFinite(Number(v))
+      );
+
+    positionEl.textContent = validPosition
+      ? ('X: ' + Math.round(Number(pos.x)) + ', Y: ' + Math.round(Number(pos.y)) + ', Z: ' + Math.round(Number(pos.z)))
+      : '--';
+  }
+
+  // 2. Hiển thị Dimension và trạng thái vị trí
+  const dimensionEl = document.getElementById('detailDimension');
+
+  if (dimensionEl) {
+    const rawDim = String(detailBot.dimension || '').trim();
+    const dimension = rawDim ? rawDim.replace(/^minecraft:/, '') : '';
+    const location = String(detailBot.locationState || '')
+      .trim()
+      .toLowerCase();
+
+    const locationLabels = {
+      login: 'LOGIN',
+      lobby: 'LOBBY',
+      other: 'INGAME'
+    };
+
+    const locationLabel = locationLabels[location] || (location && location !== 'unknown' ? location.toUpperCase() : '');
+
+    dimensionEl.textContent = [
+      dimension || 'Không xác định',
+      locationLabel
+    ].filter(Boolean).join(' • ');
+  }
   const rawDetailIp = String(detailBot.ipAddress || '').trim();
   const isDetailLoopback = rawDetailIp === '127.0.0.1' || rawDetailIp === 'localhost' || rawDetailIp === '0.0.0.0' || rawDetailIp === '::1';
   document.getElementById('detailIp').textContent = (!isDetailLoopback && rawDetailIp) ? rawDetailIp : (detailBot.host || '-');
@@ -13454,15 +14784,25 @@ async function submitRenewKey() {
       body: JSON.stringify({ key })
     });
     if (res.ok) {
-      box.style.background = 'rgba(16,185,129,0.2)';
-      box.style.color = 'var(--green)';
-      box.textContent = res.data?.message || 'Gia hạn thành công!';
-      showToast('🎉 Kích hoạt Key gia hạn thành công!');
+      const partial = res.data?.partial === true;
+      box.style.background = partial ? 'rgba(245,158,11,0.2)' : 'rgba(16,185,129,0.2)';
+      box.style.color = partial ? 'var(--yellow)' : 'var(--green)';
+      box.textContent = (partial ? '⚠️ ' : '') + (res.data?.warning || res.data?.message || 'Gia hạn thành công!');
+      showToast((partial ? '⚠️ ' : '🎉 ') + (res.data?.warning || 'Kích hoạt Key gia hạn thành công!'));
       if (currentUser && res.data.expiresAt) {
         currentUser.expiresAt = res.data.expiresAt;
+        if (res.data.planName) currentUser.planName = res.data.planName;
+        if (Array.isArray(res.data.assignedBotIds)) currentUser.assignedBotIds = res.data.assignedBotIds;
+        currentUser.status = 'active';
+        applyUserRoleUI();
         updateUserHeaderCountdown();
       }
-      setTimeout(closeRenewModal, 1800);
+      lastHomeSig = '';
+      await refreshHome();
+      if (selectedBotId !== null) {
+        await refreshDetail(true);
+      }
+      setTimeout(closeRenewModal, partial ? 2600 : 1800);
     } else {
       box.style.background = 'rgba(239,68,68,0.2)';
       box.style.color = 'var(--red)';
@@ -13507,7 +14847,10 @@ async function refreshKeysTable() {
     }
 
     const rowsHtml = keys.map(k => {
-      const maxUses = Number(k.maxUses) || (k.used !== undefined ? 1 : 1);
+      // Client-side scope: normalize independently from the server helper.
+      // 0 = không giới hạn; invalid/missing values fall back to 1.
+      const rawMaxUses = Number(k.maxUses);
+      const maxUses = Number.isSafeInteger(rawMaxUses) && rawMaxUses >= 0 ? rawMaxUses : 1;
       const usedCount = Number(k.usedCount) || (k.used ? 1 : (Array.isArray(k.usedUsers) ? k.usedUsers.length : 0));
       const isExpired = k.expiresAt && Date.now() > Date.parse(k.expiresAt);
       const isExhausted = maxUses > 0 && usedCount >= maxUses;
@@ -13573,7 +14916,10 @@ async function refreshKeysTable() {
   }
 }
 
+const keyMutationState = { creating: false, deleting: new Set() };
+
 async function submitCreateKeys() {
+  if (keyMutationState.creating) return;
   const daysSelect = document.getElementById('createKeyDays')?.value;
   const customInp = document.getElementById('createKeyCustomDays');
   let days = 7;
@@ -13592,22 +14938,34 @@ async function submitCreateKeys() {
   const planName = document.getElementById('createKeyPlan')?.value.trim() || defaultPlanName;
   const count = Number(document.getElementById('createKeyCount')?.value) || 1;
   const botCount = Number(document.getElementById('createKeyBotCount')?.value) || 1;
+  const rawMaxUses = document.getElementById('createKeyMaxUses')?.value;
+  const maxUses = rawMaxUses === '' || rawMaxUses === undefined ? 1 : Number(rawMaxUses);
+  if (!Number.isSafeInteger(maxUses) || maxUses < 0) {
+    showToast('Số lượt dùng phải là số nguyên không âm; 0 = không giới hạn.', 'error');
+    return;
+  }
+  keyMutationState.creating = true;
   try {
     const res = await requestJson('/api/manager/keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ days, planName, count, botCount })
+      body: JSON.stringify({ days, planName, count, botCount, maxUses })
     });
     if (!res.ok) throw new Error(res.data?.error || 'Lỗi tạo key');
     showToast(res.data?.message || 'Đã tạo key thành công!');
     await refreshKeysTable();
   } catch(e) {
     showToast(e.message || 'Lỗi tạo key');
+  } finally {
+    keyMutationState.creating = false;
   }
 }
 
 async function deleteLicenseKey(key) {
   if (!confirm('Bạn có chắc chắn muốn xóa mã Key ' + key + ' không?')) return;
+  const keyId = String(key || '');
+  if (!keyId || keyMutationState.deleting.has(keyId)) return;
+  keyMutationState.deleting.add(keyId);
   try {
     const res = await requestJson('/api/manager/keys/' + encodeURIComponent(key), { method: 'DELETE' });
     if (!res.ok) throw new Error(res.data?.error || 'Lỗi xóa key');
@@ -13615,6 +14973,8 @@ async function deleteLicenseKey(key) {
     await refreshKeysTable();
   } catch(e) {
     showToast(e.message || 'Lỗi xóa key');
+  } finally {
+    keyMutationState.deleting.delete(keyId);
   }
 }
 
@@ -13629,7 +14989,11 @@ async function quickAddUserDays(username, days) {
     });
     if (!res.ok) throw new Error(res.data?.error || 'Lỗi cập nhật');
     showToast(res.data?.message || 'Đã cộng ngày thuê!');
-    if (typeof refreshUserManagementList === 'function') refreshUserManagementList();
+    lastHomeSig = '';
+    await Promise.allSettled([
+      typeof refreshUserManagementPage === 'function' ? refreshUserManagementPage() : Promise.resolve(),
+      refreshHome()
+    ]);
   } catch(e) {
     showToast(e.message || 'Lỗi cộng ngày thuê');
   }
@@ -13641,8 +15005,12 @@ async function resetCustomerBot() {
   try {
     invalidateDetailReads();
     const res = await requestJson('/api/manager/bot/' + selectedBotId + '/reset-customer', { method: 'POST' });
-    if (!res.ok) throw new Error(res.data?.error || 'Lỗi reset bot');
-    showToast(res.data?.message || 'Đã reset bàn giao bot thành công!');
+    if (!res.ok) throw new Error((res.data?.warning ? res.data.warning + ' ' : '') + (res.data?.error || 'Lỗi reset bot'));
+    if (res.data?.partial === true) {
+      showToast('⚠️ Bot đã reset một phần: ' + (res.data?.warning || res.data?.message || 'Chưa thu hồi/xóa đủ dữ liệu Cloud. Kiểm tra log và thử lại.'));
+    } else {
+      showToast(res.data?.message || 'Đã reset bàn giao bot thành công!');
+    }
     if (detailBot) {
       detailBot.username = '';
       detailBot.status = 'offline';
@@ -13926,6 +15294,8 @@ async function refreshDetail(force=false) {
     await loadDetailLogs(force, requestGeneration, requestBotId);
     if(!isCurrentRequest()) return;
     await loadDetailChat(force, requestGeneration, requestBotId);
+    if(!isCurrentRequest()) return;
+    await loadDetailPositionHistory(force, requestGeneration, requestBotId);
   } catch(err) {
     if(!isCurrentRequest()) return;
     if(err && err.status===404){
@@ -13979,6 +15349,30 @@ async function loadDetailChat(force=false, expectedGeneration=detailRefreshGener
     lastChatRevision=Number(data.revision||0);
     if(keep) box.scrollTop=box.scrollHeight;
   } finally {chatLoading=false;}
+}
+
+async function loadDetailPositionHistory(force=false, expectedGeneration=detailRefreshGeneration, expectedBotId=selectedBotId) {
+  const box=document.getElementById('detailPositionHistory');
+  if(!box) return;
+  if(!force && Date.now()-lastPositionHistoryFetchedAt<15000) return;
+  try {
+    const data=await detailGet('/position-logs?limit=10');
+    if(!currentUser || (expectedGeneration!==null && (expectedGeneration!==detailRefreshGeneration || expectedBotId!==selectedBotId))) return;
+    const positionText=value => value && [value.x,value.y,value.z].every(v=>v!==null && v!==undefined && Number.isFinite(Number(v)))
+      ? ('X ' + Math.round(Number(value.x)) + ', Y ' + Math.round(Number(value.y)) + ', Z ' + Math.round(Number(value.z)))
+      : '--';
+    const rows=Array.isArray(data.logs)?data.logs.slice().reverse():[];
+    box.innerHTML=rows.length?rows.map(row=>{
+      const when=row.changed_at?new Date(row.changed_at).toLocaleString('vi-VN',{hour12:false}):'--';
+      const fromDimension=String(row.from_dimension||'unknown').replace(/^minecraft:/,'');
+      const toDimension=String(row.to_dimension||'unknown').replace(/^minecraft:/,'');
+      return '<div style="border-bottom:1px solid var(--border);padding:4px 0;"><span style="color:var(--muted);">'+escapeHtml(when)+'</span> · '+escapeHtml(positionText(row.from_position))+' ('+escapeHtml(fromDimension)+') → '+escapeHtml(positionText(row.to_position))+' ('+escapeHtml(toDimension)+') · '+escapeHtml(row.reason||'MOVE')+' · '+escapeHtml(row.location_state||'Unknown')+'</div>';
+    }).join(''):'Chưa có lịch sử tọa độ.';
+    lastPositionHistoryRevision=Number(data.revision||0);
+    lastPositionHistoryFetchedAt=Date.now();
+  } catch(err) {
+    if(expectedGeneration===detailRefreshGeneration && expectedBotId===selectedBotId) box.textContent='Không tải được lịch sử tọa độ: '+(err.message||'lỗi Supabase');
+  }
 }
 
 function itemLabel(item) {
@@ -14881,39 +16275,41 @@ async function saveSupabaseConfig() {
   }
 }
 
-async function syncAllToSupabase() {
-  const btn = document.getElementById('supabaseSyncBtn');
+async function runSupabaseSyncAction(buttonId, endpoint, busyText, successPrefix) {
+  const btn = document.getElementById(buttonId);
   const alertBox = document.getElementById('supabaseAlertBox');
-
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang đồng bộ...'; }
+  if (btn?.disabled) return;
+  if (btn) { btn.disabled = true; btn.dataset.originalText = btn.textContent; btn.textContent = busyText; }
   if (alertBox) alertBox.className = 'login-alert hidden';
-
   try {
-    const res = await requestJson('/api/manager/supabase/sync-now', {
-      method: 'POST'
-    });
-
-    if (res.ok) {
-      if (alertBox) {
-        alertBox.textContent = '✅ ' + (res.data?.message || 'Đồng bộ Supabase thành công!');
-        alertBox.className = 'login-alert success';
-      }
-      showToast(res.data?.message || '✅ Đã đồng bộ toàn bộ dữ liệu lên Supabase!');
-    } else {
-      if (alertBox) {
-        alertBox.textContent = '⚠️ ' + (res.data?.error || 'Đồng bộ thất bại.');
-        alertBox.className = 'login-alert error';
-      }
-      showToast('⚠️ ' + (res.data?.error || 'Lỗi đồng bộ'));
+    const res = await requestJson(endpoint, { method: 'POST' });
+    if (!res.ok) {
+      const error = new Error(res.data?.error || 'Thao tác Supabase thất bại.');
+      error.counts = res.data?.counts;
+      throw error;
     }
+    const counts = res.data?.counts;
+    const partial = res.data?.partial === true;
+    const countText = counts ? ' (' + Object.entries(counts).map(([key, value]) => key + ': ' + value).join(', ') + ')' : '';
+    const message = (res.data?.message || 'Hoàn tất.') + countText;
+    if (alertBox) { alertBox.textContent = (partial ? '⚠️ ' : '✅ ') + message; alertBox.className = 'login-alert ' + (partial ? 'error' : 'success'); }
+    showToast((partial ? '⚠️ ' : successPrefix) + message);
+    lastHomeSig = '';
+    await Promise.allSettled([refreshHome(), refreshUserManagementPage(), refreshKeysTable()]);
+    if (selectedBotId !== null) await refreshDetail(true);
   } catch (err) {
-    if (alertBox) {
-      alertBox.textContent = '⚠️ Lỗi: ' + err.message;
-      alertBox.className = 'login-alert error';
-    }
+    const message = (err.message || 'Không thể đồng bộ Supabase.') + (err.counts ? ' (' + Object.entries(err.counts).map(([key, value]) => key + ': ' + value).join(', ') + ')' : '');
+    if (alertBox) { alertBox.textContent = '⚠️ ' + message; alertBox.className = 'login-alert error'; }
+    showToast('⚠️ ' + message);
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '🔄 Đồng bộ ngay (Sync Now)'; }
+    if (btn) { btn.disabled = false; btn.textContent = btn.dataset.originalText || (buttonId === 'supabaseSyncBtn' ? '⬆ Tải lên Supabase Cloud' : '⬇ Đồng bộ xuống'); }
   }
+}
+async function syncAllToSupabase() {
+  return runSupabaseSyncAction('supabaseSyncBtn', '/api/manager/supabase/upload', '⏳ Đang tải lên...', '⬆ ');
+}
+async function syncDownFromSupabase() {
+  return runSupabaseSyncAction('supabaseSyncDownBtn', '/api/manager/supabase/sync-down', '⏳ Đang tải xuống...', '⬇ ');
 }
 
 window.handleRenameClick = handleRenameClick;
@@ -14975,6 +16371,7 @@ window.startBotDrag = startBotDrag;
 window.unequipDetail = unequipDetail;
 window.quickBotAction = quickBotAction;
 window.setStatusFilter = setStatusFilter;
+window.resetBotFilters = resetBotFilters;
 window.toggleSoundAlert = toggleSoundAlert;
 window.exportBotList = exportBotList;
 window.triggerImport = triggerImport;
@@ -15024,6 +16421,7 @@ window.copySupabaseSchemaSql = copySupabaseSchemaSql;
 window.testSupabaseConnection = testSupabaseConnection;
 window.saveSupabaseConfig = saveSupabaseConfig;
 window.syncAllToSupabase = syncAllToSupabase;
+window.syncDownFromSupabase = syncDownFromSupabase;
 window.debounceAuditFilter = debounceAuditFilter;
 window.filterAuditLogs = debounceAuditFilter;
 window.navigateAuditPage = navigateAuditPage;
@@ -15127,11 +16525,17 @@ window.addEventListener('unhandledrejection',event=>{
   }
 })();
 
+let lastUserActivityAt = Date.now();
+['mousemove', 'keydown', 'touchstart', 'scroll'].forEach(evt => {
+  window.addEventListener(evt, () => { lastUserActivityAt = Date.now(); }, { passive: true });
+});
+
 // managerPollTimerId declared at top of client script
 function scheduleNextManagerPoll() {
   if (managerPollTimerId) clearTimeout(managerPollTimerId);
   if (!currentUser) return;
-  const delay = document.hidden ? 5000 : 500;
+  const isIdle = Date.now() - lastUserActivityAt > 5 * 60 * 1000;
+  const delay = document.hidden ? 30000 : (isIdle ? 10000 : 3000);
   managerPollTimerId = setTimeout(async () => {
     try {
       if (!routeResolving && currentUser) {
@@ -15148,13 +16552,14 @@ function scheduleNextManagerPoll() {
 
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
+    lastUserActivityAt = Date.now();
     if (selectedBotId === null) refreshHome();
     else refreshDetail(true);
   }
   scheduleNextManagerPoll();
 });
 
-setInterval(updateDetailUptime,250);
+setInterval(updateDetailUptime, 1000);
 setInterval(updateUserHeaderCountdown, 5000);
 </script>
 
@@ -15242,6 +16647,10 @@ setInterval(updateUserHeaderCountdown, 5000);
             <input type="number" id="createKeyBotCount" value="1" min="1" max="50" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 10px;border-radius:6px;font-size:13px;width:60px;" />
           </div>
           <div>
+            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">LƯỢT DÙNG (0=∞):</label>
+            <input type="number" id="createKeyMaxUses" value="1" min="0" max="10000" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 10px;border-radius:6px;font-size:13px;width:72px;" />
+          </div>
+          <div>
             <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">SỐ LƯỢNG KEY:</label>
             <input type="number" id="createKeyCount" value="1" min="1" max="10" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 10px;border-radius:6px;font-size:13px;width:60px;" />
           </div>
@@ -15257,6 +16666,7 @@ setInterval(updateUserHeaderCountdown, 5000);
               <th style="padding:8px 10px;">GÓI</th>
               <th style="padding:8px 10px;">TRẠNG THÁI</th>
               <th style="padding:8px 10px;">NGƯỜI KÍCH HOẠT</th>
+              <th style="padding:8px 10px;">HẾT HẠN</th>
               <th style="padding:8px 10px;text-align:right;">THAO TÁC</th>
             </tr>
           </thead>
@@ -15279,37 +16689,830 @@ setInterval(updateUserHeaderCountdown, 5000);
 
 let registerLock = Promise.resolve();
 function withRegisterLock(fn) {
-    const next = registerLock.then(() => fn(), () => fn());
+    const run = () => supabaseAdapter?.isEnabled?.()
+        ? supabaseAdapter.withManagerLock('customer-registration', fn, 900)
+        : fn();
+    const next = registerLock.then(run, run);
     registerLock = next.catch(() => {});
     return next;
 }
 
-async function resetBotsForAssignment(botIds, reason = 'reassignment') {
+async function resetBotsForAssignmentUnlocked(botIds, reason = 'reassignment') {
     if (!Array.isArray(botIds) || botIds.length === 0) return { ok: true };
+    let partial = false;
     for (const rawId of botIds) {
         const bId = Number(rawId);
         const botConfig = BOT_CONFIG.find(c => Number(c.id) === bId);
         if (!botConfig) continue;
         try {
-            const resetRes = await fetchChild(botConfig, '/api/bot/reset-customer', { method: 'POST', timeoutMs: 5000 });
-            if (!resetRes || !resetRes.ok || resetRes.data?.ok !== true) {
-                console.error(`[RESET_ASSIGN] Bot #${bId} reset trả về lỗi khi ${reason}:`, resetRes?.data || resetRes?.status);
-                return { ok: false, botId: bId, error: resetRes?.data?.error || 'RESET_FAILED' };
+            // Use the same durable state machine as the dedicated reset route so a
+            // Manager restart can resume an interrupted handover instead of leaving
+            // the bot half-reset. The old owner's Cloud access is revoked first.
+            const begin = await beginCustomerReset(bId, `resetBotsForAssignment: ${reason}`);
+            if (!begin.ok) {
+                console.error(`[RESET_ASSIGN] Không bắt đầu được reset bot #${bId} (${reason}):`, begin.error);
+                return {
+                    ok: false,
+                    botId: bId,
+                    botReset: false,
+                    error: begin.error || 'RESET_START_FAILED',
+                    partial: true,
+                    reset: begin.existing || null
+                };
             }
+            const resetResult = await executeCustomerReset(bId, { context: begin.context });
+            if (!resetResult.ok) {
+                console.error(`[RESET_ASSIGN] Bot #${bId} reset thất bại khi ${reason}:`, resetResult.error || resetResult.warning);
+                return {
+                    ok: false,
+                    botId: bId,
+                    botReset: false,
+                    ownershipRevoked: resetResult.ownershipRevoked === true,
+                    error: resetResult.error || 'RESET_FAILED',
+                    partial: true,
+                    resetId: resetResult.resetId
+                };
+            }
+            if (resetResult.partial === true) partial = true;
             summaryCache.delete(bId);
             try { await refreshSummary(botConfig, true); } catch (_) {}
         } catch (e) {
             console.error(`[RESET_ASSIGN] Không thể kết nối để reset bot #${bId} khi ${reason}:`, e.message);
-            return { ok: false, botId: bId, error: e.message };
+            return { ok: false, botId: bId, ownershipRevoked: true, error: e.message, partial: true };
         }
     }
+    return { ok: true, partial };
+}
+
+async function resetBotsForAssignment(botIds, reason = 'reassignment') {
+    if (!Array.isArray(botIds) || botIds.length === 0) return { ok: true };
+    if (!supabaseAdapter?.isEnabled?.()) {
+        for (const rawId of botIds) {
+            const bId = Number(rawId);
+            const botConfig = BOT_CONFIG.find(c => Number(c.id) === bId);
+            if (!botConfig) continue;
+            try {
+                await fetchChild(botConfig, '/api/bot/reset-customer', {
+                    method: 'POST',
+                    body: { resetTransactionId: crypto.randomUUID() },
+                    timeoutMs: 4000
+                });
+            } catch (_) {}
+        }
+        return { ok: true, partial: false };
+    }
+    if (!supabaseStorageReady) return { ok: false, error: 'Supabase chưa sẵn sàng để khóa reset trên Cloud.', partial: true };
+    try { return await supabaseAdapter.withManagerLock('bot-ownership-mutation', () => resetBotsForAssignmentUnlocked(botIds, reason), 900); }
+    catch (err) { return { ok: false, error: err.message || 'Không lấy được khóa Cloud cho reset bot.', partial: true }; }
+}
+
+function resetSettingsFingerprint(row, forceCleared = false) {
+    const settings = row?.settings && typeof row.settings === 'object' ? { ...row.settings } : {};
+    if (settings.proxy && typeof settings.proxy === 'object') {
+        settings.proxy = { ...settings.proxy, password: '' };
+    }
+    const proxy = row?.proxy && typeof row.proxy === 'object' ? { ...row.proxy, password: '' } : {};
+    return stableJson({
+        username: forceCleared ? '' : String(row?.username || ''),
+        password: forceCleared ? '' : String(row?.password || ''),
+        proxy,
+        settings,
+        schedules: row?.schedules || [],
+        auto_chat: row?.auto_chat || []
+    });
+}
+
+function resetContextConflict(context, existingSettings) {
+    if (!context) return null;
+    const syncedAuth = existingSettings?.synced_auth || {};
+    if (context.resetId && String(syncedAuth.lastCustomerResetId || '') === String(context.resetId)) return null;
+    const expectedFingerprint = String(context.settingsFingerprint || '');
+    const beforeFingerprint = String(context.settingsFingerprintBefore || '');
+    const currentFingerprint = resetSettingsFingerprint(existingSettings);
+    if (expectedFingerprint && currentFingerprint === expectedFingerprint) return null;
+    // An unchanged pre-clear row is still the old customer even if updated_at
+    // moved because the worker saved a non-destructive setting.
+    if (beforeFingerprint && currentFingerprint === beforeFingerprint) return null;
+    const expectedExisted = context.settingsExisted === true;
+    const expectedUpdatedAt = String(context.settingsUpdatedAt || '');
+    const expectedUsername = String(context.settingsUsername || '');
+    const currentUsername = String(existingSettings?.username || '');
+    const currentPassword = String(existingSettings?.password || '');
+    const currentProxyHost = String(existingSettings?.proxy?.host || '');
+    const currentHasCustomerData = !!existingSettings && !!(currentUsername || currentPassword || currentProxyHost);
+    const ownerChanged = !!expectedUsername && !!currentUsername && currentUsername !== expectedUsername;
+    const appearedAfterBegin = !expectedExisted && !!existingSettings && currentHasCustomerData;
+    const updatedChanged = !!expectedUpdatedAt && !!existingSettings?.updated_at && String(existingSettings.updated_at) !== expectedUpdatedAt;
+    if (ownerChanged || appearedAfterBegin || updatedChanged) {
+        return 'CONFLICT_NEW_OWNER: bot_settings đã thay đổi hoặc thuộc khách mới; không xóa dữ liệu mới.';
+    }
+    return null;
+}
+
+async function assertCustomerResetTargetSafe(botId, context) {
+    if (!supabaseAdapter?.isEnabled?.() || !supabaseStorageReady) {
+        return { ok: false, error: 'Supabase chưa sẵn sàng; không thể xác minh chủ sở hữu bot.' };
+    }
+    let settings = null;
+    try {
+        settings = await supabaseAdapter.fetchBotSettingsStrict(String(botId));
+    } catch (err) {
+        return { ok: false, error: 'Không đọc được bot_settings để xác minh chủ sở hữu: ' + err.message };
+    }
+    const syncedAuth = settings?.synced_auth || {};
+    if (context?.resetId && String(syncedAuth.lastCustomerResetId || '') === String(context.resetId)) {
+        context.authResetMarker = String(syncedAuth.resetMarker || context.authResetMarker || '');
+        return { ok: true, resetCompleted: true, resetMarker: context.authResetMarker };
+    }
+    if (/^user-lifecycle:/.test(String(context?.requestedBy || ''))) {
+        let users;
+        try { users = await loadUsersFreshOrThrow(); }
+        catch (err) { return { ok: false, error: 'Không xác minh được chủ sở hữu bot trước reset: ' + err.message }; }
+        const activeOwner = users.find(user => user.role !== 'admin' && isActiveUserEntitlement(user) &&
+            Array.isArray(user.assignedBotIds) && user.assignedBotIds.some(id => Number(id) === Number(botId)));
+        if (activeOwner) return { ok: false, conflict: true, error: 'BOT_LEASE_ACTIVE: bot đã có lease hiệu lực của ' + activeOwner.username + '; reset bị dừng.' };
+    }
+    const conflict = resetContextConflict(context, settings);
+    if (conflict) return { ok: false, conflict: true, error: conflict };
     return { ok: true };
 }
 
-async function allocateBotsForUser(username, count = 1, preferredBotIds = []) {
-    const users = loadUsers(true);
+// Thu hồi một bot khỏi tất cả người dùng (assignedBotIds), bot_aliases, session và auth cache Cloud.
+// Đọc lại users/sessions/settings từ Cloud trước khi ghi để không dựa vào cache RAM đã cũ.
+async function revokeBotOwnership(botId, options = {}) {
+    const context = options && typeof options.context === 'object' ? options.context : null;
+    const bId = Number(botId);
+    let usersModified = false;
+    let usersSaved = false;
+    let sessionsModified = false;
+    let sessionsSaved = false;
+    let settingsSaved = false;
+    const fail = (error, extra = {}) => ({
+        ok: false,
+        error,
+        usersModified,
+        usersSaved,
+        sessionsModified,
+        sessionsSaved,
+        settingsSaved,
+        partial: true,
+        ...extra
+    });
+    if (!Number.isSafeInteger(bId) || bId <= 0) return fail('BOT_ID không hợp lệ');
+    if (!supabaseAdapter?.isEnabled?.() || !supabaseStorageReady) {
+        return fail('Supabase chưa sẵn sàng; không thể thu hồi quyền trên Cloud.');
+    }
+    try {
+        const [cloudUsers, cloudSessions] = await Promise.all([
+            loadUsersFreshOrThrow(),
+            supabaseAdapter.fetchSessions()
+        ]);
+        if (!Array.isArray(cloudUsers) || !Array.isArray(cloudSessions)) {
+            return fail('Không đọc được đầy đủ users/sessions từ Cloud; chưa thu hồi quyền.');
+        }
+        const assignmentFlow = /^(?:allocateBotsForUser|resetBotsForAssignment):/.test(String(context?.requestedBy || ''));
+        if (assignmentFlow) {
+            const activeOwner = cloudUsers.find(user => {
+                if (!user || user.role === 'admin' || user.status !== 'active' || !Array.isArray(user.assignedBotIds) || !user.assignedBotIds.some(id => Number(id) === bId)) return false;
+                const expiry = user.expiresAt ? Date.parse(user.expiresAt) : Infinity;
+                return !Number.isFinite(expiry) || expiry > Date.now();
+            });
+            if (activeOwner) return fail('BOT_LEASE_ACTIVE: bot còn lease hiệu lực của ' + activeOwner.username + '; không reset hoặc thu hồi.', { activeOwner: activeOwner.username });
+        }
+        let existingSettings = null;
+        try {
+            existingSettings = await supabaseAdapter.fetchBotSettingsStrict(String(bId));
+        } catch (err) {
+            return fail('Không đọc được bot_settings từ Cloud; chưa thu hồi quyền: ' + err.message);
+        }
+
+        // A retry must never wipe data that belongs to a newly assigned customer.
+        const contextConflict = resetContextConflict(context, existingSettings);
+        if (contextConflict) {
+            return fail(contextConflict, { conflict: true });
+        }
+
+        const allowedUserIds = new Set((context?.ownerUserIds || []).map(id => String(id)));
+        const allowedUsernames = new Set((context?.ownerUsernames || []).map(name => String(name || '').toLowerCase()));
+        const isCapturedOwner = (user) => {
+            if (!context) return true;
+            if (user.id !== undefined && user.id !== null && String(user.id) !== '') {
+                return allowedUserIds.has(String(user.id));
+            }
+            // Only fall back to username for legacy rows without a stable id.
+            return allowedUsernames.has(String(user.username || '').toLowerCase());
+        };
+
+        for (const user of cloudUsers) {
+            if (!user) continue;
+            // Admin giữ quyền quản trị toàn bộ bot; chỉ khách thuê bị gỡ assignedBotIds.
+            if (user.role === 'admin' || !isCapturedOwner(user)) continue;
+            let changed = false;
+            if (Array.isArray(user.assignedBotIds)) {
+                const original = user.assignedBotIds.length;
+                user.assignedBotIds = user.assignedBotIds.filter(id => Number(id) !== bId);
+                if (user.assignedBotIds.length !== original) changed = true;
+            }
+            if (user.botAliases && typeof user.botAliases === 'object' && String(bId) in user.botAliases) {
+                delete user.botAliases[String(bId)];
+                changed = true;
+            }
+            if (changed) {
+                usersModified = true;
+                user.updatedAt = new Date().toISOString();
+            }
+        }
+        usersSaved = true;
+        if (usersModified) {
+            usersSaved = await saveUsers(cloudUsers);
+            if (!usersSaved) {
+                return fail('Không lưu được users đã thu hồi lên Cloud; chưa reset bot.');
+            }
+        } else {
+            setUsersCache(cloudUsers);
+        }
+
+        if (context) {
+            context.steps = context.steps || {};
+            context.steps.users = true;
+            if (!(await persistPendingReset(bId, context))) return fail('Users đã thu hồi nhưng không lưu được checkpoint Cloud; reset đã dừng để phục hồi an toàn.', { checkpointFailed: 'users' });
+        }
+        const now = Date.now();
+        const cloudSessionsByHash = new Map();
+        for (const sessionItem of cloudSessions) {
+            const tokenHash = String(sessionItem?.tokenHash || '').trim();
+            if (!tokenHash || Number(sessionItem.expiresAt) <= now) continue;
+            cloudSessionsByHash.set(tokenHash, { ...sessionItem, tokenHash });
+        }
+        const allowedSessionHashes = new Set((context?.sessionTokenHashes || []).map(token => String(token)));
+        const sessionBelongsToCapturedOwner = (sessionItem) => {
+            if (!context) return true;
+            const tokenHash = String(sessionItem?.tokenHash || '').trim();
+            if (tokenHash && allowedSessionHashes.has(tokenHash)) return true;
+            const userId = String(sessionItem?.userId || '');
+            const username = String(sessionItem?.username || '').toLowerCase();
+            return allowedUserIds.has(userId) || allowedUsernames.has(username);
+        };
+        const revokedSessionHashes = new Set();
+        for (const [tokenHash, sessionItem] of cloudSessionsByHash.entries()) {
+            if (!sessionBelongsToCapturedOwner(sessionItem)) continue;
+            if (Array.isArray(sessionItem.assignedBotIds) && sessionItem.assignedBotIds.some(id => Number(id) === bId)) {
+                revokedSessionHashes.add(tokenHash);
+            }
+        }
+        for (const [tokenHash, sessionItem] of activeSessions.entries()) {
+            if (!sessionItem || Number(sessionItem.expiresAt) <= now) continue;
+            if (!sessionBelongsToCapturedOwner({ ...sessionItem, tokenHash })) continue;
+            if (Array.isArray(sessionItem.assignedBotIds) && sessionItem.assignedBotIds.some(id => Number(id) === bId)) {
+                revokedSessionHashes.add(tokenHash);
+            }
+        }
+        const sessionsToSave = new Map();
+        for (const tokenHash of revokedSessionHashes) {
+            // Cloud session là nguồn chuẩn; chỉ dùng session RAM khi Cloud chưa có token đó.
+            const baseSession = cloudSessionsByHash.get(tokenHash) || activeSessions.get(tokenHash);
+            if (!baseSession) continue;
+            const currentIds = Array.isArray(baseSession.assignedBotIds) ? baseSession.assignedBotIds : [];
+            const updated = { ...baseSession, tokenHash, assignedBotIds: currentIds.filter(id => Number(id) !== bId) };
+            sessionsModified = true;
+            sessionsToSave.set(tokenHash, updated);
+        }
+        sessionsSaved = true;
+        if (sessionsModified) {
+            sessionsSaved = await supabaseAdapter.syncAllSessions(sessionsToSave);
+            if (!sessionsSaved) {
+                return fail('Không lưu được sessions đã thu hồi lên Cloud; chưa reset bot.');
+            }
+            for (const [tokenHash, updated] of sessionsToSave.entries()) {
+                if (activeSessions.has(tokenHash)) activeSessions.set(tokenHash, { ...updated });
+                persistedSessionHashes.add(tokenHash);
+            }
+        }
+
+        if (context) {
+            context.steps = context.steps || {};
+            context.steps.sessions = true;
+            if (!(await persistPendingReset(bId, context))) return fail('Sessions đã thu hồi nhưng không lưu được checkpoint Cloud; reset đã dừng để phục hồi an toàn.', { checkpointFailed: 'sessions' });
+        }
+
+        try {
+            const cleared = {
+                bot_id: String(bId),
+                username: '',
+                password: '',
+                clearCredentials: true,
+                clearProxyPassword: true,
+                settings: existingSettings?.settings || {},
+                proxy: existingSettings?.proxy || {},
+                schedules: existingSettings?.schedules || [],
+                auto_chat: existingSettings?.auto_chat || [],
+                syncedAuth: {
+                    ...(existingSettings?.synced_auth || {}),
+                    managerBotId: null,
+                    adminPasswordHash: null,
+                    users: [],
+                    pendingCustomerResetId: context?.resetId || existingSettings?.synced_auth?.pendingCustomerResetId || null,
+                    updatedAt: new Date().toISOString()
+                },
+                manuallyStopped: true,
+                manually_stopped: true
+            };
+            settingsSaved = await supabaseAdapter.saveBotSettings(String(bId), cleared);
+            if (!settingsSaved) console.error('[RESET_ASSIGN] Không thể ghi bot_settings đã thu hồi lên Supabase.');
+        } catch (e) {
+            settingsSaved = false;
+            console.error('[RESET_ASSIGN] Lỗi thu hồi bot_settings trên Supabase:', e.message);
+        }
+
+        if (context && settingsSaved) {
+            context.steps = context.steps || {};
+            context.steps.settings = true;
+            if (!(await persistPendingReset(bId, context))) return fail('bot_settings đã ghi ý định reset nhưng không lưu được checkpoint Cloud; reset đã dừng để phục hồi an toàn.', { checkpointFailed: 'settings' });
+        }
+        const ok = usersSaved && sessionsSaved && settingsSaved;
+        return { ok, usersModified, sessionsModified, usersSaved, sessionsSaved, settingsSaved, partial: !ok };
+    } catch (err) {
+        console.error('[RESET_ASSIGN] Lỗi thu hồi ownership bot #' + bId + ':', err.message);
+        return fail(err.message);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Persistent customer-reset state machine.
+// pendingResets lives inside the existing registry JSON blob, so no DB schema
+// change is required. Each step is idempotent and retried after a Manager
+// restart or transient Cloud/worker failure.
+// ---------------------------------------------------------------------------
+const customerResetLocks = new Set();
+
+function getPendingResets() {
+    if (!registry.pendingResets || typeof registry.pendingResets !== 'object' || Array.isArray(registry.pendingResets)) {
+        registry.pendingResets = {};
+    }
+    return registry.pendingResets;
+}
+
+async function persistPendingReset(botId, context) {
+    if (!context) return false;
+    const pending = getPendingResets();
+    pending[String(Number(botId))] = context;
+    return await saveRegistry();
+}
+
+async function persistPendingResetOrThrow(botId, context) {
+    let saved = false;
+    try { saved = await persistPendingReset(botId, context); } catch (_) {}
+    if (!saved) throw new Error('RESET_CHECKPOINT_SAVE_FAILED: không xác nhận được checkpoint reset trên Supabase.');
+    return true;
+}
+
+async function beginCustomerReset(botId, requestedBy = 'admin') {
+    const bId = Number(botId);
+    const key = String(bId);
+    if (!Number.isSafeInteger(bId) || bId <= 0) return { ok: false, error: 'BOT_ID không hợp lệ' };
+    if (!supabaseAdapter?.isEnabled?.() || !supabaseStorageReady) {
+        return { ok: false, error: 'Supabase chưa sẵn sàng; không thể bắt đầu reset an toàn.' };
+    }
+    const pending = getPendingResets();
+    const existing = pending[key];
+    const previousPending = existing ? JSON.parse(JSON.stringify(existing)) : null;
+    if (customerResetLocks.has(key) || (existing && existing.status === 'in_progress' && Number(existing.leaseUntil || 0) > Date.now())) {
+        return { ok: false, conflict: true, error: 'Đang có một tiến trình reset khác chạy trên bot này.', existing };
+    }
+    if (existing && existing.status === 'conflict') return { ok: false, conflict: true, error: 'Reset đang ở trạng thái conflict và cần quản trị viên xử lý.', existing };
+    if (existing && existing.status !== 'completed') {
+        customerResetLocks.add(key);
+        existing.status = 'in_progress';
+        existing.leaseUntil = Date.now() + 10 * 60 * 1000;
+        existing.attempts = Number(existing.attempts || 0) + 1;
+        if (!(await persistPendingReset(bId, existing))) {
+            customerResetLocks.delete(key);
+            return { ok: false, error: 'Không lưu được checkpoint để tiếp tục giao dịch reset đang chờ.', existing };
+        }
+        return { ok: true, context: existing, resumed: true };
+    }
+    if (existing && existing.status === 'completed') {
+        delete pending[key];
+        if (!(await saveRegistry())) { pending[key] = previousPending; return { ok: false, error: 'Không dọn được checkpoint reset đã hoàn tất.' }; }
+    }
+    customerResetLocks.add(key);
+    try {
+        const [cloudUsers, cloudSessions] = await Promise.all([
+            supabaseAdapter.fetchUsers(),
+            supabaseAdapter.fetchSessions()
+        ]);
+        if (!Array.isArray(cloudUsers) || !Array.isArray(cloudSessions)) {
+            throw new Error('Không đọc được đầy đủ users/sessions từ Cloud; chưa bắt đầu reset.');
+        }
+        let settings = null;
+        try {
+            settings = await supabaseAdapter.fetchBotSettingsStrict(String(bId));
+        } catch (err) {
+            throw new Error('Không đọc được bot_settings từ Cloud; chưa bắt đầu reset: ' + err.message);
+        }
+        const cloudPendingId = String(settings?.synced_auth?.pendingCustomerResetId || '');
+        if (cloudPendingId && cloudPendingId !== String(existing?.resetId || '')) {
+            throw new Error('Cloud vẫn có giao dịch reset đang chờ xử lý: ' + cloudPendingId);
+        }
+        const assignmentFlow = /^(?:allocateBotsForUser|resetBotsForAssignment):/.test(String(requestedBy || ''));
+        if (assignmentFlow) {
+            const activeOwner = cloudUsers.find(user => {
+                if (!user || user.role === 'admin' || user.status !== 'active' || !Array.isArray(user.assignedBotIds) || !user.assignedBotIds.some(id => Number(id) === bId)) return false;
+                const expiry = user.expiresAt ? Date.parse(user.expiresAt) : Infinity;
+                return !Number.isFinite(expiry) || expiry > Date.now();
+            });
+            if (activeOwner) throw new Error('BOT_LEASE_ACTIVE: bot còn lease hiệu lực của ' + activeOwner.username + '; không reset hoặc thu hồi.');
+        }
+        const lifecycleFlow = /^user-lifecycle:/.test(String(requestedBy || ''));
+        if (lifecycleFlow) {
+            const activeOwner = cloudUsers.find(user => user.role !== 'admin' && isActiveUserEntitlement(user) &&
+                Array.isArray(user.assignedBotIds) && user.assignedBotIds.some(id => Number(id) === bId));
+            if (activeOwner) {
+                customerResetLocks.delete(key);
+                return { ok: true, skipReset: true, activeOwner: activeOwner.username };
+            }
+        }
+        const ownerUserIds = [];
+        const ownerUsernames = [];
+        for (const user of cloudUsers) {
+            if (!user || user.role === 'admin') continue;
+            if (Array.isArray(user.assignedBotIds) && user.assignedBotIds.some(id => Number(id) === bId)) {
+                if (user.id !== undefined && user.id !== null && String(user.id) !== '') ownerUserIds.push(String(user.id));
+                if (String(user.username || '').trim()) ownerUsernames.push(String(user.username).trim());
+            }
+        }
+        const now = Date.now();
+        const sessionTokenHashes = new Set();
+        for (const sessionItem of cloudSessions) {
+            if (!sessionItem || Number(sessionItem.expiresAt) <= now) continue;
+            if (Array.isArray(sessionItem.assignedBotIds) && sessionItem.assignedBotIds.some(id => Number(id) === bId)) {
+                sessionTokenHashes.add(String(sessionItem.tokenHash || ''));
+            }
+        }
+        for (const sessionItem of activeSessions.values()) {
+            if (!sessionItem || Number(sessionItem.expiresAt) <= now) continue;
+            if (Array.isArray(sessionItem.assignedBotIds) && sessionItem.assignedBotIds.some(id => Number(id) === bId)) {
+                sessionTokenHashes.add(String(sessionItem.tokenHash || ''));
+            }
+        }
+        const context = {
+            resetId: 'reset_' + bId + '_' + now.toString(36),
+            botId: bId,
+            requestedBy: String(requestedBy || 'admin'),
+            requestedAt: new Date(now).toISOString(),
+            ownerUserIds,
+            ownerUsernames,
+            sessionTokenHashes: [...sessionTokenHashes],
+            settingsExisted: !!settings,
+            settingsUpdatedAt: String(settings?.updated_at || ''),
+            settingsUsername: String(settings?.username || ''),
+            settingsFingerprint: resetSettingsFingerprint(settings, true),
+            settingsFingerprintBefore: resetSettingsFingerprint(settings, false),
+            steps: { users: false, settings: false, sessions: false, botReset: false, authSync: false },
+            status: 'in_progress',
+            attempts: 0,
+            leaseUntil: now + 10 * 60 * 1000,
+            lastError: ''
+        };
+        pending[key] = context;
+        const saved = await saveRegistry();
+        if (!saved) {
+            delete pending[key];
+            throw new Error('Không lưu được trạng thái reset lên Cloud; chưa thay đổi dữ liệu.');
+        }
+        return { ok: true, context };
+    } catch (err) {
+        customerResetLocks.delete(key);
+        if (previousPending) pending[key] = previousPending;
+        else delete pending[key];
+        return { ok: false, error: err.message };
+    }
+}
+
+async function executeCustomerReset(botId, options = {}) {
+    const bId = Number(botId);
+    const key = String(bId);
+    if (!options?.context) return { ok: false, status: 500, error: 'Thiếu reset context.' };
+    try {
+        if (!supabaseAdapter?.isEnabled?.() || !supabaseStorageReady) throw new Error('Supabase chưa sẵn sàng để khóa reset trên Cloud.');
+        return await supabaseAdapter.withManagerLock('customer-reset-' + bId, () =>
+            supabaseAdapter.withManagerLock('bot-auth-sync-' + bId, () => executeCustomerResetCore(bId, { ...options, distributedAuthLockHeld: true }), 900), 900);
+    } catch (err) {
+        customerResetLocks.delete(key);
+        const context = options.context;
+        context.status = 'failed'; context.lastError = err.message; context.leaseUntil = 0;
+        try { await persistPendingReset(bId, context); } catch (_) {}
+        return { ok: false, status: 503, partial: true, resetId: context.resetId, error: err.message };
+    }
+}
+
+async function executeCustomerResetCore(botId, options = {}) {
+    const bId = Number(botId);
+    const key = String(bId);
+    const context = options.context;
+    const botConfig = (typeof BOT_CONFIG !== 'undefined' ? BOT_CONFIG : []).find(bot => Number(bot.id) === bId) || null;
+    if (!context) return { ok: false, status: 500, error: 'Thiếu reset context.' };
+    try {
+        if (!(context.steps.users && context.steps.settings && context.steps.sessions)) {
+            const revoke = await revokeBotOwnership(bId, { context });
+            if (revoke.usersSaved) context.steps.users = true;
+            if (revoke.settingsSaved) context.steps.settings = true;
+            if (revoke.sessionsSaved) context.steps.sessions = true;
+            if (revoke.conflict) {
+                context.status = 'conflict';
+                context.lastError = revoke.error;
+                context.leaseUntil = 0;
+                await persistPendingResetOrThrow(bId, context);
+                return {
+                    ok: false,
+                    status: 409,
+                    partial: true,
+                    conflict: true,
+                    resetId: context.resetId,
+                    error: revoke.error,
+                    revoke
+                };
+            }
+            if (!revoke.ok) {
+                context.status = 'failed';
+                context.lastError = revoke.error || 'REVOKE_FAILED';
+                context.attempts = Number(context.attempts || 0) + 1;
+                context.leaseUntil = 0;
+                await persistPendingResetOrThrow(bId, context);
+                return {
+                    ok: false,
+                    status: 502,
+                    partial: true,
+                    step: 'revoke-before-reset',
+                    resetId: context.resetId,
+                    error: revoke.error || 'REVOKE_FAILED',
+                    revoke
+                };
+            }
+            await persistPendingResetOrThrow(bId, context);
+        }
+
+        if (!context.steps.botReset) {
+            if (!botConfig) {
+                context.steps.botReset = true;
+                context.steps.authSync = true;
+            } else {
+                // Re-check immediately before the destructive worker reset. A new
+                // customer may have been configured while an earlier step failed.
+                const safety = await assertCustomerResetTargetSafe(bId, context);
+                if (!safety.ok) {
+                    context.status = safety.conflict ? 'conflict' : 'failed';
+                    context.lastError = safety.error;
+                    context.attempts = Number(context.attempts || 0) + 1;
+                    context.leaseUntil = 0;
+                    await persistPendingResetOrThrow(bId, context);
+                    return {
+                        ok: false,
+                        status: safety.conflict ? 409 : 502,
+                        partial: true,
+                        conflict: !!safety.conflict,
+                        resetId: context.resetId,
+                        error: safety.error,
+                        warning: 'Đã dừng trước bước reset bot vì không xác minh được bot vẫn thuộc khách cũ.'
+                    };
+                }
+                let botResult = await runChildAction(bId, '/api/bot/reset-customer', { resetTransactionId: context.resetId }, {}, 'POST', { timeoutMs: 45000 });
+                if (safety.resetCompleted === true && (!botResult.ok || botResult.data?.ok !== true)) {
+                    // Cloud proves the reset committed; retrying the same transaction on Worker only refreshes cleanup status.
+                    botResult = { ok: true, status: 200, data: { ok: true, alreadyReset: true, partial: true, resetMarker: safety.resetMarker } };
+                } else if (!botResult.ok || botResult.data?.ok !== true) {
+                    // The Worker may have committed Cloud state before the response was lost.
+                    try {
+                        const committed = await supabaseAdapter.fetchBotSettingsStrict(String(bId));
+                        if (String(committed?.synced_auth?.lastCustomerResetId || '') === String(context.resetId)) {
+                            botResult = { ok: true, status: 200, data: { ok: true, alreadyReset: true, partial: true, resetMarker: committed?.synced_auth?.resetMarker || '' } };
+                        }
+                    } catch (_) {}
+                }
+                const botResetOk = !!(botResult.ok && botResult.data?.ok === true);
+                if (!botResetOk) {
+                    context.status = 'failed';
+                    context.lastError = botResult.data?.error || 'WORKER_RESET_FAILED';
+                    context.attempts = Number(context.attempts || 0) + 1;
+                    context.leaseUntil = 0;
+                    await persistPendingResetOrThrow(bId, context);
+                    return {
+                        ok: false,
+                        status: botResult.status || 502,
+                        partial: true,
+                        ownershipRevoked: true,
+                        authSynced: false,
+                        resetId: context.resetId,
+                        error: context.lastError,
+                        warning: 'Quyền Cloud của khách cũ đã được thu hồi, nhưng bot chưa reset thành công.',
+                        data: botResult.data
+                    };
+                }
+                context.steps.botReset = true;
+                if (/^[a-f0-9]{32}$/i.test(String(botResult.data?.resetMarker || ''))) {
+                    context.authResetMarker = String(botResult.data.resetMarker);
+                }
+                if (botResult.data?.partial === true) context.partialLogs = true;
+                await persistPendingResetOrThrow(bId, context);
+            }
+        }
+
+        if (!context.steps.authSync) {
+            if (!botConfig) {
+                context.steps.authSync = true;
+            } else {
+                const authSync = await syncAuthToBotAfterOwnershipChange(botConfig, { resetMarker: context.authResetMarker, pendingCustomerResetId: null, distributedAuthLockHeld: true });
+                if (authSync?.ok === true) {
+                    context.steps.authSync = true;
+                } else {
+                    context.status = 'failed';
+                    context.lastError = authSync?.error || 'AUTH_SYNC_FAILED';
+                    context.attempts = Number(context.attempts || 0) + 1;
+                    context.leaseUntil = 0;
+                    await persistPendingResetOrThrow(bId, context);
+                    return {
+                        ok: true,
+                        status: 200,
+                        partial: true,
+                        ownershipRevoked: true,
+                        authSynced: false,
+                        resetId: context.resetId,
+                        authSyncError: context.lastError,
+                        warning: 'Bot đã reset và quyền Cloud đã thu hồi, nhưng worker chưa xác nhận auth-sync. Hệ thống sẽ thử lại định kỳ.'
+                    };
+                }
+                await persistPendingResetOrThrow(bId, context);
+            }
+        }
+
+        const cloudSettings = await supabaseAdapter.fetchBotSettingsStrict(String(bId));
+        if (!cloudSettings) throw new Error('Không đọc được bot_settings để hoàn tất checkpoint reset.');
+        const cloudAuth = { ...(cloudSettings.synced_auth || {}) };
+        const pendingResetId = String(cloudAuth.pendingCustomerResetId || '');
+        if (pendingResetId && pendingResetId !== String(context.resetId)) throw new Error('Cloud có pending reset ID khác; giữ nguyên checkpoint để tránh ghi đè.');
+        if (pendingResetId) {
+            delete cloudAuth.pendingCustomerResetId;
+            if (!(await supabaseAdapter.saveBotSettings(String(bId), { ...cloudSettings, syncedAuth: cloudAuth }))) throw new Error('Không xóa được pending reset marker trên Cloud.');
+        }
+        context.status = 'completed';
+        context.completedAt = new Date().toISOString();
+        context.leaseUntil = 0;
+        const pending = getPendingResets();
+        pending[key] = context;
+        // Mark completion durably before deleting the record. If the process
+        // dies here, resume sees status=completed and will not reset the bot a
+        // second time; it only removes the stale completed marker.
+        const marked = await persistPendingResetOrThrow(bId, context);
+        let removed = false;
+        if (marked) {
+            delete pending[key];
+            removed = await saveRegistry().catch(() => false);
+            if (!removed) pending[key] = context;
+        }
+        const statePersisted = marked && removed;
+        return {
+            ok: true,
+            status: 200,
+            partial: !!context.partialLogs || !statePersisted,
+            ownershipRevoked: true,
+            authSynced: true,
+            resetId: context.resetId,
+            statePersisted,
+            warning: statePersisted ? undefined : 'Reset đã xong nhưng chưa xác nhận xóa xong trạng thái tạm trên Cloud; sẽ dọn lại khi Manager khởi động.',
+            message: 'Đã reset bàn giao bot và thu hồi quyền khách cũ thành công.'
+        };
+    } catch (err) {
+        context.status = 'failed';
+        context.lastError = err.message;
+        context.attempts = Number(context.attempts || 0) + 1;
+        context.leaseUntil = 0;
+        await persistPendingReset(bId, context).catch(() => false);
+        return { ok: false, status: 502, partial: true, resetId: context.resetId, error: err.message };
+    } finally {
+        customerResetLocks.delete(key);
+    }
+}
+
+async function runCustomerResetTransaction(botId, requestedBy = 'admin') {
+    if (!supabaseAdapter?.isEnabled?.() || !supabaseStorageReady) {
+        const targetBot = getBotConfig(botId);
+        if (targetBot) {
+            try {
+                void fetchChild(targetBot, '/api/bot/reset-customer', { method: 'POST', body: { offlineLocalReset: true }, timeoutMs: 3000 }).catch(() => {});
+            } catch (_) {}
+        }
+        return { begin: { ok: true, context: { botId, offline: true }, skipped: false }, resetResult: { ok: true, offline: true } };
+    }
+    try {
+        return await supabaseAdapter.withManagerLock('bot-ownership-mutation', async () => {
+            const begin = await beginCustomerReset(botId, requestedBy);
+            if (!begin.ok) return { begin, resetResult: null };
+            if (begin.skipReset === true) return { begin, resetResult: { ok: true, skipped: true } };
+            const resetResult = await executeCustomerReset(botId, { context: begin.context });
+            return { begin, resetResult };
+        }, 900);
+    } catch (err) {
+        return { begin: { ok: false, error: err.message || 'Không lấy được khóa reset Cloud.' }, resetResult: null };
+    }
+}
+
+function isActiveUserEntitlement(user, now = Date.now()) {
+    if (!user || String(user.status || 'active') !== 'active') return false;
+    if (!user.expiresAt) return true;
+    const expiry = Date.parse(user.expiresAt);
+    return Number.isFinite(expiry) && expiry > now;
+}
+
+async function reconcileUserBotLifecycle(previousUser, nextUser, reason = 'user lifecycle change') {
+    const previousBots = Array.isArray(previousUser?.assignedBotIds) ? [...new Set(previousUser.assignedBotIds.map(Number).filter(Number.isSafeInteger))] : [];
+    const nextBots = Array.isArray(nextUser?.assignedBotIds) ? new Set(nextUser.assignedBotIds.map(Number)) : new Set();
+    const nextIsActive = isActiveUserEntitlement(nextUser);
+    const retire = nextIsActive ? previousBots.filter(botId => !nextBots.has(botId)) : previousBots;
+    let partial = false;
+    const failedBots = [];
+    for (const botId of retire) {
+        const latestUsers = await loadUsersFreshOrThrow();
+        const targetId = String(previousUser?.id || '');
+        const targetName = String(previousUser?.username || '').toLowerCase();
+        const otherOwner = latestUsers.find(user => {
+            const sameUser = (targetId && String(user.id || '') === targetId) ||
+                (targetName && String(user.username || '').toLowerCase() === targetName);
+            return !sameUser && isActiveUserEntitlement(user) &&
+                Array.isArray(user.assignedBotIds) && user.assignedBotIds.some(id => Number(id) === botId);
+        });
+        if (otherOwner) continue;
+
+        const reset = await runCustomerResetTransaction(botId, 'user-lifecycle: ' + reason);
+        if (reset.begin?.skipReset === true) continue;
+        if (!reset.begin?.ok || !reset.resetResult?.ok) {
+            partial = true;
+            failedBots.push({
+                botId,
+                resetId: reset.resetResult?.resetId || reset.begin?.context?.resetId || '',
+                error: reset.resetResult?.error || reset.begin?.error || 'Không hoàn tất được reset bot sau thay đổi quyền user.'
+            });
+            continue;
+        }
+        if (reset.resetResult.partial === true || reset.resetResult?.authSyncError) partial = true;
+    }
+    if (failedBots.length > 0) {
+        return {
+            ok: false,
+            partial: true,
+            failedBots,
+            error: `Không hoàn tất được reset cho ${failedBots.length} bot (${failedBots.map(f => f.botId).join(', ')}) sau khi thay đổi quyền.`
+        };
+    }
+    return { ok: true, partial };
+}
+
+async function resumePendingCustomerResets() {
+    if (!supabaseAdapter?.isEnabled?.() || !supabaseStorageReady) return { resumed: 0 };
+    const pending = getPendingResets();
+    let resumed = 0;
+    for (const [key, context] of Object.entries(pending)) {
+        if (!context || typeof context !== 'object') continue;
+        if (context.status === 'completed') {
+            delete pending[key];
+            const cleaned = await saveRegistry().catch(() => false);
+            if (!cleaned) pending[key] = context;
+            continue;
+        }
+        if (context.status === 'conflict') continue;
+        if (customerResetLocks.has(String(key))) continue;
+        const bId = Number(context.botId || key);
+        if (!Number.isSafeInteger(bId) || bId <= 0) continue;
+        customerResetLocks.add(String(key));
+        context.status = 'in_progress';
+        context.leaseUntil = Date.now() + 10 * 60 * 1000;
+        try {
+            const result = await supabaseAdapter.withManagerLock('bot-ownership-mutation', async () => {
+                if (!(await persistPendingReset(bId, context))) throw new Error('Không lưu được lease/checkpoint resume reset lên Cloud.');
+                return await executeCustomerReset(bId, { context, resume: true });
+            }, 900);
+            resumed++;
+            if (result.ok && result.partial !== true) {
+                console.log('[RESET_CUSTOMER] Đã hoàn tất reset còn dang dở cho bot #' + bId + '.');
+            } else {
+                console.warn('[RESET_CUSTOMER] Reset bot #' + bId + ' vẫn chưa hoàn tất: ' + (result.error || result.warning || 'PARTIAL'));
+            }
+        } catch (err) {
+            customerResetLocks.delete(String(key));
+            console.error('[RESET_CUSTOMER] Lỗi resume reset bot #' + bId + ':', err.message);
+        }
+    }
+    return { resumed };
+}
+
+async function allocateBotsForUserUnlocked(username, count = 1, preferredBotIds = []) {
+    let partial = false;
+    const users = await loadUsersFreshOrThrow();
     const now = Date.now();
-    const rentalDisabledSet = new Set((registry.botRentalDisabled || []).map(Number));
+    registry.botRentalDisabled = normalizeBotRentalDisabled(registry.botRentalDisabled);
+    const rentalDisabledSet = new Set(registry.botRentalDisabled);
+    const pendingResetBotIds = new Set(Object.entries(getPendingResets())
+        .filter(([, context]) => context && context.status !== 'completed')
+        .map(([id]) => Number(id)).filter(Number.isSafeInteger));
 
     // 1. Tập hợp các bot đang có khách hàng active thuê (role !== 'admin', status === 'active', chưa hết hạn)
     const activeOccupiedBotMap = new Map();
@@ -15327,7 +17530,7 @@ async function allocateBotsForUser(username, count = 1, preferredBotIds = []) {
     // 2. Lấy danh sách toàn bộ bot cho thuê hợp lệ (rentable !== false và không nằm trong botRentalDisabled)
     const rentableConfigs = BOT_CONFIG.filter(b => {
         const bId = Number(b.id);
-        return !rentalDisabledSet.has(bId) && b.rentable !== false;
+        return !rentalDisabledSet.has(bId) && !pendingResetBotIds.has(bId) && b.rentable !== false;
     });
 
     if (rentableConfigs.length === 0) {
@@ -15388,27 +17591,49 @@ async function allocateBotsForUser(username, count = 1, preferredBotIds = []) {
         }
     }
 
-    // Tiến hành reset và bàn giao bot theo số lượng yêu cầu
+    // Tiến hành reset và bàn giao bot theo số lượng yêu cầu.
+    // QUAN TRỌNG: bắt buộc đi qua beginCustomerReset/executeCustomerReset —
+    // đường gọi worker thẳng đã từng bỏ sót: (1) thu hồi quyền Cloud khách cũ
+    // TRƯỚC khi reset worker, (2) resetMarker cần thiết cho auth-sync đầu tiên
+    // sau reset, (3) tái lập (resume) khi Manager chết giữa chừng.
     for (const { botConfig, reclaimedFrom } of candidates) {
         if (allocatedIds.length >= count) break;
         const chosenBotId = Number(botConfig.id);
+        if (!supabaseAdapter?.isEnabled?.()) {
+            try {
+                await fetchChild(botConfig, '/api/bot/reset-customer', { method: 'POST', body: { botSecretKey: BOT_SECRET } }).catch(() => null);
+            } catch (_) {}
+            allocatedIds.push(chosenBotId);
+            continue;
+        }
         try {
-            const resetRes = await fetchChild(botConfig, '/api/bot/reset-customer', { method: 'POST', timeoutMs: 5000 });
-            if (resetRes && resetRes.ok && resetRes.data?.ok === true) {
-                if (reclaimedFrom) {
-                    reclaimedFrom.assignedBotIds = (reclaimedFrom.assignedBotIds || []).filter(id => Number(id) !== chosenBotId);
-                    saveUsers(users);
-                    logAuditEvent({
-                        action: 'BOT_RECLAIM_EXPIRED',
-                        target: { botId: chosenBotId, label: botConfig.label },
-                        details: `Thu hồi Bot #${chosenBotId} (${botConfig.label || ''}) từ tài khoản hết hạn "${reclaimedFrom.username}" để cấp cho "${username}".`,
-                        status: 'SUCCESS'
-                    });
-                }
-                summaryCache.delete(chosenBotId);
-                try { await refreshSummary(botConfig, true); } catch (_) {}
-                allocatedIds.push(chosenBotId);
+            const begin = await beginCustomerReset(chosenBotId, `allocateBotsForUser: ${username}`);
+            if (!begin.ok) {
+                console.warn(`[ALLOCATE] Không bắt đầu được reset bền vững cho Bot #${chosenBotId}: ${begin.error || 'RESET_START_FAILED'}. Thử bot tiếp theo...`);
+                continue;
             }
+            const resetResult = await executeCustomerReset(chosenBotId, { context: begin.context });
+            if (!resetResult.ok) {
+                console.warn(`[ALLOCATE] Reset Bot #${chosenBotId} chưa hoàn tất (đã ghi pendingResets để resume): ${resetResult.error || resetResult.warning}. Thử bot tiếp theo...`);
+                // Trạng thái còn dang dở nằm trong registry.pendingResets; resume định kỳ sẽ tiếp tục.
+                continue;
+            }
+            if (resetResult.ownershipRevoked !== true) {
+                console.error(`[ALLOCATE] Bot #${chosenBotId} đã reset worker nhưng chưa xác nhận thu hồi quyền Cloud khách cũ; không cấp bot này.`);
+                continue;
+            }
+            if (resetResult.partial === true) partial = true;
+            if (reclaimedFrom) {
+                logAuditEvent({
+                    action: 'BOT_RECLAIM_EXPIRED',
+                    target: { botId: chosenBotId, label: botConfig.label },
+                    details: `Thu hồi Bot #${chosenBotId} (${botConfig.label || ''}) từ tài khoản hết hạn "${reclaimedFrom.username}" để cấp cho "${username}" (thu hồi quyền Cloud do state machine reset thực hiện).`,
+                    status: 'SUCCESS'
+                });
+            }
+            summaryCache.delete(chosenBotId);
+            try { await refreshSummary(botConfig, true); } catch (_) {}
+            allocatedIds.push(chosenBotId);
         } catch (e) {
             console.warn(`[ALLOCATE] Không thể kết nối tới Bot #${chosenBotId} (${e.message}), thử bot tiếp theo...`);
         }
@@ -15423,7 +17648,7 @@ async function allocateBotsForUser(username, count = 1, preferredBotIds = []) {
         botIds: allocatedIds,
         botId: allocatedIds[0],
         botLabel: (BOT_CONFIG.find(b => Number(b.id) === allocatedIds[0])?.label) || ('Bot ' + allocatedIds[0]),
-        partial: allocatedIds.length < count
+        partial: allocatedIds.length < count || partial
     };
 }
 
@@ -15431,10 +17656,20 @@ async function allocateBotForNewUser(newUsername) {
     return allocateBotsForUser(newUsername, 1);
 }
 
+async function allocateBotsForUser(username, count = 1, preferredBotIds = []) {
+    if (!supabaseAdapter?.isEnabled?.()) return allocateBotsForUserUnlocked(username, count, preferredBotIds);
+    if (!supabaseStorageReady) return { ok: false, error: 'CLOUD_USERS_READ_FAILED', botIds: [] };
+    try { return await supabaseAdapter.withManagerLock('bot-ownership-mutation', () => allocateBotsForUserUnlocked(username, count, preferredBotIds), 900); }
+    catch (err) { return { ok: false, error: err.message || 'CLOUD_ALLOCATION_LOCK_FAILED', botIds: [] }; }
+}
+
 // Khách tự đăng ký tài khoản mới (Tự động cấp bot trống hoặc tái sử dụng bot của tài khoản hết hạn)
 app.post('/api/auth/register', (req, res) => {
     return withRegisterLock(async () => {
         try {
+            if (supabaseAdapter.isEnabled() && !supabaseStorageReady) {
+                return res.status(503).json({ ok: false, error: 'Supabase chưa sẵn sàng; không thể tạo tài khoản bền vững lúc này.' });
+            }
             const clientIp = getClientIp(req);
             const username = String(req.body?.username || '').trim();
             const password = String(req.body?.password ?? '');
@@ -15464,7 +17699,7 @@ app.post('/api/auth/register', (req, res) => {
                 return res.status(400).json({ ok: false, error: passPolicy.error });
             }
 
-            const users = loadUsers(true);
+            const users = await loadUsersFreshOrThrow();
             if (users.some(u => u.username.toLowerCase() === username.toLowerCase())) {
                 recordRegisterAttempt(clientIp, username, false);
                 return res.status(400).json({ ok: false, error: `Tên người dùng "${username}" đã tồn tại. Vui lòng chọn tên khác!` });
@@ -15479,8 +17714,12 @@ app.post('/api/auth/register', (req, res) => {
             let registerMessage = `Đăng ký thành công! Chào mừng ${username} đến với KBOT.`;
 
             if (providedKey !== '') {
-                const keysList = loadKeysFile();
-                const keyIndex = keysList.findIndex(k => k.key.toUpperCase() === providedKey);
+                const keysList = await loadKeysFresh();
+                if (!Array.isArray(keysList)) {
+                    recordRegisterAttempt(clientIp, username, false);
+                    return res.status(503).json({ ok: false, error: 'Không đọc được danh sách Key mới nhất từ Supabase.' });
+                }
+                const keyIndex = keysList.findIndex(k => normalizeKeyCode(k) === providedKey);
                 if (keyIndex === -1) {
                     recordRegisterAttempt(clientIp, username, false);
                     return res.status(400).json({ ok: false, error: 'Mã Key / Giftcode gia hạn không tồn tại!' });
@@ -15491,7 +17730,6 @@ app.post('/api/auth/register', (req, res) => {
                     recordRegisterAttempt(clientIp, username, false);
                     return res.status(400).json({ ok: false, error: keyCheck.error });
                 }
-                consumeKeyForUser(keyObj, username);
                 const days = Number(keyObj.days || 30);
                 expiresAt = new Date(Date.now() + days * 86400000).toISOString();
                 planName = keyObj.planName || `Gói ${days} ngày`;
@@ -15541,7 +17779,7 @@ app.post('/api/auth/register', (req, res) => {
                 status: 'active',
                 planName,
                 expiresAt,
-                note: providedKey ? `Tự đăng ký với mã Key ${providedKey}` : (assignedBotIds.length ? `Tự đăng ký (Được cấp Bot #${assignedBotIds.join(', ')})` : 'Tự đăng ký (Chưa có bot)'),
+                note: providedKey ? `Tự đăng ký với mã Key ${maskLicenseKey(providedKey)}` : (assignedBotIds.length ? `Tự đăng ký (Được cấp Bot #${assignedBotIds.join(', ')})` : 'Tự đăng ký (Chưa có bot)'),
                 allowAccountChange: true,
                 assignedBotIds,
                 createdAt: new Date().toISOString(),
@@ -15550,28 +17788,31 @@ app.post('/api/auth/register', (req, res) => {
 
             assignBotsExclusively(users, '', assignedBotIds);
             users.push(newUser);
-            const saved = saveUsers(users);
-            if (!saved) {
-                users.pop();
-                recordRegisterAttempt(clientIp, username, false);
-                return res.status(500).json({ ok: false, error: 'Không thể lưu tài khoản mới vào hệ thống. Vui lòng thử lại!' });
-            }
-
             if (keyObj) {
-                const keysList = loadKeysFile();
-                const keySaved = saveKeysFile(keysList.map(k => k.key.toUpperCase() === providedKey ? keyObj : k));
-                if (!keySaved) {
+                // Key usage and new account ownership commit together. No active
+                // entitlement is visible until Supabase confirms both writes.
+                const keyCommit = await commitKeyConsumptionAtomic(keyObj, username, users);
+                if (!keyCommit.ok) {
                     users.pop();
-                    saveUsers(users);
                     recordRegisterAttempt(clientIp, username, false);
-                    return res.status(500).json({ ok: false, error: 'Không thể cập nhật trạng thái Key. Đã hủy đăng ký, vui lòng thử lại!' });
+                    return res.status(keyCommit.status || 409).json({ ok: false, error: keyCommit.error || 'Không thể cập nhật trạng thái Key. Vui lòng thử lại!' });
+                }
+            } else {
+                const saved = await saveUsers(users);
+                if (!saved) {
+                    users.pop();
+                    recordRegisterAttempt(clientIp, username, false);
+                    const status = lastUserSaveError.startsWith('REVISION_CONFLICT') ? 409 : 503;
+                    return res.status(status).json({ ok: false, error: lastUserSaveError || 'Không thể lưu tài khoản mới vào hệ thống. Vui lòng thử lại!' });
                 }
             }
 
             // Ghi nhận đăng ký thành công cho rate limiter
             recordRegisterAttempt(clientIp, username, true);
 
-            void syncAuthToAllBots(true);
+            if (!(await syncAuthToAllBots(true))) {
+                return res.status(502).json({ ok: false, partial: true, error: 'Tài khoản đã được tạo nhưng chưa đồng bộ auth tới toàn bộ bot; có thể đăng nhập lại sau khi hệ thống đồng bộ.' });
+            }
 
             logAuditEvent({
                 req,
@@ -15598,8 +17839,13 @@ app.post('/api/auth/register', (req, res) => {
                 allowAccountChange: true,
                 status: 'active'
             };
+            const sessionCommit = await supabaseAdapter.createManagerUserSession(session, userSnapshotRevisions.get(users));
+            if (!sessionCommit.ok) {
+                const status = sessionCommit.error === 'REVISION_CONFLICT' ? 409 : 502;
+                return res.status(status).json({ ok: false, error: 'Tài khoản đã lưu nhưng phiên chưa được tạo an toàn: ' + (sessionCommit.error || 'Supabase chưa xác nhận.') });
+            }
             activeSessions.set(tokenHash, session);
-            saveSessions();
+            persistedSessionHashes.add(tokenHash);
 
             res.setHeader('Set-Cookie', serializeCookie('kingmc_mgr_session', token, { maxAge: cookieMaxAge, secure: isHttps(req) }));
             return res.json({
@@ -15623,6 +17869,9 @@ app.post('/api/auth/register', (req, res) => {
 });
 
 app.post('/api/auth/login', async (req, res) => {
+    if (supabaseAdapter.isEnabled() && !supabaseStorageReady) {
+        return res.status(503).json({ ok: false, error: 'Đang tải dữ liệu Supabase hoặc Cloud chưa sẵn sàng. Vui lòng thử lại.' });
+    }
     const clientIp = getClientIp(req);
     const username = String(req.body?.username || '').trim();
     const password = String(req.body?.password ?? '');
@@ -15672,9 +17921,9 @@ app.post('/api/auth/login', async (req, res) => {
         recordLoginAttempt(clientIp, username, true);
 
         // Tự động di trú mật khẩu Admin sang scrypt nếu đang là plaintext
-        if (!adminPass.startsWith('scrypt$')) {
+        if (!String(registry.adminPassword || '').startsWith('scrypt$')) {
             registry.adminPassword = hashAdminPassword(password);
-            const regSaved = saveRegistry();
+            const regSaved = await saveRegistry();
             if (regSaved) {
                 console.log('[SECURITY] 🔐 Đã tự động nâng cấp mật khẩu Admin sang scrypt hash an toàn!');
             } else {
@@ -15694,7 +17943,10 @@ app.post('/api/auth/login', async (req, res) => {
             expiresAt
         };
         activeSessions.set(tokenHash, session);
-        saveSessions();
+        if (supabaseAdapter.isEnabled() && !(await saveSessions())) {
+            activeSessions.delete(tokenHash);
+            return res.status(502).json({ ok: false, error: 'Không thể lưu phiên đăng nhập Admin lên Supabase.' });
+        }
         logAuditEvent({
             req,
             action: 'AUTH_ADMIN_LOGIN_SUCCESS',
@@ -15717,8 +17969,13 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     // 2. Tài khoản người dùng USER
-    const users = loadUsers();
-    const user = users.find(u => u.username.toLowerCase() === username.toLowerCase());
+    let users;
+    try {
+        users = await loadUsersFreshOrThrow();
+    } catch (err) {
+        return res.status(503).json({ ok: false, error: 'Không thể xác minh tài khoản trên Supabase. Vui lòng thử lại sau.' });
+    }
+    let user = users.find(u => u.username.toLowerCase() === username.toLowerCase());
     if (!user) {
         recordLoginAttempt(clientIp, username, false);
         logAuditEvent({
@@ -15746,15 +18003,37 @@ app.post('/api/auth/login', async (req, res) => {
 
     recordLoginAttempt(clientIp, username, true);
 
+    if (user.status === 'disabled') {
+        logAuditEvent({
+            req,
+            action: 'AUTH_LOGIN_BLOCKED',
+            target: { username },
+            details: 'Đăng nhập bị từ chối: Tài khoản "' + username + '" đã bị vô hiệu hóa bởi Quản trị viên.',
+            status: 'BLOCKED'
+        });
+        return res.status(403).json({ ok: false, error: 'Tài khoản của bạn đã bị vô hiệu hóa hoặc khóa bởi Quản trị viên.' });
+    }
+
     // Xử lý nạp Key gia hạn (nếu có nhập)
+    // Giao dịch chiếm khóa chung với đăng ký (withRegisterLock) để hai luồng
+    // tiêu thụ Key không chạy song song trên cùng một process.
+    let renewalResetPartial = false;
+    let renewalResetPerformed = false;
     if (providedKey !== '') {
+        let renewOutcome;
+        try {
+            renewOutcome = await withRegisterLock(async () => {
         const renewRate = checkRenewRateLimit(req, user.username);
         if (!renewRate.allowed) {
             return res.status(429).json({ ok: false, error: renewRate.error });
         }
 
-        const keysList = loadKeysFile();
-        const keyIndex = keysList.findIndex(k => k.key.toUpperCase() === providedKey);
+        const keysList = await loadKeysFresh();
+        if (!Array.isArray(keysList)) {
+            recordRenewAttempt(req, user.username, false);
+            return res.status(503).json({ ok: false, error: 'Không đọc được danh sách Key mới nhất từ Supabase.' });
+        }
+        const keyIndex = keysList.findIndex(k => normalizeKeyCode(k) === providedKey);
         if (keyIndex === -1) {
             recordRenewAttempt(req, user.username, false);
             return res.status(400).json({ ok: false, error: 'Mã Key / Giftcode gia hạn không tồn tại!' });
@@ -15768,11 +18047,10 @@ app.post('/api/auth/login', async (req, res) => {
 
         recordRenewAttempt(req, user.username, true);
 
-        // Giao dịch atomic nạp Key
-        const keysBackup = JSON.parse(JSON.stringify(keysList));
-        const usersBackup = JSON.parse(JSON.stringify(users));
-
-        consumeKeyForUser(keyObj, user.username);
+        if (user.status === 'disabled') {
+            recordRenewAttempt(req, user.username, false);
+            return res.status(403).json({ ok: false, error: 'Tài khoản của bạn đã bị vô hiệu hóa hoặc khóa bởi Quản trị viên.' });
+        }
 
         const baseTime = (user.expiresAt && Date.parse(user.expiresAt) > Date.now())
             ? Date.parse(user.expiresAt)
@@ -15788,51 +18066,78 @@ app.post('/api/auth/login', async (req, res) => {
                 const resetRes = await resetBotsForAssignment(newlyAssigned, `nạp Key gia hạn cho "${user.username}"`);
                 if (!resetRes.ok) {
                     recordRenewAttempt(req, user.username, false);
-                    return res.status(500).json({ ok: false, error: `Không thể dọn dẹp reset Bot #${resetRes.botId} để bàn giao (${resetRes.error}). Vui lòng liên hệ Admin!` });
+                    return res.status(500).json({ ok: false, partial: resetRes.partial === true, error: `Không thể dọn dẹp reset Bot #${resetRes.botId} để bàn giao (${resetRes.error}). Vui lòng liên hệ Admin!` });
                 }
+                renewalResetPerformed = true;
+                renewalResetPartial = resetRes.partial === true;
+                const preserved = { expiresAt: user.expiresAt, status: user.status, planName: user.planName };
+                users = await loadUsersFreshOrThrow();
+                const freshUser = users.find(u => String(u.id) === String(user.id) || u.username.toLowerCase() === user.username.toLowerCase());
+                if (!freshUser) return res.status(409).json({ ok: false, partial: renewalResetPerformed, error: 'Tài khoản đã thay đổi trong lúc reset bot; vui lòng đăng nhập lại.' });
+                if (freshUser.status === 'disabled') {
+                    return res.status(403).json({ ok: false, partial: renewalResetPerformed, error: 'Tài khoản của bạn đã bị vô hiệu hóa hoặc khóa bởi Quản trị viên.' });
+                }
+                user = freshUser;
+                user.expiresAt = preserved.expiresAt;
+                user.status = preserved.status;
+                user.planName = preserved.planName;
             }
-            const merged = [...new Set([...currentBots, ...keyObj.botIds.map(Number)])];
+            const freshCurrentBots = Array.isArray(user.assignedBotIds) ? user.assignedBotIds.map(Number) : [];
+            const merged = [...new Set([...freshCurrentBots, ...keyObj.botIds.map(Number)])];
             user.assignedBotIds = merged;
             assignBotsExclusively(users, user.id || user.username, keyObj.botIds);
         } else if (keyBotCount > 0 && currentBots.length < keyBotCount) {
             const needed = keyBotCount - currentBots.length;
             const alloc = await allocateBotsForUser(user.username, needed);
             if (alloc.ok && alloc.botIds.length > 0) {
-                user.assignedBotIds = [...new Set([...currentBots, ...alloc.botIds])];
+                const preserved = { expiresAt: user.expiresAt, status: user.status, planName: user.planName };
+                users = await loadUsersFreshOrThrow();
+                const freshUser = users.find(u => String(u.id) === String(user.id) || u.username.toLowerCase() === user.username.toLowerCase());
+                if (!freshUser) return res.status(409).json({ ok: false, partial: renewalResetPerformed, error: 'Tài khoản đã thay đổi trong lúc cấp bot; vui lòng đăng nhập lại.' });
+                if (freshUser.status === 'disabled') {
+                    return res.status(403).json({ ok: false, partial: renewalResetPerformed, error: 'Tài khoản của bạn đã bị vô hiệu hóa hoặc khóa bởi Quản trị viên.' });
+                }
+                user = freshUser;
+                user.expiresAt = preserved.expiresAt;
+                user.status = preserved.status;
+                user.planName = preserved.planName;
+                const freshUserBots = Array.isArray(user.assignedBotIds) ? user.assignedBotIds.map(Number) : [];
+                user.assignedBotIds = [...new Set([...freshUserBots, ...alloc.botIds])];
                 assignBotsExclusively(users, user.id || user.username, user.assignedBotIds);
             }
         }
 
-        const keysSaved = saveKeysFile(keysList);
-        const usersSaved = saveUsers(users);
-
-        if (!keysSaved || !usersSaved) {
-            saveKeysFile(keysBackup);
-            saveUsers(usersBackup);
-            return res.status(500).json({ ok: false, error: 'Lỗi lưu trữ giao dịch nạp Key. Vui lòng thử lại!' });
+        // Key consumption and entitlement mutation are one Cloud transaction.
+        const keyCommit = await commitKeyConsumptionAtomic(keyObj, user.username, users);
+        if (!keyCommit.ok) {
+            return res.status(keyCommit.status || 409).json({
+                ok: false,
+                partial: renewalResetPerformed,
+                error: (renewalResetPerformed ? 'Bot đã được reset và quyền cũ đã thu hồi, nhưng ' : '') +
+                    (keyCommit.conflict ? 'mã Key vừa được sử dụng bởi giao dịch khác. ' : 'lỗi ghi lượt dùng Key. ') +
+                    'Vui lòng thử lại!'
+            });
         }
 
         logAuditEvent({
             req,
             action: 'RENTAL_RENEW_KEY',
-            target: { username: user.username, key: keyObj.key },
-            details: 'Gia hạn thành công khi đăng nhập bằng Key (' + keyObj.key + ', +' + keyObj.days + ' ngày). Hạn mới: ' + user.expiresAt,
-            status: 'SUCCESS'
+            target: { username: user.username, key: maskLicenseKey(keyObj.key) },
+            details: 'Gia hạn thành công khi đăng nhập bằng Key (' + maskLicenseKey(keyObj.key) + ', +' + keyObj.days + ' ngày). Hạn mới: ' + user.expiresAt + (renewalResetPartial ? ' | Bot bàn giao reset chưa xóa hết log Cloud.' : ''),
+            status: renewalResetPartial ? 'PARTIAL' : 'SUCCESS'
         });
 
-        void syncAuthToAllBots(true);
-    }
-
-    // Tự động mã hóa AES-256-GCM nếu trong file thô lưu plaintext
-    try {
-        if (fs.existsSync(USERS_FILE)) {
-            const raw = fs.readFileSync(USERS_FILE, 'utf8');
-            const data = JSON.parse(raw);
-            if (Array.isArray(data.users) && data.users.some(u => u && u.password && !String(u.password).startsWith('aes256$gcm$'))) {
-                saveUsers(users);
-            }
+        if (!(await syncAuthToAllBots(true))) {
+            return res.status(502).json({ ok: false, partial: true, error: 'Key và hạn thuê đã lưu nhưng chưa đồng bộ auth tới toàn bộ bot.' });
         }
-    } catch (_) {}
+        return 'RENEW_CONTINUE_LOGIN';
+        });
+        if (renewOutcome !== 'RENEW_CONTINUE_LOGIN') return renewOutcome; // chết đường nào thì response đã gửi ở đó
+        } catch (renewErr) {
+            console.error('[AUTH] Lỗi giao dịch nạp Key khi đăng nhập:', renewErr.message);
+            return res.status(500).json({ ok: false, partial: renewalResetPerformed, error: 'Lỗi máy chủ khi xử lý nạp Key gia hạn. Vui lòng thử lại.' });
+        }
+    }
 
     // Xác định trạng thái tài khoản: disabled, expired hoặc active
     const isTemporarilyDisabled = user.status === 'disabled';
@@ -15856,8 +18161,19 @@ app.post('/api/auth/login', async (req, res) => {
         status: finalStatus,
         lockReason: user.lockReason || ''
     };
+    const expectedUserRevision = userSnapshotRevisions.get(users);
+    const sessionCommit = await supabaseAdapter.createManagerUserSession(session, expectedUserRevision);
+    if (!sessionCommit.ok) {
+        if (sessionCommit.error === 'USER_CHANGED') {
+            return res.status(403).json({ ok: false, error: 'Tài khoản đã bị khóa hoặc thay đổi trong lúc đăng nhập. Vui lòng tải lại và thử lại.' });
+        }
+        const status = sessionCommit.error === 'REVISION_CONFLICT' ? 409 : 502;
+        return res.status(status).json({ ok: false, error: sessionCommit.error === 'REVISION_CONFLICT'
+            ? 'Tài khoản vừa được thay đổi; vui lòng đăng nhập lại.'
+            : 'Không thể tạo phiên đăng nhập an toàn trên Supabase.' });
+    }
     activeSessions.set(tokenHash, session);
-    saveSessions();
+    persistedSessionHashes.add(tokenHash);
 
     logAuditEvent({
         req,
@@ -15874,6 +18190,8 @@ app.post('/api/auth/login', async (req, res) => {
     res.setHeader('Set-Cookie', serializeCookie('kingmc_mgr_session', token, { maxAge: cookieMaxAge, secure: isHttps(req) }));
     return res.json({
         ok: true,
+        partial: renewalResetPartial,
+        warning: renewalResetPartial ? 'Gia hạn thành công nhưng bot bàn giao chưa xóa hết log Cloud; kiểm tra log worker.' : undefined,
         token,
         user: {
             username: user.username,
@@ -15921,7 +18239,9 @@ app.post('/api/auth/logout', async (req, res) => {
         }
     }
     if (modified) {
-        saveSessions();
+        if (supabaseAdapter.isEnabled() && !(await saveSessions())) {
+            return res.status(502).json({ ok: false, error: 'Không thể xác nhận phiên đăng xuất trên Supabase.' });
+        }
     }
 
     if (session) {
@@ -15969,7 +18289,7 @@ function validatePasswordPolicy(password) {
     return { valid: true };
 }
 
-app.post('/api/auth/change-password', (req, res) => {
+app.post('/api/auth/change-password', async (req, res) => {
     const session = getSessionUser(req);
     if (!session) {
         return res.status(401).json({ ok: false, error: 'Chưa đăng nhập hệ thống.' });
@@ -16002,24 +18322,29 @@ app.post('/api/auth/change-password', (req, res) => {
             return res.status(400).json({ ok: false, error: 'Mật khẩu hiện tại của Quản trị viên không chính xác.' });
         }
         changePassLimiter.record(clientIp, session.username, true);
-        createSystemBackup('pre-admin-pass-change');
-        registry.adminPassword = hashAdminPassword(newPassword);
-        registry.mustChangePassword = false;
-        const saved = saveRegistry();
-        if (!saved) {
-            return res.status(500).json({ ok: false, error: 'Không thể lưu mật khẩu Quản trị viên vào hệ thống.' });
-        }
-        for (const [token, s] of activeSessions.entries()) {
-            if (s.role === 'admin' && token !== session.token) {
-                activeSessions.delete(token);
+        await createSystemBackup('pre-admin-pass-change');
+        if (supabaseAdapter?.isEnabled?.()) {
+            const previousAdminPassword = registry.adminPassword;
+            const previousMustChangePassword = registry.mustChangePassword;
+            registry.adminPassword = hashAdminPassword(newPassword);
+            registry.mustChangePassword = false;
+            const saved = await saveRegistry();
+            if (!saved) {
+                registry.adminPassword = previousAdminPassword;
+                registry.mustChangePassword = previousMustChangePassword;
+                return res.status(502).json({ ok: false, error: 'Supabase chưa xác nhận lưu mật khẩu mới. Vui lòng kiểm tra kết nối rồi thử lại.' });
             }
+        } else {
+            registry.adminPassword = hashAdminPassword(newPassword);
+            registry.mustChangePassword = false;
         }
-        saveSessions();
-        void syncAuthToAllBots(true);
+        const sessionResult = await revokeUserSessions(session, { excludeTokenHash: session.tokenHash || '' });
+        if (!sessionResult.ok) return res.status(502).json({ ok: false, partial: true, error: 'Mật khẩu đã lưu nhưng chưa xác nhận thu hồi các phiên Admin khác: ' + sessionResult.error });
+        if (!(await syncAuthToAllBots(true))) return res.status(502).json({ ok: false, partial: true, error: 'Mật khẩu đã lưu nhưng chưa đồng bộ auth tới toàn bộ bot.' });
         logAuditEvent({ req, action: 'AUTH_ADMIN_CHANGE_PASS_SUCCESS', status: 'SUCCESS' });
         return res.json({ ok: true, message: 'Đổi mật khẩu Quản trị viên (ADMIN) thành công!' });
     } else {
-        const users = loadUsers();
+        const users = await loadUsersFreshOrThrow();
         const userIndex = users.findIndex(u => u.id === session.userId || u.username.toLowerCase() === session.username.toLowerCase());
         if (userIndex === -1) {
             return res.status(404).json({ ok: false, error: 'Không tìm thấy thông tin tài khoản người dùng.' });
@@ -16030,33 +18355,28 @@ app.post('/api/auth/change-password', (req, res) => {
             return res.status(400).json({ ok: false, error: 'Mật khẩu hiện tại không chính xác.' });
         }
         changePassLimiter.record(clientIp, session.username, true);
-        createSystemBackup('pre-user-pass-change');
+        await createSystemBackup('pre-user-pass-change');
         users[userIndex].password = newPassword;
         users[userIndex].updatedAt = new Date().toISOString();
-        const saved = saveUsers(users);
+        const saved = await saveUsers(users);
         if (!saved) {
             return res.status(500).json({ ok: false, error: 'Không thể lưu mật khẩu người dùng vào hệ thống.' });
         }
-        const currentUserId = users[userIndex].id;
-        for (const [token, s] of activeSessions.entries()) {
-            if ((s.userId === currentUserId || s.username?.toLowerCase() === session.username.toLowerCase()) && token !== session.token) {
-                activeSessions.delete(token);
-            }
-        }
-        saveSessions();
-        void syncAuthToAllBots(true);
+        const sessionResult = await revokeUserSessions(users[userIndex], { excludeTokenHash: session.tokenHash || '' });
+        if (!sessionResult.ok) return res.status(502).json({ ok: false, partial: true, error: 'Mật khẩu đã lưu nhưng chưa xác nhận thu hồi các phiên khác: ' + sessionResult.error });
+        if (!(await syncAuthToAllBots(true))) return res.status(502).json({ ok: false, partial: true, error: 'Mật khẩu đã lưu nhưng chưa đồng bộ auth tới toàn bộ bot.' });
         logAuditEvent({ req, action: 'AUTH_USER_CHANGE_PASS_SUCCESS', details: `Đổi mật khẩu tài khoản "${session.username}" thành công`, status: 'SUCCESS' });
         return res.json({ ok: true, message: 'Đổi mật khẩu thành công!' });
     }
 });
 
 // Admin: Lấy danh sách users (Không trả mật khẩu plaintext hàng loạt)
-app.get('/api/manager/users', (req, res) => {
+app.get('/api/manager/users', async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') {
         return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên (Admin) mới có quyền truy cập danh sách người dùng.' });
     }
-    const allUsers = loadUsers(true);
+    const allUsers = await loadUsersFreshOrThrow();
     const users = allUsers.map(u => ({
         id: u.id,
         username: u.username,
@@ -16083,28 +18403,38 @@ app.get('/api/manager/users', (req, res) => {
         }
     }
 
-    const availableBots = BOT_CONFIG.map(b => ({
-        id: b.id,
-        label: b.label || `Bot ${b.id}`,
-        url: b.url || '',
-        rentable: b.rentable !== false,
-        currentOwner: botOwnership[b.id] || null
-    }));
+    const availableBots = BOT_CONFIG.map(b => {
+        const bId = Number(b.id);
+        const rawLabel = String(b.label || '').trim();
+        const hasCustomAlias = rawLabel && rawLabel !== `Bot ${bId}` && rawLabel !== `bot${bId}` && rawLabel !== `Bot #${bId}`;
+        const displayLabel = hasCustomAlias ? `Bot #${bId} (${rawLabel})` : `Bot #${bId}`;
+        return {
+            id: bId,
+            label: displayLabel,
+            rawLabel: rawLabel || `Bot #${bId}`,
+            url: b.url || '',
+            rentable: b.rentable !== false,
+            currentOwner: botOwnership[bId] || null
+        };
+    });
     res.json({ ok: true, users, availableBots, botOwnership });
 });
 
 // Admin: Xem mật khẩu người dùng theo yêu cầu (On-Demand Reveal)
-app.post('/api/manager/users/:id/reveal-password', (req, res) => {
+app.post('/api/manager/users/:id/reveal-password', async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') {
         return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên (Admin) mới có quyền xem mật khẩu người dùng.' });
     }
-    const allUsers = loadUsers(true);
+    const allUsers = await loadUsersFreshOrThrow();
     const target = allUsers.find(u => u.id === req.params.id || (u.username && u.username.toLowerCase() === String(req.params.id).toLowerCase()));
     if (!target) {
         return res.status(404).json({ ok: false, error: 'Không tìm thấy người dùng.' });
     }
     const plain = decryptUserPassword(target.password);
+    if (plain === null) {
+        return res.status(500).json({ ok: false, error: 'Không thể giải mã mật khẩu người dùng bằng MANAGER_MASTER_KEY hiện tại.' });
+    }
     logAuditEvent({
         req,
         action: 'USER_PASSWORD_REVEAL',
@@ -16142,17 +18472,23 @@ app.post('/api/manager/users', async (req, res) => {
         return res.status(400).json({ ok: false, error: parsedExp.error });
     }
 
-    const users = loadUsers(true);
+    let users = await loadUsersFreshOrThrow();
     if (users.some(u => u.username.toLowerCase() === username.toLowerCase())) {
         return res.status(400).json({ ok: false, error: `Người dùng "${username}" đã tồn tại.` });
     }
 
     // Reset bot được cấp cho user mới để bàn giao sạch sẽ
+    let resetPartial = false;
+    let resetPerformed = false;
     if (assignedBotIds.length > 0) {
         const resetRes = await resetBotsForAssignment(assignedBotIds, `Admin tạo người dùng "${username}"`);
         if (!resetRes.ok) {
-            return res.status(500).json({ ok: false, error: `Không thể dọn dẹp reset Bot #${resetRes.botId} để bàn giao (${resetRes.error}).` });
+            return res.status(500).json({ ok: false, partial: resetRes.partial === true, error: `Không thể dọn dẹp reset Bot #${resetRes.botId} để bàn giao (${resetRes.error}).` });
         }
+        resetPerformed = true;
+        resetPartial = resetRes.partial === true;
+        // revokeBotOwnership đã ghi Cloud; nạp lại để không ghi đè aliases/quyền cũ bằng snapshot trước reset.
+        users = await loadUsersFreshOrThrow();
     }
 
     // Đảm bảo nguyên tắc 1 bot chỉ cấp cho tối đa 1 user
@@ -16174,17 +18510,28 @@ app.post('/api/manager/users', async (req, res) => {
         updatedAt: new Date().toISOString()
     };
     users.push(newUser);
-    const saved = saveUsers(users);
+    const saved = await saveUsers(users);
     if (!saved) {
         users.pop();
-        return res.status(500).json({ ok: false, error: 'Không thể lưu dữ liệu người dùng mới vào hệ thống.' });
+        return res.status(500).json({
+            ok: false,
+            partial: resetPerformed,
+            error: (resetPerformed ? 'Bot đã được reset và quyền cũ đã thu hồi, nhưng chưa lưu được người dùng mới. ' : '') +
+                'Không thể lưu dữ liệu người dùng mới vào hệ thống.'
+        });
     }
-    createSystemBackup('post-user-create');
-    void syncAuthToAllBots(true);
+    await createSystemBackup('post-user-create');
+    const authSyncOk = await syncAuthToAllBots(true);
 
-    logAuditEvent({ req, action: 'USER_CREATE', target: { userId: newUser.id, username }, status: 'SUCCESS' });
+    logAuditEvent({ req, action: 'USER_CREATE', target: { userId: newUser.id, username }, status: resetPartial || !authSyncOk ? 'PARTIAL' : 'SUCCESS' });
     const safeNewUser = { ...newUser, password: '' };
-    res.json({ ok: true, user: safeNewUser, message: `Đã tạo người dùng "${username}" thành công!` });
+    res.json({
+        ok: true,
+        partial: resetPartial || !authSyncOk,
+        warning: [resetPartial ? 'Bot bàn giao chưa xóa hết log Cloud; kiểm tra log worker.' : '', !authSyncOk ? 'Auth chưa được đồng bộ tới toàn bộ bot.' : ''].filter(Boolean).join(' ') || undefined,
+        user: safeNewUser,
+        message: `Đã tạo người dùng "${username}" thành công!`
+    });
 });
 
 // Admin: Cập nhật user
@@ -16194,13 +18541,26 @@ const handleUpdateUser = async (req, res) => {
         return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên (Admin) mới có quyền cập nhật người dùng.' });
     }
     const userId = String(req.params.id);
-    const users = loadUsers(true);
-    const userIndex = users.findIndex(u => u.id === userId || u.username.toLowerCase() === userId.toLowerCase());
+    let users = await loadUsersFreshOrThrow();
+    let userIndex = users.findIndex(u => u.id === userId || u.username.toLowerCase() === userId.toLowerCase());
     if (userIndex === -1) return res.status(404).json({ ok: false, error: 'Không tìm thấy người dùng.' });
 
     const userBackup = JSON.parse(JSON.stringify(users[userIndex]));
-    const user = { ...userBackup };
+    let rollbackUser = userBackup;
+    let user = { ...userBackup };
     let passwordChanged = false;
+    let resetPartial = false;
+    let resetPerformed = false;
+    let hasExpiresAtUpdate = false;
+    let parsedExpiresAt = null;
+    if (req.body?.expiresAt !== undefined) {
+        const parsedExp = parseSafeIsoDate(req.body.expiresAt);
+        if (!parsedExp.valid) {
+            return res.status(400).json({ ok: false, error: parsedExp.error });
+        }
+        hasExpiresAtUpdate = true;
+        parsedExpiresAt = parsedExp.value;
+    }
 
     if (typeof req.body?.username === 'string') {
         const newUsername = req.body.username.trim();
@@ -16233,10 +18593,35 @@ const handleUpdateUser = async (req, res) => {
         if (newlyAssigned.length > 0) {
             const resetRes = await resetBotsForAssignment(newlyAssigned, `Admin gán Bot cho "${user.username}"`);
             if (!resetRes.ok) {
-                return res.status(500).json({ ok: false, error: `Không thể dọn dẹp reset Bot #${resetRes.botId} để bàn giao (${resetRes.error}).` });
+                return res.status(500).json({ ok: false, partial: resetRes.partial === true, error: `Không thể dọn dẹp reset Bot #${resetRes.botId} để bàn giao (${resetRes.error}).` });
             }
+            resetPerformed = true;
+            resetPartial = resetRes.partial === true;
+            users = await loadUsersFreshOrThrow();
+            const matchedUserId = String(user.id || '');
+            const originalUsername = String(userBackup.username || '').toLowerCase();
+            userIndex = users.findIndex(u => (matchedUserId && String(u.id) === matchedUserId) ||
+                (originalUsername && String(u.username || '').toLowerCase() === originalUsername));
+            if (userIndex === -1) {
+                return res.status(409).json({ ok: false, error: 'Người dùng đã thay đổi trong lúc reset bot; vui lòng tải lại trang và thử lại.' });
+            }
+            // revokeBotOwnership đã xóa alias/quyền của bot khỏi Cloud và cache. Không được
+            // ghi đè user bằng snapshot trước reset, nếu không alias cũ sẽ sống lại.
+            const freshUser = users[userIndex];
+            rollbackUser = JSON.parse(JSON.stringify(freshUser));
+            user = {
+                ...freshUser,
+                ...(user.username !== userBackup.username ? { username: user.username } : {}),
+                ...(passwordChanged ? { password: user.password } : {})
+            };
         }
         user.assignedBotIds = nextBotIds;
+        const retainedBotIds = new Set(nextBotIds.map(Number));
+        if (user.botAliases && typeof user.botAliases === 'object') {
+            for (const aliasBotId of Object.keys(user.botAliases)) {
+                if (!retainedBotIds.has(Number(aliasBotId))) delete user.botAliases[aliasBotId];
+            }
+        }
         assignBotsExclusively(users, user.id, user.assignedBotIds);
     }
     if (typeof req.body?.status === 'string') {
@@ -16248,12 +18633,8 @@ const handleUpdateUser = async (req, res) => {
     if (req.body?.planName !== undefined) {
         user.planName = String(req.body.planName || '').trim();
     }
-    if (req.body?.expiresAt !== undefined) {
-        const parsedExp = parseSafeIsoDate(req.body.expiresAt);
-        if (!parsedExp.valid) {
-            return res.status(400).json({ ok: false, error: parsedExp.error });
-        }
-        user.expiresAt = parsedExp.value;
+    if (hasExpiresAtUpdate) {
+        user.expiresAt = parsedExpiresAt;
     }
     if (req.body?.note !== undefined) {
         user.note = String(req.body.note || '').trim();
@@ -16264,30 +18645,48 @@ const handleUpdateUser = async (req, res) => {
     user.updatedAt = new Date().toISOString();
     users[userIndex] = user;
 
-    const saved = saveUsers(users);
+    const saved = await saveUsers(users);
     if (!saved) {
-        users[userIndex] = userBackup;
-        return res.status(500).json({ ok: false, error: 'Không thể lưu dữ liệu cập nhật người dùng.' });
+        users[userIndex] = rollbackUser;
+        return res.status(500).json({
+            ok: false,
+            partial: resetPerformed,
+            error: (resetPerformed ? 'Bot đã được reset và quyền cũ đã thu hồi, nhưng chưa lưu được cập nhật người dùng. ' : '') +
+                'Không thể lưu dữ liệu cập nhật người dùng.'
+        });
     }
-    createSystemBackup('post-user-update');
-    void syncAuthToAllBots(true);
-
-    for (const [token, s] of activeSessions.entries()) {
-        if (s.userId === user.id || s.username.toLowerCase() === user.username.toLowerCase()) {
-            if (user.status !== 'active' || passwordChanged) {
-                activeSessions.delete(token);
-            } else {
-                s.assignedBotIds = user.assignedBotIds;
-                s.username = user.username;
-                s.status = 'active';
-            }
+    user = users[userIndex];
+    await createSystemBackup('post-user-update');
+    let sessionRevokeError = null;
+    if (user.status !== 'active' || (user.expiresAt && Date.parse(user.expiresAt) <= Date.now()) || passwordChanged ||
+        user.username.toLowerCase() !== userBackup.username.toLowerCase()) {
+        const sessionResult = await revokeUserSessions(user);
+        if (!sessionResult.ok) {
+            sessionRevokeError = sessionResult.error || 'Chưa xác nhận thu hồi mọi session.';
         }
     }
-    saveSessions();
+    const lifecycle = await reconcileUserBotLifecycle(userBackup, user, 'admin user update');
+    const authSyncOk = await syncAuthToAllBots(true);
 
-    logAuditEvent({ req, action: 'USER_UPDATE', target: { userId: user.id, username: user.username }, status: 'SUCCESS' });
+    if (sessionRevokeError || !lifecycle.ok || !authSyncOk) {
+        const errors = [
+            sessionRevokeError,
+            !lifecycle.ok ? ('Chưa hoàn tất reset bot: ' + lifecycle.error) : null,
+            !authSyncOk ? 'Chưa đồng bộ auth tới toàn bộ bot.' : null
+        ].filter(Boolean).join('; ');
+        logAuditEvent({ req, action: 'USER_UPDATE', target: { userId: user.id, username: user.username }, details: errors, status: 'PARTIAL' });
+        return res.status(502).json({ ok: false, partial: true, user: { ...user, password: '' }, error: 'Đã lưu thay đổi user nhưng có lỗi hoàn tất: ' + errors });
+    }
+
+    logAuditEvent({ req, action: 'USER_UPDATE', target: { userId: user.id, username: user.username }, status: resetPartial ? 'PARTIAL' : 'SUCCESS' });
     const safeUser = { ...user, password: '' };
-    res.json({ ok: true, user: safeUser, message: `Đã cập nhật người dùng "${user.username}" thành công!` });
+    res.json({
+        ok: true,
+        partial: resetPartial,
+        warning: resetPartial ? 'Người dùng đã được cập nhật nhưng bot bàn giao chưa xóa hết log Cloud; kiểm tra log worker.' : undefined,
+        user: safeUser,
+        message: `Đã cập nhật người dùng "${user.username}" thành công!`
+    });
 };
 app.put('/api/manager/users/:id', handleUpdateUser);
 app.patch('/api/manager/users/:id', handleUpdateUser);
@@ -16299,45 +18698,64 @@ app.delete('/api/manager/users/:id', async (req, res) => {
         return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên (Admin) mới có quyền xóa người dùng.' });
     }
     const userId = String(req.params.id);
-    let users = loadUsers(true);
-    const target = users.find(u => u.id === userId || u.username.toLowerCase() === userId.toLowerCase());
+    let users = await loadUsersFreshOrThrow();
+    const targetIndex = users.findIndex(u => u.id === userId || u.username.toLowerCase() === userId.toLowerCase());
+    const target = targetIndex >= 0 ? users[targetIndex] : null;
     if (!target) return res.status(404).json({ ok: false, error: 'Không tìm thấy người dùng.' });
+    if (target.role === 'admin') return res.status(400).json({ ok: false, error: 'Không thể xóa tài khoản Quản trị viên bằng chức năng xóa user.' });
 
-    createSystemBackup('pre-user-delete');
-    const usersBackup = [...users];
-    users = users.filter(u => u.id !== target.id);
-    const saved = saveUsers(users);
-    if (!saved) {
-        users = usersBackup;
-        return res.status(500).json({ ok: false, error: 'Không thể lưu dữ liệu sau khi xóa người dùng.' });
-    }
-    void syncAuthToAllBots(true);
-    if (supabaseAdapter && supabaseAdapter.isEnabled()) {
-        await supabaseAdapter.deleteUser(target.id);
+    await createSystemBackup('pre-user-delete');
+    const previousUser = { ...target, assignedBotIds: Array.isArray(target.assignedBotIds) ? [...target.assignedBotIds] : [] };
+    const disabledUser = { ...target, status: 'disabled', updatedAt: new Date().toISOString() };
+    users[targetIndex] = disabledUser;
+    if (!(await saveUsers(users))) {
+        const status = lastUserSaveError.startsWith('REVISION_CONFLICT') ? 409 : 503;
+        return res.status(status).json({ ok: false, error: 'Không thể vô hiệu hóa user trước khi xóa: ' + (lastUserSaveError || 'Supabase write failed.') });
     }
 
-    for (const [token, s] of activeSessions.entries()) {
-        if (s.userId === target.id || s.username.toLowerCase() === target.username.toLowerCase()) {
-            activeSessions.delete(token);
-            if (supabaseAdapter && supabaseAdapter.isEnabled()) {
-                await supabaseAdapter.deleteSession(token);
-            }
-        }
+    let deleteRevokeError = null;
+    const revoked = await revokeUserSessions(disabledUser);
+    if (!revoked.ok) {
+        deleteRevokeError = revoked.error || 'Thu hồi session thất bại.';
     }
-    saveSessions();
+    const lifecycle = await reconcileUserBotLifecycle(previousUser, disabledUser, 'admin user delete');
+    let lifecycleError = !lifecycle.ok ? (lifecycle.error || 'Reset bot thất bại.') : null;
+
+    users = await loadUsersFreshOrThrow();
+    const currentIndex = users.findIndex(u => String(u.id) === String(target.id) || u.username.toLowerCase() === target.username.toLowerCase());
+    if (currentIndex < 0) {
+        const authSyncOk = await syncAuthToAllBots(true);
+        const hasErr = deleteRevokeError || lifecycleError || !authSyncOk;
+        return res.json({ ok: !hasErr, partial: hasErr, message: `Đã xóa người dùng "${target.username}".` });
+    }
+    const updatedUsers = deriveUsersSnapshot(users, users.filter((_, index) => index !== currentIndex));
+    if (!(await saveUsers(updatedUsers))) {
+        return res.status(502).json({ ok: false, partial: true, error: 'User đã bị vô hiệu hóa và bot/session đã xử lý, nhưng không thể xóa hàng user trên Cloud: ' + (lastUserSaveError || 'Supabase write failed.') });
+    }
+    const authSyncOk = await syncAuthToAllBots(true);
+
+    if (deleteRevokeError || lifecycleError || !authSyncOk) {
+        const errors = [
+            deleteRevokeError ? `Chưa xác nhận thu hồi session: ${deleteRevokeError}` : null,
+            lifecycleError ? `Chưa reset sạch bot: ${lifecycleError}` : null,
+            !authSyncOk ? 'Chưa đồng bộ auth tới toàn bộ bot' : null
+        ].filter(Boolean).join('; ');
+        logAuditEvent({ req, action: 'USER_DELETE', target: { userId: target.id, username: target.username }, details: errors, status: 'PARTIAL' });
+        return res.status(502).json({ ok: false, partial: true, error: 'User đã bị xóa nhưng có lỗi hoàn tất: ' + errors });
+    }
 
     logAuditEvent({ req, action: 'USER_DELETE', target: { userId: target.id, username: target.username }, status: 'SUCCESS' });
     res.json({ ok: true, message: `Đã xóa người dùng "${target.username}".` });
 });
 
 // Admin: Gia hạn linh hoạt cho người dùng (thêm/bớt ngày, ngày cố định, vĩnh viễn)
-app.post('/api/manager/users/:id/renew-days', (req, res) => {
+app.post('/api/manager/users/:id/renew-days', async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') {
         return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên mới có quyền gia hạn tài khoản.' });
     }
     const userId = String(req.params.id);
-    const users = loadUsers(true);
+    const users = await loadUsersFreshOrThrow();
     const userIndex = users.findIndex(u => u.id === userId || u.username.toLowerCase() === userId.toLowerCase());
     if (userIndex === -1) {
         return res.status(404).json({ ok: false, error: 'Không tìm thấy người dùng.' });
@@ -16391,13 +18809,15 @@ app.post('/api/manager/users/:id/renew-days', (req, res) => {
 
     targetUser.updatedAt = new Date().toISOString();
     users[userIndex] = targetUser;
-    const saved = saveUsers(users);
+    const saved = await saveUsers(users);
     if (!saved) {
         users[userIndex] = userBackup;
         return res.status(500).json({ ok: false, error: 'Không thể lưu thông tin gia hạn người dùng.' });
     }
 
-    void syncAuthToAllBots(true);
+    if (!(await syncAuthToAllBots(true))) {
+        return res.status(502).json({ ok: false, partial: true, user: { ...targetUser, password: '' }, error: 'Hạn thuê đã lưu nhưng chưa đồng bộ auth tới toàn bộ bot.' });
+    }
     logAuditEvent({
         req,
         action: 'ADMIN_RENEW_USER',
@@ -16430,17 +18850,19 @@ app.get('/api/manager/audit-logs', async (req, res) => {
         const botId = String(req.query?.botId || '').trim();
         const logType = String(req.query?.logType || '').trim();
 
-        let result = null;
-        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
-            try {
-                result = await supabaseAdapter.fetchAuditLogs({ logType, category, status, q, limit, page });
-            } catch (err) {
-                console.warn('[AUDIT] Không lấy được log từ Supabase, fallback về local:', err.message);
-            }
+        if (!supabaseAdapter || !supabaseAdapter.isEnabled()) {
+            const memoryResult = readAuditLogs({ limit, page });
+            return res.json({
+                ok: true,
+                logs: memoryResult.logs,
+                total: memoryResult.total,
+                page: memoryResult.page,
+                limit: memoryResult.limit,
+                totalPages: memoryResult.totalPages
+            });
         }
-        if (!result) {
-            result = readAuditLogs({ limit, page, q, category, status, actor, botId, logType });
-        }
+        const result = await supabaseAdapter.fetchAuditLogs({ logType, category, status, q, actor, botId, limit, page });
+        if (!result) return res.status(502).json({ ok: false, error: 'Không thể tải Audit Log từ Supabase.' });
         res.json({ 
             ok: true, 
             logs: result.logs, 
@@ -16456,14 +18878,23 @@ app.get('/api/manager/audit-logs', async (req, res) => {
 });
 
 // Admin: Xuất file Audit Logs (CSV / JSONL)
-app.get('/api/manager/audit-logs/export', (req, res) => {
+app.get('/api/manager/audit-logs/export', async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') {
         return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên mới có quyền xuất Audit Logs.' });
     }
     const format = String(req.query?.format || 'csv').toLowerCase() === 'jsonl' ? 'jsonl' : 'csv';
     const dateStr = new Date().toISOString().slice(0, 10);
-    const content = exportAuditLogsFile(format);
+    if (!supabaseAdapter?.isEnabled() || !supabaseStorageReady) return res.status(503).json({ ok: false, error: 'Supabase chưa sẵn sàng để xuất Audit Logs.' });
+    const firstPage = await supabaseAdapter.fetchAuditLogs({ limit: 1000, page: 1 });
+    if (!firstPage) return res.status(502).json({ ok: false, error: 'Không thể tải Audit Logs từ Supabase.' });
+    const entries = [...firstPage.logs];
+    for (let page = 2; page <= Math.min(firstPage.totalPages, 100); page++) {
+        const next = await supabaseAdapter.fetchAuditLogs({ limit: 1000, page });
+        if (!next) return res.status(502).json({ ok: false, error: `Không thể tải trang Audit Logs ${page}.` });
+        entries.push(...next.logs);
+    }
+    const content = exportAuditLogsFile(format, entries);
 
     if (format === 'jsonl') {
         res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
@@ -16535,21 +18966,38 @@ app.post('/api/manager/supabase/config', async (req, res) => {
         }
         const newUrl = String(req.body?.url || '').trim();
         let newKey = String(req.body?.key || '').trim();
-        if (newKey === '••••••••••••••••') {
-            newKey = supabaseAdapter.key || loadSupabaseSecretKey();
-        }
-        if (newKey) {
-            saveSupabaseSecretKey(newKey);
-        }
+        if (newKey === '••••••••••••••••') newKey = supabaseAdapter.key || loadSupabaseSecretKey();
+        if (!newUrl || !newKey) return res.status(400).json({ ok: false, error: 'Nhập Supabase URL và Service Role Key.' });
+        const previousConfig = {
+            url: supabaseAdapter.url,
+            key: supabaseAdapter.key,
+            registrySupabase: registry.supabase,
+            storageReady: supabaseStorageReady
+        };
         supabaseAdapter.updateConfig(newUrl, newKey);
         registry.supabase = {
             url: newUrl,
-            key: newKey,
             enabled: !!(newUrl && newKey)
         };
-        saveRegistry();
-
         const test = await supabaseAdapter.testConnection();
+        if (!test.ok) {
+            supabaseAdapter.updateConfig(previousConfig.url, previousConfig.key);
+            registry.supabase = previousConfig.registrySupabase;
+            return res.status(502).json({ ok: false, error: test.error, missingTables: test.missingTables || [] });
+        }
+        const loaded = await initSupabaseCloud();
+        if (!loaded) {
+            supabaseAdapter.updateConfig(previousConfig.url, previousConfig.key);
+            registry.supabase = previousConfig.registrySupabase;
+            supabaseStorageReady = previousConfig.storageReady;
+            return res.status(502).json({ ok: false, error: 'Đã kết nối nhưng không tải đủ dữ liệu Cloud; cấu hình chưa được áp dụng.' });
+        }
+        await ensureInitialSystemBackup();
+        const configuredCloudRegistry = await supabaseAdapter.fetchRegistry();
+        if (configuredCloudRegistry && Object.keys(configuredCloudRegistry).length > 0 && registryNeedsSave) {
+            if (!(await saveRegistry())) return res.status(502).json({ ok: false, error: 'Đã kết nối Supabase nhưng không lưu được ánh xạ bot.' });
+            registryNeedsSave = false;
+        }
         logAuditEvent({
             req,
             action: 'SUPABASE_SYNC',
@@ -16560,100 +19008,485 @@ app.post('/api/manager/supabase/config', async (req, res) => {
 
         res.json({
             ok: true,
-            message: test.ok ? 'Đã lưu cấu hình và kết nối Supabase thành công!' : 'Đã lưu cấu hình, nhưng chưa ping được: ' + test.error,
-            connected: test.ok
+            message: 'Đã kết nối và đồng bộ dữ liệu từ Supabase. Để giữ cấu hình sau khi restart, đặt SUPABASE_URL và SUPABASE_SERVICE_ROLE_KEY trong Environment Variables.',
+            connected: true
         });
     } catch (err) {
         res.status(500).json({ ok: false, error: 'Lỗi lưu cấu hình Supabase: ' + err.message });
     }
 });
 
-app.post('/api/manager/supabase/sync-now', async (req, res) => {
+function readLegacyJsonFiles(candidates) {
+    const documents = [];
+    for (const filename of [...new Set(candidates.filter(Boolean))]) {
+        try {
+            if (!fs.existsSync(filename)) continue;
+            const parsed = JSON.parse(fs.readFileSync(filename, 'utf8'));
+            if (parsed && typeof parsed === 'object') documents.push({ filename, parsed });
+        } catch (err) {
+            console.warn('[MIGRATION] Bỏ qua một file legacy JSON không hợp lệ.');
+        }
+    }
+    return documents;
+}
+
+function readLegacyRows(candidates, property) {
+    const rows = [];
+    for (const { parsed } of readLegacyJsonFiles(candidates)) {
+        const value = Array.isArray(parsed) ? parsed : parsed[property];
+        if (Array.isArray(value)) rows.push(...value);
+        else if (property === 'sessions' && value && typeof value === 'object') {
+            for (const [tokenHash, session] of Object.entries(value)) rows.push({ ...session, tokenHash: session?.tokenHash || tokenHash });
+        }
+    }
+    if (property === 'users') {
+        if (!legacyImportMasterSecret) {
+            for (const candidate of [path.join(DATA_DIR, '.manager_master_key'), path.join(__dirname, '.manager_master_key')]) {
+                try { if (fs.existsSync(candidate)) { legacyImportMasterSecret = fs.readFileSync(candidate, 'utf8').trim(); if (legacyImportMasterSecret) break; } } catch (_) {}
+            }
+        }
+        for (const user of rows) {
+            if (typeof user?.password === 'string' && user.password.startsWith('aes256$gcm$')) {
+                const plain = decryptUserPassword(user.password);
+                if (plain === null) throw new Error('Không thể giải mã mật khẩu user legacy. Cần cấu hình đúng MANAGER_MASTER_KEY trước khi Upload.');
+                user.password = plain;
+            }
+        }
+    }
+    return rows;
+}
+
+function readLegacyRegistry() {
+    const candidates = readLegacyJsonFiles(REGISTRY_CANDIDATES)
+        .filter(entry => entry.parsed && typeof entry.parsed === 'object' && !Array.isArray(entry.parsed))
+        .map((entry, index) => {
+            const parsed = { ...entry.parsed };
+            const sourceBots = Array.isArray(parsed.dynamicBots) ? parsed.dynamicBots : (Array.isArray(parsed.bots) ? parsed.bots : []);
+            const validBots = sourceBots.filter(bot => bot && typeof bot === 'object' && normalizeRegistryUrl(bot.url));
+            const mapSize = parsed.botIdMap && typeof parsed.botIdMap === 'object' && !Array.isArray(parsed.botIdMap) ? Object.keys(parsed.botIdMap).length : 0;
+            const usefulFields = ['adminPassword', 'announcement', 'webhook', 'systemSettings', 'botAliases', 'botTags', 'orderUrls']
+                .filter(key => parsed[key] && (typeof parsed[key] !== 'object' || Object.keys(parsed[key]).length > 0)).length;
+            return { filename: entry.filename, parsed, index, score: validBots.length * 100 + mapSize * 5 + usefulFields };
+        })
+        .sort((a, b) => b.score - a.score || a.index - b.index);
+    if (!candidates.length || candidates[0].score === 0) return null;
+
+    const merged = {};
+    const botByUrl = new Map();
+    const idByUrl = {};
+    const overrides = new Map();
+    for (const { parsed } of candidates) {
+        for (const [key, value] of Object.entries(parsed)) {
+            if (key === 'dynamicBots' || key === 'bots' || key === 'botIdMap' || key === 'overrides') continue;
+            if (merged[key] === undefined || merged[key] === null || merged[key] === '' ||
+                (Array.isArray(merged[key]) && merged[key].length === 0) ||
+                (merged[key] && typeof merged[key] === 'object' && !Array.isArray(merged[key]) && Object.keys(merged[key]).length === 0)) {
+                merged[key] = value;
+            }
+        }
+        const sourceBots = Array.isArray(parsed.dynamicBots) ? parsed.dynamicBots : (Array.isArray(parsed.bots) ? parsed.bots : []);
+        for (const bot of sourceBots) {
+            if (!bot || typeof bot !== 'object') continue;
+            const url = normalizeRegistryUrl(bot.url);
+            if (!url) continue;
+            const key = url.toLowerCase();
+            if (!botByUrl.has(key)) botByUrl.set(key, { ...bot, url });
+        }
+        if (parsed.botIdMap && typeof parsed.botIdMap === 'object' && !Array.isArray(parsed.botIdMap)) {
+            for (const [url, id] of Object.entries(parsed.botIdMap)) {
+                const normalizedUrl = normalizeRegistryUrl(url);
+                if (normalizedUrl && idByUrl[normalizedUrl] === undefined && Number.isSafeInteger(Number(id)) && Number(id) > 0) idByUrl[normalizedUrl] = Number(id);
+            }
+        }
+        for (const override of Array.isArray(parsed.overrides) ? parsed.overrides : []) {
+            if (!override || typeof override !== 'object') continue;
+            const sourceUrl = normalizeRegistryUrl(override.sourceUrl);
+            const url = normalizeRegistryUrl(override.url);
+            const key = `${sourceUrl.toLowerCase()}|${String(override.legacyId || '')}`;
+            if (!overrides.has(key)) overrides.set(key, { ...override, sourceUrl, url });
+        }
+    }
+    merged.dynamicBots = [...botByUrl.values()];
+    merged.botIdMap = idByUrl;
+    merged.overrides = [...overrides.values()];
+    merged.botRentalDisabled = normalizeBotRentalDisabled(merged.botRentalDisabled);
+    return merged;
+}
+
+function readLegacyAuditLogs() {
+    const uniqueFiles = [...new Set([
+        path.resolve(AUDIT_LOG_FILE),
+        path.resolve(__dirname, 'manager_audit.jsonl'),
+        path.resolve(process.cwd(), 'manager_audit.jsonl')
+    ])];
+    const logMap = new Map();
+    for (const filename of uniqueFiles) {
+        try {
+            if (!fs.existsSync(filename)) continue;
+            for (const line of fs.readFileSync(filename, 'utf8').split(/\r?\n/)) {
+                if (!line.trim()) continue;
+                try {
+                    const parsed = JSON.parse(line);
+                    if (parsed && typeof parsed === 'object') {
+                        const id = String(parsed.id || `${parsed.timestamp || ''}_${parsed.action || ''}_${parsed.actor?.username || ''}`);
+                        if (!logMap.has(id)) {
+                            logMap.set(id, parsed);
+                        }
+                    }
+                } catch (_) {}
+            }
+        } catch (_) {}
+    }
+    return [...logMap.values()];
+}
+
+function readLegacyBackups() {
+    const result = [];
+    const directories = [...new Set([path.join(DATA_DIR, 'backups'), path.join(__dirname, 'backups'), path.join(process.cwd(), 'backups')])];
+    for (const directory of directories) {
+        try {
+            if (!fs.existsSync(directory)) continue;
+            for (const name of fs.readdirSync(directory).filter(item => /^backup-[A-Za-z0-9._-]+\.json$/.test(item))) {
+                try {
+                    const payload = JSON.parse(fs.readFileSync(path.join(directory, name), 'utf8'));
+                    result.push({ name, payload });
+                } catch (_) {}
+            }
+        } catch (_) {}
+    }
+    return result;
+}
+
+async function managerSupabaseUpload(req, res) {
     const session = getSessionUser(req);
-    if (!session || session.role !== 'admin') {
-        return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên mới có quyền đồng bộ Supabase.' });
-    }
-    if (!supabaseAdapter.isEnabled()) {
-        return res.status(400).json({ ok: false, error: 'Chưa cấu hình Supabase URL và Key.' });
-    }
-
+    if (!session || session.role !== 'admin') return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên mới có quyền đồng bộ Supabase.' });
+    if (!supabaseAdapter.isEnabled()) return res.status(400).json({ ok: false, error: 'Chưa cấu hình Supabase URL và Key.' });
+    if (supabaseSyncLocks.upload) return res.status(409).json({ ok: false, error: 'Đang có yêu cầu Upload chạy; vui lòng chờ hoàn tất.' });
+    supabaseSyncLocks.upload = true;
+    const test = await supabaseAdapter.testConnection();
+    if (!test.ok) { supabaseSyncLocks.upload = false; return res.status(502).json({ ok: false, error: test.error || 'Không thể kết nối Supabase.' }); }
     try {
-        const users = loadUsers(true);
-        const keys = loadKeysFile();
-        const activeAuditLogs = readAuditLogs({ limit: Number.MAX_SAFE_INTEGER }).logs;
-        const okUsers = await supabaseAdapter.syncAllUsers(users);
-        const okKeys = await supabaseAdapter.syncAllKeys(keys);
-        const okReg = await supabaseAdapter.saveRegistry(registry);
-        const okSessions = await supabaseAdapter.syncAllSessions(activeSessions);
-        const okAuditLogs = await supabaseAdapter.syncAuditLogs(activeAuditLogs);
+        if (!supabaseStorageReady && !(await initSupabaseCloud())) throw new Error('Không thể tải trạng thái Cloud trước khi Upload.');
+        const counts = { users: 0, keys: 0, bots: 0, botSettings: 0, sessions: 0, auditLogs: 0, backups: 0, skipped: 0 };
+        const legacyUsers = readLegacyRows(USERS_CANDIDATES, 'users');
+        const legacyKeys = readLegacyRows(KEYS_CANDIDATES, 'keys');
+        const legacyRegistry = readLegacyRegistry();
+        const legacySessions = readLegacyRows([SESSIONS_FILE], 'sessions');
+        const legacyAudit = readLegacyAuditLogs();
+        const legacyBackups = readLegacyBackups();
+        const cloudUsers = await supabaseAdapter.fetchUsers();
+        const cloudKeys = await supabaseAdapter.fetchKeys();
+        const cloudRegistry = await supabaseAdapter.fetchRegistry();
+        const cloudSessions = await supabaseAdapter.fetchSessions();
+        const cloudBackups = await supabaseAdapter.fetchBackups();
+        if (![cloudUsers, cloudKeys, cloudSessions, cloudBackups].every(Array.isArray) || !cloudRegistry || typeof cloudRegistry !== 'object') throw new Error('Không thể đọc đủ dữ liệu Cloud; chưa thực hiện Upload.');
 
-        if (!okUsers || !okKeys || !okReg || !okSessions || !okAuditLogs) {
-            const failed = [];
-            if (!okUsers) failed.push('users');
-            if (!okKeys) failed.push('keys');
-            if (!okReg) failed.push('registry');
-            if (!okSessions) failed.push('sessions');
-            if (!okAuditLogs) failed.push('audit_logs');
-            logAuditEvent({
-                req,
-                action: 'SUPABASE_SYNC',
-                category: 'SYSTEM',
-                details: `Đồng bộ Supabase thất bại một phần: [${failed.join(', ')}]`,
-                status: 'FAILED'
-            });
-            return res.status(500).json({
-                ok: false,
-                error: `Đồng bộ thất bại một phần: không thể đồng bộ [${failed.join(', ')}] lên Supabase.`
-            });
+        // Upload is a one-time migration path: Cloud wins ID conflicts; legacy files only fill missing rows.
+        const userIds = new Set(cloudUsers.map(user => String(user.id || '').toLowerCase()).filter(Boolean));
+        const usernames = new Set(cloudUsers.map(user => String(user.username || '').toLowerCase()).filter(Boolean));
+        const importedUsers = [...loadUsers(), ...legacyUsers].filter(user => user && String(user.username || '').trim());
+        const newUsers = [];
+        for (const user of importedUsers) {
+            const id = String(user.id || ('usr_' + String(user.username).toLowerCase()));
+            const username = String(user.username).toLowerCase();
+            if (userIds.has(id.toLowerCase()) || usernames.has(username)) { counts.skipped++; continue; }
+            user.id = id;
+            userIds.add(id.toLowerCase()); usernames.add(username); newUsers.push(user);
         }
 
-        logAuditEvent({
-            req,
-            action: 'SUPABASE_SYNC',
-            category: 'SYSTEM',
-            details: `Đồng bộ toàn bộ dữ liệu lên Supabase: ${users.length} users, ${keys.length} keys, ${activeAuditLogs.length} audit logs, phiên đăng nhập và registry hạm đội`,
-            status: 'SUCCESS'
-        });
+        const keyIds = new Set(cloudKeys.map(key => String(key.id || '').toLowerCase()).filter(Boolean));
+        const keyCodes = new Set(cloudKeys.map(key => String(key.key || key.code || '').toUpperCase()).filter(Boolean));
+        const importedKeys = [...loadKeysFile(), ...legacyKeys].filter(key => key && String(key.key || key.code || '').trim());
+        const newKeys = [];
+        for (const key of importedKeys) {
+            const code = String(key.key || key.code).toUpperCase();
+            const id = String(key.id || ('key_' + code));
+            if (keyIds.has(id.toLowerCase()) || keyCodes.has(code)) { counts.skipped++; continue; }
+            key.id = id; key.key = code; keyCodes.add(code); keyIds.add(id.toLowerCase()); newKeys.push(key);
+        }
 
-        res.json({ ok: true, message: `Đã đồng bộ ${users.length} users, ${keys.length} keys, ${activeAuditLogs.length} audit logs, phiên đăng nhập và cấu hình hạm đội lên Supabase!` });
+        const mergeCloudPreferred = (cloud, legacy) => {
+            const merged = { ...(legacy || {}), ...(cloud || {}) };
+            for (const field of ['dynamicBots','disabledEnvUrls','disabledEnvIds','overrides','orderUrls','order','botAliases','botTags','botIdMap']) {
+                if ((!Array.isArray(merged[field]) || merged[field].length === 0) && Array.isArray(legacy?.[field]) && legacy[field].length) merged[field] = legacy[field];
+                if ((!merged[field] || (typeof merged[field] === 'object' && !Array.isArray(merged[field]) && Object.keys(merged[field]).length === 0)) && legacy?.[field] && Object.keys(legacy[field]).length) merged[field] = legacy[field];
+            }
+            if ((!merged.adminPassword || merged.adminPassword === 'scrypt$') && legacy?.adminPassword) merged.adminPassword = legacy.adminPassword;
+            if ((!merged.announcement || !merged.announcement.content) && legacy?.announcement?.content) merged.announcement = legacy.announcement;
+            if ((!merged.webhook || !merged.webhook.enabled) && legacy?.webhook?.enabled) merged.webhook = legacy.webhook;
+            return merged;
+        };
+        const cloudRegistryHasData = Object.keys(cloudRegistry).length > 0;
+        const uploadRegistryBase = cloudRegistryHasData
+            ? { ...registry, ...cloudRegistry }
+            : (legacyRegistry || { ...registry });
+        const uploadRegistry = mergeCloudPreferred(uploadRegistryBase, legacyRegistry);
+        uploadRegistry.botRentalDisabled = normalizeBotRentalDisabled(uploadRegistry.botRentalDisabled);
+        const envAdminPassword = String(process.env.ADMIN_PASSWORD || process.env.MANAGER_ADMIN_PASSWORD || process.env.MANAGER_PASSWORD || MANAGER_CONFIG.ADMIN_PASSWORD || '').trim();
+        if (envAdminPassword) uploadRegistry.adminPassword = hashAdminPassword(envAdminPassword);
+        if (uploadRegistry.adminPassword && !String(uploadRegistry.adminPassword).startsWith('scrypt$')) uploadRegistry.adminPassword = hashAdminPassword(String(uploadRegistry.adminPassword));
+        const registryBeforeBotPlan = JSON.parse(JSON.stringify(registry));
+        const botsBeforeBotPlan = BOT_CONFIG;
+        const dirtyBeforeBotPlan = registryNeedsSave;
+        let uploadBotConfigs;
+        try {
+            Object.assign(registry, uploadRegistry);
+            uploadBotConfigs = buildManagerBotConfig();
+            uploadRegistry.botIdMap = { ...(registry.botIdMap || uploadRegistry.botIdMap || {}) };
+            uploadRegistry.lastBotId = Number(registry.lastBotId || uploadRegistry.lastBotId || 0);
+            uploadRegistry.orderUrls = Array.isArray(registry.orderUrls) ? [...registry.orderUrls] : (uploadRegistry.orderUrls || []);
+        } finally {
+            Object.keys(registry).forEach(key => delete registry[key]);
+            Object.assign(registry, registryBeforeBotPlan);
+            BOT_CONFIG = botsBeforeBotPlan;
+            registryNeedsSave = dirtyBeforeBotPlan;
+        }
+        const cloudSessionTokens = new Set(cloudSessions.map(item => String(item.tokenHash || '')));
+        const importedSessions = [...legacySessions, ...Array.from(activeSessions.values())];
+        const sessionMap = new Map();
+        for (const item of importedSessions) {
+            const tokenHash = String(item?.tokenHash || '');
+            if (!tokenHash || cloudSessionTokens.has(tokenHash)) { counts.skipped++; continue; }
+            sessionMap.set(tokenHash, item); cloudSessionTokens.add(tokenHash);
+        }
+        const audit = [...legacyAudit, ...pendingAuditLogs];
+        const groups = [];
+        if (newUsers.length) groups.push(['users', await supabaseAdapter.syncAllUsers(newUsers), newUsers.length]);
+        if (newKeys.length) groups.push(['keys', await supabaseAdapter.syncAllKeys(newKeys), newKeys.length]);
+        if (registryNeedsSave || Object.keys(legacyRegistry || {}).length) groups.push(['registry', await supabaseAdapter.saveRegistry(uploadRegistry), 1]);
+        if (sessionMap.size) groups.push(['sessions', await supabaseAdapter.syncAllSessions(sessionMap), sessionMap.size]);
+        if (audit.length) groups.push(['audit_logs', await supabaseAdapter.syncAuditLogs(audit), audit.length]);
+        if (legacyBackups.length) {
+            let allBackupsSaved = true;
+            const existingBackupNames = new Set(cloudBackups.map(backup => backup.filename));
+            for (const backup of legacyBackups) {
+                if (existingBackupNames.has(backup.name)) { counts.skipped++; continue; }
+                if (!(await supabaseAdapter.saveBackup(backup.name, backup.payload))) allBackupsSaved = false;
+                else { counts.backups++; existingBackupNames.add(backup.name); }
+            }
+            if (counts.backups || legacyBackups.some(backup => !existingBackupNames.has(backup.name))) groups.push(['backups', allBackupsSaved, counts.backups]);
+        }
+
+        // Import currently running worker configuration explicitly. Credentials are returned only
+        // over the existing shared-secret Manager channel and are encrypted by the adapter at rest.
+        for (const bot of uploadBotConfigs || []) {
+            const botId = String(bot.id || '').trim();
+            if (!/^[1-9][0-9]{0,8}$/.test(botId)) { groups.push(['bot_settings #' + (bot.label || 'unknown'), false, 0, 'BOT_ID thiếu hoặc không hợp lệ']); continue; }
+            try {
+                const resetState = getPendingResets()[botId];
+                if (resetState && resetState.status !== 'completed') throw new Error('Sync Up bị chặn khi giao dịch Reset Customer chưa hoàn tất.');
+                const result = await fetchChild(bot, '/api/bot/supabase/export-settings', { timeoutMs: 10000 });
+                if (!result.ok || !result.data?.ok || String(result.data.botId) !== botId) throw new Error(result.data?.error || 'Worker không xác nhận BOT_ID.');
+                const existing = await supabaseAdapter.fetchBotSettingsStrict(botId);
+                const current = result.data;
+                const existingAuth = existing?.synced_auth && typeof existing.synced_auth === 'object' ? existing.synced_auth : {};
+                const pendingResetId = String(current.pendingCustomerResetId || existingAuth.pendingCustomerResetId || '');
+                if (pendingResetId) throw new Error('Sync Up bị chặn khi Cloud còn pending reset ID: ' + pendingResetId);
+                const resetTombstone = !!(current.credentialsResetAt || current.lastCustomerResetId || existingAuth.credentialsResetAt || existingAuth.lastCustomerResetId);
+                const incomingSettings = current.settings && typeof current.settings === 'object' ? current.settings : {};
+                const existingSettings = existing?.settings && typeof existing.settings === 'object' ? existing.settings : {};
+                const hasProxyConfig = current.proxy && typeof current.proxy === 'object' && (current.proxy.enabled === true || String(current.proxy.host || '').trim() !== '');
+                const uploadPayload = {
+                    ...current,
+                    username: resetTombstone ? '' : (String(current.username || '').trim() || existing?.username || ''),
+                    password: resetTombstone ? '' : (String(current.password || '') || existing?.password || ''),
+                    settings: resetTombstone ? incomingSettings : (Object.keys(incomingSettings).length ? { ...existingSettings, ...incomingSettings } : existingSettings),
+                    proxy: resetTombstone ? (current.proxy || incomingSettings.proxy || {}) : (hasProxyConfig ? current.proxy : (existing?.proxy || current.proxy || {})),
+                    schedules: resetTombstone ? (Array.isArray(current.schedules) ? current.schedules : []) : (Array.isArray(current.schedules) && current.schedules.length ? current.schedules : (existing?.schedules || current.schedules || [])),
+                    auto_chat: resetTombstone ? (Array.isArray(current.auto_chat) ? current.auto_chat : []) : (Array.isArray(current.auto_chat) && current.auto_chat.length ? current.auto_chat : (existing?.auto_chat || current.auto_chat || [])),
+                    syncedAuth: {
+                        ...existingAuth,
+                        credentialsResetAt: current.credentialsResetAt || existingAuth.credentialsResetAt || null,
+                        lastCustomerResetId: current.lastCustomerResetId || existingAuth.lastCustomerResetId || null,
+                        customerResetLogCutoff: current.customerResetLogCutoff || existingAuth.customerResetLogCutoff || null,
+                        pendingCustomerResetId: null
+                    },
+                    manually_stopped: resetTombstone ? current.manually_stopped === true : (current.manually_stopped === true ? true : (existing?.manually_stopped ?? current.manually_stopped))
+                };
+                const saved = await supabaseAdapter.saveBotSettings(botId, uploadPayload);
+                if (!saved) throw new Error('Không thể lưu bot_settings lên Supabase.');
+                counts.botSettings++;
+            } catch (err) {
+                groups.push(['bot_settings #' + botId, false, 0, err.message]);
+            }
+        }
+        const failed = groups.filter(group => !group[1]).map(group => group[0] + (group[3] ? ': ' + group[3] : ''));
+        counts.users = groups.filter(g => g[0] === 'users' && g[1]).reduce((n, g) => n + g[2], 0);
+        counts.keys = groups.filter(g => g[0] === 'keys' && g[1]).reduce((n, g) => n + g[2], 0);
+        counts.bots = counts.botSettings;
+        counts.sessions = groups.filter(g => g[0] === 'sessions' && g[1]).reduce((n, g) => n + g[2], 0);
+        counts.auditLogs = groups.filter(g => g[0] === 'audit_logs' && g[1]).reduce((n, g) => n + g[2], 0);
+        counts.registry = groups.filter(g => g[0] === 'registry' && g[1]).reduce((n, g) => n + g[2], 0);
+        if (failed.length) {
+            logAuditEvent({ req, action: 'SUPABASE_UPLOAD', category: 'SYSTEM', details: 'Upload Supabase thất bại: ' + failed.join('; '), status: 'FAILED' });
+            return res.status(502).json({ ok: false, error: 'Upload chưa hoàn tất: ' + failed.join('; '), counts, failed });
+        }
+        const [confirmedUsers, confirmedKeys, confirmedRegistry, confirmedSessions] = await Promise.all([
+            supabaseAdapter.fetchUsers(), supabaseAdapter.fetchKeys(), supabaseAdapter.fetchRegistry(), supabaseAdapter.fetchSessions()
+        ]);
+        if (![confirmedUsers, confirmedKeys, confirmedSessions].every(Array.isArray) || !confirmedRegistry) throw new Error('Dữ liệu đã gửi nhưng không xác minh đọc lại được từ Cloud; Manager chưa cập nhật cache.');
+        setUsersCache(confirmedUsers); setKeysCache(confirmedKeys); setSessionsCache(confirmedSessions);
+        Object.assign(registry, confirmedRegistry);
+        initializeAdminPassword();
+        BOT_CONFIG = buildManagerBotConfig();
+        registryNeedsSave = false;
+        logAuditEvent({ req, action: 'SUPABASE_UPLOAD', category: 'SYSTEM', details: 'Upload Supabase thành công: ' + JSON.stringify(counts), status: 'SUCCESS' });
+        if (pendingAuditLogs.length) await flushPendingAuditLogs();
+        return res.json({ ok: true, message: 'Upload hoàn tất. Giá trị Cloud hiện có được giữ; dữ liệu legacy chỉ bổ sung hàng còn thiếu.', counts });
     } catch (err) {
-        res.status(500).json({ ok: false, error: 'Lỗi đồng bộ: ' + err.message });
+        logAuditEvent({ req, action: 'SUPABASE_UPLOAD', category: 'SYSTEM', details: 'Upload Supabase lỗi: ' + err.message, status: 'FAILED' });
+        return res.status(502).json({ ok: false, error: 'Upload Supabase thất bại: ' + err.message });
+    } finally {
+        supabaseSyncLocks.upload = false;
     }
-});
+}
+
+async function managerSupabaseSyncDown(req, res) {
+    const session = getSessionUser(req);
+    if (!session || session.role !== 'admin') return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên mới có quyền đồng bộ Supabase.' });
+    if (!supabaseAdapter.isEnabled()) return res.status(400).json({ ok: false, error: 'Chưa cấu hình Supabase URL và Key.' });
+    if (supabaseSyncLocks.syncDown) return res.status(409).json({ ok: false, error: 'Đang có yêu cầu Sync Down chạy; vui lòng chờ hoàn tất.' });
+    supabaseSyncLocks.syncDown = true;
+    let applySnapshot = null;
+    try {
+        const test = await supabaseAdapter.testConnection();
+        if (!test.ok) return res.status(502).json({ ok: false, error: test.error || 'Không thể kết nối Supabase.' });
+        const [cloudUsers, cloudKeys, cloudRegistry, cloudSessions] = await Promise.all([
+            supabaseAdapter.fetchUsers(), supabaseAdapter.fetchKeys(), supabaseAdapter.fetchRegistry(), supabaseAdapter.fetchSessions()
+        ]);
+        if (!Array.isArray(cloudUsers) || !Array.isArray(cloudKeys) || !cloudRegistry || typeof cloudRegistry !== 'object' || !Array.isArray(cloudSessions)) {
+            return res.status(502).json({ ok: false, error: 'Supabase trả về dữ liệu thiếu hoặc không đọc được; không áp dụng thay đổi.' });
+        }
+        // Stage the Cloud registry first so bot ID validation and child reads cannot partially erase RAM state.
+        applySnapshot = {
+            registry: JSON.parse(JSON.stringify(registry)),
+            bots: BOT_CONFIG,
+            users: loadUsers(),
+            keys: loadKeysFile(),
+            sessions: [...activeSessions.values()],
+            storageReady: supabaseStorageReady,
+            registryNeedsSave
+        };
+        Object.assign(registry, cloudRegistry);
+        initializeAdminPassword();
+        const nextBots = buildManagerBotConfig();
+        const rollbackStagedRegistry = () => {
+            Object.keys(registry).forEach(key => delete registry[key]);
+            Object.assign(registry, applySnapshot.registry);
+            BOT_CONFIG = applySnapshot.bots;
+            registryNeedsSave = applySnapshot.registryNeedsSave;
+            applySnapshot = null;
+        };
+
+        // Validate identifiers and fetch every bot_settings row before applying any Manager cache.
+        if (cloudUsers.some(u => !u || !String(u.username || '').trim() || !String(u.id || '').trim()) ||
+            cloudKeys.some(k => !k || !String(k.key || k.code || '').trim()) ||
+            (cloudRegistry.dynamicBots || []).some(b => !b || !String(b.url || '').trim())) {
+            rollbackStagedRegistry();
+            return res.status(502).json({ ok: false, error: 'Dữ liệu Cloud có ID hoặc trường bắt buộc không hợp lệ; không áp dụng thay đổi.' });
+        }
+        const ids = new Set();
+        for (const bot of nextBots || []) {
+            const id = String(bot.id || '').trim();
+            if (!/^[1-9][0-9]{0,8}$/.test(id) || ids.has(id)) {
+                rollbackStagedRegistry();
+                return res.status(409).json({ ok: false, error: 'Ánh xạ BOT_ID trong Manager bị thiếu hoặc trùng; đã hủy Sync Down.' });
+            }
+            ids.add(id);
+        }
+        const stagedBotSettings = await Promise.all(nextBots.map(bot => supabaseAdapter.fetchBotSettingsStrict(bot.id)));
+
+        // Apply only after all required Cloud reads and identifier validation succeeded.
+        setUsersCache(cloudUsers);
+        setKeysCache(cloudKeys);
+        setSessionsCache(cloudSessions);
+        supabaseStorageReady = true;
+        BOT_CONFIG = nextBots;
+        applySnapshot = null;
+        // Sync Down chỉ cập nhật cache runtime; không ghi ngược payload vừa tải lên Cloud.
+
+        const workerResults = [];
+        for (let index = 0; index < (BOT_CONFIG || []).length; index++) {
+            const bot = BOT_CONFIG[index];
+            const row = stagedBotSettings[index];
+            if (!row) { workerResults.push({ botId: String(bot.id), skipped: true, reason: 'Chưa có cấu hình Cloud' }); continue; }
+            try {
+                const result = await fetchChild(bot, '/api/bot/supabase/reload', { method: 'POST', body: {}, timeoutMs: 12000, headers: { 'X-Manager-Role': 'admin' } });
+                if (!result.ok || !result.data?.ok || String(result.data.botId) !== String(bot.id)) {
+                    workerResults.push({ botId: String(bot.id), ok: false, error: result.data?.error || ('HTTP ' + result.status) });
+                } else workerResults.push({ botId: String(bot.id), ok: true, restored: result.data.restored === true });
+            } catch (err) {
+                workerResults.push({ botId: String(bot.id), ok: false, error: err.message || 'Worker chưa kết nối.' });
+            }
+        }
+        const authSync = await syncAuthToAllBotsDetailed(true);
+        const failedWorkers = workerResults.filter(r => r.ok === false);
+        const skippedWorkers = workerResults.filter(r => r.skipped === true);
+        const failedAuth = authSync.results.filter(r => !r.ok);
+        const counts = { users: cloudUsers.length, keys: cloudKeys.length, bots: (BOT_CONFIG || []).length, workersSynced: workerResults.filter(r => r.ok === true).length, workersSkipped: skippedWorkers.length, authWorkersSynced: authSync.results.filter(r => r.ok).length, failed: failedWorkers.length + skippedWorkers.length + failedAuth.length };
+        if (failedWorkers.length || skippedWorkers.length || failedAuth.length) {
+            const failures = [
+                ...failedWorkers.map(r => '#' + r.botId + ' settings: ' + r.error),
+                ...skippedWorkers.map(r => '#' + r.botId + ' skipped: ' + (r.reason || 'thiếu cấu hình bắt buộc')),
+                ...failedAuth.map(r => '#' + r.botId + ' auth: ' + r.error)
+            ];
+            logAuditEvent({ req, action: 'SUPABASE_SYNC_DOWN', category: 'SYSTEM', details: 'Sync Down áp dụng Manager nhưng worker chưa nhận đủ cấu hình/auth: ' + failures.join('; '), status: 'PARTIAL' });
+            return res.json({ ok: true, partial: true, message: 'Dữ liệu Manager đã cập nhật; một số worker chưa nhận đủ cấu hình hoặc dữ liệu auth.', counts, workers: workerResults, authWorkers: authSync.results });
+        }
+        logAuditEvent({ req, action: 'SUPABASE_SYNC_DOWN', category: 'SYSTEM', details: 'Sync Down Supabase thành công: ' + JSON.stringify(counts), status: 'SUCCESS' });
+        return res.json({ ok: true, message: 'Đã đồng bộ dữ liệu Cloud xuống Manager và worker.', counts, workers: workerResults });
+    } catch (err) {
+        if (applySnapshot) {
+            Object.keys(registry).forEach(key => delete registry[key]);
+            Object.assign(registry, applySnapshot.registry);
+            BOT_CONFIG = applySnapshot.bots;
+            setUsersCache(applySnapshot.users);
+            setKeysCache(applySnapshot.keys);
+            setSessionsCache(applySnapshot.sessions);
+            supabaseStorageReady = applySnapshot.storageReady;
+            registryNeedsSave = applySnapshot.registryNeedsSave;
+        }
+        logAuditEvent({ req, action: 'SUPABASE_SYNC_DOWN', category: 'SYSTEM', details: 'Sync Down Supabase lỗi: ' + err.message, status: 'FAILED' });
+        return res.status(502).json({ ok: false, error: 'Sync Down Supabase thất bại: ' + err.message });
+    } finally {
+        supabaseSyncLocks.syncDown = false;
+    }
+}
+
+app.post('/api/manager/supabase/upload', managerSupabaseUpload);
+app.post('/api/manager/supabase/sync-down', managerSupabaseSyncDown);
+// Backward-compatible endpoint, with Upload semantics.
+app.post('/api/manager/supabase/sync-now', managerSupabaseUpload);
 
 app.post('/api/manager/audit-logs/clear', async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') {
         return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên mới có quyền xóa Audit Logs.' });
     }
-    if (supabaseAdapter && supabaseAdapter.isEnabled()) {
-        const cloudCleared = await supabaseAdapter.clearAuditLogs();
-        if (!cloudCleared) {
-            return res.status(502).json({ ok: false, error: 'Không thể xóa Audit Logs trên Supabase; dữ liệu cục bộ chưa bị thay đổi.' });
-        }
-    }
     const result = clearAuditLogsFile(session, req);
-    if (!result.ok) {
-        return res.status(500).json({ ok: false, error: result.error || 'Lỗi khi xóa audit logs.' });
-    }
-    if (supabaseAdapter && supabaseAdapter.isEnabled() && result.entry) {
-        const cloudLogged = await supabaseAdapter.insertAuditLog(result.entry);
-        if (!cloudLogged) {
-            return res.status(502).json({ ok: false, error: 'Đã xóa Audit Logs cục bộ nhưng không thể ghi lại sự kiện xóa lên Supabase.' });
+    if (supabaseAdapter?.isEnabled() && supabaseStorageReady) {
+        const cloudCleared = await supabaseAdapter.clearAuditLogs();
+        if (!cloudCleared) return res.status(502).json({ ok: false, error: 'Không thể xóa Audit Logs trên Supabase.' });
+        if (result.entry) {
+            const cloudLogged = await supabaseAdapter.insertAuditLog(result.entry);
+            if (!cloudLogged) {
+                return res.status(502).json({ ok: false, error: 'Audit Logs đã xóa trên Supabase nhưng sự kiện xóa chưa ghi được.' });
+            }
         }
+        return res.json({ ok: true, message: 'Đã xóa Audit Logs trên Supabase và máy chủ cục bộ.' });
     }
-    res.json({ ok: true, message: result.message });
+    res.json({ ok: true, message: 'Đã xóa Audit Logs trên máy chủ cục bộ.' });
 });
 
 // Admin: Lấy danh sách System Backups
 // Admin: Xóa bản sao lưu
-app.delete('/api/manager/backups/:filename', (req, res) => {
+app.delete('/api/manager/backups/:filename', async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') {
         return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên mới có quyền xóa bản sao lưu.' });
     }
     const filename = String(req.params.filename || '');
-    const result = deleteSystemBackupFile(filename);
+    const result = await deleteSystemBackupFile(filename);
     if (!result.ok) {
         return res.status(400).json({ ok: false, error: result.error });
     }
@@ -16665,23 +19498,43 @@ app.delete('/api/manager/backups/:filename', (req, res) => {
     });
     res.json({ ok: true, message: 'Đã xóa bản sao lưu ' + filename });
 });
-app.get('/api/manager/backups', (req, res) => {
+app.get('/api/manager/backups', async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') {
         return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên mới có quyền xem danh sách bản sao lưu.' });
     }
-    res.json({ ok: true, backups: listSystemBackups() });
+    const backups = await listSystemBackups();
+    if (!backups) return res.status(502).json({ ok: false, error: 'Không thể tải danh sách backup từ Supabase.' });
+    res.json({ ok: true, backups });
+});
+
+let backupRestoreInProgress = false;
+app.post('/api/manager/backups/:filename/restore', async (req, res) => {
+    const session = getSessionUser(req);
+    if (!session || session.role !== 'admin') return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên mới có quyền khôi phục backup.' });
+    if (backupRestoreInProgress) return res.status(409).json({ ok: false, error: 'Đang có một lần khôi phục backup chạy.' });
+    backupRestoreInProgress = true;
+    try {
+        const result = await restoreSystemBackup(String(req.params.filename || ''), { allowEmpty: req.body?.allowEmpty === true });
+        if (!result.ok) return res.status(502).json(result);
+        if (result.partial) return res.json({ ...result, ok: true });
+        return res.json(result);
+    } catch (err) {
+        return res.status(502).json({ ok: false, error: err.message });
+    } finally {
+        backupRestoreInProgress = false;
+    }
 });
 
 // Admin: Tạo bản sao lưu thủ công ngay
-app.post('/api/manager/backups/create', (req, res) => {
+app.post('/api/manager/backups/create', async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') {
         return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên mới có quyền tạo bản sao lưu.' });
     }
-    const result = createSystemBackup('manual-admin-trigger');
+    const result = await createSystemBackup('manual-admin-trigger');
     if (!result.ok) {
-        return res.status(500).json({ ok: false, error: result.error || 'Lỗi khi tạo bản sao lưu.' });
+        return res.status(result.error?.includes('Supabase chưa sẵn sàng') ? 503 : 502).json({ ok: false, error: result.error || 'Lỗi khi tạo bản sao lưu.' });
     }
     res.json({ ok: true, filename: result.filename, message: `Đã tạo bản sao lưu ${result.filename} thành công!` });
 });
@@ -16702,23 +19555,30 @@ app.get('/api/manager/announcement', (req, res) => {
         endDate: '',
         updatedAt: new Date().toISOString()
     };
-    res.json({ ok: true, announcement });
+    res.json({
+        ok: true,
+        announcement: {
+            ...announcement,
+            message: announcement.content || announcement.message || ''
+        }
+    });
 });
 
 // Admin cập nhật thông báo hệ thống
-app.post('/api/manager/announcement', (req, res) => {
+app.post('/api/manager/announcement', async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') {
         return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên (Admin) mới có quyền cài đặt thông báo.' });
     }
     const body = req.body || {};
     const title = String(body.title || '📢 THÔNG BÁO TỪ QUẢN TRỊ VIÊN').trim();
-    const content = String(body.content || '').trim();
+    const content = String(body.content || body.message || '').trim();
     const mode = ['daily', 'every_login', 'time_range'].includes(body.mode) ? body.mode : 'daily';
     const enabled = !!body.enabled;
     const startDate = String(body.startDate || '').trim();
     const endDate = String(body.endDate || '').trim();
 
+    const previousAnnouncement = registry.announcement;
     registry.announcement = {
         enabled,
         id: 'ann_' + Date.now(),
@@ -16729,8 +19589,9 @@ app.post('/api/manager/announcement', (req, res) => {
         endDate,
         updatedAt: new Date().toISOString()
     };
-    const saved = saveRegistry();
+    const saved = await saveRegistry();
     if (!saved) {
+        registry.announcement = previousAnnouncement;
         return res.status(500).json({ ok: false, error: 'Không thể lưu cấu hình thông báo hệ thống.' });
     }
 
@@ -16840,7 +19701,7 @@ app.post('/api/manager/bots', async (req, res) => {
                     return res.status(409).json({ error: 'Bot URL này đã tồn tại.' });
                 }
 
-                createSystemBackup('pre-bot-add');
+                await createSystemBackup('pre-bot-add');
                 if (!registry.botIdMap) registry.botIdMap = {};
                 registry.botIdMap[url] = config.id;
                 registry.lastBotId = config.id;
@@ -16848,7 +19709,7 @@ app.post('/api/manager/bots', async (req, res) => {
                 summaryCache.delete(config.id);
                 summaryRefreshInFlight.delete(config.id);
 
-                const saved = saveRegistry();
+                const saved = await saveRegistry();
                 if (!saved) {
                     delete registry.botIdMap[url];
                     BOT_CONFIG.pop();
@@ -16978,7 +19839,7 @@ app.post('/api/manager/bots', async (req, res) => {
             });
             await Promise.allSettled(probePromises);
 
-            createSystemBackup('pre-bulk-bot-add');
+            await createSystemBackup('pre-bulk-bot-add');
             if (!registry.botIdMap) registry.botIdMap = {};
 
             for (const item of addedBots) {
@@ -16989,7 +19850,7 @@ app.post('/api/manager/bots', async (req, res) => {
                 summaryRefreshInFlight.delete(item.config.id);
             }
 
-            const saved = saveRegistry();
+            const saved = await saveRegistry();
             if (!saved) {
                 // Rollback newly added bots
                 for (const item of addedBots) {
@@ -17074,14 +19935,13 @@ app.patch('/api/manager/bot/:id', async (req, res) => {
         const previousOverrides = registry.overrides.map(item => ({ ...item }));
         const previousBotIdMap = { ...(registry.botIdMap || {}) };
         const previousBotTags = { ...(registry.botTags || {}) };
-        const previousBotRentalDisabled = [...(registry.botRentalDisabled || [])];
+        registry.botRentalDisabled = normalizeBotRentalDisabled(registry.botRentalDisabled);
+        const previousBotRentalDisabled = [...registry.botRentalDisabled];
 
         bot.label = nextLabel || bot.label || `Bot ${id}`;
 
         if (req.body?.rentable !== undefined) {
-            if (!Array.isArray(registry.botRentalDisabled)) {
-                registry.botRentalDisabled = [];
-            }
+            registry.botRentalDisabled = normalizeBotRentalDisabled(registry.botRentalDisabled);
             const isRentable = req.body.rentable === true;
             if (isRentable) {
                 registry.botRentalDisabled = registry.botRentalDisabled.filter(bId => Number(bId) !== id);
@@ -17151,7 +20011,7 @@ app.patch('/api/manager/bot/:id', async (req, res) => {
         summaryCache.delete(id);
         summaryRefreshInFlight.delete(id);
 
-        const saved = saveRegistry();
+        const saved = await saveRegistry();
         if (!saved) {
             Object.assign(bot, previousBot);
             registry.dynamicBots = previousDynamicBots;
@@ -17186,7 +20046,7 @@ app.patch('/api/manager/bot/:id', async (req, res) => {
     }
 });
 
-app.post('/api/manager/bots/reorder', (req, res) => {
+app.post('/api/manager/bots/reorder', async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') {
         return res.status(403).json({ error: 'Chỉ Quản trị viên (Admin) mới có quyền sắp xếp bot.' });
@@ -17234,7 +20094,7 @@ app.post('/api/manager/bots/reorder', (req, res) => {
 
     registry.orderUrls = BOT_CONFIG.map(bot => bot.url);
 
-    const saved = saveRegistry();
+    const saved = await saveRegistry();
 
     if (!saved) {
         BOT_CONFIG.splice(0, BOT_CONFIG.length, ...previousBotOrder);
@@ -17283,19 +20143,33 @@ app.get('/api/manager/webhook', (req, res) => {
     });
 });
 
-app.post('/api/manager/webhook', (req, res) => {
+app.post('/api/manager/webhook', async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') {
         return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên (Admin) mới có quyền cài đặt Webhook.' });
     }
     try {
         const body = req.body || {};
-        createSystemBackup('pre-webhook-update');
+        await createSystemBackup('pre-webhook-update');
+        const previousWebhook = registry.webhook || {};
+        const incomingDiscord = body.discordUrl !== undefined ? String(body.discordUrl).trim() : undefined;
+        const incomingTg = body.telegramToken !== undefined ? String(body.telegramToken).trim() : undefined;
+
+        let finalDiscord = previousWebhook.discordUrl || '';
+        if (incomingDiscord !== undefined && incomingDiscord !== '[CONFIGURED]') {
+            finalDiscord = incomingDiscord;
+        }
+
+        let finalTg = previousWebhook.telegramToken || '';
+        if (incomingTg !== undefined && incomingTg !== '[CONFIGURED]') {
+            finalTg = incomingTg;
+        }
+
         registry.webhook = {
             enabled: !!body.enabled,
-            discordUrl: body.discordUrl !== undefined ? String(body.discordUrl).trim() : (registry.webhook?.discordUrl || ''),
-            telegramToken: body.telegramToken !== undefined ? String(body.telegramToken).trim() : (registry.webhook?.telegramToken || ''),
-            telegramChatId: body.telegramChatId !== undefined ? String(body.telegramChatId).trim() : (registry.webhook?.telegramChatId || ''),
+            discordUrl: finalDiscord,
+            telegramToken: finalTg,
+            telegramChatId: body.telegramChatId !== undefined ? String(body.telegramChatId).trim() : (previousWebhook.telegramChatId || ''),
             notifyOnOffline: body.notifyOnOffline !== false,
             notifyOnLowTotem: body.notifyOnLowTotem !== false,
             notifyOnRecover: body.notifyOnRecover !== false,
@@ -17303,8 +20177,9 @@ app.post('/api/manager/webhook', (req, res) => {
             notifyOnDeath: body.notifyOnDeath !== false,
             offlineThresholdMinutes: Math.max(1, Math.min(60, Number(body.offlineThresholdMinutes || 5)))
         };
-        const saved = saveRegistry();
+        const saved = await saveRegistry();
         if (!saved) {
+            registry.webhook = previousWebhook;
             return res.status(500).json({ ok: false, error: 'Không thể lưu cấu hình Webhook vào hệ thống.' });
         }
         logAuditEvent({
@@ -17416,7 +20291,7 @@ app.post('/api/manager/admin/credentials', async (req, res) => {
 
     res.json({ ok: true, bots: results });
 });
-app.delete('/api/manager/bot/:id', (req, res) => {
+app.delete('/api/manager/bot/:id', async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') {
         return res.status(403).json({ error: 'Chỉ Quản trị viên (Admin) mới có quyền xóa bot.' });
@@ -17428,16 +20303,47 @@ app.delete('/api/manager/bot/:id', (req, res) => {
         return res.status(404).json({ error: 'Bot không tồn tại.' });
     }
 
-    createSystemBackup('pre-bot-delete');
+    const backup = await createSystemBackup('pre-bot-delete');
+    if (!backup.ok) return res.status(502).json({ ok: false, error: 'Không thể tạo backup trên Supabase; chưa xóa bot.' });
 
     const previousOrder = BOT_CONFIG.slice();
-    const previousDisabledEnvUrls = [...registry.disabledEnvUrls];
-    const previousDynamicBots = registry.dynamicBots.map(item => ({ ...item }));
-    const previousOverrides = registry.overrides.map(item => ({ ...item }));
-    const previousOrderUrls = [...(registry.orderUrls || [])];
-    const previousBotIdMap = { ...(registry.botIdMap || {}) };
+    const previousRegistry = JSON.parse(JSON.stringify(registry));
+    const [previousUsers, previousKeys] = await Promise.all([loadUsersFresh(), loadKeysFresh()]);
+    if (!Array.isArray(previousUsers) || !Array.isArray(previousKeys)) {
+        return res.status(503).json({ ok: false, error: 'Không đọc được snapshot users/keys mới nhất từ Supabase; chưa xóa bot.' });
+    }
     const previousCache = summaryCache.get(id);
     const previousInFlight = summaryRefreshInFlight.get(id);
+    let previousBotSettings;
+    try {
+        if (supabaseAdapter?.isEnabled?.()) {
+            previousBotSettings = await supabaseAdapter.fetchBotSettingsStrict(String(id));
+        }
+    } catch (err) {
+        return res.status(502).json({ ok: false, error: 'Không thể đọc cấu hình bot từ Supabase: ' + err.message });
+    }
+    const cloudWrites = { registry: false, users: false, keys: false };
+
+    const restoreRegistryState = () => {
+        for (const key of Object.keys(registry)) delete registry[key];
+        Object.assign(registry, JSON.parse(JSON.stringify(previousRegistry)));
+        BOT_CONFIG.splice(0, BOT_CONFIG.length, ...previousOrder);
+        if (previousCache) summaryCache.set(id, previousCache);
+        else summaryCache.delete(id);
+        if (previousInFlight) summaryRefreshInFlight.set(id, previousInFlight);
+        else summaryRefreshInFlight.delete(id);
+    };
+
+    const rollbackDelete = async () => {
+        const rollbackErrors = [];
+        if (cloudWrites.keys && !(await saveKeysFile(previousKeys))) rollbackErrors.push('keys');
+        if (cloudWrites.users) rollbackErrors.push('users (giữ nguyên trạng thái đã gỡ bot để tránh ghi đè snapshot Cloud mới)');
+        restoreRegistryState();
+        if (cloudWrites.registry && !(await saveRegistry())) rollbackErrors.push('registry');
+        if (cloudWrites.users && !(await syncAuthToAllBots(true))) rollbackErrors.push('bot auth sync');
+        return rollbackErrors;
+    };
+
     const [removed] = BOT_CONFIG.splice(index, 1);
 
     summaryCache.delete(id);
@@ -17453,9 +20359,7 @@ app.delete('/api/manager/bot/:id', (req, res) => {
     if (registry.botTags) {
         delete registry.botTags[id];
     }
-    if (registry.botRentalDisabled) {
-        registry.botRentalDisabled = registry.botRentalDisabled.filter(bId => Number(bId) !== id);
-    }
+    registry.botRentalDisabled = normalizeBotRentalDisabled(registry.botRentalDisabled).filter(bId => Number(bId) !== id);
 
     const remainingIds = BOT_CONFIG.map(b => Number(b.id)).filter(n => Number.isInteger(n) && n > 0);
     registry.lastBotId = remainingIds.length ? Math.max(...remainingIds) : 0;
@@ -17486,101 +20390,70 @@ app.delete('/api/manager/bot/:id', (req, res) => {
         bot => bot.url
     );
 
-    const saved = saveRegistry();
+    const saved = await saveRegistry();
 
     if (!saved) {
-        BOT_CONFIG.splice(0, BOT_CONFIG.length, ...previousOrder);
-        registry.disabledEnvUrls = previousDisabledEnvUrls;
-        registry.dynamicBots = previousDynamicBots;
-        registry.overrides = previousOverrides;
-        registry.orderUrls = previousOrderUrls;
-        registry.botIdMap = previousBotIdMap;
-        if (previousCache) summaryCache.set(id, previousCache);
-        if (previousInFlight) summaryRefreshInFlight.set(id, previousInFlight);
+        restoreRegistryState();
         return res.status(500).json({
             error: 'Không thể lưu registry; thao tác xóa đã được rollback.'
         });
     }
+    cloudWrites.registry = true;
 
-    // 1. Đồng bộ xóa bot_settings và cập nhật bot_registry trên Supabase Cloud
-    if (supabaseAdapter && supabaseAdapter.isEnabled()) {
-        void supabaseAdapter.deleteBotSettings(id);
-        void supabaseAdapter.saveRegistry(registry);
+    // Stage and persist all dependent records before deleting bot_settings.
+    const allUsers = deriveUsersSnapshot(previousUsers, previousUsers.map(user => ({
+        ...user,
+        assignedBotIds: Array.isArray(user.assignedBotIds) ? user.assignedBotIds.filter(botId => Number(botId) !== id) : [],
+        botAliases: Object.fromEntries(Object.entries(user.botAliases || {}).filter(([botId]) => Number(botId) !== id))
+    })));
+    if (JSON.stringify(allUsers) !== JSON.stringify(previousUsers)) {
+        cloudWrites.users = true;
+        if (!(await saveUsers(allUsers))) {
+            const rollbackErrors = await rollbackDelete();
+            return res.status(502).json({ ok: false, error: 'Không thể đồng bộ danh sách người dùng khi xóa bot.', rollbackErrors });
+        }
     }
 
-    // 2. Dọn dẹp botId khỏi danh sách bot được gán của Users và đồng bộ Supabase
-    try {
-        const allUsers = loadUsers(true);
-        let usersModified = false;
-        for (const u of allUsers) {
-            if (Array.isArray(u.assignedBotIds) && u.assignedBotIds.includes(id)) {
-                u.assignedBotIds = u.assignedBotIds.filter(bId => Number(bId) !== id);
-                usersModified = true;
-            }
-            if (u.botAliases && u.botAliases[id]) {
-                delete u.botAliases[id];
-                usersModified = true;
-            }
+    const allKeys = previousKeys.map(key => ({
+        ...key,
+        botIds: Array.isArray(key.botIds) ? key.botIds.filter(botId => Number(botId) !== id) : []
+    }));
+    if (JSON.stringify(allKeys) !== JSON.stringify(previousKeys)) {
+        cloudWrites.keys = true;
+        if (!(await saveKeysFile(allKeys))) {
+            const rollbackErrors = await rollbackDelete();
+            return res.status(502).json({ ok: false, error: 'Không thể đồng bộ danh sách key khi xóa bot.', rollbackErrors });
         }
-        if (usersModified) {
-            saveUsers(allUsers);
-            if (supabaseAdapter && supabaseAdapter.isEnabled()) {
-                void supabaseAdapter.syncAllUsers(allUsers);
-            }
-        }
-    } catch (e) {
-        console.error('[BOT_DELETE] Lỗi dọn dẹp users:', e.message);
     }
 
-    // 3. Dọn dẹp botId khỏi danh sách key và đồng bộ Supabase
-    try {
-        const allKeys = loadKeysFile();
-        let keysModified = false;
-        for (const k of allKeys) {
-            if (Array.isArray(k.botIds) && k.botIds.includes(id)) {
-                k.botIds = k.botIds.filter(bId => Number(bId) !== id);
-                keysModified = true;
-            }
+    if (supabaseAdapter?.isEnabled?.() && !(await supabaseAdapter.deleteBotSettings(id))) {
+        const rollbackErrors = await rollbackDelete();
+        // A network timeout can happen after Supabase applies DELETE; restore the row if needed.
+        if (previousBotSettings && !(await supabaseAdapter.restoreBotSettingsRow(previousBotSettings))) {
+            rollbackErrors.push('bot_settings');
         }
-        if (keysModified) {
-            saveKeysFile(allKeys);
-            if (supabaseAdapter && supabaseAdapter.isEnabled()) {
-                void supabaseAdapter.syncAllKeys(allKeys);
-            }
-        }
-    } catch (e) {
-        console.error('[BOT_DELETE] Lỗi dọn dẹp keys:', e.message);
+        return res.status(502).json({ ok: false, error: 'Không thể xóa cấu hình bot trên Supabase; các thay đổi phụ đã được rollback nếu có thể.', rollbackErrors });
     }
 
-    // 4. Dọn dẹp botId khỏi active sessions và đồng bộ Supabase
-    try {
-        let sessionsModified = false;
-        for (const [token, s] of activeSessions.entries()) {
-            if (Array.isArray(s.assignedBotIds) && s.assignedBotIds.includes(id)) {
-                s.assignedBotIds = s.assignedBotIds.filter(bId => Number(bId) !== id);
-                sessionsModified = true;
-            }
-        }
-        if (sessionsModified) {
-            saveSessions();
-            if (supabaseAdapter && supabaseAdapter.isEnabled()) {
-                void supabaseAdapter.syncAllSessions(activeSessions);
-            }
-        }
-    } catch (e) {
-        console.error('[BOT_DELETE] Lỗi dọn dẹp sessions:', e.message);
-    }
-
-    void syncAuthToAllBots(true);
+    const authSynced = await syncAuthToAllBots(true);
 
     logAuditEvent({
         req,
         action: 'BOT_DELETE',
         target: { botId: removed.id, label: removed.label },
         details: removed.url,
-        status: 'SUCCESS'
+        status: authSynced ? 'SUCCESS' : 'PARTIAL'
     });
 
+    if (!authSynced) {
+        return res.json({
+            ok: true,
+            partial: true,
+            warning: 'Bot đã được xóa khỏi Manager và Supabase. Một số bot còn lại đang offline nên sẽ tự động đồng bộ quyền khi online.',
+            message: `${removed.label} đã được xóa khỏi Manager và đồng bộ Supabase Cloud. (Lưu ý: Bot khác đang offline nên sẽ tự nạp quyền khi bật)`,
+            removedId: removed.id
+        });
+    }
     return res.json({
         ok: true,
         message: `${removed.label} đã được xóa khỏi Manager và đồng bộ Supabase Cloud.`,
@@ -17589,6 +20462,7 @@ app.delete('/api/manager/bot/:id', (req, res) => {
 });
 
 app.get('/api/manager/bots', (req, res) => {
+    lastClientApiAccessAt = Date.now();
     const session = getSessionUser(req);
     if (!session) {
         return res.status(401).json({ ok: false, error: 'Chưa đăng nhập hệ thống.' });
@@ -17597,8 +20471,9 @@ app.get('/api/manager/bots', (req, res) => {
     let currentUserObj = null;
     const allUsers = loadUsers();
     if (session && session.role === 'user') {
-        configs = BOT_CONFIG.filter(config => (session.assignedBotIds || []).includes(Number(config.id)));
         currentUserObj = allUsers.find(u => u.username.toLowerCase() === session.username.toLowerCase());
+        const userAssigned = Array.isArray(currentUserObj?.assignedBotIds) ? currentUserObj.assignedBotIds : (session.assignedBotIds || []);
+        configs = BOT_CONFIG.filter(config => userAssigned.includes(Number(config.id)));
     }
     const bots = configs.map((config, index) => {
         const item = summaryCache.get(config.id)?.data ||
@@ -17621,9 +20496,9 @@ app.get('/api/manager/bots', (req, res) => {
             const userAlias = currentUserObj?.botAliases && currentUserObj.botAliases[config.id];
             copy.label = userAlias || `bot${userIndex}`;
             copy.assignedUsername = session.username;
-            copy.assignedPlan = session.planName || 'Gói thuê';
-            copy.assignedStatus = session.status || 'active';
-            copy.assignedExpiresAt = session.expiresAtRental || null;
+            copy.assignedPlan = currentUserObj?.planName || session.planName || 'Gói thuê';
+            copy.assignedStatus = currentUserObj?.status || session.status || 'active';
+            copy.assignedExpiresAt = currentUserObj?.expiresAt || session.expiresAtRental || null;
         }
         copy.tags = (registry.botTags && registry.botTags[config.id]) || [];
         copy.rentable = config.rentable !== false;
@@ -17635,18 +20510,35 @@ app.get('/api/manager/bots', (req, res) => {
     const mem = process.memoryUsage();
     const managerRamMb = Math.round(mem.rss / (1024 * 1024));
 
+    const userStateSig = session.role === 'user' ? `:${currentUserObj?.expiresAt || session.expiresAtRental || ''}:${(currentUserObj?.assignedBotIds || session.assignedBotIds || []).join(',')}:${currentUserObj?.status || session.status || ''}:${currentUserObj?.planName || session.planName || ''}` : '';
+    const fleetSignature = bots.map(b => `${b.id}:${b.status}:${b.ready ? 1 : 0}:${b.health}:${b.totemCount}:${b.position ? `${b.position.x},${b.position.y},${b.position.z}` : ''}:${b.assignedUsername || ''}:${b.label || ''}`).join('|') + userStateSig;
+    const clientSig = String(req.headers['if-none-match'] || req.query?.sig || '').replace(/"/g, '');
+    res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+    if (clientSig && clientSig === fleetSignature) {
+        res.setHeader('ETag', `"${fleetSignature}"`);
+        return res.json({ ok: true, unchanged: true, managerRamMb, sig: fleetSignature });
+    }
+    res.setHeader('ETag', `"${fleetSignature}"`);
     res.json({
         ok: true,
         bots,
+        sig: fleetSignature,
         serverTime: Date.now(),
         cacheMs: BOT_SUMMARY_CACHE_MS,
-        registryFile: session.role === 'admin' ? REGISTRY_FILE : undefined,
         managerRamMb,
-        currentUser: { username: session.username, role: session.role }
+        currentUser: {
+            username: session.username,
+            role: session.role,
+            assignedBotIds: currentUserObj ? (currentUserObj.assignedBotIds || []) : (session.assignedBotIds || []),
+            planName: currentUserObj?.planName || session.planName || (session.role === 'admin' ? 'Admin VIP' : 'Gói thường'),
+            expiresAt: currentUserObj?.expiresAt || session.expiresAtRental || null,
+            status: currentUserObj?.status || session.status || 'active',
+            allowAccountChange: currentUserObj ? currentUserObj.allowAccountChange !== false : true
+        }
     });
 });
 
-app.post('/api/manager/bot/:id/alias', (req, res) => {
+app.post('/api/manager/bot/:id/alias', async (req, res) => {
     const session = getSessionUser(req);
     if (!session) return res.status(401).json({ ok: false, error: 'Chưa đăng nhập.' });
     const botId = Number(req.params.id);
@@ -17656,6 +20548,7 @@ app.post('/api/manager/bot/:id/alias', (req, res) => {
     }
 
     if (session.role === 'admin') {
+        const previousAliases = { ...(registry.botAliases || {}) };
         registry.botAliases = registry.botAliases || {};
         if (newLabel) {
             registry.botAliases[botId] = newLabel;
@@ -17663,10 +20556,15 @@ app.post('/api/manager/bot/:id/alias', (req, res) => {
             delete registry.botAliases[botId];
         }
         const botConfig = BOT_CONFIG.find(b => Number(b.id) === botId);
+        const previousLabel = botConfig?.label;
         if (botConfig) {
             botConfig.label = newLabel || `bot${botId}`;
         }
-        saveRegistry();
+        if (!(await saveRegistry())) {
+            registry.botAliases = previousAliases;
+            if (botConfig && previousLabel !== undefined) botConfig.label = previousLabel;
+            return res.status(502).json({ ok: false, error: 'Không thể lưu tên bot lên Supabase.' });
+        }
         logAuditEvent({
             req,
             action: 'BOT_RENAME',
@@ -17679,7 +20577,7 @@ app.post('/api/manager/bot/:id/alias', (req, res) => {
         if (!Array.isArray(session.assignedBotIds) || !session.assignedBotIds.includes(botId)) {
             return res.status(403).json({ ok: false, error: 'Bạn không có quyền quản lý bot này.' });
         }
-        const users = loadUsers(true);
+        const users = await loadUsersFreshOrThrow();
         const userObj = users.find(u => u.username.toLowerCase() === session.username.toLowerCase());
         if (!userObj) return res.status(404).json({ ok: false, error: 'Không tìm thấy thông tin tài khoản.' });
 
@@ -17689,7 +20587,7 @@ app.post('/api/manager/bot/:id/alias', (req, res) => {
         } else {
             delete userObj.botAliases[botId];
         }
-        saveUsers(users);
+        if (!(await saveUsers(users))) return res.status(502).json({ ok: false, error: 'Không lưu được tên bot của bạn lên Supabase.' });
         const userIdx = (session.assignedBotIds.indexOf(botId) + 1) || 1;
         const effectiveLabel = newLabel || `bot${userIdx}`;
         logAuditEvent({
@@ -17703,7 +20601,7 @@ app.post('/api/manager/bot/:id/alias', (req, res) => {
     }
 });
 
-app.post('/api/manager/bot/:id/tags', (req, res) => {
+app.post('/api/manager/bot/:id/tags', async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') {
         return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên mới có quyền gắn tag phân loại bot.' });
@@ -17716,9 +20614,13 @@ app.post('/api/manager/bot/:id/tags', (req, res) => {
     } else if (typeof rawTags === 'string') {
         tags = rawTags.split(/[,\s]+/).map(t => t.trim().replace(/^#/, '').toLowerCase()).filter(Boolean).slice(0, 10);
     }
+    const previousTags = { ...(registry.botTags || {}) };
     registry.botTags = registry.botTags || {};
     registry.botTags[botId] = [...new Set(tags)];
-    saveRegistry();
+    if (!(await saveRegistry())) {
+        registry.botTags = previousTags;
+        return res.status(502).json({ ok: false, error: 'Không thể lưu tag bot lên Supabase.' });
+    }
     logAuditEvent({
         req,
         action: 'BOT_TAGS_UPDATE',
@@ -17745,6 +20647,7 @@ const detailGetRoutes = {
     inventory: '/api/inventory',
     logs: '/api/bot/logs',
     'chat-logs': '/api/bot/chat-logs',
+    'position-logs': '/api/bot/position-logs',
     settings: '/api/settings',
     autoChat: '/api/auto-chat',
     botSchedules: '/api/bot-schedules'
@@ -17758,6 +20661,28 @@ for (const [name, childPath] of Object.entries(detailGetRoutes)) {
         if (!config) return res.status(404).json({ error: 'Bot không tồn tại.' });
 
         try {
+            if (name === 'logs' || name === 'chat-logs' || name === 'position-logs') {
+                if (!supabaseAdapter?.isEnabled()) return res.status(503).json({ error: 'Supabase chưa sẵn sàng; không thể tải lịch sử đã lưu.' });
+                if (name === 'position-logs') {
+                    const page = readPositiveInt(req.query?.page, 1, 1, 1000000);
+                    const limit = readPositiveInt(req.query?.limit, 20, 1, 100);
+                    const result = await supabaseAdapter.fetchBotPositionLogs(req.params.id, { page, limit });
+                    if (!result) return res.status(502).json({ error: 'Không thể tải lịch sử tọa độ từ Supabase.' });
+                    return res.json({ id: req.params.id, revision: result.total, total: result.total, page: result.page, limit: result.limit, logs: result.rows });
+                }
+                const kind = name === 'chat-logs' ? 'chat' : 'event';
+                const page = readPositiveInt(req.query?.page, 1, 1, 1000000);
+                const limit = readPositiveInt(req.query?.limit, 100, 1, 500);
+                const result = await supabaseAdapter.fetchBotLogs(req.params.id, kind, { page, limit });
+                if (!result) return res.status(502).json({ error: 'Không thể tải lịch sử từ Supabase.' });
+                const logs = result.rows.slice().reverse().map(row => {
+                    const stamp = new Date(row.created_at || Date.now()).toLocaleTimeString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh', hour12: false });
+                    return kind === 'chat'
+                        ? stamp + ' ' + (row.sender || 'SERVER') + ': ' + (row.message || '')
+                        : stamp + ' [' + (row.level || 'INFO') + '] ' + (row.message || '');
+                });
+                return res.json({ id: req.params.id, revision: result.total, total: result.total, page: result.page, limit: result.limit, logs });
+            }
             const query = new URLSearchParams();
             for (const [key, value] of Object.entries(req.query || {})) {
                 if (value !== undefined) query.set(key, String(value));
@@ -17825,11 +20750,12 @@ app.get('/api/manager/settings/system', (req, res) => {
     });
 });
 
-app.post('/api/manager/settings/system', (req, res) => {
+app.post('/api/manager/settings/system', async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') {
         return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên mới có quyền đổi cài đặt hệ thống.' });
     }
+    const previousSystemSettings = { ...(registry.systemSettings || { trialGiftEnabled: true, trialDays: 1 }) };
     registry.systemSettings = registry.systemSettings || { trialGiftEnabled: true, trialDays: 1 };
     if (req.body?.trialGiftEnabled !== undefined) {
         registry.systemSettings.trialGiftEnabled = req.body.trialGiftEnabled === true;
@@ -17840,8 +20766,11 @@ app.post('/api/manager/settings/system', (req, res) => {
             registry.systemSettings.trialDays = td;
         }
     }
-    const saved = saveRegistry(registry);
-    if (!saved) return res.status(500).json({ ok: false, error: 'Không thể lưu cài đặt hệ thống.' });
+    const saved = await saveRegistry();
+    if (!saved) {
+        registry.systemSettings = previousSystemSettings;
+        return res.status(500).json({ ok: false, error: 'Không thể lưu cài đặt hệ thống.' });
+    }
     const trialDays = Math.max(1, Math.min(365, parseInt(registry.systemSettings.trialDays, 10) || 1));
     const statusText = registry.systemSettings.trialGiftEnabled ? `BẬT (${trialDays} ngày)` : 'TẮT';
     logAuditEvent({
@@ -17927,6 +20856,43 @@ for (const [managerSuffix, childPath] of Object.entries(managerPostPathMap)) {
                 return res.status(403).json({ error: 'Tài khoản của bạn không được phép lên lịch lệnh thay đổi tài khoản Minecraft.' });
             }
         }
+        if (managerSuffix === '/logs/clear' || managerSuffix === '/chat-logs/clear') {
+            if (!supabaseAdapter?.isEnabled()) return res.status(503).json({ ok: false, error: 'Supabase chưa sẵn sàng; lịch sử chưa bị xóa.' });
+            const kind = managerSuffix === '/chat-logs/clear' ? 'chat' : 'event';
+            const config = getBotConfig(req.params.id);
+            if (!config) return res.status(404).json({ ok: false, error: 'Bot không tồn tại.' });
+            // Ghi cutoff một lần để giữ nguyên log mới phát sinh trong lúc thao tác chạy.
+            const createdBefore = new Date().toISOString();
+            let workerCacheCleared = false;
+            const cleared = await supabaseAdapter.clearBotLogs(req.params.id, kind, createdBefore);
+            if (!cleared.ok) {
+                return res.status(502).json({
+                    ok: false,
+                    partial: true,
+                    workerCacheCleared,
+                    error: 'Không thể xóa log trên Supabase: ' + cleared.error,
+                    warning: workerCacheCleared ? 'Cache worker đã dọn nhưng Cloud chưa xóa xong; hãy thử lại.' : undefined
+                });
+            }
+            try {
+                const worker = await fetchChild(config, childPath, {
+                    method: 'POST', body: { cloudAlreadyCleared: true, createdBefore }, timeoutMs: 4000,
+                    headers: { 'X-Manager-Role': String(perm.user?.role || 'user') }
+                });
+                workerCacheCleared = !!(worker.ok && worker.data?.ok);
+            } catch (_) {}
+            const partial = !workerCacheCleared;
+            const action = kind === 'chat' ? 'BOT_CHAT_LOGS_CLEAR' : 'BOT_LOGS_CLEAR';
+            logAuditEvent({ req, action, target: { botId: String(req.params.id), kind }, details: 'Đã xóa ' + (kind === 'chat' ? 'Chat Log' : 'Event Log') + ' của bot #' + req.params.id + ' (' + Number(cleared.deleted || 0) + ' bản ghi). Cache worker ' + (workerCacheCleared ? 'đã dọn' : 'chưa online/chưa dọn') + '.', status: partial ? 'PARTIAL' : 'SUCCESS' });
+            return res.json({
+                ok: true,
+                partial,
+                deleted: Number(cleared.deleted || 0),
+                workerCacheCleared,
+                warning: partial ? 'Worker chưa xác nhận dọn cache RAM; cutoff đã lưu trên Cloud nên log cũ sẽ bị loại trước khi đồng bộ lại.' : undefined,
+                message: 'Đã xóa ' + Number(cleared.deleted || 0) + ' bản ghi ' + (kind === 'chat' ? 'Chat Log' : 'Event Log') + ' của Bot #' + req.params.id + ' trên Supabase.'
+            });
+        }
         let forwardBody = req.body || {};
         if (managerSuffix === '/settings' && perm.user?.role !== 'admin') {
             forwardBody = JSON.parse(JSON.stringify(forwardBody));
@@ -17937,16 +20903,58 @@ for (const [managerSuffix, childPath] of Object.entries(managerPostPathMap)) {
         const targetBot = BOT_CONFIG.find(b => b.id === botId);
         const botLabel = targetBot?.label || `Bot ${botId}`;
 
-        const extraHeaders = {
-            'X-Manager-Allow-Account-Change': canChangeMinecraftAccount(perm.user) ? '1' : '0',
-            'X-Manager-Role': String(perm.user?.role || 'user')
-        };
-        const result = await runChildAction(
-            req.params.id,
-            childPath,
-            forwardBody,
-            extraHeaders
-        );
+        let resetPartial = false;
+        let result;
+        if (managerSuffix === '/reset-customer') {
+            const transaction = await runCustomerResetTransaction(botId, perm.user?.username || perm.user?.role || 'admin');
+            const begin = transaction.begin;
+            if (!begin.ok) {
+                logAuditEvent({
+                    req,
+                    action: 'BOT_RESET_CUSTOMER',
+                    target: { botId, label: botLabel },
+                    details: `Reset bàn giao không thể bắt đầu: ${begin.error || 'RESET_START_FAILED'}`,
+                    status: 'FAILED'
+                });
+                return res.status(begin.conflict ? 409 : 502).json({
+                    ok: false,
+                    partial: !begin.conflict,
+                    retryable: true,
+                    error: begin.error || 'RESET_START_FAILED',
+                    reset: begin.existing || null
+                });
+            }
+            const resetResult = transaction.resetResult;
+            resetPartial = resetResult.partial === true;
+            result = {
+                status: resetResult.status || (resetResult.ok ? 200 : 502),
+                data: {
+                    ...(resetResult.data || {}),
+                    ok: resetResult.ok === true,
+                    partial: resetResult.partial === true,
+                    ownershipRevoked: resetResult.ownershipRevoked === true,
+                    authSynced: resetResult.authSynced === true,
+                    resetId: resetResult.resetId,
+                    ...(resetResult.error ? { error: resetResult.error } : {}),
+                    ...(resetResult.warning ? { warning: resetResult.warning } : {}),
+                    ...(resetResult.authSyncError ? { authSyncError: resetResult.authSyncError } : {}),
+                    ...(resetResult.message ? { message: resetResult.message } : {})
+                }
+            };
+        } else {
+            const extraHeaders = {
+                'X-Manager-Allow-Account-Change': canChangeMinecraftAccount(perm.user) ? '1' : '0',
+                'X-Manager-Role': String(perm.user?.role || 'user')
+            };
+            result = await runChildAction(
+                req.params.id,
+                childPath,
+                forwardBody,
+                extraHeaders,
+                'POST',
+                {}
+            );
+        }
 
         const stateChangeSuffixes = ['/start', '/stop', '/restart', '/account', '/settings', '/auto-chat', '/bot-schedules', '/reset-customer', '/proxy'];
         if (stateChangeSuffixes.includes(managerSuffix)) {
@@ -17954,11 +20962,7 @@ for (const [managerSuffix, childPath] of Object.entries(managerPostPathMap)) {
             if (targetBot) {
                 try { await refreshSummary(targetBot, true); } catch (_) {}
             }
-            if (supabaseAdapter && supabaseAdapter.isEnabled()) {
-                if (['/settings', '/account', '/auto-chat', '/bot-schedules', '/proxy'].includes(managerSuffix)) {
-                    void supabaseAdapter.saveBotSettings(botId, forwardBody);
-                }
-            }
+
         }
 
         const auditedActions = {
@@ -17990,7 +20994,7 @@ for (const [managerSuffix, childPath] of Object.entries(managerPostPathMap)) {
                 details = `Bấm nút Khởi động lại/Restart bot ${botLabel}`;
             } else if (managerSuffix === '/send') {
                 const msg = String(req.body?.text || req.body?.message || '');
-                details = `Bấm nút Gửi lệnh trên bot ${botLabel}: "${msg}"`;
+                details = `Bấm nút Gửi lệnh trên bot ${botLabel}: "${redactAuditValue(msg, 'command')}"`;
             } else if (managerSuffix === '/account') {
                 details = `Bấm nút Đổi tài khoản Minecraft bot ${botLabel}: Username="${req.body?.username || '(giữ nguyên)'}", Mật khẩu bot="${req.body?.password ? '********' : '(không đổi)'}"`;
             } else if (managerSuffix === '/proxy') {
@@ -17998,7 +21002,7 @@ for (const [managerSuffix, childPath] of Object.entries(managerPostPathMap)) {
                 details = `Bấm nút Cập nhật Proxy bot ${botLabel}: ${p?.enabled ? 'BẬT' : 'TẮT'} (${p?.protocol || 'socks5'}://${p?.host}:${p?.port}, user: "${p?.username || ''}", pass: "${p?.password ? '********' : ''}")`;
             } else if (managerSuffix === '/settings') {
                 const setKeys = Object.keys(req.body || {});
-                details = `Cập nhật cài đặt bot (${setKeys.length} mục): ${setKeys.slice(0, 5).map(k => `${k}=${JSON.stringify(req.body[k])}`).join(', ')}${setKeys.length > 5 ? '...' : ''}`;
+                details = `Cập nhật cài đặt bot (${setKeys.length} mục): ${setKeys.slice(0, 5).map(k => `${k}=${JSON.stringify(redactAuditValue(req.body[k], k))}`).join(', ')}${setKeys.length > 5 ? '...' : ''}`;
             } else if (managerSuffix === '/logs/clear') {
                 details = `Đã xóa sạch toàn bộ Event Logs của bot ${botLabel}`;
             } else if (managerSuffix === '/chat-logs/clear') {
@@ -18016,14 +21020,16 @@ for (const [managerSuffix, childPath] of Object.entries(managerPostPathMap)) {
             } else if (managerSuffix === '/bot-schedules') {
                 details = `Cài đặt lịch trình tác vụ: ${req.body?.enabled ? `BẬT (${req.body?.tasks?.length || 0} tác vụ)` : 'TẮT'}`;
             } else if (managerSuffix === '/reset-customer') {
-                details = `Đã reset sạch dữ liệu bot ${botLabel} để bàn giao khách mới.`;
+                details = (result.ok && result.data?.partial !== true)
+                    ? `Đã reset sạch dữ liệu bot ${botLabel} để bàn giao khách mới.`
+                    : `Reset bàn giao bot ${botLabel} chưa hoàn tất: ${result.data?.error || result.data?.warning || 'PARTIAL'}`;
             }
             logAuditEvent({
                 req,
                 action: auditedActions[managerSuffix],
                 target: { botId, label: botLabel },
                 details,
-                status: result.ok ? 'SUCCESS' : 'FAILED'
+                status: (resetPartial || result.data?.partial === true) ? 'PARTIAL' : (result.ok ? 'SUCCESS' : 'FAILED')
             });
         }
 
@@ -18278,16 +21284,17 @@ app.get('/health', (req, res) => {
 // ============================================================================
 
 // 1. Quản lý License Keys (Admin)
-app.get('/api/manager/keys', (req, res) => {
+app.get('/api/manager/keys', async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') {
         return res.status(403).json({ error: 'Chỉ Quản trị viên mới có quyền xem danh sách Key.' });
     }
-    const keys = loadKeysFile();
+    const freshKeys = await loadKeysFresh();
+    const keys = Array.isArray(freshKeys) ? freshKeys : loadKeysFile();
     res.json({ ok: true, keys });
 });
 
-app.post('/api/manager/keys', (req, res) => {
+app.post('/api/manager/keys', async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') {
         return res.status(403).json({ error: 'Chỉ Quản trị viên mới có quyền tạo Key.' });
@@ -18302,8 +21309,9 @@ app.post('/api/manager/keys', (req, res) => {
     const count = Number.isFinite(rawCount) && rawCount >= 1 ? Math.min(Math.floor(rawCount), 50) : 1;
 
     // Giới hạn số lượt dùng tối đa trên toàn server (1 = key cá nhân, n = giftcode, 0 = không giới hạn)
-    const rawMaxUses = Number(req.body?.maxUses);
-    const maxUses = Number.isFinite(rawMaxUses) && rawMaxUses >= 0 ? Math.floor(rawMaxUses) : 1;
+    const rawMaxUses = req.body?.maxUses === undefined || req.body?.maxUses === '' ? 1 : Number(req.body.maxUses);
+    const maxUses = normalizeMaxUses(rawMaxUses);
+    if (maxUses === null) return res.status(400).json({ error: 'maxUses phải là số nguyên không âm; 0 là không giới hạn.' });
 
     // Thời hạn áp dụng của mã Code (ngày hết hạn hoặc số ngày có hiệu lực validDays)
     let expiresAt = null;
@@ -18319,15 +21327,15 @@ app.post('/api/manager/keys', (req, res) => {
 
     const customKey = String(req.body?.customKey || req.body?.customCode || '').trim().toUpperCase();
 
-    const keysList = loadKeysFile();
-    const previousKeys = [...keysList];
+    const keysList = await loadKeysFresh();
+    if (!Array.isArray(keysList)) return res.status(503).json({ ok: false, error: 'Không đọc được danh sách Key mới nhất từ Supabase.' });
     const createdKeys = [];
 
     for (let i = 0; i < count; i++) {
         let keyStr;
         if (count === 1 && customKey) {
             keyStr = customKey;
-            if (keysList.some(k => k.key.toUpperCase() === keyStr)) {
+            if (keysList.some(k => normalizeKeyCode(k) === keyStr)) {
                 return res.status(400).json({ ok: false, error: `Mã Key/Giftcode "${keyStr}" đã tồn tại. Vui lòng chọn mã khác!` });
             }
         } else {
@@ -18354,12 +21362,17 @@ app.post('/api/manager/keys', (req, res) => {
         createdKeys.push(keyItem);
     }
 
-    const saved = saveKeysFile(keysList);
+    const saved = supabaseAdapter?.isEnabled?.() ? (await supabaseAdapter.insertKeys(createdKeys)) : true;
     if (!saved) {
-        keysList.length = 0;
-        keysList.push(...previousKeys);
-        return res.status(500).json({ ok: false, error: 'Không thể lưu danh sách mã key vào hệ thống.' });
+        const latest = await supabaseAdapter.fetchKeys();
+        if (customKey && Array.isArray(latest) && latest.some(key => normalizeKeyCode(key) === customKey)) {
+            setKeysCache(latest);
+            return res.status(409).json({ ok: false, error: `Mã Key/Giftcode "${customKey}" vừa được tạo ở phiên khác.` });
+        }
+        return res.status(502).json({ ok: false, error: 'Không thể chèn Key mới lên Supabase; dữ liệu hiện có không bị ghi đè.' });
     }
+    const latestKeys = supabaseAdapter?.isEnabled?.() ? (await supabaseAdapter.fetchKeys()) : null;
+    setKeysCache(Array.isArray(latestKeys) ? latestKeys : [...createdKeys, ...keysList]);
     logAuditEvent({
         req,
         action: 'LICENSE_KEYS_CREATE',
@@ -18376,32 +21389,36 @@ app.delete('/api/manager/keys/:key', async (req, res) => {
         return res.status(403).json({ error: 'Chỉ Quản trị viên mới có quyền xóa Key.' });
     }
     const targetKey = String(req.params.key || '').trim().toUpperCase();
-    let keysList = loadKeysFile();
-    const exists = keysList.some(k => k.key === targetKey);
+    let keysList = await loadKeysFresh();
+    if (!Array.isArray(keysList)) return res.status(503).json({ ok: false, error: 'Không đọc được danh sách Key mới nhất từ Supabase.' });
+    const exists = keysList.some(k => normalizeKeyCode(k) === targetKey);
     if (!exists) return res.status(404).json({ error: 'Key không tồn tại.' });
 
-    const previousKeys = [...keysList];
-    keysList = keysList.filter(k => k.key !== targetKey);
-    const saved = saveKeysFile(keysList);
-    if (!saved) {
-        keysList = previousKeys;
-        return res.status(500).json({ ok: false, error: 'Không thể lưu danh sách mã key sau khi xóa.' });
+    if (supabaseAdapter?.isEnabled?.()) {
+        if (!(await supabaseAdapter.deleteKey(targetKey))) {
+            return res.status(502).json({ ok: false, error: 'Không thể xóa đúng Key trên Supabase.' });
+        }
     }
-    if (supabaseAdapter && supabaseAdapter.isEnabled()) {
-        await supabaseAdapter.deleteKey(targetKey);
-    }
+    keysList = keysList.filter(k => normalizeKeyCode(k) !== targetKey);
+    setKeysCache(keysList);
     logAuditEvent({
         req,
         action: 'LICENSE_KEY_DELETE',
-        details: `Xóa mã key ${targetKey}`,
+        target: { key: maskLicenseKey(targetKey) },
+        details: `Xóa mã key ${maskLicenseKey(targetKey)}`,
         status: 'SUCCESS'
     });
 
-    res.json({ ok: true, message: `Đã xóa mã Key ${targetKey}.` });
+    res.json({ ok: true, message: `Đã xóa mã Key ${maskLicenseKey(targetKey)}.` });
 });
 
 // 2. Gia hạn bằng Key (User hoặc Khách tại Login Gate)
-app.post('/api/manager/renew', async (req, res) => {
+// Toàn bộ giao dịch nạp Key phải nằm trong withRegisterLock (dùng chung khóa
+// với /api/auth/register) để hai luồng tiêu thụ Key không chạy song song.
+app.post('/api/manager/renew', (req, res) => {
+    return withRegisterLock(async () => {
+    let renewalResetPartial = false;
+    let renewalResetPerformed = false;
     try {
         const rawKey = String(req.body?.key || req.body?.licenseKey || '').trim().toUpperCase();
         const username = String(req.body?.username || '').trim().toLowerCase();
@@ -18418,14 +21435,18 @@ app.post('/api/manager/renew', async (req, res) => {
             return res.status(429).json({ ok: false, error: rateCheck.error });
         }
 
-        const keysList = loadKeysFile();
-        const keyItem = keysList.find(k => k.key === rawKey);
+        const keysList = await loadKeysFresh();
+        if (!Array.isArray(keysList)) {
+            recordRenewAttempt(req, rateLimitUsername, false);
+            return res.status(503).json({ ok: false, error: 'Không đọc được danh sách Key mới nhất từ Supabase.' });
+        }
+        const keyItem = keysList.find(k => normalizeKeyCode(k) === rawKey);
         if (!keyItem) {
             recordRenewAttempt(req, rateLimitUsername, false);
             return res.status(404).json({ error: 'Mã Key / Giftcode gia hạn không hợp lệ hoặc không tồn tại.' });
         }
 
-        const users = loadUsers();
+        let users = await loadUsersFreshOrThrow();
         let targetUser = null;
         if (session) {
             targetUser = users.find(u => u.username.toLowerCase() === session.username.toLowerCase());
@@ -18447,15 +21468,16 @@ app.post('/api/manager/renew', async (req, res) => {
             return res.status(404).json({ error: 'Không tìm thấy tài khoản người dùng.' });
         }
 
+        if (targetUser.status === 'disabled') {
+            recordRenewAttempt(req, rateLimitUsername, false);
+            return res.status(403).json({ ok: false, error: 'Tài khoản của bạn đã bị vô hiệu hóa hoặc khóa bởi Quản trị viên.' });
+        }
+
         const keyCheck = checkKeyValidity(keyItem, targetUser.username);
         if (!keyCheck.ok) {
             recordRenewAttempt(req, rateLimitUsername, false);
             return res.status(400).json({ error: keyCheck.error });
         }
-
-        // Capture deep backup before modifications
-        const usersBackup = JSON.parse(JSON.stringify(users));
-        const keysBackup = JSON.parse(JSON.stringify(keysList));
 
         // Cộng dồn hạn thuê
         const now = Date.now();
@@ -18475,36 +21497,54 @@ app.post('/api/manager/renew', async (req, res) => {
                 const resetRes = await resetBotsForAssignment(newlyAssigned, `gia hạn Key cho "${targetUser.username}"`);
                 if (!resetRes.ok) {
                     recordRenewAttempt(req, rateLimitUsername, false);
-                    return res.status(500).json({ ok: false, error: `Không thể dọn dẹp reset Bot #${resetRes.botId} để bàn giao (${resetRes.error}). Vui lòng liên hệ Admin!` });
+                    return res.status(500).json({ ok: false, partial: resetRes.partial === true, error: `Không thể dọn dẹp reset Bot #${resetRes.botId} để bàn giao (${resetRes.error}). Vui lòng liên hệ Admin!` });
                 }
+                renewalResetPerformed = true;
+                renewalResetPartial = resetRes.partial === true;
+                const preserved = { expiresAt: targetUser.expiresAt, status: targetUser.status, planName: targetUser.planName };
+                users = await loadUsersFreshOrThrow();
+                const freshTarget = users.find(u => String(u.id) === String(targetUser.id) || u.username.toLowerCase() === targetUser.username.toLowerCase());
+                if (!freshTarget) return res.status(409).json({ ok: false, partial: renewalResetPerformed, error: 'Tài khoản đã thay đổi trong lúc reset bot; vui lòng tải lại trang và thử lại.' });
+                if (freshTarget.status === 'disabled') {
+                    return res.status(403).json({ ok: false, partial: renewalResetPerformed, error: 'Tài khoản của bạn đã bị vô hiệu hóa hoặc khóa bởi Quản trị viên.' });
+                }
+                targetUser = freshTarget;
+                targetUser.expiresAt = preserved.expiresAt;
+                targetUser.status = preserved.status;
+                targetUser.planName = preserved.planName;
             }
-            targetUser.assignedBotIds = [...new Set([...currentBots, ...keyItem.botIds.map(Number)])];
+            const freshCurrentBots = Array.isArray(targetUser.assignedBotIds) ? targetUser.assignedBotIds.map(Number) : [];
+            targetUser.assignedBotIds = [...new Set([...freshCurrentBots, ...keyItem.botIds.map(Number)])];
             assignBotsExclusively(users, targetUser.id || targetUser.username, keyItem.botIds);
         }
 
-        // Đánh dấu Key đã dùng cho tài khoản này
-        consumeKeyForUser(keyItem, targetUser.username);
-
-        const uSaved = saveUsers(users);
-        const kSaved = saveKeysFile(keysList);
-        if (!uSaved || !kSaved) {
-            saveUsers(usersBackup);
-            saveKeysFile(keysBackup);
-            return res.status(500).json({ ok: false, error: 'Không thể lưu thông tin gia hạn vào hệ thống.' });
+        const keyCommit = await commitKeyConsumptionAtomic(keyItem, targetUser.username, users);
+        if (!keyCommit.ok) {
+            return res.status(keyCommit.status || 409).json({
+                ok: false,
+                partial: renewalResetPerformed,
+                error: (renewalResetPerformed ? 'Bot đã được reset và quyền cũ đã thu hồi, nhưng ' : '') +
+                    (keyCommit.conflict ? 'mã Key vừa được sử dụng bởi một giao dịch khác. ' : 'không ghi được lượt dùng Key. ') +
+                    'Vui lòng thử lại!'
+            });
         }
-        void syncAuthToAllBots(true);
+        if (!(await syncAuthToAllBots(true))) {
+            return res.status(502).json({ ok: false, partial: true, error: 'Key và hạn thuê đã lưu nhưng chưa đồng bộ auth tới toàn bộ bot.' });
+        }
         recordRenewAttempt(req, targetUser.username, true);
 
         logAuditEvent({
             req,
             action: 'RENTAL_RENEW_KEY',
-            target: { username: targetUser.username, key: keyItem.key },
-            details: `Kích hoạt Key ${keyItem.key} cộng ${keyItem.days} ngày (Hạn mới: ${targetUser.expiresAt})`,
-            status: 'SUCCESS'
+            target: { username: targetUser.username, key: maskLicenseKey(keyItem.key) },
+            details: `Kích hoạt Key ${maskLicenseKey(keyItem.key)} cộng ${keyItem.days} ngày (Hạn mới: ${targetUser.expiresAt})` + (renewalResetPartial ? ' | Bot bàn giao reset chưa xóa hết log Cloud.' : ''),
+            status: renewalResetPartial ? 'PARTIAL' : 'SUCCESS'
         });
 
         res.json({
             ok: true,
+            partial: renewalResetPartial,
+            warning: renewalResetPartial ? 'Gia hạn thành công nhưng bot bàn giao chưa xóa hết log Cloud; kiểm tra log worker.' : undefined,
             message: `🎉 Gia hạn thành công ${keyItem.days} ngày! Hạn sử dụng mới đến: ${new Date(targetUser.expiresAt).toLocaleString('vi-VN')}`,
             expiresAt: targetUser.expiresAt,
             planName: targetUser.planName,
@@ -18514,17 +21554,18 @@ app.post('/api/manager/renew', async (req, res) => {
         console.error('[RENEW] Lỗi gia hạn tài khoản:', err.message);
         res.status(500).json({ ok: false, error: 'Lỗi máy chủ khi xử lý gia hạn mã Key.' });
     }
+    });
 });
 
 // 3. Admin Cộng Ngày Thuê Thủ Công (+1, +3, +7, +15, +30, -1 Vĩnh Viễn)
-app.post('/api/manager/user/:username/add-days', (req, res) => {
+app.post('/api/manager/user/:username/add-days', async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') {
         return res.status(403).json({ error: 'Chỉ Quản trị viên mới có quyền cộng hạn thuê.' });
     }
     const username = String(req.params.username || '').trim().toLowerCase();
     const days = Number(req.body?.days);
-    const users = loadUsers();
+    const users = await loadUsersFreshOrThrow();
     const userIndex = users.findIndex(u => u.username?.toLowerCase() === username);
     if (userIndex === -1) return res.status(404).json({ error: 'Không tìm thấy người dùng.' });
     const userBackup = JSON.parse(JSON.stringify(users[userIndex]));
@@ -18546,12 +21587,14 @@ app.post('/api/manager/user/:username/add-days', (req, res) => {
         return res.status(400).json({ error: 'Số ngày không hợp lệ.' });
     }
 
-    const saved = saveUsers(users);
+    const saved = await saveUsers(users);
     if (!saved) {
         users[userIndex] = userBackup;
         return res.status(500).json({ ok: false, error: 'Không thể lưu hạn thuê của người dùng vào hệ thống.' });
     }
-    void syncAuthToAllBots(true);
+    if (!(await syncAuthToAllBots(true))) {
+        return res.status(502).json({ ok: false, partial: true, error: 'Hạn thuê đã lưu nhưng chưa đồng bộ auth tới toàn bộ bot.' });
+    }
     logAuditEvent({
         req,
         action: 'ADMIN_EXTEND_RENTAL',
@@ -18693,6 +21736,18 @@ app.post('/api/auth/verify-bot-access', (req, res) => {
         }
     }
 
+    const userPlainPass = user.role === 'admin' ? null : decryptUserPassword(user.password);
+    if (user.role !== 'admin' && userPlainPass === null) {
+        logAuditEvent({
+            req,
+            action: 'AUTH_VERIFY_BOT_ACCESS',
+            target: { botId, username: user.username },
+            details: 'Cổng Bot #' + botId + ': Không thể giải mã mật khẩu của "' + user.username + '" bằng MANAGER_MASTER_KEY hiện tại.',
+            status: 'FAILED'
+        });
+        return res.status(500).json({ ok: false, error: 'Không thể giải mã mật khẩu người dùng bằng MANAGER_MASTER_KEY hiện tại.' });
+    }
+
     logAuditEvent({
         req,
         action: 'AUTH_VERIFY_BOT_ACCESS',
@@ -18701,7 +21756,6 @@ app.post('/api/auth/verify-bot-access', (req, res) => {
         status: 'SUCCESS'
     });
 
-    const userPlainPass = decryptUserPassword(user.password);
     const passwordHash = user.role === 'admin'
         ? getSyncAdminPasswordHash()
         : hashSyncUserPassword(user.id || user.username, userPlainPass);
@@ -18753,7 +21807,6 @@ app.get('/api/status', (req, res) => {
         service: 'kingmc-manager',
         platform: MANAGER_PLATFORM,
         httpPort: HTTP_PORT,
-        registryFile: session.role === 'admin' ? REGISTRY_FILE : undefined,
         botCount: allowedConfigs.length,
         bots,
         cacheMs: BOT_SUMMARY_CACHE_MS
@@ -18769,8 +21822,7 @@ app.get('/api/manager/diagnostics', (req, res) => {
         ok: true,
         platform: MANAGER_PLATFORM,
         httpPort: HTTP_PORT,
-        registryFile: REGISTRY_FILE,
-        registryCandidates: REGISTRY_CANDIDATES,
+        storage: { provider: 'Supabase', ready: supabaseStorageReady, configured: supabaseAdapter.isEnabled() },
         botCount: BOT_CONFIG.length,
         bots: BOT_CONFIG.map(bot => ({
             id: bot.id,
@@ -18851,16 +21903,34 @@ app.get('/', (req, res) => {
 
 // Express Catch-All Error Handler (Mounted after all route handlers)
 app.use((err, req, res, next) => {
-    console.error(`[UNHANDLED_ERROR] ${req.method} ${req.originalUrl || req.url}:`, err.stack || err.message || err);
+    // Keep the client response generic, but log the actual stack locally so
+    // route failures (including the dashboard '/') can be diagnosed reliably.
+    console.error(`[UNHANDLED_ERROR] ${req.method} ${req.path}:`, err?.stack || String(err?.message || err?.name || 'Error'));
     if (res.headersSent) {
         return next(err);
     }
     return res.status(500).json({ ok: false, error: 'Đã xảy ra lỗi máy chủ nội bộ.' });
 });
 
-let summaryRefreshTimer = setInterval(() => {
-    void refreshAllSummaries();
-}, Math.max(BOT_POLL_MS, BOT_SUMMARY_CACHE_MS));
+let lastClientApiAccessAt = Date.now();
+let summaryRefreshTimer = null;
+
+function scheduleSummaryRefresh() {
+    if (summaryRefreshTimer) clearTimeout(summaryRefreshTimer);
+    const isClientActive = (Date.now() - lastClientApiAccessAt) < 60000;
+    const interval = isClientActive ? Math.max(BOT_POLL_MS, BOT_SUMMARY_CACHE_MS) : 30000;
+    summaryRefreshTimer = setTimeout(async () => {
+        try {
+            await refreshAllSummaries();
+        } catch (_) {}
+        finally {
+            scheduleSummaryRefresh();
+        }
+    }, interval);
+    if (typeof summaryRefreshTimer.unref === 'function') summaryRefreshTimer.unref();
+}
+
+scheduleSummaryRefresh();
 
 let server = null;
 listenHttpServer(app, HTTP_PORT, MANAGER_PLATFORM, (serverInstance, activePort) => {
@@ -18874,141 +21944,104 @@ listenHttpServer(app, HTTP_PORT, MANAGER_PLATFORM, (serverInstance, activePort) 
     console.log(`  🔑 ADMIN AUTH: ${adminPass ? 'Đã cấu hình & kích hoạt (scrypt protected)' : 'Chưa cấu hình'}`);
     console.log(`  🤖 SỐ LƯỢNG BOT QUẢN LÝ: ${BOT_CONFIG.length}`);
     console.log('================================================================================');
-    console.log(`[REGISTRY] Sử dụng tệp: ${REGISTRY_FILE}`);
+    console.log(`[STORAGE] Supabase Cloud ${supabaseStorageReady ? 'sẵn sàng' : 'đang khởi tạo hoặc chưa cấu hình'}.`);
     console.log(`[CONFIG] Loaded ${BOT_CONFIG.length} bot(s).`);
     for (const bot of BOT_CONFIG) {
         console.log(`[CONFIG] ${bot.label} | ${bot.url || '(missing)'}`);
     }
     void refreshAllSummaries();
-    void initSupabaseCloud();
+    void initSupabaseCloud().then(async initialized => {
+        if (!initialized) return;
+        await ensureInitialSystemBackup();
+        const authSync = await syncAuthToAllBotsDetailed(true);
+        if (!authSync.ok) console.warn('[AUTH-SYNC] Supabase đã khôi phục; một số worker chưa nhận auth. Sẽ thử lại định kỳ:', authSync.results.filter(item => !item.ok).map(item => '#' + item.botId + ': ' + item.error).join('; '));
+        await resumePendingCustomerResets();
+        const resetRetryTimer = setInterval(() => {
+            if (supabaseStorageReady) {
+                void resumePendingCustomerResets().catch(err => console.error('[RESET_CUSTOMER] Lỗi retry định kỳ:', err.message));
+            }
+        }, 60 * 1000);
+        if (typeof resetRetryTimer.unref === 'function') resetRetryTimer.unref();
+    }).catch(err => console.error('[STARTUP] Lỗi khởi tạo Supabase/auth:', err.message));
+
+    // Memory Guard: Tự động chạy GC khi RAM vượt quá 220MB hoặc định kỳ mỗi 15 phút (Render Cloud Protection)
+    const memoryGuardTimer = setInterval(() => {
+        try {
+            const mem = process.memoryUsage();
+            const rssMb = Math.round(mem.rss / (1024 * 1024));
+            if (rssMb > 220) {
+                runGarbageCollection();
+            }
+        } catch (_) {}
+    }, 60 * 1000);
+    if (typeof memoryGuardTimer.unref === 'function') memoryGuardTimer.unref();
 });
 
 async function initSupabaseCloud() {
     if (!supabaseAdapter || !supabaseAdapter.isEnabled()) {
-        console.log('[SUPABASE] Chưa cấu hình Supabase Cloud. Hệ thống sử dụng lưu trữ tệp cục bộ.');
-        return;
+        supabaseStorageReady = false;
+        console.warn('[SUPABASE] Chưa cấu hình Supabase. Dữ liệu ứng dụng sẽ chỉ được giữ trong RAM cho tới khi Cloud sẵn sàng.');
+        return false;
     }
-    console.log('[SUPABASE] ☁️ Đang kiểm tra kết nối Supabase Cloud...');
     const ping = await supabaseAdapter.testConnection();
     if (!ping.ok) {
-        console.warn(`[SUPABASE] ⚠️ Không thể kết nối Supabase (${ping.error}). Hệ thống tạm dùng cache tệp cục bộ.`);
-        return;
+        console.error('[SUPABASE] Cloud không sẵn sàng: ' + ping.error + '. Giữ nguyên trạng thái hiện tại; không ghi fallback lên file hoặc Cloud.');
+        supabaseStorageReady = false;
+        return false;
     }
-    console.log('[SUPABASE] ✅ Kết nối Supabase Cloud thành công! Đang đồng bộ và khôi phục dữ liệu...');
-
+    const previous = {
+        registry: JSON.parse(JSON.stringify(registry)), bots: BOT_CONFIG,
+        users: loadUsers(), keys: loadKeysFile(), sessions: [...activeSessions.values()],
+        storageReady: supabaseStorageReady, registryNeedsSave,
+        registryCloudBaseline: registryCloudBaseline ? JSON.parse(JSON.stringify(registryCloudBaseline)) : null
+    };
     try {
-        // 1. Registry.
-        const remoteReg = await supabaseAdapter.fetchRegistry();
-        if (!LOCAL_REGISTRY_EXISTED_AT_BOOT && remoteReg && typeof remoteReg === 'object' && Object.keys(remoteReg).length > 0) {
-            console.log('[SUPABASE] 📥 Khôi phục bot_registry từ Supabase Cloud (do registry cục bộ chưa tồn tại)...');
-            if (remoteReg.adminPassword) registry.adminPassword = remoteReg.adminPassword;
-            if (Array.isArray(remoteReg.dynamicBots)) registry.dynamicBots = remoteReg.dynamicBots;
-            if (remoteReg.disabledEnvUrls) registry.disabledEnvUrls = remoteReg.disabledEnvUrls;
-            if (remoteReg.disabledEnvIds) registry.disabledEnvIds = remoteReg.disabledEnvIds;
-            if (remoteReg.overrides) registry.overrides = remoteReg.overrides;
-            if (remoteReg.orderUrls) registry.orderUrls = remoteReg.orderUrls;
-            if (remoteReg.order) registry.order = remoteReg.order;
-            if (remoteReg.botIdMap) registry.botIdMap = remoteReg.botIdMap;
-            if (remoteReg.botAliases) registry.botAliases = remoteReg.botAliases;
-            if (remoteReg.systemSettings) registry.systemSettings = remoteReg.systemSettings;
-            if (remoteReg.announcement) registry.announcement = remoteReg.announcement;
-            if (remoteReg.webhook && typeof remoteReg.webhook === 'object') {
-                const { _legacyMaskedSecrets, ...cloudWebhook } = remoteReg.webhook;
-                registry.webhook = {
-                    ...(registry.webhook || {}),
-                    ...cloudWebhook,
-                    // Old cloud records intentionally masked webhook secrets. Preserve
-                    // any local value instead of replacing it with an unusable marker.
-                    ...(_legacyMaskedSecrets ? {
-                        discordUrl: registry.webhook?.discordUrl || '',
-                        telegramToken: registry.webhook?.telegramToken || ''
-                    } : {})
-                };
+        const [remoteReg, remoteUsers, remoteKeys, remoteSessions] = await Promise.all([
+            supabaseAdapter.fetchRegistry(), supabaseAdapter.fetchUsers(), supabaseAdapter.fetchKeys(), supabaseAdapter.fetchSessions()
+        ]);
+        if (!remoteReg || typeof remoteReg !== 'object' ||
+            !Array.isArray(remoteUsers) || !Array.isArray(remoteKeys) || !Array.isArray(remoteSessions)) {
+            throw new Error('Không tải đủ manager_users/manager_keys/manager_sessions từ Supabase; không áp dụng đồng bộ một phần.');
+        }
+        registryCloudBaseline = JSON.parse(JSON.stringify(remoteReg));
+        const hasAdminPasswordOverride = String(process.env.ADMIN_PASSWORD || process.env.MANAGER_ADMIN_PASSWORD || process.env.MANAGER_PASSWORD || MANAGER_CONFIG.ADMIN_PASSWORD || '').trim();
+        {
+            for (const key of ['dynamicBots','disabledEnvUrls','disabledEnvIds','overrides','orderUrls','order','botIdMap','botAliases','botTags','botRentalDisabled','systemSettings','announcement','webhook','lastBotId','mustChangePassword','pendingResets']) {
+                if (remoteReg[key] !== undefined && remoteReg[key] !== null) registry[key] = remoteReg[key];
             }
-            if (remoteReg.lastBotId) registry.lastBotId = remoteReg.lastBotId;
-            if (remoteReg.mustChangePassword !== undefined) registry.mustChangePassword = !!remoteReg.mustChangePassword;
-            saveRegistry();
+            registry.botRentalDisabled = normalizeBotRentalDisabled(registry.botRentalDisabled);
+            if (!hasAdminPasswordOverride && typeof remoteReg.adminPassword === 'string' && remoteReg.adminPassword.trim()) {
+                registry.adminPassword = remoteReg.adminPassword;
+            }
+            initializeAdminPassword();
             BOT_CONFIG = buildManagerBotConfig();
-        } else if (LOCAL_REGISTRY_EXISTED_AT_BOOT) {
-            console.log('[SUPABASE] 📤 Registry cục bộ đã tồn tại tại boot, đồng bộ lên Supabase Cloud...');
-            await supabaseAdapter.saveRegistry(registry);
-        } else {
-            console.log('[SUPABASE] 📤 Supabase Cloud chưa có registry, đồng bộ cấu hình hiện tại lên Cloud...');
-            await supabaseAdapter.saveRegistry(registry);
         }
-
-        // 2. Users.
-        const remoteUsers = await supabaseAdapter.fetchUsers();
-        if (LOCAL_USERS_EXISTED_AT_BOOT) {
-            const localUsers = loadUsers(true);
-            console.log(`[SUPABASE] 📤 File users cục bộ đã tồn tại tại boot (${localUsers.length} users). Đồng bộ lên Supabase Cloud...`);
-            if (Array.isArray(remoteUsers)) {
-                const localIds = new Set(localUsers.map(u => String(u.id || ('usr_' + u.username))));
-                for (const ru of remoteUsers) {
-                    const rId = String(ru.id || ('usr_' + ru.username));
-                    if (!localIds.has(rId)) {
-                        console.log(`[SUPABASE] 🗑️ Xóa user không còn tồn tại cục bộ khỏi Cloud: ${ru.username} (${rId})`);
-                        await supabaseAdapter.deleteUser(rId);
-                    }
-                }
-            }
-            if (localUsers.length > 0) {
-                await supabaseAdapter.syncAllUsers(localUsers);
-            }
-        } else if (Array.isArray(remoteUsers) && remoteUsers.length > 0) {
-            console.log(`[SUPABASE] 📥 Khôi phục ${remoteUsers.length} users từ Supabase Cloud...`);
-            saveUsers(remoteUsers);
-        } else if (Array.isArray(remoteUsers)) {
-            const localUsers = loadUsers(true);
-            if (localUsers.length > 0) {
-                console.log(`[SUPABASE] 📤 Khởi tạo ${localUsers.length} users cục bộ lên Supabase Cloud...`);
-                await supabaseAdapter.syncAllUsers(localUsers);
-            }
+        setUsersCache(remoteUsers);
+        setKeysCache(remoteKeys);
+        setSessionsCache(remoteSessions);
+        supabaseStorageReady = true;
+        const bootstrapPersist = await persistAdminBootstrapIfNeeded();
+        if (bootstrapPersist.persisted) registryNeedsSave = false;
+        const remoteRegistryHasData = Object.keys(remoteReg).length > 0;
+        if (registryNeedsSave && remoteRegistryHasData) {
+            if (!(await saveRegistry())) throw new Error('Không lưu được ánh xạ BOT_ID vừa chuẩn hóa lên Supabase.');
+            registryNeedsSave = false;
         }
-
-        // 3. License keys.
-        const remoteKeys = await supabaseAdapter.fetchKeys();
-        if (LOCAL_KEYS_EXISTED_AT_BOOT) {
-            const localKeys = loadKeysFile();
-            console.log(`[SUPABASE] 📤 File keys cục bộ đã tồn tại tại boot (${localKeys.length} keys). Đồng bộ lên Supabase Cloud...`);
-            if (Array.isArray(remoteKeys)) {
-                const localCodes = new Set(localKeys.map(k => String(k.code || k.key || '').trim().toUpperCase()));
-                for (const rk of remoteKeys) {
-                    const code = String(rk.code || rk.key || '').trim().toUpperCase();
-                    if (!localCodes.has(code)) {
-                        console.log(`[SUPABASE] 🗑️ Xóa key không còn tồn tại cục bộ khỏi Cloud: ${code}`);
-                        await supabaseAdapter.deleteKey(code);
-                    }
-                }
-            }
-            if (localKeys.length > 0) {
-                await supabaseAdapter.syncAllKeys(localKeys);
-            }
-        } else if (Array.isArray(remoteKeys) && remoteKeys.length > 0) {
-            console.log(`[SUPABASE] 📥 Khôi phục ${remoteKeys.length} license keys từ Supabase Cloud...`);
-            saveKeysFile(remoteKeys);
-        } else if (Array.isArray(remoteKeys)) {
-            const localKeys = loadKeysFile();
-            if (localKeys.length > 0) {
-                console.log(`[SUPABASE] 📤 Khởi tạo ${localKeys.length} license keys cục bộ lên Supabase Cloud...`);
-                await supabaseAdapter.syncAllKeys(localKeys);
-            }
-        }
-
-        // 4. Sessions (Không tự động hồi sinh session đã hết hạn hoặc bị xóa/logout)
-        if (LOCAL_SESSIONS_EXISTED_AT_BOOT) {
-            const now = Date.now();
-            const activeList = Array.from(activeSessions.values()).filter(s => s.expiresAt > now);
-            if (activeList.length > 0) {
-                await supabaseAdapter.syncAllSessions(activeSessions);
-            }
-        } else {
-            console.log('[SUPABASE] 🔒 Không khôi phục phiên cũ từ Cloud khi khởi động mới để đảm bảo an toàn xác thực.');
-        }
-
-        console.log('[SUPABASE] 🌟 Hoàn tất đồng bộ toàn diện với Supabase Cloud!');
+        void flushPendingAuditLogs();
+        console.log('[SUPABASE] Đã khôi phục ' + remoteUsers.length + ' users và ' + remoteKeys.length + ' keys từ Cloud. Không tự đẩy/xóa dữ liệu Cloud khi khởi động.');
+        return true;
     } catch (err) {
-        console.error('[SUPABASE] ❌ Lỗi trong quá trình khởi tạo dữ liệu Supabase:', err.message);
+        Object.keys(registry).forEach(key => delete registry[key]);
+        Object.assign(registry, previous.registry);
+        BOT_CONFIG = previous.bots;
+        setUsersCache(previous.users);
+        setKeysCache(previous.keys);
+        setSessionsCache(previous.sessions);
+        registryNeedsSave = previous.registryNeedsSave;
+        registryCloudBaseline = previous.registryCloudBaseline;
+        supabaseStorageReady = false;
+        console.error('[SUPABASE] Không thể đồng bộ trạng thái từ Cloud:', err.message);
+        return false;
     }
 }
 
@@ -19039,4 +22072,3 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (reason) => {
     console.error('[PROCESS] Unhandled Rejection:', reason?.message || reason);
 });
-
