@@ -4,6 +4,9 @@ const crypto = require('crypto');
 const express = require('express');
 const dns = require('dns');
 const net = require('net');
+const http = require('http');
+const https = require('https');
+const tls = require('tls');
 const zlib = require('zlib');
 const v8 = require('v8');
 const vm = require('vm');
@@ -27,8 +30,32 @@ function runGarbageCollection() {
     return false;
 }
 
+// Tự động nạp file .env nội bộ nếu tồn tại (Zero-dependency local dotenv loader)
+(function loadEnvFile() {
+    try {
+        const envPath = path.join(__dirname, '.env');
+        if (fs.existsSync(envPath)) {
+            const content = fs.readFileSync(envPath, 'utf8');
+            for (const line of content.split(/\r?\n/)) {
+                const trimmed = line.trim();
+                if (!trimmed || trimmed.startsWith('#')) continue;
+                const eqIdx = trimmed.indexOf('=');
+                if (eqIdx <= 0) continue;
+                const key = trimmed.slice(0, eqIdx).trim();
+                let val = trimmed.slice(eqIdx + 1).trim();
+                if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+                    val = val.slice(1, -1);
+                }
+                if (process.env[key] === undefined) {
+                    process.env[key] = val;
+                }
+            }
+        }
+    } catch (_) {}
+})();
+
 // ============================================================================
-// CẤU HÌNH TỔNG BỘ ĐIỀU KHIỂN MANAGER (COMMERCIAL ENTERPRISE EDITION V11.6)
+// CẤU HÌNH TỔNG BỘ ĐIỀU KHIỂN MANAGER (KingMC Bot Manager Enterprise V11.8 (Audit V4 Release Candidate))
 //
 // Triển khai file này lên Render Web Service hoặc VPS dưới dạng index.js / manager.js.
 // Tự động nhận diện Render Cloud Native (PORT 10000) và khởi chạy Web UI tức thì!
@@ -36,9 +63,13 @@ function runGarbageCollection() {
 // ============================================================================
 const MANAGER_CONFIG = {
     // --- 0. KHÓA BẢO MẬT NỘI BỘ MANAGER <-> BOT CON ---
-    BOT_SECRET_KEY: '',                   // Khóa bảo mật nội bộ kết nối Bot con
+    // SEC-01/SEC-05: đã loại bỏ secret mặc định hard-code. BẮT BUỘC đặt qua biến môi trường BOT_SECRET_KEY.
+    // Deploy thiếu secret sẽ bị fail-closed (mọi request tới worker bị từ chối 401) + cảnh báo khi khởi động.
+    BOT_SECRET_KEY: '',
     // --- 1. MẬT KHẨU QUẢN TRỊ ADMIN ---
-    ADMIN_PASSWORD: '',           // Để trống sẽ tạo mật khẩu khởi tạo ngẫu nhiên, yêu cầu đổi ngay
+    // SEC-03: đã loại bỏ mật khẩu mặc định. Khi để trống, Manager sinh mật khẩu bootstrap NGẪU NHIÊN
+    // (cả local lẫn production) và buộc đổi ngay lần đăng nhập đầu (mustChangePassword).
+    ADMIN_PASSWORD: '',
 
     // --- 2. THÔNG BÁO WEBHOOK DISCORD & TELEGRAM (ĐỂ TRỐNG NẾU CHƯA DÙNG) ---
     DISCORD_WEBHOOK_URL: '',              // Webhook Discord nhận cảnh báo khi bot offline > 5p, low totem
@@ -62,13 +93,58 @@ const MANAGER_CONFIG = {
     MAX_SPARKLINE_POINTS: 20              // Số điểm lưu trữ vẽ đồ thị SVG Sparkline thời gian thực
 };
 
-const SYSTEM_MASTER_SECRET = String(
-    process.env.MANAGER_MASTER_KEY || process.env.BOT_CREDENTIALS_ENCRYPTION_KEY ||
-    process.env.BOT_SECRET_KEY || MANAGER_CONFIG.BOT_SECRET_KEY ||
-    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || ''
-).trim();
+// SEC-01/SEC-05 (Wave A — BLOCKER-01): tách miền khóa. BOT_SECRET_KEY là khóa
+// service-to-service, KHÔNG còn được dùng để derive salt auth-sync hay khóa mã hóa
+// credential. Chuỗi primary chỉ còn MANAGER_MASTER_KEY / BOT_CREDENTIALS_ENCRYPTION_KEY,
+// sau đó mới fallback về Supabase service key. Dữ liệu cũ tạo từ BOT_SECRET_KEY vẫn
+// giải mã được qua danh sách legacy (getLegacyManagerCredentialKeys).
+// SEC-03 / V3-09: phân biệt runtime production
+function isProductionRuntime() {
+    return String(process.env.NODE_ENV || '').trim().toLowerCase() === 'production' ||
+        Boolean(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_INSTANCE_ID || process.env.RENDER_EXTERNAL_URL);
+}
+const isProdRuntime = isProductionRuntime();
 
-const BOT_SECRET_KEY = String(process.env.BOT_SECRET_KEY || MANAGER_CONFIG.BOT_SECRET_KEY || '').trim();
+// V3-09: Tách biệt miền khóa & fail-closed trên production.
+const dedicatedMasterSecret = String(process.env.MANAGER_MASTER_KEY || process.env.BOT_CREDENTIALS_ENCRYPTION_KEY || '').trim();
+const fallbackSupabaseSecret = String(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || '').trim();
+
+let effectiveMasterSecret = dedicatedMasterSecret;
+if (!effectiveMasterSecret) {
+    if (isProductionRuntime()) {
+        console.error('[SECURITY] ❌ [V3-09] PRODUCTION FAIL-CLOSED: Thiếu biến môi trường chuyên dụng MANAGER_MASTER_KEY (hoặc BOT_CREDENTIALS_ENCRYPTION_KEY). Trong môi trường production, tuyệt đối KHÔNG fallback về Supabase service-role key vì vi phạm tách biệt miền khóa. Hãy cấu hình MANAGER_MASTER_KEY ngay.');
+    } else {
+        effectiveMasterSecret = fallbackSupabaseSecret;
+        if (effectiveMasterSecret) {
+            console.warn('[SECURITY] ⚠️ [V3-09] SYSTEM_MASTER_SECRET đang tạm fallback về Supabase service key trong môi trường phi-production. Khuyến nghị đặt MANAGER_MASTER_KEY riêng.');
+        }
+    }
+}
+const SYSTEM_MASTER_SECRET = String(effectiveMasterSecret || '').trim();
+
+// SEC-01/SEC-05: nhận diện secret mặc định đã biết để vô hiệu hóa fail-closed + cảnh báo.
+const KNOWN_DEFAULT_SERVICE_SECRETS = Object.freeze(new Set([
+    'KingMC_Secret_Pass_2026_Secure!',
+    'KingMC_Master_Secret_Key_32Byte!'
+]));
+// Cửa sổ tương thích legacy: chỉ khi vận hành tự bật KBOT_LEGACY_SECRET_WINDOW=1
+// (giai đoạn rotate key) thì secret mặc định cũ mới tạm được chấp nhận.
+const KBOT_LEGACY_SECRET_WINDOW = String(process.env.KBOT_LEGACY_SECRET_WINDOW || '').trim() === '1';
+const rawBotSecretKey = String(process.env.BOT_SECRET_KEY || MANAGER_CONFIG.BOT_SECRET_KEY || '').trim();
+const BOT_SECRET_KEY = (KNOWN_DEFAULT_SERVICE_SECRETS.has(rawBotSecretKey) && !KBOT_LEGACY_SECRET_WINDOW) ? '' : rawBotSecretKey;
+if (!BOT_SECRET_KEY) {
+    console.error('[SECURITY] ❌ BOT_SECRET_KEY chưa được cấu hình (hoặc đang trùng secret mặc định đã biết): mọi request service-to-service tới Worker sẽ bị từ chối (fail-closed). Hãy đặt biến môi trường BOT_SECRET_KEY mới trên cả Manager và Worker.');
+} else if (KNOWN_DEFAULT_SERVICE_SECRETS.has(BOT_SECRET_KEY)) {
+    console.error('[SECURITY] ⚠️ KBOT_LEGACY_SECRET_WINDOW=1: đang tạm cho phép secret mặc định đã biết. Chỉ dùng trong giai đoạn rotate; hãy đặt BOT_SECRET_KEY mới sớm nhất có thể.');
+}
+if (!SYSTEM_MASTER_SECRET) {
+    console.error('[SECURITY] ❌ Thiếu MANAGER_MASTER_KEY/BOT_CREDENTIALS_ENCRYPTION_KEY: mã hóa credential và salt hash auth-sync sẽ fail-closed hoặc không ổn định. Hãy cấu hình biến môi trường khóa master.');
+} else if (!process.env.MANAGER_MASTER_KEY && !process.env.BOT_CREDENTIALS_ENCRYPTION_KEY) {
+    console.warn('[SECURITY] ⚠️ SYSTEM_MASTER_SECRET đang fallback về Supabase service key (Wave A: BOT_SECRET_KEY không còn tham gia derive salt auth-sync/khóa credential). Hash auth-sync sẽ được tái tạo và tự đồng bộ lại toàn fleet trong ~60 giây sau deploy. Khuyến nghị đặt MANAGER_MASTER_KEY riêng, độc lập với khóa dịch vụ.');
+}
+if (!getManagerCredentialKey()) {
+    console.error('[SECURITY] ❌ Không có khóa mã hóa credential (MANAGER_MASTER_KEY/BOT_CREDENTIALS_ENCRYPTION_KEY): mọi thao tác MÃ HÓA credential mới sẽ fail-closed (dữ liệu cũ vẫn giải mã được qua legacy key). Hãy cấu hình khóa master trước khi tạo/sửa user hoặc bot secret.');
+}
 
 function getAdminPassword() {
     if (typeof registry !== 'undefined' && registry && registry.adminPassword) {
@@ -353,7 +429,15 @@ function isUnsupportedCredentialCiphertext(value) {
 }
 
 function getManagerCredentialKey() {
-    const source = String(process.env.MANAGER_MASTER_KEY || process.env.BOT_CREDENTIALS_ENCRYPTION_KEY || '').trim();
+    // SEC-05 (Wave A — BLOCKER-01): khóa mã hóa credential chỉ lấy từ biến môi trường
+    // MANAGER_MASTER_KEY / BOT_CREDENTIALS_ENCRYPTION_KEY. BOT_SECRET_KEY (miền khóa
+    // service-to-service) bị loại khỏi chuỗi primary; literal cũ chỉ còn trong danh sách
+    // legacy (getLegacyManagerCredentialKeys) để GIẢI MÃ dữ liệu cũ khi migration.
+    const source = String(
+        process.env.MANAGER_MASTER_KEY ||
+        process.env.BOT_CREDENTIALS_ENCRYPTION_KEY ||
+        ''
+    ).trim();
     return source ? crypto.createHash('sha256').update(source).digest() : null;
 }
 
@@ -362,11 +446,18 @@ function getLegacyManagerCredentialKeys() {
     for (const filename of [MASTER_KEY_FILE, path.join(__dirname, '.manager_master_key')]) {
         try { if (filename && fs.existsSync(filename)) { fileKey = fs.readFileSync(filename, 'utf8').trim(); if (fileKey) break; } } catch (_) {}
     }
+    // Danh sách legacy: dùng ĐỂ GIẢI MÃ dữ liệu cũ, không dùng để mã hóa mới (SEC-05 / P2-01).
+    const allowLegacyStaticKeys = process.env.KBOT_LEGACY_SECRET_WINDOW === '1' || (process.env.NODE_ENV !== 'production' && !process.env.KBOT_STRICT_PRODUCTION);
     const sources = [
         process.env.MANAGER_MASTER_KEY, process.env.BOT_CREDENTIALS_ENCRYPTION_KEY,
+        process.env.MANAGER_MASTER_KEY_PREVIOUS,
         process.env.ENCRYPTION_KEY, process.env.BOT_SECRET_KEY, MANAGER_CONFIG.BOT_SECRET_KEY,
         process.env.SUPABASE_SERVICE_ROLE_KEY, process.env.SUPABASE_KEY,
-        'kbot_enterprise_stable_encryption_key_v11', 'kbot_default_key', fileKey
+        ...(allowLegacyStaticKeys ? [
+            'kbot_enterprise_stable_encryption_key_v11', 'kbot_default_key',
+            'KingMC_Master_Secret_Key_32Byte!'
+        ] : []),
+        fileKey
     ];
     const seen = new Set();
     return sources.map(value => String(value || '').trim()).filter(value => {
@@ -422,6 +513,315 @@ function decryptUserPassword(value) {
     return null;
 }
 
+function decryptWithAnyConfiguredKey(value) {
+    if (value === null || value === undefined || value === '') return { plaintext: '', keyIndex: -1 };
+    const stored = String(value);
+    if (isUnsupportedCredentialCiphertext(stored)) throw new Error('Unsupported credential ciphertext format');
+    if (!isStoredCredentialCiphertext(stored)) return { plaintext: stored, keyIndex: -1 };
+    let iv, tag, ciphertext;
+    if (stored.startsWith('aes256$gcm$')) {
+        const parts = stored.split('$');
+        if (parts.length !== 5) throw new Error('Invalid aes256$gcm envelope');
+        iv = parts[2]; tag = parts[3]; ciphertext = parts[4];
+    } else if (stored.startsWith('enc:v1:') || stored.startsWith('enc:v2:')) {
+        const parts = stored.split(':');
+        if (parts.length !== 5) throw new Error('Invalid enc:v envelope');
+        iv = parts[2]; tag = parts[3]; ciphertext = parts[4];
+    } else {
+        const parts = stored.split('$');
+        if (parts.length < 4) throw new Error('Invalid legacy envelope');
+        iv = parts[1]; tag = parts[2]; ciphertext = parts[3];
+    }
+    if (!/^[a-f0-9]{24}$/i.test(iv || '') || !/^[a-f0-9]{32}$/i.test(tag || '') || !/^(?:[a-f0-9]{2})*$/i.test(ciphertext || '')) {
+        throw new Error('Malformed IV/Tag/Ciphertext in credential');
+    }
+    const keys = getLegacyManagerCredentialKeys();
+    for (let i = 0; i < keys.length; i++) {
+        try {
+            const decipher = crypto.createDecipheriv('aes-256-gcm', keys[i], Buffer.from(iv, 'hex'));
+            decipher.setAuthTag(Buffer.from(tag, 'hex'));
+            const plain = Buffer.concat([decipher.update(Buffer.from(ciphertext, 'hex')), decipher.final()]).toString('utf8');
+            return { plaintext: plain, keyIndex: i };
+        } catch (_) {}
+    }
+    throw new Error('Decryption failed with all configured keys');
+}
+
+function decryptWithCurrentKeyOnly(value) {
+    if (value === null || value === undefined || value === '') return '';
+    const stored = String(value);
+    if (!isStoredCredentialCiphertext(stored)) return stored;
+    let iv, tag, ciphertext;
+    if (stored.startsWith('aes256$gcm$')) {
+        const parts = stored.split('$');
+        if (parts.length !== 5) throw new Error('Invalid aes256$gcm envelope');
+        iv = parts[2]; tag = parts[3]; ciphertext = parts[4];
+    } else if (stored.startsWith('enc:v1:') || stored.startsWith('enc:v2:')) {
+        const parts = stored.split(':');
+        if (parts.length !== 5) throw new Error('Invalid enc:v envelope');
+        iv = parts[2]; tag = parts[3]; ciphertext = parts[4];
+    } else {
+        const parts = stored.split('$');
+        if (parts.length < 4) throw new Error('Invalid legacy envelope');
+        iv = parts[1]; tag = parts[2]; ciphertext = parts[3];
+    }
+    if (!/^[a-f0-9]{24}$/i.test(iv || '') || !/^[a-f0-9]{32}$/i.test(tag || '') || !/^(?:[a-f0-9]{2})*$/i.test(ciphertext || '')) {
+        throw new Error('Malformed IV/Tag/Ciphertext in credential');
+    }
+    const currentKey = getManagerCredentialKey();
+    if (!currentKey) throw new Error('No current master key configured');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', currentKey, Buffer.from(iv, 'hex'));
+    decipher.setAuthTag(Buffer.from(tag, 'hex'));
+    return Buffer.concat([decipher.update(Buffer.from(ciphertext, 'hex')), decipher.final()]).toString('utf8');
+}
+
+async function reencryptCredentialsOnKeyRotation() {
+    if (!process.env.MANAGER_MASTER_KEY_PREVIOUS) return;
+    const currentKey = getManagerCredentialKey();
+    if (!currentKey) return;
+    console.log('[KEY-ROTATION] Phát hiện MANAGER_MASTER_KEY_PREVIOUS. Đang tiến hành re-encryption toàn bộ credential inventory...');
+    let totalInspected = 0;
+    let reencryptedCount = 0;
+    let failedCount = 0;
+
+    // 1. User passwords
+    try {
+        const users = await loadUsersFreshOrThrow();
+        let usersModified = false;
+        for (const u of users) {
+            if (u.password && isStoredCredentialCiphertext(u.password)) {
+                totalInspected++;
+                try {
+                    const { plaintext } = decryptWithAnyConfiguredKey(u.password);
+                    if (plaintext) {
+                        const newCipher = encryptUserPassword(plaintext);
+                        if (newCipher !== u.password) {
+                            u.password = newCipher;
+                            usersModified = true;
+                            reencryptedCount++;
+                        }
+                    }
+                } catch (e) {
+                    failedCount++;
+                    console.error(`[KEY-ROTATION] Không thể giải mã mật khẩu user ${u.username}:`, e.message);
+                }
+            }
+        }
+        if (usersModified) {
+            const saved = await saveUsers(users);
+            if (!saved) {
+                failedCount++;
+                console.error('[KEY-ROTATION] Không thể lưu users sau khi re-encrypt!');
+            }
+        }
+    } catch (err) {
+        failedCount++;
+        console.error('[KEY-ROTATION] Lỗi đọc/lưu users:', err.message);
+    }
+
+    // 2. Registry credentials (per-bot secrets, systemSettings, webhooks, dynamicBots)
+    let registryModified = false;
+    // 2a. Bot secrets
+    if (typeof registry !== 'undefined' && registry && registry.botSecrets && typeof registry.botSecrets === 'object') {
+        for (const [botId, sec] of Object.entries(registry.botSecrets)) {
+            if (sec) {
+                totalInspected++;
+                try {
+                    const str = String(sec);
+                    const plaintext = isStoredCredentialCiphertext(str) ? decryptWithAnyConfiguredKey(str).plaintext : str;
+                    if (plaintext) {
+                        const newCipher = encryptUserPassword(plaintext);
+                        if (newCipher !== sec) {
+                            registry.botSecrets[botId] = newCipher;
+                            registryModified = true;
+                            reencryptedCount++;
+                        }
+                    }
+                } catch (e) {
+                    failedCount++;
+                    console.error(`[KEY-ROTATION] Không thể giải mã botSecret #${botId}:`, e.message);
+                }
+            }
+        }
+    }
+
+    // 2b. System settings: link4mApiToken, link4mSecretKey
+    if (typeof registry !== 'undefined' && registry && registry.systemSettings) {
+        for (const field of ['link4mApiToken', 'link4mSecretKey']) {
+            const val = registry.systemSettings[field];
+            if (val) {
+                totalInspected++;
+                try {
+                    const str = String(val);
+                    const plaintext = isStoredCredentialCiphertext(str) ? decryptWithAnyConfiguredKey(str).plaintext : str;
+                    if (plaintext) {
+                        const newCipher = encryptUserPassword(plaintext);
+                        if (newCipher !== val) {
+                            registry.systemSettings[field] = newCipher;
+                            registryModified = true;
+                            reencryptedCount++;
+                        }
+                    }
+                } catch (e) {
+                    failedCount++;
+                    console.error(`[KEY-ROTATION] Không thể giải mã systemSettings.${field}:`, e.message);
+                }
+            }
+        }
+    }
+
+    // 2c. Webhook credentials: discordUrl, telegramToken
+    if (typeof registry !== 'undefined' && registry && registry.webhook) {
+        for (const field of ['discordUrl', 'telegramToken']) {
+            const val = registry.webhook[field];
+            if (val && val !== '[CONFIGURED]') {
+                totalInspected++;
+                try {
+                    const str = String(val);
+                    const plaintext = isStoredCredentialCiphertext(str) ? decryptWithAnyConfiguredKey(str).plaintext : str;
+                    if (plaintext) {
+                        const newCipher = encryptUserPassword(plaintext);
+                        if (newCipher !== val) {
+                            registry.webhook[field] = newCipher;
+                            registryModified = true;
+                            reencryptedCount++;
+                        }
+                    }
+                } catch (e) {
+                    failedCount++;
+                    console.error(`[KEY-ROTATION] Không thể giải mã webhook.${field}:`, e.message);
+                }
+            }
+        }
+    }
+
+    // 2d. Dynamic bots
+    const botList = (typeof BOT_CONFIG !== 'undefined' && Array.isArray(BOT_CONFIG) && BOT_CONFIG.length > 0)
+        ? BOT_CONFIG
+        : ((typeof registry !== 'undefined' && Array.isArray(registry.dynamicBots)) ? registry.dynamicBots : []);
+    for (const b of botList) {
+        if (b.secretKey) {
+            totalInspected++;
+            try {
+                const str = String(b.secretKey);
+                const plaintext = isStoredCredentialCiphertext(str) ? decryptWithAnyConfiguredKey(str).plaintext : str;
+                if (plaintext) {
+                    const newCipher = encryptUserPassword(plaintext);
+                    if (newCipher !== b.secretKey) {
+                        b.secretKey = newCipher;
+                        registryModified = true;
+                        reencryptedCount++;
+                    }
+                }
+            } catch (e) {
+                failedCount++;
+                console.error(`[KEY-ROTATION] Không thể giải mã secretKey cho bot ${b.label || b.id}:`, e.message);
+            }
+        }
+    }
+
+    if (registryModified) {
+        registryCloudBaseline = null; // force write to Supabase
+        const saved = await saveRegistry();
+        if (!saved) {
+            failedCount++;
+            console.error('[KEY-ROTATION] Không thể lưu registry sau khi re-encrypt!');
+        }
+    }
+
+    // 3. POST-ROTATION VERIFICATION: Verify that ALL credential inventory decrypts with ONLY currentKey
+    if (failedCount === 0) {
+        const prevKey = process.env.MANAGER_MASTER_KEY_PREVIOUS;
+        try {
+            delete process.env.MANAGER_MASTER_KEY_PREVIOUS;
+
+            // 3a. Verify user passwords with single current key
+            const freshUsers = await loadUsersFreshOrThrow();
+            for (const u of freshUsers) {
+                if (u.password && isStoredCredentialCiphertext(u.password)) {
+                    const dec = decryptWithCurrentKeyOnly(u.password);
+                    if (!dec) throw new Error(`User ${u.username} password không thể giải mã bằng khóa mới.`);
+                }
+            }
+
+            // 3b. Verify registry botSecrets with single current key
+            if (registry && registry.botSecrets && typeof registry.botSecrets === 'object') {
+                for (const [bId, sec] of Object.entries(registry.botSecrets)) {
+                    if (sec && isStoredCredentialCiphertext(sec)) {
+                        const dec = decryptWithCurrentKeyOnly(sec);
+                        if (!dec) throw new Error(`botSecret #${bId} không thể giải mã bằng khóa mới.`);
+                    }
+                }
+            }
+
+            // 3c. Verify registry systemSettings with single current key
+            if (registry && registry.systemSettings) {
+                for (const field of ['link4mApiToken', 'link4mSecretKey']) {
+                    const val = registry.systemSettings[field];
+                    if (val && isStoredCredentialCiphertext(val)) {
+                        const dec = decryptWithCurrentKeyOnly(val);
+                        if (!dec) throw new Error(`systemSettings.${field} không thể giải mã bằng khóa mới.`);
+                    }
+                }
+            }
+
+            // 3d. Verify registry webhook with single current key
+            if (registry && registry.webhook) {
+                for (const field of ['discordUrl', 'telegramToken']) {
+                    const val = registry.webhook[field];
+                    if (val && isStoredCredentialCiphertext(val)) {
+                        const dec = decryptWithCurrentKeyOnly(val);
+                        if (!dec) throw new Error(`webhook.${field} không thể giải mã bằng khóa mới.`);
+                    }
+                }
+            }
+
+            // 3e. Verify dynamic bots with single current key
+            const dynamicList = (typeof BOT_CONFIG !== 'undefined' && Array.isArray(BOT_CONFIG) && BOT_CONFIG.length > 0)
+                ? BOT_CONFIG
+                : ((typeof registry !== 'undefined' && Array.isArray(registry.dynamicBots)) ? registry.dynamicBots : []);
+            for (const b of dynamicList) {
+                if (b.secretKey && isStoredCredentialCiphertext(b.secretKey)) {
+                    const dec = decryptWithCurrentKeyOnly(b.secretKey);
+                    if (!dec) throw new Error(`dynamicBot #${b.id || b.label} secretKey không thể giải mã bằng khóa mới.`);
+                }
+            }
+        } catch (verifyErr) {
+            failedCount++;
+            console.error('[KEY-ROTATION] Verification failed:', verifyErr.message);
+        } finally {
+            if (prevKey !== undefined) {
+                process.env.MANAGER_MASTER_KEY_PREVIOUS = prevKey;
+            }
+        }
+    }
+
+    if (failedCount > 0) {
+        console.error(`[KEY-ROTATION] FAILED: Đã kiểm tra ${totalInspected}, re-encrypted ${reencryptedCount}, NHƯNG có ${failedCount} lỗi! KHÔNG được gỡ MANAGER_MASTER_KEY_PREVIOUS.`);
+    } else {
+        console.log(`[KEY-ROTATION] Completed. Đã tái mã hóa thành công credentials với khóa master mới. Summary: Inspected ${totalInspected}, Re-encrypted ${reencryptedCount}, Failed ${failedCount}. Đã xác minh 100% giải mã bằng khóa mới.`);
+    }
+}
+
+
+// BUG-03/BUG-16 (Wave A — BLOCKER-03): per-bot secret trong registry.botSecrets giờ được
+// mã hóa khi lưu Cloud (aes256$gcm). Giá trị plaintext cũ (trước khi có mã hóa) vẫn đọc
+// được để tương thích ngược. Không giải mã được → trả '' (fail-closed, không gửi ciphertext
+// nhầm làm secret).
+function getRegistryBotSecret(botId) {
+    const map = (typeof registry !== 'undefined' && registry && registry.botSecrets && typeof registry.botSecrets === 'object' && !Array.isArray(registry.botSecrets)) ? registry.botSecrets : null;
+    if (!map) return '';
+    const raw = String(map[botId] ?? '').trim();
+    if (!raw) return '';
+    if (isStoredCredentialCiphertext(raw)) {
+        const decrypted = decryptUserPassword(raw);
+        return decrypted === null ? '' : decrypted;
+    }
+    return raw;
+}
+const getBotSecretKey = getRegistryBotSecret;
+
+
 function loadSupabaseSecretKey() {
     return String(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || '').trim();
 }
@@ -437,10 +837,11 @@ function saveSupabaseSecretKey() {
 const SUPABASE_REQUIRED_TABLES = Object.freeze([
     'manager_users', 'manager_keys', 'bot_registry', 'manager_sessions', 'bot_settings',
     'audit_logs', 'bot_chat_logs', 'bot_event_logs', 'bot_position_state', 'bot_position_logs', 'manager_backups', 'manager_locks', 'manager_key_usage_transactions', 'bot_log_clear_cutoffs',
-    'manager_user_state', 'manager_users_write_transactions', 'manager_session_revocations'
+    'manager_user_state', 'manager_users_write_transactions', 'manager_session_revocations', 'manager_link4m_attempts',
+    'manager_outbox_queue', 'manager_pending_allocations', 'manager_migration_entitlement_undo'
 ]);
 
-const SUPABASE_SCHEMA_SQL = "-- KingMC Bot Manager storage contract, aligned with manager.js and bot.js.\n-- Safe to run more than once. Keeps legacy columns/rows and adds the current API schema.\nBEGIN;\n\nCREATE TABLE IF NOT EXISTS public.manager_users (\n  id text,\n  username text PRIMARY KEY,\n  password text,\n  password_hash text,\n  role text NOT NULL DEFAULT 'user',\n  status text NOT NULL DEFAULT 'active',\n  assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  expires_at timestamptz,\n  plan_name text NOT NULL DEFAULT 'Gói mặc định',\n  bot_aliases jsonb NOT NULL DEFAULT '{}'::jsonb,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS username text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS password text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS password_hash text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS expires_at timestamptz;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS plan_name text NOT NULL DEFAULT 'Gói mặc định';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS bot_aliases jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_users ALTER COLUMN password_hash DROP NOT NULL;\nUPDATE public.manager_users SET id = 'usr_' || username WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.manager_users SET password = password_hash WHERE (password IS NULL OR password = '') AND password_hash IS NOT NULL;\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_users_id_unique ON public.manager_users(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_users_username_unique ON public.manager_users(username);\n\nCREATE TABLE IF NOT EXISTS public.manager_keys (\n  id text PRIMARY KEY,\n  code text,\n  key_code text,\n  days integer NOT NULL DEFAULT 1,\n  duration_days integer NOT NULL DEFAULT 0,\n  duration_ms bigint NOT NULL DEFAULT 0,\n  plan_name text NOT NULL DEFAULT 'Gói mặc định',\n  bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  bot_count integer NOT NULL DEFAULT 1,\n  used boolean NOT NULL DEFAULT false,\n  status text NOT NULL DEFAULT 'unused',\n  allow_account_change boolean NOT NULL DEFAULT true,\n  used_by text,\n  used_at timestamptz,\n  max_uses integer NOT NULL DEFAULT 1,\n  used_count integer NOT NULL DEFAULT 0,\n  used_users jsonb NOT NULL DEFAULT '[]'::jsonb,\n  expires_at timestamptz,\n  note text,\n  created_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS code text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS key_code text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS days integer NOT NULL DEFAULT 1;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS duration_days integer NOT NULL DEFAULT 0;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS duration_ms bigint NOT NULL DEFAULT 0;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS plan_name text NOT NULL DEFAULT 'Gói mặc định';\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS bot_count integer NOT NULL DEFAULT 1;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used boolean NOT NULL DEFAULT false;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'unused';\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS allow_account_change boolean NOT NULL DEFAULT true;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_by text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_at timestamptz;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS max_uses integer NOT NULL DEFAULT 1;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_count integer NOT NULL DEFAULT 0;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_users jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS expires_at timestamptz;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS note text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nUPDATE public.manager_keys SET code = key_code WHERE code IS NULL OR code = '';\nUPDATE public.manager_keys SET key_code = code WHERE key_code IS NULL OR key_code = '';\nUPDATE public.manager_keys SET id = 'key_' || code WHERE (id IS NULL OR id = '') AND code IS NOT NULL;\nUPDATE public.manager_keys SET days = duration_days WHERE duration_days > 0 AND (days IS NULL OR days = 1);\nUPDATE public.manager_keys SET bot_ids = assigned_bot_ids WHERE bot_ids = '[]'::jsonb AND assigned_bot_ids <> '[]'::jsonb;\nUPDATE public.manager_keys SET used = (lower(status) IN ('used','active','redeemed')) WHERE status IS NOT NULL AND used = false;\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_keys_code_unique ON public.manager_keys(code);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_keys_id_unique ON public.manager_keys(id);\n\nCREATE TABLE IF NOT EXISTS public.bot_registry (\n  id text PRIMARY KEY,\n  data jsonb NOT NULL DEFAULT '{}'::jsonb,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\n-- Earlier versions stored one bot per row with numeric ids. Convert the id type\n-- without removing those rows, then create the singleton registry document.\nDO $$\nBEGIN\n  IF EXISTS (\n    SELECT 1 FROM information_schema.columns\n    WHERE table_schema='public' AND table_name='bot_registry'\n      AND column_name='id' AND data_type <> 'text'\n  ) THEN\n    ALTER TABLE public.bot_registry ALTER COLUMN id TYPE text USING id::text;\n  END IF;\nEND $$;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS data jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS url text;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS label text DEFAULT '';\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS sort_order integer DEFAULT 0;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS admin_password text DEFAULT '';\nDO $$\nDECLARE\n  legacy_bots jsonb;\n  legacy_id_map jsonb;\n  legacy_order jsonb;\n  legacy_admin text;\nBEGIN\n  IF NOT EXISTS (SELECT 1 FROM public.bot_registry WHERE id='default') THEN\n    SELECT COALESCE(jsonb_agg(jsonb_build_object('label', COALESCE(label,''), 'url', url) ORDER BY sort_order, id), '[]'::jsonb),\n           COALESCE(jsonb_object_agg(url, id), '{}'::jsonb),\n           COALESCE(jsonb_agg(url ORDER BY sort_order, id), '[]'::jsonb),\n           COALESCE(max(admin_password), '')\n      INTO legacy_bots, legacy_id_map, legacy_order, legacy_admin\n      FROM public.bot_registry\n      WHERE id <> 'default' AND url IS NOT NULL AND btrim(url) <> '';\n    INSERT INTO public.bot_registry(id, data, updated_at, url, label, sort_order, admin_password)\n      VALUES ('default', jsonb_build_object(\n        'dynamicBots', legacy_bots, 'botIdMap', legacy_id_map,\n        'orderUrls', legacy_order, 'adminPassword', legacy_admin,\n        'disabledEnvUrls', '[]'::jsonb, 'disabledEnvIds', '[]'::jsonb,\n        'overrides', '[]'::jsonb, 'order', '[]'::jsonb,\n        'botAliases', '{}'::jsonb, 'botTags', '{}'::jsonb,\n        'systemSettings', '{}'::jsonb, 'lastBotId', 0\n      ), now(), '', 'KingMC Registry', -1, legacy_admin) ON CONFLICT (id) DO NOTHING;\n  END IF;\nEND $$;\n\nCREATE TABLE IF NOT EXISTS public.manager_sessions (\n  token_hash text PRIMARY KEY,\n  user_id text NOT NULL DEFAULT '',\n  username text NOT NULL,\n  role text NOT NULL DEFAULT 'user',\n  assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  expires_at bigint NOT NULL DEFAULT 0,\n  plan_name text NOT NULL DEFAULT 'Gói thường',\n  allow_account_change boolean NOT NULL DEFAULT true,\n  status text NOT NULL DEFAULT 'active',\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS user_id text NOT NULL DEFAULT '';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS token_hash text;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS username text;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS expires_at bigint NOT NULL DEFAULT 0;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS plan_name text NOT NULL DEFAULT 'Gói thường';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS allow_account_change boolean NOT NULL DEFAULT true;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nUPDATE public.manager_sessions SET user_id = username WHERE user_id IS NULL OR user_id = '';\n\nCREATE TABLE IF NOT EXISTS public.bot_settings (\n  bot_id text PRIMARY KEY,\n  username text NOT NULL DEFAULT '',\n  password text NOT NULL DEFAULT '',\n  settings jsonb NOT NULL DEFAULT '{}'::jsonb,\n  proxy jsonb NOT NULL DEFAULT '{}'::jsonb,\n  schedules jsonb NOT NULL DEFAULT '[]'::jsonb,\n  auto_chat jsonb NOT NULL DEFAULT '[]'::jsonb,\n  manually_stopped boolean NOT NULL DEFAULT false,\n  synced_auth jsonb NOT NULL DEFAULT '{}'::jsonb,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS username text NOT NULL DEFAULT '';\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS password text NOT NULL DEFAULT '';\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS settings jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS proxy jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS schedules jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS auto_chat jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS manually_stopped boolean NOT NULL DEFAULT false;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS synced_auth jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\n\nCREATE TABLE IF NOT EXISTS public.audit_logs (\n  id text PRIMARY KEY,\n  bot_id text,\n  log_type text NOT NULL DEFAULT 'SYSTEM',\n  category text NOT NULL DEFAULT 'SYSTEM',\n  action text NOT NULL DEFAULT '',\n  action_label text NOT NULL DEFAULT '',\n  actor_username text NOT NULL DEFAULT 'system',\n  actor_role text NOT NULL DEFAULT 'system',\n  actor_ip text NOT NULL DEFAULT '',\n  target jsonb NOT NULL DEFAULT '{}'::jsonb,\n  details text NOT NULL DEFAULT '',\n  status text NOT NULL DEFAULT 'SUCCESS',\n  timestamp timestamptz NOT NULL DEFAULT now(),\n  actor jsonb NOT NULL DEFAULT '{}'::jsonb,\n  ip text NOT NULL DEFAULT ''\n);\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS log_type text NOT NULL DEFAULT 'SYSTEM';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS category text NOT NULL DEFAULT 'SYSTEM';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS action text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS action_label text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_username text NOT NULL DEFAULT 'system';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_role text NOT NULL DEFAULT 'system';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_ip text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS target jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS details text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'SUCCESS';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS timestamp timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS ip text NOT NULL DEFAULT '';\nUPDATE public.audit_logs SET\n  actor_username = COALESCE(NULLIF(actor_username, 'system'), actor->>'username', 'system'),\n  actor_role = COALESCE(NULLIF(actor_role, 'system'), actor->>'role', 'system'),\n  actor_ip = COALESCE(NULLIF(actor_ip, ''), ip, ''),\n  bot_id = COALESCE(NULLIF(bot_id, ''), NULLIF(target->>'botId',''), NULLIF(target->>'bot_id',''))\nWHERE actor IS NOT NULL OR ip <> '' OR bot_id IS NULL;\n\nCREATE TABLE IF NOT EXISTS public.bot_chat_logs (\n  id text PRIMARY KEY,\n  bot_id text NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  sender text NOT NULL DEFAULT 'SERVER',\n  event_type text NOT NULL DEFAULT 'CHAT',\n  message text NOT NULL DEFAULT '',\n  metadata jsonb NOT NULL DEFAULT '{}'::jsonb\n);\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS sender text NOT NULL DEFAULT 'SERVER';\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS event_type text NOT NULL DEFAULT 'CHAT';\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS message text NOT NULL DEFAULT '';\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb;\nCREATE TABLE IF NOT EXISTS public.bot_event_logs (\n  id text PRIMARY KEY,\n  bot_id text NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  level text NOT NULL DEFAULT 'INFO',\n  event_type text NOT NULL DEFAULT 'SYSTEM',\n  message text NOT NULL DEFAULT '',\n  metadata jsonb NOT NULL DEFAULT '{}'::jsonb\n);\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS level text NOT NULL DEFAULT 'INFO';\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS event_type text NOT NULL DEFAULT 'SYSTEM';\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS message text NOT NULL DEFAULT '';\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb;\nCREATE TABLE IF NOT EXISTS public.bot_position_state (\n  bot_id text PRIMARY KEY,\n  position jsonb NOT NULL DEFAULT '{}'::jsonb,\n  dimension text NOT NULL DEFAULT 'unknown',\n  location_state text NOT NULL DEFAULT 'Unknown',\n  last_event_key text,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS position jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS dimension text NOT NULL DEFAULT 'unknown';\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS location_state text NOT NULL DEFAULT 'Unknown';\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS last_event_key text;\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nCREATE TABLE IF NOT EXISTS public.bot_position_logs (\n  id text PRIMARY KEY,\n  bot_id text NOT NULL,\n  changed_at timestamptz NOT NULL DEFAULT now(),\n  from_position jsonb,\n  to_position jsonb NOT NULL,\n  from_dimension text,\n  to_dimension text NOT NULL DEFAULT 'unknown',\n  location_state text NOT NULL DEFAULT 'Unknown',\n  reason text NOT NULL DEFAULT 'MOVE',\n  event_key text NOT NULL UNIQUE\n);\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS changed_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS from_position jsonb;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS to_position jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS from_dimension text;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS to_dimension text NOT NULL DEFAULT 'unknown';\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS location_state text NOT NULL DEFAULT 'Unknown';\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS reason text NOT NULL DEFAULT 'MOVE';\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS event_key text;\nCREATE TABLE IF NOT EXISTS public.manager_backups (\n  name text PRIMARY KEY,\n  bot_id text,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  size_bytes integer NOT NULL DEFAULT 0,\n  payload jsonb NOT NULL DEFAULT '{}'::jsonb\n);\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS name text;\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS size_bytes integer NOT NULL DEFAULT 0;\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS payload jsonb NOT NULL DEFAULT '{}'::jsonb;\n\n-- Repair nullable legacy identifiers without deleting or merging existing rows.\nUPDATE public.audit_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_chat_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_event_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_position_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_position_logs SET event_key = 'legacy:' || id WHERE event_key IS NULL OR btrim(event_key) = '';\n\nCREATE INDEX IF NOT EXISTS idx_manager_users_role_status ON public.manager_users(role, status);\nCREATE INDEX IF NOT EXISTS idx_manager_keys_used_created ON public.manager_keys(used, created_at DESC);\nCREATE INDEX IF NOT EXISTS idx_manager_sessions_username ON public.manager_sessions(username);\nCREATE INDEX IF NOT EXISTS idx_manager_sessions_expires_at ON public.manager_sessions(expires_at);\nCREATE INDEX IF NOT EXISTS idx_audit_logs_bot_time ON public.audit_logs(bot_id, timestamp DESC);\nCREATE INDEX IF NOT EXISTS idx_audit_logs_user_time ON public.audit_logs(actor_username, timestamp DESC);\nCREATE INDEX IF NOT EXISTS idx_bot_chat_logs_bot_time ON public.bot_chat_logs(bot_id, created_at DESC);\nCREATE INDEX IF NOT EXISTS idx_bot_event_logs_bot_time ON public.bot_event_logs(bot_id, created_at DESC);\nCREATE INDEX IF NOT EXISTS idx_bot_position_logs_bot_time ON public.bot_position_logs(bot_id, changed_at DESC);\nCREATE INDEX IF NOT EXISTS idx_manager_backups_bot_time ON public.manager_backups(bot_id, created_at DESC);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_sessions_token_hash_unique ON public.manager_sessions(token_hash);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_settings_bot_id_unique ON public.bot_settings(bot_id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_audit_logs_id_unique ON public.audit_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_chat_logs_id_unique ON public.bot_chat_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_event_logs_id_unique ON public.bot_event_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_position_state_bot_id_unique ON public.bot_position_state(bot_id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_position_logs_id_unique ON public.bot_position_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_position_logs_event_key_unique ON public.bot_position_logs(event_key);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_backups_name_unique ON public.manager_backups(name);\n\nALTER TABLE public.manager_users ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_keys ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_registry ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_sessions ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_settings ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_chat_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_event_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_position_state ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_position_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_backups ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON public.manager_users, public.manager_keys, public.bot_registry,\n  public.manager_sessions, public.bot_settings, public.audit_logs,\n  public.bot_chat_logs, public.bot_event_logs, public.bot_position_state,\n  public.bot_position_logs, public.manager_backups FROM anon, authenticated;\nGRANT ALL ON public.manager_users, public.manager_keys, public.bot_registry,\n  public.manager_sessions, public.bot_settings, public.audit_logs,\n  public.bot_chat_logs, public.bot_event_logs, public.bot_position_state,\n  public.bot_position_logs, public.manager_backups TO service_role;\n\nCREATE OR REPLACE FUNCTION public.record_bot_position_change(\n  p_id text,\n  p_bot_id text,\n  p_changed_at timestamptz,\n  p_to_position jsonb,\n  p_to_dimension text,\n  p_location_state text,\n  p_reason text,\n  p_event_key text,\n  p_min_distance double precision DEFAULT 5.0\n) RETURNS jsonb\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $$\nDECLARE\n  prior public.bot_position_state%ROWTYPE;\n  dx double precision := 0;\n  dy double precision := 0;\n  dz double precision := 0;\n  distance double precision := 0;\n  dimension_changed boolean := false;\n  state_changed boolean := false;\nBEGIN\n  IF p_bot_id IS NULL OR p_bot_id !~ '^[1-9][0-9]{0,8}$' THEN\n    RAISE EXCEPTION 'Invalid bot_id';\n  END IF;\n  IF p_event_key IS NULL OR btrim(p_event_key) = '' THEN\n    RAISE EXCEPTION 'event_key is required';\n  END IF;\n  IF EXISTS (SELECT 1 FROM public.bot_position_logs WHERE event_key = p_event_key) THEN\n    RETURN jsonb_build_object('ok', true, 'recorded', false, 'duplicate', true);\n  END IF;\n\n  PERFORM pg_advisory_xact_lock(hashtext('bot-position:' || p_bot_id)::bigint);\n  -- Recheck under the bot lock so a concurrent retry cannot advance state twice.\n  IF EXISTS (SELECT 1 FROM public.bot_position_logs WHERE event_key = p_event_key) THEN\n    RETURN jsonb_build_object('ok', true, 'recorded', false, 'duplicate', true);\n  END IF;\n  SELECT * INTO prior FROM public.bot_position_state WHERE bot_id = p_bot_id FOR UPDATE;\n  IF FOUND THEN\n    dimension_changed := COALESCE(prior.dimension, '') <> COALESCE(p_to_dimension, 'unknown');\n    state_changed := COALESCE(prior.location_state, '') <> COALESCE(p_location_state, 'Unknown');\n    BEGIN\n      dx := COALESCE((p_to_position->>'x')::double precision, 0) - COALESCE((prior.position->>'x')::double precision, 0);\n      dy := COALESCE((p_to_position->>'y')::double precision, 0) - COALESCE((prior.position->>'y')::double precision, 0);\n      dz := COALESCE((p_to_position->>'z')::double precision, 0) - COALESCE((prior.position->>'z')::double precision, 0);\n      distance := sqrt(dx*dx + dy*dy + dz*dz);\n    EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN\n      distance := 0;\n    END;\n    IF NOT dimension_changed AND NOT state_changed AND distance < GREATEST(COALESCE(p_min_distance, 5.0), 0) THEN\n      RETURN jsonb_build_object('ok', true, 'recorded', false, 'duplicate', false, 'distance', distance);\n    END IF;\n  END IF;\n\n  INSERT INTO public.bot_position_logs(id, bot_id, changed_at, from_position, to_position,\n    from_dimension, to_dimension, location_state, reason, event_key)\n  VALUES (COALESCE(NULLIF(p_id,''), md5(random()::text || clock_timestamp()::text)), p_bot_id,\n    COALESCE(p_changed_at, now()), CASE WHEN prior.bot_id IS NULL THEN NULL ELSE prior.position END,\n    COALESCE(p_to_position, '{}'::jsonb), CASE WHEN prior.bot_id IS NULL THEN NULL ELSE prior.dimension END,\n    COALESCE(p_to_dimension, 'unknown'), COALESCE(p_location_state, 'Unknown'),\n    COALESCE(NULLIF(p_reason,''), 'MOVE'), p_event_key)\n  ON CONFLICT (event_key) DO NOTHING;\n\n  INSERT INTO public.bot_position_state(bot_id, position, dimension, location_state, last_event_key, updated_at)\n  VALUES (p_bot_id, COALESCE(p_to_position, '{}'::jsonb), COALESCE(p_to_dimension, 'unknown'),\n    COALESCE(p_location_state, 'Unknown'), p_event_key, COALESCE(p_changed_at, now()))\n  ON CONFLICT (bot_id) DO UPDATE SET position=EXCLUDED.position, dimension=EXCLUDED.dimension,\n    location_state=EXCLUDED.location_state, last_event_key=EXCLUDED.last_event_key, updated_at=EXCLUDED.updated_at;\n  RETURN jsonb_build_object('ok', true, 'recorded', true, 'distance', distance);\nEND;\n$$;\nREVOKE ALL ON FUNCTION public.record_bot_position_change(text,text,timestamptz,jsonb,text,text,text,text,double precision) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.record_bot_position_change(text,text,timestamptz,jsonb,text,text,text,text,double precision) TO service_role;\n\nCOMMIT;\n\nBEGIN;\n\nCREATE TABLE IF NOT EXISTS public.manager_locks (\n  lock_key text PRIMARY KEY,\n  owner_id text NOT NULL,\n  lease_until timestamptz NOT NULL,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_locks ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_locks FROM PUBLIC, anon, authenticated;\n\nCREATE TABLE IF NOT EXISTS public.manager_key_usage_transactions (\n  transaction_id text PRIMARY KEY,\n  key_id text NOT NULL,\n  username text NOT NULL,\n  usage_snapshot jsonb NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_key_usage_transactions ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_key_usage_transactions FROM PUBLIC, anon, authenticated;\nGRANT SELECT ON TABLE public.manager_key_usage_transactions TO service_role;\n\nCREATE TABLE IF NOT EXISTS public.bot_log_clear_cutoffs (\n  bot_id text PRIMARY KEY,\n  event_cutoff timestamptz,\n  chat_cutoff timestamptz,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.bot_log_clear_cutoffs ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.bot_log_clear_cutoffs FROM PUBLIC, anon, authenticated;\nGRANT SELECT ON TABLE public.bot_log_clear_cutoffs TO service_role;\n\nCREATE OR REPLACE FUNCTION public.acquire_manager_lock(\n  p_lock_key text,\n  p_owner_id text,\n  p_lease_seconds integer DEFAULT 900\n) RETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE affected integer;\nBEGIN\n  IF COALESCE(btrim(p_lock_key), '') = '' OR COALESCE(btrim(p_owner_id), '') = '' THEN\n    RETURN false;\n  END IF;\n  INSERT INTO public.manager_locks(lock_key, owner_id, lease_until, updated_at)\n  VALUES (p_lock_key, p_owner_id, now() + make_interval(secs => GREATEST(30, LEAST(COALESCE(p_lease_seconds, 900), 3600))), now())\n  ON CONFLICT (lock_key) DO UPDATE\n    SET owner_id = EXCLUDED.owner_id, lease_until = EXCLUDED.lease_until, updated_at = now()\n    WHERE public.manager_locks.lease_until <= now() OR public.manager_locks.owner_id = EXCLUDED.owner_id;\n  GET DIAGNOSTICS affected = ROW_COUNT;\n  RETURN affected = 1;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.release_manager_lock(p_lock_key text, p_owner_id text)\nRETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE affected integer;\nBEGIN\n  DELETE FROM public.manager_locks WHERE lock_key = p_lock_key AND owner_id = p_owner_id;\n  GET DIAGNOSTICS affected = ROW_COUNT;\n  RETURN affected = 1;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.renew_manager_lock(\n  p_lock_key text,\n  p_owner_id text,\n  p_lease_seconds integer DEFAULT 900\n) RETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE affected integer;\nBEGIN\n  UPDATE public.manager_locks\n  SET lease_until = now() + make_interval(secs => GREATEST(30, LEAST(COALESCE(p_lease_seconds, 900), 3600))),\n      updated_at = now()\n  WHERE lock_key = p_lock_key AND owner_id = p_owner_id AND lease_until > now();\n  GET DIAGNOSTICS affected = ROW_COUNT;\n  RETURN affected = 1;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.patch_manager_registry(\n  p_patch jsonb DEFAULT '{}'::jsonb,\n  p_pending_reset_patch jsonb DEFAULT '{}'::jsonb,\n  p_pending_reset_deletes text[] DEFAULT '{}'::text[]\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_data jsonb;\n  v_resets jsonb;\n  v_key text;\nBEGIN\n  INSERT INTO public.bot_registry(id, data, updated_at)\n  VALUES ('default', '{}'::jsonb, now()) ON CONFLICT (id) DO NOTHING;\n  SELECT COALESCE(data, '{}'::jsonb) INTO v_data\n  FROM public.bot_registry WHERE id = 'default' FOR UPDATE;\n  v_data := v_data || COALESCE(p_patch, '{}'::jsonb);\n  v_resets := CASE WHEN jsonb_typeof(v_data->'pendingResets') = 'object' THEN v_data->'pendingResets' ELSE '{}'::jsonb END;\n  FOREACH v_key IN ARRAY COALESCE(p_pending_reset_deletes, '{}'::text[]) LOOP\n    v_resets := v_resets - v_key;\n  END LOOP;\n  v_resets := v_resets || CASE WHEN jsonb_typeof(p_pending_reset_patch) = 'object' THEN p_pending_reset_patch ELSE '{}'::jsonb END;\n  v_data := jsonb_set(v_data, '{pendingResets}', v_resets, true);\n  UPDATE public.bot_registry SET data = v_data, updated_at = now() WHERE id = 'default';\n  RETURN jsonb_build_object('ok', true);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.set_bot_log_clear_cutoff(\n  p_bot_id text,\n  p_kind text,\n  p_cutoff timestamptz\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE v_cutoff timestamptz;\nBEGIN\n  IF p_bot_id IS NULL OR p_bot_id !~ '^[1-9][0-9]{0,8}$' OR p_cutoff IS NULL OR p_kind IS NULL OR p_kind NOT IN ('event','chat') THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_INPUT');\n  END IF;\n  IF p_kind = 'event' THEN\n    INSERT INTO public.bot_log_clear_cutoffs(bot_id, event_cutoff, updated_at)\n    VALUES (p_bot_id, p_cutoff, now())\n    ON CONFLICT (bot_id) DO UPDATE SET\n      event_cutoff = CASE WHEN public.bot_log_clear_cutoffs.event_cutoff IS NULL THEN EXCLUDED.event_cutoff ELSE GREATEST(public.bot_log_clear_cutoffs.event_cutoff, EXCLUDED.event_cutoff) END,\n      updated_at = now()\n    RETURNING event_cutoff INTO v_cutoff;\n  ELSE\n    INSERT INTO public.bot_log_clear_cutoffs(bot_id, chat_cutoff, updated_at)\n    VALUES (p_bot_id, p_cutoff, now())\n    ON CONFLICT (bot_id) DO UPDATE SET\n      chat_cutoff = CASE WHEN public.bot_log_clear_cutoffs.chat_cutoff IS NULL THEN EXCLUDED.chat_cutoff ELSE GREATEST(public.bot_log_clear_cutoffs.chat_cutoff, EXCLUDED.chat_cutoff) END,\n      updated_at = now()\n    RETURNING chat_cutoff INTO v_cutoff;\n  END IF;\n  RETURN jsonb_build_object('ok', true, 'cutoff', v_cutoff);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.reject_cleared_bot_log()\nRETURNS trigger\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE v_cutoff timestamptz;\nBEGIN\n  IF TG_TABLE_NAME = 'bot_event_logs' THEN\n    SELECT event_cutoff INTO v_cutoff FROM public.bot_log_clear_cutoffs WHERE bot_id = NEW.bot_id;\n  ELSE\n    SELECT chat_cutoff INTO v_cutoff FROM public.bot_log_clear_cutoffs WHERE bot_id = NEW.bot_id;\n  END IF;\n  IF v_cutoff IS NOT NULL AND NEW.created_at < v_cutoff THEN\n    RETURN NULL;\n  END IF;\n  RETURN NEW;\nEND;\n$$;\n\nDROP TRIGGER IF EXISTS reject_cleared_event_log ON public.bot_event_logs;\nCREATE TRIGGER reject_cleared_event_log BEFORE INSERT ON public.bot_event_logs\nFOR EACH ROW EXECUTE FUNCTION public.reject_cleared_bot_log();\nDROP TRIGGER IF EXISTS reject_cleared_chat_log ON public.bot_chat_logs;\nCREATE TRIGGER reject_cleared_chat_log BEFORE INSERT ON public.bot_chat_logs\nFOR EACH ROW EXECUTE FUNCTION public.reject_cleared_bot_log();\n\nCREATE OR REPLACE FUNCTION public.consume_manager_key_usage(p_code text, p_username text, p_transaction_id text)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_key public.manager_keys%ROWTYPE;\n  v_code text := upper(btrim(COALESCE(p_code, '')));\n  v_username text := lower(btrim(COALESCE(p_username, '')));\n  v_users jsonb;\n  v_count integer;\n  v_max integer;\n  v_used_by text;\n  v_transaction public.manager_key_usage_transactions%ROWTYPE;\nBEGIN\n  IF v_code = '' OR v_username = '' OR COALESCE(btrim(p_transaction_id), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_INPUT');\n  END IF;\n  SELECT * INTO v_transaction FROM public.manager_key_usage_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF v_transaction.username <> v_username OR upper(COALESCE(v_transaction.usage_snapshot->>'code', v_transaction.usage_snapshot->>'key_code', '')) <> v_code THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN jsonb_build_object('ok', true, 'replayed', true, 'transactionId', p_transaction_id, 'row', v_transaction.usage_snapshot);\n  END IF;\n  SELECT * INTO v_key\n  FROM public.manager_keys\n  WHERE upper(COALESCE(NULLIF(code, ''), key_code, '')) = v_code\n  FOR UPDATE;\n  IF NOT FOUND THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'KEY_NOT_FOUND');\n  END IF;\n\n  -- A duplicate request may have waited on this key row while its first attempt committed.\n  SELECT * INTO v_transaction FROM public.manager_key_usage_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF v_transaction.username <> v_username\n       OR upper(COALESCE(v_transaction.usage_snapshot->>'code', v_transaction.usage_snapshot->>'key_code', '')) <> v_code THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN jsonb_build_object('ok', true, 'replayed', true, 'transactionId', p_transaction_id, 'row', v_transaction.usage_snapshot);\n  END IF;\n\n  v_max := COALESCE(v_key.max_uses, 1);\n  IF v_max < 0 THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_MAX_USES');\n  END IF;\n  v_users := CASE WHEN jsonb_typeof(v_key.used_users) = 'array' THEN v_key.used_users ELSE '[]'::jsonb END;\n  IF jsonb_array_length(v_users) > 0 THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM jsonb_array_elements_text(v_users) AS u(value)\n    WHERE btrim(value) <> '';\n  END IF;\n  IF jsonb_array_length(v_users) = 0 AND COALESCE(v_key.used_by, '') <> '' THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM unnest(string_to_array(v_key.used_by, ',')) AS value\n    WHERE btrim(value) <> '';\n  END IF;\n  IF v_users ? v_username THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'ALREADY_USED');\n  END IF;\n  v_count := GREATEST(COALESCE(v_key.used_count, 0), jsonb_array_length(v_users), CASE WHEN v_key.used THEN 1 ELSE 0 END);\n  IF v_max > 0 AND v_count >= v_max THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'EXHAUSTED');\n  END IF;\n\n  v_users := v_users || jsonb_build_array(v_username);\n  v_count := v_count + 1;\n  SELECT string_agg(value, ', ' ORDER BY ord) INTO v_used_by\n  FROM jsonb_array_elements_text(v_users) WITH ORDINALITY AS u(value, ord);\n  UPDATE public.manager_keys\n  SET used_users = v_users,\n      used_count = v_count,\n      used_by = v_used_by,\n      used_at = now(),\n      used = (v_max > 0 AND v_count >= v_max)\n  WHERE id = v_key.id\n  RETURNING * INTO v_key;\n  INSERT INTO public.manager_key_usage_transactions(transaction_id, key_id, username, usage_snapshot)\n  VALUES (p_transaction_id, v_key.id, v_username, to_jsonb(v_key));\n  RETURN jsonb_build_object('ok', true, 'transactionId', p_transaction_id, 'row', to_jsonb(v_key));\nEND;\n$$;\n\nREVOKE ALL ON FUNCTION public.acquire_manager_lock(text,text,integer) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.release_manager_lock(text,text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.renew_manager_lock(text,text,integer) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.patch_manager_registry(jsonb,jsonb,text[]) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.set_bot_log_clear_cutoff(text,text,timestamptz) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.reject_cleared_bot_log() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.consume_manager_key_usage(text,text,text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.acquire_manager_lock(text,text,integer) TO service_role;\nGRANT EXECUTE ON FUNCTION public.release_manager_lock(text,text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.renew_manager_lock(text,text,integer) TO service_role;\nGRANT EXECUTE ON FUNCTION public.patch_manager_registry(jsonb,jsonb,text[]) TO service_role;\nGRANT EXECUTE ON FUNCTION public.set_bot_log_clear_cutoff(text,text,timestamptz) TO service_role;\nGRANT EXECUTE ON FUNCTION public.consume_manager_key_usage(text,text,text) TO service_role;\n\nCOMMIT;\n\nNOTIFY pgrst, 'reload schema';\n\nBEGIN;\n\n-- User entitlement fields were previously accepted by Manager but not persisted.\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS allow_account_change boolean NOT NULL DEFAULT true;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS lock_reason text NOT NULL DEFAULT '';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS note text NOT NULL DEFAULT '';\n\nCREATE TABLE IF NOT EXISTS public.manager_user_state (\n  singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),\n  revision bigint NOT NULL DEFAULT 1 CHECK (revision >= 1),\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nINSERT INTO public.manager_user_state(singleton, revision)\nVALUES (true, 1) ON CONFLICT (singleton) DO NOTHING;\n\nCREATE TABLE IF NOT EXISTS public.manager_users_write_transactions (\n  transaction_id uuid PRIMARY KEY,\n  expected_revision bigint NOT NULL,\n  users_payload jsonb NOT NULL,\n  result jsonb NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE TABLE IF NOT EXISTS public.manager_session_revocations (\n  token_hash text PRIMARY KEY,\n  revoked_at timestamptz NOT NULL DEFAULT now()\n);\n\nALTER TABLE public.manager_key_usage_transactions\n  ADD COLUMN IF NOT EXISTS user_revision bigint;\n\nALTER TABLE public.manager_user_state ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_users_write_transactions ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_session_revocations ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_user_state FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON TABLE public.manager_users_write_transactions FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON TABLE public.manager_session_revocations FROM PUBLIC, anon, authenticated;\nGRANT SELECT ON TABLE public.manager_users_write_transactions TO service_role;\n-- Force every service-role user write through the revision-checked RPCs below.\n-- This makes stale legacy snapshot upserts fail closed during mixed-version deploys.\nREVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE public.manager_users FROM service_role;\nGRANT SELECT ON TABLE public.manager_users TO service_role;\n\nCREATE OR REPLACE FUNCTION public.bump_manager_users_revision()\nRETURNS trigger\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nBEGIN\n  UPDATE public.manager_user_state\n  SET revision = revision + 1, updated_at = now()\n  WHERE singleton = true;\n  RETURN NULL;\nEND;\n$$;\n\nDROP TRIGGER IF EXISTS manager_users_revision_after_write ON public.manager_users;\nCREATE TRIGGER manager_users_revision_after_write\nAFTER INSERT OR UPDATE OR DELETE ON public.manager_users\nFOR EACH STATEMENT EXECUTE FUNCTION public.bump_manager_users_revision();\n\nCREATE OR REPLACE FUNCTION public.reject_revoked_manager_session()\nRETURNS trigger\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nBEGIN\n  IF EXISTS (\n    SELECT 1 FROM public.manager_session_revocations\n    WHERE token_hash = NEW.token_hash\n  ) THEN\n    RETURN NULL;\n  END IF;\n  RETURN NEW;\nEND;\n$$;\n\nDROP TRIGGER IF EXISTS manager_sessions_reject_revoked ON public.manager_sessions;\nCREATE TRIGGER manager_sessions_reject_revoked\nBEFORE INSERT OR UPDATE ON public.manager_sessions\nFOR EACH ROW EXECUTE FUNCTION public.reject_revoked_manager_session();\n\nCREATE OR REPLACE FUNCTION public.read_manager_users_snapshot()\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_revision bigint;\n  v_users jsonb;\nBEGIN\n  SELECT revision INTO v_revision\n  FROM public.manager_user_state\n  WHERE singleton = true\n  FOR UPDATE;\n  SELECT COALESCE(jsonb_agg(to_jsonb(u) ORDER BY u.username), '[]'::jsonb)\n  INTO v_users\n  FROM public.manager_users AS u;\n  RETURN jsonb_build_object('ok', true, 'revision', v_revision, 'users', v_users);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.read_manager_session(p_token_hash text)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE v_session jsonb;\nBEGIN\n  IF COALESCE(btrim(p_token_hash), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_TOKEN_HASH');\n  END IF;\n  SELECT to_jsonb(s) INTO v_session\n  FROM public.manager_sessions AS s\n  WHERE s.token_hash = p_token_hash\n    AND s.expires_at > (extract(epoch FROM now()) * 1000)::bigint\n    AND NOT EXISTS (\n      SELECT 1 FROM public.manager_session_revocations AS r\n      WHERE r.token_hash = s.token_hash\n    );\n  RETURN jsonb_build_object('ok', true, 'session', v_session);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.read_manager_authorization(p_token_hash text)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_session public.manager_sessions%ROWTYPE;\n  v_user jsonb;\nBEGIN\n  IF COALESCE(btrim(p_token_hash), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_TOKEN_HASH');\n  END IF;\n  SELECT * INTO v_session\n  FROM public.manager_sessions AS s\n  WHERE s.token_hash = p_token_hash\n    AND s.expires_at > (extract(epoch FROM now()) * 1000)::bigint\n    AND NOT EXISTS (\n      SELECT 1 FROM public.manager_session_revocations AS r\n      WHERE r.token_hash = s.token_hash\n    );\n  IF NOT FOUND THEN\n    RETURN jsonb_build_object('ok', true, 'session', NULL, 'user', NULL);\n  END IF;\n  IF v_session.role <> 'admin' THEN\n    SELECT jsonb_build_object(\n      'id', u.id, 'username', u.username, 'status', u.status,\n      'assigned_bot_ids', u.assigned_bot_ids, 'expires_at', u.expires_at,\n      'plan_name', u.plan_name, 'allow_account_change', u.allow_account_change,\n      'lock_reason', u.lock_reason\n    ) INTO v_user\n    FROM public.manager_users AS u\n    WHERE u.id = v_session.user_id\n      AND lower(u.username) = lower(v_session.username);\n  END IF;\n  RETURN jsonb_build_object('ok', true, 'session', to_jsonb(v_session), 'user', v_user);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.revoke_manager_session(p_token_hash text)\nRETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nBEGIN\n  IF COALESCE(btrim(p_token_hash), '') = '' THEN RETURN false; END IF;\n  INSERT INTO public.manager_session_revocations(token_hash, revoked_at)\n  VALUES (p_token_hash, now())\n  ON CONFLICT (token_hash) DO NOTHING;\n  DELETE FROM public.manager_sessions WHERE token_hash = p_token_hash;\n  RETURN true;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.create_manager_user_session(\n  p_expected_revision bigint,\n  p_session jsonb\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_revision bigint;\n  v_user_id text;\n  v_username text;\n  v_token_hash text;\n  v_expires_at bigint;\n  v_rows integer;\nBEGIN\n  SELECT revision INTO v_revision\n  FROM public.manager_user_state\n  WHERE singleton = true\n  FOR UPDATE;\n  IF v_revision IS DISTINCT FROM p_expected_revision THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'REVISION_CONFLICT', 'revision', v_revision);\n  END IF;\n  v_user_id := btrim(COALESCE(p_session->>'user_id', ''));\n  v_username := btrim(COALESCE(p_session->>'username', ''));\n  v_token_hash := btrim(COALESCE(p_session->>'token_hash', ''));\n  v_expires_at := NULLIF(p_session->>'expires_at', '')::bigint;\n  IF v_user_id = '' OR v_username = '' OR v_token_hash !~ '^[a-f0-9]{64}$' OR v_expires_at IS NULL\n     OR v_expires_at <= (extract(epoch FROM now()) * 1000)::bigint THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_SESSION');\n  END IF;\n  IF NOT EXISTS (\n    SELECT 1 FROM public.manager_users AS u\n    WHERE u.id = v_user_id AND lower(u.username) = lower(v_username)\n      AND lower(COALESCE(u.status, 'active')) <> 'disabled'\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_CHANGED');\n  END IF;\n  INSERT INTO public.manager_sessions(\n    token_hash, user_id, username, role, assigned_bot_ids, expires_at,\n    plan_name, allow_account_change, status, updated_at\n  ) VALUES (\n    v_token_hash, v_user_id, v_username, 'user',\n    COALESCE(p_session->'assigned_bot_ids', '[]'::jsonb), v_expires_at,\n    COALESCE(NULLIF(p_session->>'plan_name', ''), 'Gói thường'),\n    COALESCE((p_session->>'allow_account_change')::boolean, true),\n    COALESCE(NULLIF(p_session->>'status', ''), 'active'), now()\n  ) ON CONFLICT (token_hash) DO NOTHING;\n  GET DIAGNOSTICS v_rows = ROW_COUNT;\n  IF v_rows <> 1 THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'SESSION_NOT_CREATED');\n  END IF;\n  RETURN jsonb_build_object('ok', true, 'revision', v_revision);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.apply_manager_users_snapshot_locked(\n  p_expected_revision bigint,\n  p_users jsonb,\n  p_allow_empty boolean DEFAULT false\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_revision bigint;\n  v_user jsonb;\n  v_id text;\n  v_username text;\n  v_affected integer;\n  v_result jsonb;\nBEGIN\n  SELECT revision INTO v_revision\n  FROM public.manager_user_state\n  WHERE singleton = true\n  FOR UPDATE;\n  IF v_revision IS DISTINCT FROM p_expected_revision THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'REVISION_CONFLICT', 'revision', v_revision);\n  END IF;\n  IF p_users IS NULL OR jsonb_typeof(p_users) <> 'array' OR (jsonb_array_length(p_users) = 0 AND NOT p_allow_empty) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_OR_EMPTY_SNAPSHOT', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY lower(btrim(value->>'username'))\n    HAVING lower(btrim(value->>'username')) = '' OR count(*) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'DUPLICATE_OR_INVALID_USERNAME', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE jsonb_typeof(item.value->'assigned_bot_ids') NOT IN ('array', 'null')\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_BOT_ASSIGNMENTS', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT btrim(bot_id.value)\n    FROM jsonb_array_elements(p_users) AS item(value)\n    CROSS JOIN LATERAL jsonb_array_elements_text(\n      CASE WHEN jsonb_typeof(item.value->'assigned_bot_ids') = 'array'\n        THEN item.value->'assigned_bot_ids' ELSE '[]'::jsonb END\n    ) AS bot_id(value)\n    GROUP BY btrim(bot_id.value)\n    HAVING btrim(bot_id.value) = '' OR count(DISTINCT lower(btrim(item.value->>'username'))) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'BOT_OWNERSHIP_CONFLICT', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY btrim(COALESCE(value->>'id', ''))\n    HAVING btrim(COALESCE(value->>'id', '')) = '' OR count(*) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'DUPLICATE_OR_INVALID_USER_ID', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE btrim(COALESCE(item.value->>'username', '')) = ''\n       OR btrim(COALESCE(item.value->>'id', '')) = ''\n       OR btrim(COALESCE(item.value->>'password', '')) = ''\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW', 'revision', v_revision);\n  END IF;\n\n  FOR v_user IN SELECT value FROM jsonb_array_elements(p_users) AS item(value)\n  LOOP\n    v_username := btrim(COALESCE(v_user->>'username', ''));\n    v_id := btrim(COALESCE(v_user->>'id', ''));\n    IF v_username = '' OR v_id = '' OR COALESCE(v_user->>'password', '') = '' THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW', 'revision', v_revision);\n    END IF;\n\n    UPDATE public.manager_users AS u\n    SET id = v_id,\n        username = v_username,\n        password = v_user->>'password',\n        role = COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n        status = COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n        assigned_bot_ids = COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n        expires_at = NULLIF(v_user->>'expires_at', '')::timestamptz,\n        plan_name = COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n        bot_aliases = CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n        allow_account_change = COALESCE((v_user->>'allow_account_change')::boolean, true),\n        lock_reason = COALESCE(v_user->>'lock_reason', ''),\n        note = COALESCE(v_user->>'note', ''),\n        created_at = COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, u.created_at, now()),\n        updated_at = COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n    WHERE u.id = v_id;\n    GET DIAGNOSTICS v_affected = ROW_COUNT;\n    IF v_affected = 0 THEN\n      UPDATE public.manager_users AS u\n      SET id = v_id,\n          username = v_username,\n          password = v_user->>'password',\n          role = COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n          status = COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n          assigned_bot_ids = COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n          expires_at = NULLIF(v_user->>'expires_at', '')::timestamptz,\n          plan_name = COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n          bot_aliases = CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n          allow_account_change = COALESCE((v_user->>'allow_account_change')::boolean, true),\n          lock_reason = COALESCE(v_user->>'lock_reason', ''),\n          note = COALESCE(v_user->>'note', ''),\n          created_at = COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, u.created_at, now()),\n          updated_at = COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n      WHERE lower(u.username) = lower(v_username);\n      GET DIAGNOSTICS v_affected = ROW_COUNT;\n    END IF;\n    IF v_affected = 0 THEN\n      INSERT INTO public.manager_users(\n        id, username, password, role, status, assigned_bot_ids, expires_at,\n        plan_name, bot_aliases, allow_account_change, lock_reason, note,\n        created_at, updated_at\n      ) VALUES (\n        v_id, v_username, v_user->>'password',\n        COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n        COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n        COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n        NULLIF(v_user->>'expires_at', '')::timestamptz,\n        COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n        CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n        COALESCE((v_user->>'allow_account_change')::boolean, true),\n        COALESCE(v_user->>'lock_reason', ''), COALESCE(v_user->>'note', ''),\n        COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, now()),\n        COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n      );\n    END IF;\n  END LOOP;\n\n  DELETE FROM public.manager_users AS u\n  WHERE NOT EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE COALESCE(item.value->>'id', '') = u.id\n       OR lower(COALESCE(item.value->>'username', '')) = lower(u.username)\n  );\n\n  SELECT revision INTO v_revision FROM public.manager_user_state WHERE singleton = true;\n  v_result := jsonb_build_object('ok', true, 'revision', v_revision);\n  RETURN v_result;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.save_manager_users_snapshot(\n  p_expected_revision bigint,\n  p_transaction_id uuid,\n  p_users jsonb,\n  p_allow_empty boolean DEFAULT false\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_existing public.manager_users_write_transactions%ROWTYPE;\n  v_result jsonb;\nBEGIN\n  IF p_transaction_id IS NULL THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_TRANSACTION_ID');\n  END IF;\n  PERFORM 1 FROM public.manager_user_state WHERE singleton = true FOR UPDATE;\n  SELECT * INTO v_existing FROM public.manager_users_write_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF v_existing.expected_revision <> p_expected_revision OR v_existing.users_payload <> p_users THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN v_existing.result;\n  END IF;\n  v_result := public.apply_manager_users_snapshot_locked(p_expected_revision, p_users, p_allow_empty);\n  IF COALESCE((v_result->>'ok')::boolean, false) THEN\n    INSERT INTO public.manager_users_write_transactions(transaction_id, expected_revision, users_payload, result)\n    VALUES (p_transaction_id, p_expected_revision, p_users, v_result);\n  END IF;\n  RETURN v_result;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.insert_manager_users_if_absent(p_users jsonb)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_user jsonb;\n  v_id text;\n  v_username text;\n  v_revision bigint;\n  v_inserted integer := 0;\n  v_rows integer;\nBEGIN\n  PERFORM 1 FROM public.manager_user_state WHERE singleton = true FOR UPDATE;\n  IF p_users IS NULL OR jsonb_typeof(p_users) <> 'array' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USERS');\n  END IF;\n  IF EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE btrim(COALESCE(item.value->>'username', '')) = ''\n       OR btrim(COALESCE(item.value->>'id', '')) = ''\n       OR btrim(COALESCE(item.value->>'password', '')) = ''\n       OR (item.value ? 'assigned_bot_ids' AND jsonb_typeof(item.value->'assigned_bot_ids') NOT IN ('array', 'null'))\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW');\n  END IF;\n  IF EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY lower(btrim(value->>'username'))\n    HAVING lower(btrim(value->>'username')) = '' OR count(*) > 1\n  ) OR EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY btrim(COALESCE(value->>'id', ''))\n    HAVING btrim(COALESCE(value->>'id', '')) = '' OR count(*) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'DUPLICATE_OR_INVALID_USER');\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    CROSS JOIN LATERAL jsonb_array_elements_text(\n      CASE WHEN jsonb_typeof(item.value->'assigned_bot_ids') = 'array'\n        THEN item.value->'assigned_bot_ids' ELSE '[]'::jsonb END\n    ) AS assigned(value)\n    GROUP BY assigned.value\n    HAVING assigned.value = '' OR count(DISTINCT lower(btrim(item.value->>'username'))) > 1\n  ) OR EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    CROSS JOIN LATERAL jsonb_array_elements_text(\n      CASE WHEN jsonb_typeof(item.value->'assigned_bot_ids') = 'array'\n        THEN item.value->'assigned_bot_ids' ELSE '[]'::jsonb END\n    ) AS assigned(value)\n    JOIN public.manager_users AS existing\n      ON existing.assigned_bot_ids ? assigned.value\n     AND existing.id <> COALESCE(item.value->>'id', '')\n     AND lower(existing.username) <> lower(COALESCE(item.value->>'username', ''))\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'BOT_OWNERSHIP_CONFLICT');\n  END IF;\n  FOR v_user IN SELECT value FROM jsonb_array_elements(p_users) AS item(value)\n  LOOP\n    v_username := btrim(COALESCE(v_user->>'username', ''));\n    v_id := btrim(COALESCE(v_user->>'id', ''));\n    IF v_username = '' OR v_id = '' OR COALESCE(v_user->>'password', '') = '' THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW');\n    END IF;\n    IF EXISTS (\n      SELECT 1 FROM public.manager_users AS existing\n      WHERE lower(existing.username) = lower(v_username) OR existing.id = v_id\n    ) THEN\n      CONTINUE;\n    END IF;\n    IF EXISTS (\n      SELECT 1\n      FROM jsonb_array_elements(COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb)) AS assigned(value)\n      JOIN public.manager_users AS existing\n        ON existing.assigned_bot_ids ? (assigned.value #>> '{}')\n    ) THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'BOT_OWNERSHIP_CONFLICT');\n    END IF;\n    INSERT INTO public.manager_users(\n      id, username, password, role, status, assigned_bot_ids, expires_at,\n      plan_name, bot_aliases, allow_account_change, lock_reason, note,\n      created_at, updated_at\n    ) VALUES (\n      v_id, v_username, v_user->>'password',\n      COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n      COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n      COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n      NULLIF(v_user->>'expires_at', '')::timestamptz,\n      COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n      CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n      COALESCE((v_user->>'allow_account_change')::boolean, true),\n      COALESCE(v_user->>'lock_reason', ''), COALESCE(v_user->>'note', ''),\n      COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, now()),\n      COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n    ) ON CONFLICT DO NOTHING;\n    GET DIAGNOSTICS v_rows = ROW_COUNT;\n    v_inserted := v_inserted + v_rows;\n  END LOOP;\n  SELECT revision INTO v_revision FROM public.manager_user_state WHERE singleton = true;\n  RETURN jsonb_build_object('ok', true, 'inserted', v_inserted, 'revision', v_revision);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.redeem_manager_key_and_save_users(\n  p_code text,\n  p_username text,\n  p_transaction_id text,\n  p_expected_revision bigint,\n  p_users jsonb,\n  p_allow_empty boolean DEFAULT false\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_key public.manager_keys%ROWTYPE;\n  v_transaction public.manager_key_usage_transactions%ROWTYPE;\n  v_code text := upper(btrim(COALESCE(p_code, '')));\n  v_username text := lower(btrim(COALESCE(p_username, '')));\n  v_users jsonb;\n  v_count integer;\n  v_max integer;\n  v_used_by text;\n  v_user_revision bigint;\n  v_result jsonb;\nBEGIN\n  IF v_code = '' OR v_username = '' OR COALESCE(btrim(p_transaction_id), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_INPUT');\n  END IF;\n  PERFORM 1 FROM public.manager_user_state WHERE singleton = true FOR UPDATE;\n  SELECT * INTO v_transaction FROM public.manager_key_usage_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF lower(v_transaction.username) <> v_username\n       OR upper(COALESCE(v_transaction.usage_snapshot->>'code', v_transaction.usage_snapshot->>'key_code', '')) <> v_code THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN jsonb_build_object('ok', true, 'replayed', true, 'transactionId', p_transaction_id,\n      'row', v_transaction.usage_snapshot, 'userRevision', v_transaction.user_revision);\n  END IF;\n  SELECT * INTO v_key\n  FROM public.manager_keys\n  WHERE upper(COALESCE(NULLIF(code, ''), key_code, '')) = v_code\n  FOR UPDATE;\n  IF NOT FOUND THEN RETURN jsonb_build_object('ok', false, 'error', 'KEY_NOT_FOUND'); END IF;\n\n  v_max := COALESCE(v_key.max_uses, 1);\n  IF v_max < 0 THEN RETURN jsonb_build_object('ok', false, 'error', 'INVALID_MAX_USES'); END IF;\n  IF v_key.expires_at IS NOT NULL AND v_key.expires_at <= now() THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'KEY_EXPIRED');\n  END IF;\n  v_users := CASE WHEN jsonb_typeof(v_key.used_users) = 'array' THEN v_key.used_users ELSE '[]'::jsonb END;\n  IF jsonb_array_length(v_users) > 0 THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM jsonb_array_elements_text(v_users) AS item(value) WHERE btrim(value) <> '';\n  END IF;\n  IF jsonb_array_length(v_users) = 0 AND COALESCE(v_key.used_by, '') <> '' THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM unnest(string_to_array(v_key.used_by, ',')) AS value WHERE btrim(value) <> '';\n  END IF;\n  IF v_users ? v_username THEN RETURN jsonb_build_object('ok', false, 'error', 'ALREADY_USED'); END IF;\n  v_count := GREATEST(COALESCE(v_key.used_count, 0), jsonb_array_length(v_users), CASE WHEN v_key.used THEN 1 ELSE 0 END);\n  IF v_max > 0 AND v_count >= v_max THEN RETURN jsonb_build_object('ok', false, 'error', 'EXHAUSTED'); END IF;\n\n  v_users := v_users || jsonb_build_array(v_username);\n  v_count := v_count + 1;\n  SELECT string_agg(value, ', ' ORDER BY ord) INTO v_used_by\n  FROM jsonb_array_elements_text(v_users) WITH ORDINALITY AS item(value, ord);\n  IF NOT EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE lower(btrim(item.value->>'username')) = v_username\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'REDEEM_USER_MISSING');\n  END IF;\n  v_result := public.apply_manager_users_snapshot_locked(p_expected_revision, p_users, p_allow_empty);\n  IF NOT COALESCE((v_result->>'ok')::boolean, false) THEN RETURN v_result; END IF;\n\n  UPDATE public.manager_keys\n  SET used_users = v_users, used_count = v_count, used_by = v_used_by,\n      used_at = now(), used = (v_max > 0 AND v_count >= v_max)\n  WHERE id = v_key.id\n  RETURNING * INTO v_key;\n  SELECT revision INTO v_user_revision FROM public.manager_user_state WHERE singleton = true;\n  INSERT INTO public.manager_key_usage_transactions(transaction_id, key_id, username, usage_snapshot, user_revision)\n  VALUES (p_transaction_id, v_key.id, v_username, to_jsonb(v_key), v_user_revision);\n  RETURN jsonb_build_object('ok', true, 'transactionId', p_transaction_id,\n    'row', to_jsonb(v_key), 'userRevision', v_user_revision);\nEND;\n$$;\n\nREVOKE ALL ON FUNCTION public.bump_manager_users_revision() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.reject_revoked_manager_session() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.read_manager_users_snapshot() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.read_manager_session(text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.read_manager_authorization(text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.revoke_manager_session(text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.create_manager_user_session(bigint,jsonb) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.apply_manager_users_snapshot_locked(bigint,jsonb,boolean) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.save_manager_users_snapshot(bigint,uuid,jsonb,boolean) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.insert_manager_users_if_absent(jsonb) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.redeem_manager_key_and_save_users(text,text,text,bigint,jsonb,boolean) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.read_manager_users_snapshot() TO service_role;\nGRANT EXECUTE ON FUNCTION public.read_manager_session(text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.read_manager_authorization(text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.revoke_manager_session(text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.create_manager_user_session(bigint,jsonb) TO service_role;\nGRANT EXECUTE ON FUNCTION public.save_manager_users_snapshot(bigint,uuid,jsonb,boolean) TO service_role;\nGRANT EXECUTE ON FUNCTION public.insert_manager_users_if_absent(jsonb) TO service_role;\nGRANT EXECUTE ON FUNCTION public.redeem_manager_key_and_save_users(text,text,text,bigint,jsonb,boolean) TO service_role;\n\nCOMMIT;\nNOTIFY pgrst, 'reload schema';";
+const SUPABASE_SCHEMA_SQL = "-- KingMC Bot Manager storage contract, aligned with manager.js and bot.js.\n-- Safe to run more than once. Keeps legacy columns/rows and adds the current API schema.\n--\n-- SCHEMA VERSION: 2026-10-30-v11.9 (Audit V4 Master Directive)\n--   - Link4M RPC chỉ chặn user 'disabled'; user 'expired' ĐƯỢC vượt link để hồi sinh.\n--   - claim_manager_link4m_reward revive 'expired' -> 'active' ATOMIC (cùng UPDATE với\n--     expires_at), chỉ chạy sau khi attempt đã được xác minh (token/status/expiry).\n--   - Không tự mở khóa 'disabled' (chỉ admin mới có quyền).\n-- ROLLBACK: toàn bộ hàm dùng CREATE OR REPLACE — chạy lại nguyên văn bản schema NGAY TRƯỚC\n--   (phiên bản 2026-10-28) là quay về hành vi cũ, không mất dữ liệu. Nếu chỉ muốn rollback\n--   riêng BUG-09: khôi phục guard chặn trạng thái khác active ở cả hai RPC và bỏ dòng\n--   `status = CASE WHEN v_user.status = 'expired' ...` trong UPDATE manager_users của claim.\n--\nBEGIN;\n\nCREATE TABLE IF NOT EXISTS public.manager_users (\n  id text,\n  username text PRIMARY KEY,\n  password text,\n  password_hash text,\n  role text NOT NULL DEFAULT 'user',\n  status text NOT NULL DEFAULT 'active',\n  assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  expires_at timestamptz,\n  plan_name text NOT NULL DEFAULT 'Gói mặc định',\n  bot_aliases jsonb NOT NULL DEFAULT '{}'::jsonb,\n  allow_account_change boolean NOT NULL DEFAULT true,\n  lock_reason text NOT NULL DEFAULT '',\n  note text NOT NULL DEFAULT '',\n  created_at timestamptz NOT NULL DEFAULT now(),\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS username text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS password text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS password_hash text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS expires_at timestamptz;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS plan_name text NOT NULL DEFAULT 'Gói mặc định';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS bot_aliases jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS allow_account_change boolean NOT NULL DEFAULT true;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS lock_reason text NOT NULL DEFAULT '';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS note text NOT NULL DEFAULT '';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS is_permanent boolean NOT NULL DEFAULT false;\nCREATE TABLE IF NOT EXISTS public.manager_migration_entitlement_undo (\n  migration_id text NOT NULL,\n  entity_type text NOT NULL CHECK (entity_type IN ('user', 'key')),\n  entity_key text NOT NULL,\n  old_is_permanent boolean NOT NULL,\n  new_is_permanent boolean NOT NULL,\n  captured_at timestamptz NOT NULL DEFAULT now(),\n  rolled_back_at timestamptz,\n  PRIMARY KEY (migration_id, entity_type, entity_key)\n);\nALTER TABLE public.manager_migration_entitlement_undo ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_migration_entitlement_undo FROM PUBLIC, anon, authenticated;\nGRANT ALL ON TABLE public.manager_migration_entitlement_undo TO service_role;\nINSERT INTO public.manager_migration_entitlement_undo (migration_id, entity_type, entity_key, old_is_permanent, new_is_permanent) SELECT '2026-10-30-v11.9', 'user', username, is_permanent, true FROM public.manager_users WHERE is_permanent = false AND expires_at IS NULL AND (plan_name ILIKE '%vĩnh viễn%' OR plan_name ILIKE '%permanent%' OR plan_name ILIKE '%lifetime%') AND status = 'active' AND role <> 'admin' ON CONFLICT (migration_id, entity_type, entity_key) DO UPDATE SET old_is_permanent = EXCLUDED.old_is_permanent, new_is_permanent = EXCLUDED.new_is_permanent, captured_at = now();\nUPDATE public.manager_users SET is_permanent = true, updated_at = now() WHERE is_permanent = false AND expires_at IS NULL AND (plan_name ILIKE '%vĩnh viễn%' OR plan_name ILIKE '%permanent%' OR plan_name ILIKE '%lifetime%') AND status = 'active' AND role <> 'admin';\nALTER TABLE public.manager_users ALTER COLUMN password_hash DROP NOT NULL;\nUPDATE public.manager_users SET id = 'usr_' || username WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.manager_users SET password = password_hash WHERE (password IS NULL OR password = '') AND password_hash IS NOT NULL;\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_users_id_unique ON public.manager_users(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_users_username_unique ON public.manager_users(username);\n\nCREATE TABLE IF NOT EXISTS public.manager_keys (\n  id text PRIMARY KEY,\n  code text,\n  key_code text,\n  days integer NOT NULL DEFAULT 1,\n  duration_days integer NOT NULL DEFAULT 0,\n  duration_ms bigint NOT NULL DEFAULT 0,\n  plan_name text NOT NULL DEFAULT 'Gói mặc định',\n  bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  bot_count integer NOT NULL DEFAULT 1,\n  used boolean NOT NULL DEFAULT false,\n  status text NOT NULL DEFAULT 'unused',\n  allow_account_change boolean NOT NULL DEFAULT true,\n  used_by text,\n  used_at timestamptz,\n  max_uses integer NOT NULL DEFAULT 1,\n  used_count integer NOT NULL DEFAULT 0,\n  used_users jsonb NOT NULL DEFAULT '[]'::jsonb,\n  expires_at timestamptz,\n  note text,\n  created_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS code text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS key_code text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS days integer NOT NULL DEFAULT 1;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS duration_days integer NOT NULL DEFAULT 0;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS duration_ms bigint NOT NULL DEFAULT 0;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS role text DEFAULT 'user';\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS plan_name text NOT NULL DEFAULT 'Gói mặc định';\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS bot_count integer NOT NULL DEFAULT 1;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used boolean NOT NULL DEFAULT false;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'unused';\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS allow_account_change boolean NOT NULL DEFAULT true;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_by text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_at timestamptz;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS max_uses integer NOT NULL DEFAULT 1;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_count integer NOT NULL DEFAULT 0;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_users jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS expires_at timestamptz;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS note text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS is_permanent boolean NOT NULL DEFAULT false;\nUPDATE public.manager_keys SET is_permanent = true WHERE days = -1 OR duration_days = -1;\nUPDATE public.manager_keys SET code = key_code WHERE code IS NULL OR code = '';\nUPDATE public.manager_keys SET key_code = code WHERE key_code IS NULL OR key_code = '';\nUPDATE public.manager_keys SET id = 'key_' || code WHERE (id IS NULL OR id = '') AND code IS NOT NULL;\nUPDATE public.manager_keys SET days = duration_days WHERE duration_days > 0 AND (days IS NULL OR days = 1);\nUPDATE public.manager_keys SET bot_ids = assigned_bot_ids WHERE bot_ids = '[]'::jsonb AND assigned_bot_ids <> '[]'::jsonb;\nUPDATE public.manager_keys SET used = (lower(status) IN ('used','active','redeemed')) WHERE status IS NOT NULL AND used = false;\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_keys_code_unique ON public.manager_keys(code);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_keys_id_unique ON public.manager_keys(id);\n\nCREATE TABLE IF NOT EXISTS public.bot_registry (\n  id text PRIMARY KEY,\n  data jsonb NOT NULL DEFAULT '{}'::jsonb,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\n-- Earlier versions stored one bot per row with numeric ids. Convert the id type\n-- without removing those rows, then create the singleton registry document.\nDO $$\nBEGIN\n  IF EXISTS (\n    SELECT 1 FROM information_schema.columns\n    WHERE table_schema='public' AND table_name='bot_registry'\n      AND column_name='id' AND data_type <> 'text'\n  ) THEN\n    ALTER TABLE public.bot_registry ALTER COLUMN id TYPE text USING id::text;\n  END IF;\nEND $$;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS data jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS url text;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS label text DEFAULT '';\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS sort_order integer DEFAULT 0;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS admin_password text DEFAULT '';\nDO $$\nDECLARE\n  legacy_bots jsonb;\n  legacy_id_map jsonb;\n  legacy_order jsonb;\n  legacy_admin text;\nBEGIN\n  IF NOT EXISTS (SELECT 1 FROM public.bot_registry WHERE id='default') THEN\n    SELECT COALESCE(jsonb_agg(jsonb_build_object('label', COALESCE(label,''), 'url', url) ORDER BY sort_order, id), '[]'::jsonb),\n           COALESCE(jsonb_object_agg(url, id), '{}'::jsonb),\n           COALESCE(jsonb_agg(url ORDER BY sort_order, id), '[]'::jsonb),\n           COALESCE(max(admin_password), '')\n      INTO legacy_bots, legacy_id_map, legacy_order, legacy_admin\n      FROM public.bot_registry\n      WHERE id <> 'default' AND url IS NOT NULL AND btrim(url) <> '';\n    INSERT INTO public.bot_registry(id, data, updated_at, url, label, sort_order, admin_password)\n      VALUES ('default', jsonb_build_object(\n        'dynamicBots', legacy_bots, 'botIdMap', legacy_id_map,\n        'orderUrls', legacy_order, 'adminPassword', legacy_admin,\n        'disabledEnvUrls', '[]'::jsonb, 'disabledEnvIds', '[]'::jsonb,\n        'overrides', '[]'::jsonb, 'order', '[]'::jsonb,\n        'botAliases', '{}'::jsonb, 'botTags', '{}'::jsonb,\n        'systemSettings', '{}'::jsonb, 'lastBotId', 0\n      ), now(), '', 'KingMC Registry', -1, legacy_admin) ON CONFLICT (id) DO NOTHING;\n  END IF;\nEND $$;\n\nCREATE TABLE IF NOT EXISTS public.manager_sessions (\n  token_hash text PRIMARY KEY,\n  user_id text NOT NULL DEFAULT '',\n  username text NOT NULL,\n  role text NOT NULL DEFAULT 'user',\n  assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  expires_at bigint NOT NULL DEFAULT 0,\n  plan_name text NOT NULL DEFAULT 'Gói thường',\n  allow_account_change boolean NOT NULL DEFAULT true,\n  status text NOT NULL DEFAULT 'active',\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS user_id text NOT NULL DEFAULT '';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS token_hash text;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS username text;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS expires_at bigint NOT NULL DEFAULT 0;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS plan_name text NOT NULL DEFAULT 'Gói thường';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS allow_account_change boolean NOT NULL DEFAULT true;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nUPDATE public.manager_sessions SET user_id = username WHERE user_id IS NULL OR user_id = '';\n\nCREATE TABLE IF NOT EXISTS public.bot_settings (\n  bot_id text PRIMARY KEY,\n  username text NOT NULL DEFAULT '',\n  password text NOT NULL DEFAULT '',\n  settings jsonb NOT NULL DEFAULT '{}'::jsonb,\n  proxy jsonb NOT NULL DEFAULT '{}'::jsonb,\n  schedules jsonb NOT NULL DEFAULT '[]'::jsonb,\n  bot_schedules jsonb NOT NULL DEFAULT '[]'::jsonb,\n  auto_chat jsonb NOT NULL DEFAULT '[]'::jsonb,\n  manually_stopped boolean NOT NULL DEFAULT false,\n  synced_auth jsonb NOT NULL DEFAULT '{}'::jsonb,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS username text NOT NULL DEFAULT '';\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS password text NOT NULL DEFAULT '';\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS settings jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS proxy jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS schedules jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS bot_schedules jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS auto_chat jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS manually_stopped boolean NOT NULL DEFAULT false;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS synced_auth jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\n\nCREATE OR REPLACE FUNCTION public.sync_bot_schedules_column()\nRETURNS trigger\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $\nBEGIN\n  IF NEW.schedules IS NOT NULL AND (NEW.bot_schedules IS NULL OR NEW.bot_schedules = '[]'::jsonb) AND NEW.schedules <> '[]'::jsonb THEN\n    NEW.bot_schedules := NEW.schedules;\n  ELSIF NEW.bot_schedules IS NOT NULL AND (NEW.schedules IS NULL OR NEW.schedules = '[]'::jsonb) AND NEW.bot_schedules <> '[]'::jsonb THEN\n    NEW.schedules := NEW.bot_schedules;\n  ELSIF NEW.schedules IS NOT NULL AND NEW.bot_schedules IS NULL THEN\n    NEW.bot_schedules := NEW.schedules;\n  ELSIF NEW.bot_schedules IS NOT NULL AND NEW.schedules IS NULL THEN\n    NEW.schedules := NEW.bot_schedules;\n  END IF;\n  RETURN NEW;\nEND;\n$;\n\nDROP TRIGGER IF EXISTS trg_sync_bot_schedules ON public.bot_settings;\nCREATE TRIGGER trg_sync_bot_schedules\nBEFORE INSERT OR UPDATE ON public.bot_settings\nFOR EACH ROW EXECUTE FUNCTION public.sync_bot_schedules_column();\n\nCREATE TABLE IF NOT EXISTS public.audit_logs (\n  id text PRIMARY KEY,\n  bot_id text,\n  log_type text NOT NULL DEFAULT 'SYSTEM',\n  category text NOT NULL DEFAULT 'SYSTEM',\n  action text NOT NULL DEFAULT '',\n  action_label text NOT NULL DEFAULT '',\n  actor_username text NOT NULL DEFAULT 'system',\n  actor_role text NOT NULL DEFAULT 'system',\n  actor_ip text NOT NULL DEFAULT '',\n  target jsonb NOT NULL DEFAULT '{}'::jsonb,\n  details text NOT NULL DEFAULT '',\n  status text NOT NULL DEFAULT 'SUCCESS',\n  timestamp timestamptz NOT NULL DEFAULT now(),\n  actor jsonb NOT NULL DEFAULT '{}'::jsonb,\n  ip text NOT NULL DEFAULT ''\n);\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS log_type text NOT NULL DEFAULT 'SYSTEM';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS category text NOT NULL DEFAULT 'SYSTEM';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS action text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS action_label text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_username text NOT NULL DEFAULT 'system';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_role text NOT NULL DEFAULT 'system';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_ip text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS target jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS details text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'SUCCESS';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS timestamp timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS ip text NOT NULL DEFAULT '';\nUPDATE public.audit_logs SET\n  actor_username = COALESCE(NULLIF(actor_username, 'system'), actor->>'username', 'system'),\n  actor_role = COALESCE(NULLIF(actor_role, 'system'), actor->>'role', 'system'),\n  actor_ip = COALESCE(NULLIF(actor_ip, ''), ip, ''),\n  bot_id = COALESCE(NULLIF(bot_id, ''), NULLIF(target->>'botId',''), NULLIF(target->>'bot_id',''))\nWHERE actor IS NOT NULL OR ip <> '' OR bot_id IS NULL;\n\nCREATE TABLE IF NOT EXISTS public.bot_chat_logs (\n  id text PRIMARY KEY,\n  bot_id text NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  sender text NOT NULL DEFAULT 'SERVER',\n  event_type text NOT NULL DEFAULT 'CHAT',\n  message text NOT NULL DEFAULT '',\n  metadata jsonb NOT NULL DEFAULT '{}'::jsonb\n);\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS sender text NOT NULL DEFAULT 'SERVER';\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS event_type text NOT NULL DEFAULT 'CHAT';\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS message text NOT NULL DEFAULT '';\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb;\nCREATE TABLE IF NOT EXISTS public.bot_event_logs (\n  id text PRIMARY KEY,\n  bot_id text NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  level text NOT NULL DEFAULT 'INFO',\n  event_type text NOT NULL DEFAULT 'SYSTEM',\n  message text NOT NULL DEFAULT '',\n  metadata jsonb NOT NULL DEFAULT '{}'::jsonb\n);\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS level text NOT NULL DEFAULT 'INFO';\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS event_type text NOT NULL DEFAULT 'SYSTEM';\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS message text NOT NULL DEFAULT '';\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb;\nCREATE TABLE IF NOT EXISTS public.bot_position_state (\n  bot_id text PRIMARY KEY,\n  position jsonb NOT NULL DEFAULT '{}'::jsonb,\n  dimension text NOT NULL DEFAULT 'unknown',\n  location_state text NOT NULL DEFAULT 'Unknown',\n  last_event_key text,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS position jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS dimension text NOT NULL DEFAULT 'unknown';\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS location_state text NOT NULL DEFAULT 'Unknown';\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS last_event_key text;\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nCREATE TABLE IF NOT EXISTS public.bot_position_logs (\n  id text PRIMARY KEY,\n  bot_id text NOT NULL,\n  changed_at timestamptz NOT NULL DEFAULT now(),\n  from_position jsonb,\n  to_position jsonb NOT NULL,\n  from_dimension text,\n  to_dimension text NOT NULL DEFAULT 'unknown',\n  location_state text NOT NULL DEFAULT 'Unknown',\n  reason text NOT NULL DEFAULT 'MOVE',\n  event_key text NOT NULL UNIQUE\n);\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS changed_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS from_position jsonb;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS to_position jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS from_dimension text;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS to_dimension text NOT NULL DEFAULT 'unknown';\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS location_state text NOT NULL DEFAULT 'Unknown';\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS reason text NOT NULL DEFAULT 'MOVE';\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS event_key text;\nCREATE TABLE IF NOT EXISTS public.manager_backups (\n  name text PRIMARY KEY,\n  bot_id text,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  size_bytes integer NOT NULL DEFAULT 0,\n  payload jsonb NOT NULL DEFAULT '{}'::jsonb\n);\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS name text;\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS size_bytes integer NOT NULL DEFAULT 0;\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS payload jsonb NOT NULL DEFAULT '{}'::jsonb;\n\n-- Repair nullable legacy identifiers without deleting or merging existing rows.\nUPDATE public.audit_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_chat_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_event_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_position_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_position_logs SET event_key = 'legacy:' || id WHERE event_key IS NULL OR btrim(event_key) = '';\n\nCREATE INDEX IF NOT EXISTS idx_manager_users_role_status ON public.manager_users(role, status);\nCREATE INDEX IF NOT EXISTS idx_manager_keys_used_created ON public.manager_keys(used, created_at DESC);\nCREATE INDEX IF NOT EXISTS idx_manager_sessions_username ON public.manager_sessions(username);\nCREATE INDEX IF NOT EXISTS idx_manager_sessions_expires_at ON public.manager_sessions(expires_at);\nCREATE INDEX IF NOT EXISTS idx_audit_logs_bot_time ON public.audit_logs(bot_id, timestamp DESC);\nCREATE INDEX IF NOT EXISTS idx_audit_logs_user_time ON public.audit_logs(actor_username, timestamp DESC);\nCREATE INDEX IF NOT EXISTS idx_bot_chat_logs_bot_time ON public.bot_chat_logs(bot_id, created_at DESC);\nCREATE INDEX IF NOT EXISTS idx_bot_event_logs_bot_time ON public.bot_event_logs(bot_id, created_at DESC);\nCREATE INDEX IF NOT EXISTS idx_bot_position_logs_bot_time ON public.bot_position_logs(bot_id, changed_at DESC);\nCREATE INDEX IF NOT EXISTS idx_manager_backups_bot_time ON public.manager_backups(bot_id, created_at DESC);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_sessions_token_hash_unique ON public.manager_sessions(token_hash);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_settings_bot_id_unique ON public.bot_settings(bot_id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_audit_logs_id_unique ON public.audit_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_chat_logs_id_unique ON public.bot_chat_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_event_logs_id_unique ON public.bot_event_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_position_state_bot_id_unique ON public.bot_position_state(bot_id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_position_logs_id_unique ON public.bot_position_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_position_logs_event_key_unique ON public.bot_position_logs(event_key);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_backups_name_unique ON public.manager_backups(name);\n\nALTER TABLE public.manager_users ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_keys ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_registry ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_sessions ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_settings ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_chat_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_event_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_position_state ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_position_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_backups ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON public.manager_users, public.manager_keys, public.bot_registry,\n  public.manager_sessions, public.bot_settings, public.audit_logs,\n  public.bot_chat_logs, public.bot_event_logs, public.bot_position_state,\n  public.bot_position_logs, public.manager_backups FROM anon, authenticated;\nGRANT ALL ON public.manager_users, public.manager_keys, public.bot_registry,\n  public.manager_sessions, public.bot_settings, public.audit_logs,\n  public.bot_chat_logs, public.bot_event_logs, public.bot_position_state,\n  public.bot_position_logs, public.manager_backups TO service_role;\n\nCREATE OR REPLACE FUNCTION public.record_bot_position_change(\n  p_id text,\n  p_bot_id text,\n  p_changed_at timestamptz,\n  p_to_position jsonb,\n  p_to_dimension text,\n  p_location_state text,\n  p_reason text,\n  p_event_key text,\n  p_min_distance double precision DEFAULT 5.0\n) RETURNS jsonb\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $$\nDECLARE\n  prior public.bot_position_state%ROWTYPE;\n  dx double precision := 0;\n  dy double precision := 0;\n  dz double precision := 0;\n  distance double precision := 0;\n  dimension_changed boolean := false;\n  state_changed boolean := false;\nBEGIN\n  IF p_bot_id IS NULL OR p_bot_id !~ '^[1-9][0-9]{0,8}$' THEN\n    RAISE EXCEPTION 'Invalid bot_id';\n  END IF;\n  IF p_event_key IS NULL OR btrim(p_event_key) = '' THEN\n    RAISE EXCEPTION 'event_key is required';\n  END IF;\n  IF EXISTS (SELECT 1 FROM public.bot_position_logs WHERE event_key = p_event_key) THEN\n    RETURN jsonb_build_object('ok', true, 'recorded', false, 'duplicate', true);\n  END IF;\n\n  PERFORM pg_advisory_xact_lock(hashtext('bot-position:' || p_bot_id)::bigint);\n  -- Recheck under the bot lock so a concurrent retry cannot advance state twice.\n  IF EXISTS (SELECT 1 FROM public.bot_position_logs WHERE event_key = p_event_key) THEN\n    RETURN jsonb_build_object('ok', true, 'recorded', false, 'duplicate', true);\n  END IF;\n  SELECT * INTO prior FROM public.bot_position_state WHERE bot_id = p_bot_id FOR UPDATE;\n  IF FOUND THEN\n    dimension_changed := COALESCE(prior.dimension, '') <> COALESCE(p_to_dimension, 'unknown');\n    state_changed := COALESCE(prior.location_state, '') <> COALESCE(p_location_state, 'Unknown');\n    BEGIN\n      dx := COALESCE((p_to_position->>'x')::double precision, 0) - COALESCE((prior.position->>'x')::double precision, 0);\n      dy := COALESCE((p_to_position->>'y')::double precision, 0) - COALESCE((prior.position->>'y')::double precision, 0);\n      dz := COALESCE((p_to_position->>'z')::double precision, 0) - COALESCE((prior.position->>'z')::double precision, 0);\n      distance := sqrt(dx*dx + dy*dy + dz*dz);\n    EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN\n      distance := 0;\n    END;\n    IF NOT dimension_changed AND NOT state_changed AND distance < GREATEST(COALESCE(p_min_distance, 5.0), 0) THEN\n      RETURN jsonb_build_object('ok', true, 'recorded', false, 'duplicate', false, 'distance', distance);\n    END IF;\n  END IF;\n\n  INSERT INTO public.bot_position_logs(id, bot_id, changed_at, from_position, to_position,\n    from_dimension, to_dimension, location_state, reason, event_key)\n  VALUES (COALESCE(NULLIF(p_id,''), md5(random()::text || clock_timestamp()::text)), p_bot_id,\n    COALESCE(p_changed_at, now()), CASE WHEN prior.bot_id IS NULL THEN NULL ELSE prior.position END,\n    COALESCE(p_to_position, '{}'::jsonb), CASE WHEN prior.bot_id IS NULL THEN NULL ELSE prior.dimension END,\n    COALESCE(p_to_dimension, 'unknown'), COALESCE(p_location_state, 'Unknown'),\n    COALESCE(NULLIF(p_reason,''), 'MOVE'), p_event_key)\n  ON CONFLICT (event_key) DO NOTHING;\n\n  INSERT INTO public.bot_position_state(bot_id, position, dimension, location_state, last_event_key, updated_at)\n  VALUES (p_bot_id, COALESCE(p_to_position, '{}'::jsonb), COALESCE(p_to_dimension, 'unknown'),\n    COALESCE(p_location_state, 'Unknown'), p_event_key, COALESCE(p_changed_at, now()))\n  ON CONFLICT (bot_id) DO UPDATE SET position=EXCLUDED.position, dimension=EXCLUDED.dimension,\n    location_state=EXCLUDED.location_state, last_event_key=EXCLUDED.last_event_key, updated_at=EXCLUDED.updated_at;\n  RETURN jsonb_build_object('ok', true, 'recorded', true, 'distance', distance);\nEND;\n$$;\nREVOKE ALL ON FUNCTION public.record_bot_position_change(text,text,timestamptz,jsonb,text,text,text,text,double precision) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.record_bot_position_change(text,text,timestamptz,jsonb,text,text,text,text,double precision) TO service_role;\n\nCOMMIT;\n\nBEGIN;\n\nCREATE TABLE IF NOT EXISTS public.manager_locks (\n  lock_key text PRIMARY KEY,\n  owner_id text NOT NULL,\n  lease_until timestamptz NOT NULL,\n  fencing_token bigint NOT NULL DEFAULT 1,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_locks ADD COLUMN IF NOT EXISTS fencing_token bigint NOT NULL DEFAULT 1;\nALTER TABLE public.manager_locks ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_locks FROM PUBLIC, anon, authenticated;\nGRANT ALL ON TABLE public.manager_locks TO service_role;\n\nCREATE TABLE IF NOT EXISTS public.manager_key_usage_transactions (\n  transaction_id text PRIMARY KEY,\n  key_id text NOT NULL,\n  username text NOT NULL,\n  usage_snapshot jsonb NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_key_usage_transactions ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_key_usage_transactions FROM PUBLIC, anon, authenticated;\nGRANT SELECT ON TABLE public.manager_key_usage_transactions TO service_role;\n\nCREATE TABLE IF NOT EXISTS public.bot_log_clear_cutoffs (\n  bot_id text PRIMARY KEY,\n  event_cutoff timestamptz,\n  chat_cutoff timestamptz,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.bot_log_clear_cutoffs ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.bot_log_clear_cutoffs FROM PUBLIC, anon, authenticated;\nGRANT SELECT ON TABLE public.bot_log_clear_cutoffs TO service_role;\n\nDROP FUNCTION IF EXISTS public.acquire_manager_lock(text,text,integer);\nCREATE OR REPLACE FUNCTION public.acquire_manager_lock(\n  p_lock_key text,\n  p_owner_id text,\n  p_lease_seconds integer DEFAULT 900\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $\nDECLARE\n  v_lease_interval interval;\n  v_now timestamptz := now();\n  v_current RECORD;\n  v_token bigint;\nBEGIN\n  IF COALESCE(btrim(p_lock_key), '') = '' OR COALESCE(btrim(p_owner_id), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'fencing_token', 0);\n  END IF;\n\n  v_lease_interval := make_interval(secs => GREATEST(30, LEAST(COALESCE(p_lease_seconds, 900), 3600)));\n\n  SELECT owner_id, lease_until, fencing_token INTO v_current\n  FROM public.manager_locks\n  WHERE lock_key = p_lock_key\n  FOR UPDATE;\n\n  IF NOT FOUND THEN\n    v_token := 1;\n    INSERT INTO public.manager_locks(lock_key, owner_id, lease_until, updated_at, fencing_token)\n    VALUES (p_lock_key, p_owner_id, v_now + v_lease_interval, v_now, v_token);\n    RETURN jsonb_build_object('ok', true, 'fencing_token', v_token);\n  END IF;\n\n  IF v_current.owner_id <> p_owner_id AND v_current.lease_until > v_now THEN\n    RETURN jsonb_build_object('ok', false, 'fencing_token', v_current.fencing_token);\n  END IF;\n\n  v_token := COALESCE(v_current.fencing_token, 0) + 1;\n  UPDATE public.manager_locks\n  SET owner_id = p_owner_id,\n      lease_until = v_now + v_lease_interval,\n      updated_at = v_now,\n      fencing_token = v_token\n  WHERE lock_key = p_lock_key;\n\n  RETURN jsonb_build_object('ok', true, 'fencing_token', v_token);\nEND;\n$;\n\nCREATE OR REPLACE FUNCTION public.release_manager_lock(p_lock_key text, p_owner_id text)\nRETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE affected integer;\nBEGIN\n  DELETE FROM public.manager_locks WHERE lock_key = p_lock_key AND owner_id = p_owner_id;\n  GET DIAGNOSTICS affected = ROW_COUNT;\n  RETURN affected = 1;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.renew_manager_lock(\n  p_lock_key text,\n  p_owner_id text,\n  p_lease_seconds integer DEFAULT 900\n) RETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $\nDECLARE affected integer;\nBEGIN\n  UPDATE public.manager_locks\n  SET lease_until = now() + make_interval(secs => GREATEST(30, LEAST(COALESCE(p_lease_seconds, 900), 3600))),\n      updated_at = now()\n  WHERE lock_key = p_lock_key AND owner_id = p_owner_id AND lease_until > now();\n  GET DIAGNOSTICS affected = ROW_COUNT;\n  RETURN affected = 1;\nEND;\n$;\n\nCREATE OR REPLACE FUNCTION public.verify_manager_lock_fencing(\n  p_lock_key text,\n  p_owner_id text,\n  p_fencing_token bigint\n) RETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $\nDECLARE\n  v_valid boolean := false;\nBEGIN\n  IF COALESCE(btrim(p_lock_key), '') = '' OR COALESCE(btrim(p_owner_id), '') = '' OR p_fencing_token IS NULL OR p_fencing_token <= 0 THEN\n    RETURN false;\n  END IF;\n\n  SELECT (owner_id = p_owner_id AND fencing_token = p_fencing_token AND lease_until > now()) INTO v_valid\n  FROM public.manager_locks\n  WHERE lock_key = p_lock_key;\n\n  RETURN COALESCE(v_valid, false);\nEND;\n$;\n\nCREATE OR REPLACE FUNCTION public.patch_manager_registry(\n  p_patch jsonb DEFAULT '{}'::jsonb,\n  p_pending_reset_patch jsonb DEFAULT '{}'::jsonb,\n  p_pending_reset_deletes text[] DEFAULT '{}'::text[]\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_data jsonb;\n  v_resets jsonb;\n  v_key text;\nBEGIN\n  INSERT INTO public.bot_registry(id, data, updated_at)\n  VALUES ('default', '{}'::jsonb, now()) ON CONFLICT (id) DO NOTHING;\n  SELECT COALESCE(data, '{}'::jsonb) INTO v_data\n  FROM public.bot_registry WHERE id = 'default' FOR UPDATE;\n  v_data := v_data || COALESCE(p_patch, '{}'::jsonb);\n  v_resets := CASE WHEN jsonb_typeof(v_data->'pendingResets') = 'object' THEN v_data->'pendingResets' ELSE '{}'::jsonb END;\n  FOREACH v_key IN ARRAY COALESCE(p_pending_reset_deletes, '{}'::text[]) LOOP\n    v_resets := v_resets - v_key;\n  END LOOP;\n  v_resets := v_resets || CASE WHEN jsonb_typeof(p_pending_reset_patch) = 'object' THEN p_pending_reset_patch ELSE '{}'::jsonb END;\n  v_data := jsonb_set(v_data, '{pendingResets}', v_resets, true);\n  UPDATE public.bot_registry SET data = v_data, updated_at = now() WHERE id = 'default';\n  RETURN jsonb_build_object('ok', true);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.set_bot_log_clear_cutoff(\n  p_bot_id text,\n  p_kind text,\n  p_cutoff timestamptz\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE v_cutoff timestamptz;\nBEGIN\n  IF p_bot_id IS NULL OR p_bot_id !~ '^[1-9][0-9]{0,8}$' OR p_cutoff IS NULL OR p_kind IS NULL OR p_kind NOT IN ('event','chat') THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_INPUT');\n  END IF;\n  IF p_kind = 'event' THEN\n    INSERT INTO public.bot_log_clear_cutoffs(bot_id, event_cutoff, updated_at)\n    VALUES (p_bot_id, p_cutoff, now())\n    ON CONFLICT (bot_id) DO UPDATE SET\n      event_cutoff = CASE WHEN public.bot_log_clear_cutoffs.event_cutoff IS NULL THEN EXCLUDED.event_cutoff ELSE GREATEST(public.bot_log_clear_cutoffs.event_cutoff, EXCLUDED.event_cutoff) END,\n      updated_at = now()\n    RETURNING event_cutoff INTO v_cutoff;\n  ELSE\n    INSERT INTO public.bot_log_clear_cutoffs(bot_id, chat_cutoff, updated_at)\n    VALUES (p_bot_id, p_cutoff, now())\n    ON CONFLICT (bot_id) DO UPDATE SET\n      chat_cutoff = CASE WHEN public.bot_log_clear_cutoffs.chat_cutoff IS NULL THEN EXCLUDED.chat_cutoff ELSE GREATEST(public.bot_log_clear_cutoffs.chat_cutoff, EXCLUDED.chat_cutoff) END,\n      updated_at = now()\n    RETURNING chat_cutoff INTO v_cutoff;\n  END IF;\n  RETURN jsonb_build_object('ok', true, 'cutoff', v_cutoff);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.reject_cleared_bot_log()\nRETURNS trigger\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE v_cutoff timestamptz;\nBEGIN\n  IF TG_TABLE_NAME = 'bot_event_logs' THEN\n    SELECT event_cutoff INTO v_cutoff FROM public.bot_log_clear_cutoffs WHERE bot_id = NEW.bot_id;\n  ELSE\n    SELECT chat_cutoff INTO v_cutoff FROM public.bot_log_clear_cutoffs WHERE bot_id = NEW.bot_id;\n  END IF;\n  IF v_cutoff IS NOT NULL AND NEW.created_at < v_cutoff THEN\n    RETURN NULL;\n  END IF;\n  RETURN NEW;\nEND;\n$$;\n\nDROP TRIGGER IF EXISTS reject_cleared_event_log ON public.bot_event_logs;\nCREATE TRIGGER reject_cleared_event_log BEFORE INSERT ON public.bot_event_logs\nFOR EACH ROW EXECUTE FUNCTION public.reject_cleared_bot_log();\nDROP TRIGGER IF EXISTS reject_cleared_chat_log ON public.bot_chat_logs;\nCREATE TRIGGER reject_cleared_chat_log BEFORE INSERT ON public.bot_chat_logs\nFOR EACH ROW EXECUTE FUNCTION public.reject_cleared_bot_log();\n\nCREATE OR REPLACE FUNCTION public.consume_manager_key_usage(p_code text, p_username text, p_transaction_id text)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_key public.manager_keys%ROWTYPE;\n  v_code text := upper(btrim(COALESCE(p_code, '')));\n  v_username text := lower(btrim(COALESCE(p_username, '')));\n  v_users jsonb;\n  v_count integer;\n  v_max integer;\n  v_used_by text;\n  v_transaction public.manager_key_usage_transactions%ROWTYPE;\nBEGIN\n  IF v_code = '' OR v_username = '' OR COALESCE(btrim(p_transaction_id), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_INPUT');\n  END IF;\n  SELECT * INTO v_transaction FROM public.manager_key_usage_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF v_transaction.username <> v_username OR upper(COALESCE(v_transaction.usage_snapshot->>'code', v_transaction.usage_snapshot->>'key_code', '')) <> v_code THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN jsonb_build_object('ok', true, 'replayed', true, 'transactionId', p_transaction_id, 'row', v_transaction.usage_snapshot);\n  END IF;\n  SELECT * INTO v_key\n  FROM public.manager_keys\n  WHERE upper(COALESCE(NULLIF(code, ''), key_code, '')) = v_code\n  FOR UPDATE;\n  IF NOT FOUND THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'KEY_NOT_FOUND');\n  END IF;\n\n  -- A duplicate request may have waited on this key row while its first attempt committed.\n  SELECT * INTO v_transaction FROM public.manager_key_usage_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF v_transaction.username <> v_username\n       OR upper(COALESCE(v_transaction.usage_snapshot->>'code', v_transaction.usage_snapshot->>'key_code', '')) <> v_code THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN jsonb_build_object('ok', true, 'replayed', true, 'transactionId', p_transaction_id, 'row', v_transaction.usage_snapshot);\n  END IF;\n\n  v_max := COALESCE(v_key.max_uses, 1);\n  IF v_max < 0 THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_MAX_USES');\n  END IF;\n  v_users := CASE WHEN jsonb_typeof(v_key.used_users) = 'array' THEN v_key.used_users ELSE '[]'::jsonb END;\n  IF jsonb_array_length(v_users) > 0 THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM jsonb_array_elements_text(v_users) AS u(value)\n    WHERE btrim(value) <> '';\n  END IF;\n  IF jsonb_array_length(v_users) = 0 AND COALESCE(v_key.used_by, '') <> '' THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM unnest(string_to_array(v_key.used_by, ',')) AS value\n    WHERE btrim(value) <> '';\n  END IF;\n  IF v_users ? v_username THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'ALREADY_USED');\n  END IF;\n  v_count := GREATEST(COALESCE(v_key.used_count, 0), jsonb_array_length(v_users), CASE WHEN v_key.used THEN 1 ELSE 0 END);\n  IF v_max > 0 AND v_count >= v_max THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'EXHAUSTED');\n  END IF;\n\n  v_users := v_users || jsonb_build_array(v_username);\n  v_count := v_count + 1;\n  SELECT string_agg(value, ', ' ORDER BY ord) INTO v_used_by\n  FROM jsonb_array_elements_text(v_users) WITH ORDINALITY AS u(value, ord);\n  UPDATE public.manager_keys\n  SET used_users = v_users,\n      used_count = v_count,\n      used_by = v_used_by,\n      used_at = now(),\n      used = (v_max > 0 AND v_count >= v_max)\n  WHERE id = v_key.id\n  RETURNING * INTO v_key;\n  INSERT INTO public.manager_key_usage_transactions(transaction_id, key_id, username, usage_snapshot)\n  VALUES (p_transaction_id, v_key.id, v_username, to_jsonb(v_key));\n  RETURN jsonb_build_object('ok', true, 'transactionId', p_transaction_id, 'row', to_jsonb(v_key));\nEND;\n$$;\n\nREVOKE ALL ON FUNCTION public.acquire_manager_lock(text,text,integer) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.release_manager_lock(text,text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.renew_manager_lock(text,text,integer) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.verify_manager_lock_fencing(text,text,bigint) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.patch_manager_registry(jsonb,jsonb,text[]) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.set_bot_log_clear_cutoff(text,text,timestamptz) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.reject_cleared_bot_log() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.consume_manager_key_usage(text,text,text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.acquire_manager_lock(text,text,integer) TO service_role;\nGRANT EXECUTE ON FUNCTION public.release_manager_lock(text,text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.renew_manager_lock(text,text,integer) TO service_role;\nGRANT EXECUTE ON FUNCTION public.verify_manager_lock_fencing(text,text,bigint) TO service_role;\nGRANT EXECUTE ON FUNCTION public.patch_manager_registry(jsonb,jsonb,text[]) TO service_role;\nGRANT EXECUTE ON FUNCTION public.set_bot_log_clear_cutoff(text,text,timestamptz) TO service_role;\nGRANT EXECUTE ON FUNCTION public.consume_manager_key_usage(text,text,text) TO service_role;\n\nCOMMIT;\n\nNOTIFY pgrst, 'reload schema';\n\nBEGIN;\n\n-- User entitlement fields were previously accepted by Manager but not persisted.\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS allow_account_change boolean NOT NULL DEFAULT true;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS lock_reason text NOT NULL DEFAULT '';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS note text NOT NULL DEFAULT '';\n\nCREATE TABLE IF NOT EXISTS public.manager_user_state (\n  singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),\n  revision bigint NOT NULL DEFAULT 1 CHECK (revision >= 1),\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nINSERT INTO public.manager_user_state(singleton, revision)\nVALUES (true, 1) ON CONFLICT (singleton) DO NOTHING;\n\nCREATE TABLE IF NOT EXISTS public.manager_users_write_transactions (\n  transaction_id uuid PRIMARY KEY,\n  expected_revision bigint NOT NULL,\n  users_payload jsonb NOT NULL,\n  result jsonb NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE TABLE IF NOT EXISTS public.manager_session_revocations (\n  token_hash text PRIMARY KEY,\n  revoked_at timestamptz NOT NULL DEFAULT now()\n);\n\nALTER TABLE public.manager_key_usage_transactions\n  ADD COLUMN IF NOT EXISTS user_revision bigint;\n\nALTER TABLE public.manager_user_state ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_users_write_transactions ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_session_revocations ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_user_state FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON TABLE public.manager_users_write_transactions FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON TABLE public.manager_session_revocations FROM PUBLIC, anon, authenticated;\nGRANT SELECT ON TABLE public.manager_users_write_transactions TO service_role;\n-- Force every service-role user write through the revision-checked RPCs below.\n-- This makes stale legacy snapshot upserts fail closed during mixed-version deploys.\nREVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE public.manager_users FROM service_role;\nGRANT SELECT ON TABLE public.manager_users TO service_role;\n\nCREATE OR REPLACE FUNCTION public.bump_manager_users_revision()\nRETURNS trigger\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nBEGIN\n  UPDATE public.manager_user_state\n  SET revision = revision + 1, updated_at = now()\n  WHERE singleton = true;\n  RETURN NULL;\nEND;\n$$;\n\nDROP TRIGGER IF EXISTS manager_users_revision_after_write ON public.manager_users;\nCREATE TRIGGER manager_users_revision_after_write\nAFTER INSERT OR UPDATE OR DELETE ON public.manager_users\nFOR EACH STATEMENT EXECUTE FUNCTION public.bump_manager_users_revision();\n\nCREATE OR REPLACE FUNCTION public.reject_revoked_manager_session()\nRETURNS trigger\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nBEGIN\n  IF EXISTS (\n    SELECT 1 FROM public.manager_session_revocations\n    WHERE token_hash = NEW.token_hash\n  ) THEN\n    RETURN NULL;\n  END IF;\n  RETURN NEW;\nEND;\n$$;\n\nDROP TRIGGER IF EXISTS manager_sessions_reject_revoked ON public.manager_sessions;\nCREATE TRIGGER manager_sessions_reject_revoked\nBEFORE INSERT OR UPDATE ON public.manager_sessions\nFOR EACH ROW EXECUTE FUNCTION public.reject_revoked_manager_session();\n\nCREATE OR REPLACE FUNCTION public.read_manager_users_snapshot()\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_result jsonb;\nBEGIN\n  WITH state_cte AS (\n    SELECT COALESCE(revision, 1) AS revision\n    FROM public.manager_user_state\n    WHERE singleton = true\n  ),\n  users_cte AS (\n    SELECT COALESCE(jsonb_agg(to_jsonb(u) ORDER BY u.username), '[]'::jsonb) AS users\n    FROM public.manager_users AS u\n  )\n  SELECT jsonb_build_object(\n    'ok', true,\n    'revision', state_cte.revision,\n    'users', users_cte.users\n  ) INTO v_result\n  FROM state_cte, users_cte;\n  RETURN v_result;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.read_manager_session(p_token_hash text)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE v_session jsonb;\nBEGIN\n  IF COALESCE(btrim(p_token_hash), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_TOKEN_HASH');\n  END IF;\n  SELECT to_jsonb(s) INTO v_session\n  FROM public.manager_sessions AS s\n  WHERE s.token_hash = p_token_hash\n    AND s.expires_at > (extract(epoch FROM now()) * 1000)::bigint\n    AND NOT EXISTS (\n      SELECT 1 FROM public.manager_session_revocations AS r\n      WHERE r.token_hash = s.token_hash\n    );\n  RETURN jsonb_build_object('ok', true, 'session', v_session);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.read_manager_authorization(p_token_hash text)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_session public.manager_sessions%ROWTYPE;\n  v_user jsonb;\nBEGIN\n  IF COALESCE(btrim(p_token_hash), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_TOKEN_HASH');\n  END IF;\n  SELECT * INTO v_session\n  FROM public.manager_sessions AS s\n  WHERE s.token_hash = p_token_hash\n    AND s.expires_at > (extract(epoch FROM now()) * 1000)::bigint\n    AND NOT EXISTS (\n      SELECT 1 FROM public.manager_session_revocations AS r\n      WHERE r.token_hash = s.token_hash\n    );\n  IF NOT FOUND THEN\n    RETURN jsonb_build_object('ok', true, 'session', NULL, 'user', NULL);\n  END IF;\n  IF v_session.role <> 'admin' THEN\n    SELECT jsonb_build_object(\n      'id', u.id, 'username', u.username, 'status', u.status,\n      'assigned_bot_ids', u.assigned_bot_ids, 'expires_at', u.expires_at,\n      'plan_name', u.plan_name, 'allow_account_change', u.allow_account_change,\n      'is_permanent', u.is_permanent,\n      'lock_reason', u.lock_reason\n    ) INTO v_user\n    FROM public.manager_users AS u\n    WHERE u.id = v_session.user_id\n      AND lower(u.username) = lower(v_session.username);\n  END IF;\n  RETURN jsonb_build_object('ok', true, 'session', to_jsonb(v_session), 'user', v_user);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.revoke_manager_session(p_token_hash text)\nRETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nBEGIN\n  IF COALESCE(btrim(p_token_hash), '') = '' THEN RETURN false; END IF;\n  INSERT INTO public.manager_session_revocations(token_hash, revoked_at)\n  VALUES (p_token_hash, now())\n  ON CONFLICT (token_hash) DO NOTHING;\n  DELETE FROM public.manager_sessions WHERE token_hash = p_token_hash;\n  RETURN true;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.create_manager_user_session(\n  p_expected_revision bigint,\n  p_session jsonb\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_revision bigint;\n  v_user_id text;\n  v_username text;\n  v_token_hash text;\n  v_expires_at bigint;\n  v_rows integer;\nBEGIN\n  v_user_id := btrim(COALESCE(p_session->>'user_id', ''));\n  v_username := btrim(COALESCE(p_session->>'username', ''));\n  v_token_hash := btrim(COALESCE(p_session->>'token_hash', ''));\n  v_expires_at := NULLIF(p_session->>'expires_at', '')::bigint;\n  IF v_user_id = '' OR v_username = '' OR v_token_hash !~ '^[a-f0-9]{64}$' OR v_expires_at IS NULL\n     OR v_expires_at <= (extract(epoch FROM now()) * 1000)::bigint THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_SESSION');\n  END IF;\n  IF NOT EXISTS (\n    SELECT 1 FROM public.manager_users AS u\n    WHERE u.id = v_user_id AND lower(u.username) = lower(v_username)\n      AND lower(COALESCE(u.status, 'active')) <> 'disabled'\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_CHANGED');\n  END IF;\n  SELECT revision INTO v_revision\n  FROM public.manager_user_state\n  WHERE singleton = true FOR UPDATE;\n  INSERT INTO public.manager_sessions(\n    token_hash, user_id, username, role, assigned_bot_ids, expires_at,\n    plan_name, allow_account_change, status, updated_at\n  ) VALUES (\n    v_token_hash, v_user_id, v_username, 'user',\n    COALESCE(p_session->'assigned_bot_ids', '[]'::jsonb), v_expires_at,\n    COALESCE(NULLIF(p_session->>'plan_name', ''), 'Gói thường'),\n    COALESCE((p_session->>'allow_account_change')::boolean, true),\n    COALESCE(NULLIF(p_session->>'status', ''), 'active'), now()\n  ) ON CONFLICT (token_hash) DO NOTHING;\n  GET DIAGNOSTICS v_rows = ROW_COUNT;\n  IF v_rows <> 1 THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'SESSION_NOT_CREATED');\n  END IF;\n  RETURN jsonb_build_object('ok', true, 'revision', v_revision);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.apply_manager_users_snapshot_locked(\n  p_expected_revision bigint,\n  p_users jsonb,\n  p_allow_empty boolean DEFAULT false\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_revision bigint;\n  v_user jsonb;\n  v_id text;\n  v_username text;\n  v_affected integer;\n  v_result jsonb;\nBEGIN\n  SELECT revision INTO v_revision\n  FROM public.manager_user_state\n  WHERE singleton = true FOR UPDATE;\n  IF v_revision IS DISTINCT FROM p_expected_revision THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'REVISION_CONFLICT', 'revision', v_revision);\n  END IF;\n  IF p_users IS NULL OR jsonb_typeof(p_users) <> 'array' OR (jsonb_array_length(p_users) = 0 AND NOT p_allow_empty) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_OR_EMPTY_SNAPSHOT', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY lower(btrim(value->>'username'))\n    HAVING lower(btrim(value->>'username')) = '' OR count(*) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'DUPLICATE_OR_INVALID_USERNAME', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE jsonb_typeof(item.value->'assigned_bot_ids') NOT IN ('array', 'null')\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_BOT_ASSIGNMENTS', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT btrim(bot_id.value)\n    FROM jsonb_array_elements(p_users) AS item(value)\n    CROSS JOIN LATERAL jsonb_array_elements_text(\n      CASE WHEN jsonb_typeof(item.value->'assigned_bot_ids') = 'array'\n        THEN item.value->'assigned_bot_ids' ELSE '[]'::jsonb END\n    ) AS bot_id(value)\n    GROUP BY btrim(bot_id.value)\n    HAVING btrim(bot_id.value) = '' OR count(DISTINCT lower(btrim(item.value->>'username'))) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'BOT_OWNERSHIP_CONFLICT', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY btrim(COALESCE(value->>'id', ''))\n    HAVING btrim(COALESCE(value->>'id', '')) = '' OR count(*) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'DUPLICATE_OR_INVALID_USER_ID', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE btrim(COALESCE(item.value->>'username', '')) = ''\n       OR btrim(COALESCE(item.value->>'id', '')) = ''\n       OR btrim(COALESCE(item.value->>'password', '')) = ''\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW', 'revision', v_revision);\n  END IF;\n\n  FOR v_user IN SELECT value FROM jsonb_array_elements(p_users) AS item(value)\n  LOOP\n    v_username := btrim(COALESCE(v_user->>'username', ''));\n    v_id := btrim(COALESCE(v_user->>'id', ''));\n    IF v_username = '' OR v_id = '' OR COALESCE(v_user->>'password', '') = '' THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW', 'revision', v_revision);\n    END IF;\n\n    UPDATE public.manager_users AS u\n    SET id = v_id,\n        username = v_username,\n        password = v_user->>'password',\n        role = COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n        status = COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n        assigned_bot_ids = COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n        expires_at = NULLIF(v_user->>'expires_at', '')::timestamptz,\n        plan_name = COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n        bot_aliases = CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n        allow_account_change = COALESCE((v_user->>'allow_account_change')::boolean, true),\n        is_permanent = COALESCE((v_user->>'is_permanent')::boolean, (NULLIF(v_user->>'expires_at', '') IS NULL AND COALESCE(NULLIF(v_user->>'role', ''), 'user') <> 'admin' AND COALESCE(NULLIF(v_user->>'status', ''), 'active') = 'active'), false),\n        lock_reason = COALESCE(v_user->>'lock_reason', ''),\n        note = COALESCE(v_user->>'note', ''),\n        created_at = COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, u.created_at, now()),\n        updated_at = COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n    WHERE u.id = v_id;\n    GET DIAGNOSTICS v_affected = ROW_COUNT;\n    IF v_affected = 0 THEN\n      UPDATE public.manager_users AS u\n      SET id = v_id,\n          username = v_username,\n          password = v_user->>'password',\n          role = COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n          status = COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n          assigned_bot_ids = COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n          expires_at = NULLIF(v_user->>'expires_at', '')::timestamptz,\n          plan_name = COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n          bot_aliases = CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n          allow_account_change = COALESCE((v_user->>'allow_account_change')::boolean, true),\n          is_permanent = COALESCE((v_user->>'is_permanent')::boolean, (NULLIF(v_user->>'expires_at', '') IS NULL AND COALESCE(NULLIF(v_user->>'role', ''), 'user') <> 'admin' AND COALESCE(NULLIF(v_user->>'status', ''), 'active') = 'active'), false),\n          lock_reason = COALESCE(v_user->>'lock_reason', ''),\n          note = COALESCE(v_user->>'note', ''),\n          created_at = COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, u.created_at, now()),\n          updated_at = COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n      WHERE lower(u.username) = lower(v_username);\n      GET DIAGNOSTICS v_affected = ROW_COUNT;\n    END IF;\n    IF v_affected = 0 THEN\n      INSERT INTO public.manager_users(\n        id, username, password, role, status, assigned_bot_ids, expires_at,\n        plan_name, bot_aliases, allow_account_change, is_permanent, lock_reason, note,\n        created_at, updated_at\n      ) VALUES (\n        v_id, v_username, v_user->>'password',\n        COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n        COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n        COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n        NULLIF(v_user->>'expires_at', '')::timestamptz,\n        COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n        CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n        COALESCE((v_user->>'allow_account_change')::boolean, true),\n        COALESCE((v_user->>'is_permanent')::boolean, (NULLIF(v_user->>'expires_at', '') IS NULL AND COALESCE(NULLIF(v_user->>'role', ''), 'user') <> 'admin' AND COALESCE(NULLIF(v_user->>'status', ''), 'active') = 'active'), false),\n        COALESCE(v_user->>'lock_reason', ''), COALESCE(v_user->>'note', ''),\n        COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, now()),\n        COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n      );\n    END IF;\n  END LOOP;\n\n  DELETE FROM public.manager_users AS u\n  WHERE NOT EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE COALESCE(item.value->>'id', '') = u.id\n       OR lower(COALESCE(item.value->>'username', '')) = lower(u.username)\n  );\n\n  SELECT revision INTO v_revision FROM public.manager_user_state WHERE singleton = true;\n  v_result := jsonb_build_object('ok', true, 'revision', v_revision);\n  RETURN v_result;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.save_manager_users_snapshot(\n  p_expected_revision bigint,\n  p_transaction_id uuid,\n  p_users jsonb,\n  p_allow_empty boolean DEFAULT false\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_existing public.manager_users_write_transactions%ROWTYPE;\n  v_result jsonb;\nBEGIN\n  IF p_transaction_id IS NULL THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_TRANSACTION_ID');\n  END IF;\n  PERFORM 1 FROM public.manager_user_state WHERE singleton = true FOR UPDATE;\n  SELECT * INTO v_existing FROM public.manager_users_write_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF v_existing.expected_revision <> p_expected_revision OR v_existing.users_payload <> p_users THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN v_existing.result;\n  END IF;\n  v_result := public.apply_manager_users_snapshot_locked(p_expected_revision, p_users, p_allow_empty);\n  IF COALESCE((v_result->>'ok')::boolean, false) THEN\n    INSERT INTO public.manager_users_write_transactions(transaction_id, expected_revision, users_payload, result)\n    VALUES (p_transaction_id, p_expected_revision, p_users, v_result);\n    DELETE FROM public.manager_users_write_transactions WHERE created_at < now() - interval '24 hours';\n  END IF;\n  RETURN v_result;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.insert_manager_users_if_absent(p_users jsonb)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_user jsonb;\n  v_id text;\n  v_username text;\n  v_revision bigint;\n  v_inserted integer := 0;\n  v_rows integer;\nBEGIN\n  PERFORM 1 FROM public.manager_user_state WHERE singleton = true FOR UPDATE;\n  IF p_users IS NULL OR jsonb_typeof(p_users) <> 'array' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USERS');\n  END IF;\n  IF EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE btrim(COALESCE(item.value->>'username', '')) = ''\n       OR btrim(COALESCE(item.value->>'id', '')) = ''\n       OR btrim(COALESCE(item.value->>'password', '')) = ''\n       OR (item.value ? 'assigned_bot_ids' AND jsonb_typeof(item.value->'assigned_bot_ids') NOT IN ('array', 'null'))\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW');\n  END IF;\n  IF EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY lower(btrim(value->>'username'))\n    HAVING lower(btrim(value->>'username')) = '' OR count(*) > 1\n  ) OR EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY btrim(COALESCE(value->>'id', ''))\n    HAVING btrim(COALESCE(value->>'id', '')) = '' OR count(*) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'DUPLICATE_OR_INVALID_USER');\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    CROSS JOIN LATERAL jsonb_array_elements_text(\n      CASE WHEN jsonb_typeof(item.value->'assigned_bot_ids') = 'array'\n        THEN item.value->'assigned_bot_ids' ELSE '[]'::jsonb END\n    ) AS assigned(value)\n    GROUP BY assigned.value\n    HAVING assigned.value = '' OR count(DISTINCT lower(btrim(item.value->>'username'))) > 1\n  ) OR EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    CROSS JOIN LATERAL jsonb_array_elements_text(\n      CASE WHEN jsonb_typeof(item.value->'assigned_bot_ids') = 'array'\n        THEN item.value->'assigned_bot_ids' ELSE '[]'::jsonb END\n    ) AS assigned(value)\n    JOIN public.manager_users AS existing\n      ON existing.assigned_bot_ids ? assigned.value\n     AND existing.id <> COALESCE(item.value->>'id', '')\n     AND lower(existing.username) <> lower(COALESCE(item.value->>'username', ''))\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'BOT_OWNERSHIP_CONFLICT');\n  END IF;\n  FOR v_user IN SELECT value FROM jsonb_array_elements(p_users) AS item(value)\n  LOOP\n    v_username := btrim(COALESCE(v_user->>'username', ''));\n    v_id := btrim(COALESCE(v_user->>'id', ''));\n    IF v_username = '' OR v_id = '' OR COALESCE(v_user->>'password', '') = '' THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW');\n    END IF;\n    IF EXISTS (\n      SELECT 1 FROM public.manager_users AS existing\n      WHERE lower(existing.username) = lower(v_username) OR existing.id = v_id\n    ) THEN\n      CONTINUE;\n    END IF;\n    IF EXISTS (\n      SELECT 1\n      FROM jsonb_array_elements(COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb)) AS assigned(value)\n      JOIN public.manager_users AS existing\n        ON existing.assigned_bot_ids ? (assigned.value #>> '{}')\n    ) THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'BOT_OWNERSHIP_CONFLICT');\n    END IF;\n    INSERT INTO public.manager_users(\n      id, username, password, role, status, assigned_bot_ids, expires_at,\n      plan_name, bot_aliases, allow_account_change, is_permanent, lock_reason, note,\n      created_at, updated_at\n    ) VALUES (\n      v_id, v_username, v_user->>'password',\n      COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n      COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n      COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n      NULLIF(v_user->>'expires_at', '')::timestamptz,\n      COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n      CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n      COALESCE((v_user->>'allow_account_change')::boolean, true),\n      COALESCE((v_user->>'is_permanent')::boolean, (NULLIF(v_user->>'expires_at', '') IS NULL AND COALESCE(NULLIF(v_user->>'role', ''), 'user') <> 'admin' AND COALESCE(NULLIF(v_user->>'status', ''), 'active') = 'active'), false),\n      COALESCE(v_user->>'lock_reason', ''), COALESCE(v_user->>'note', ''),\n      COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, now()),\n      COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n    ) ON CONFLICT DO NOTHING;\n    GET DIAGNOSTICS v_rows = ROW_COUNT;\n    v_inserted := v_inserted + v_rows;\n  END LOOP;\n  SELECT revision INTO v_revision FROM public.manager_user_state WHERE singleton = true;\n  RETURN jsonb_build_object('ok', true, 'inserted', v_inserted, 'revision', v_revision);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.redeem_manager_key_and_save_users(\n  p_code text,\n  p_username text,\n  p_transaction_id text,\n  p_expected_revision bigint,\n  p_users jsonb,\n  p_allow_empty boolean DEFAULT false\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_key public.manager_keys%ROWTYPE;\n  v_transaction public.manager_key_usage_transactions%ROWTYPE;\n  v_code text := upper(btrim(COALESCE(p_code, '')));\n  v_username text := lower(btrim(COALESCE(p_username, '')));\n  v_users jsonb;\n  v_count integer;\n  v_max integer;\n  v_used_by text;\n  v_user_revision bigint;\n  v_result jsonb;\nBEGIN\n  IF v_code = '' OR v_username = '' OR COALESCE(btrim(p_transaction_id), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_INPUT');\n  END IF;\n  PERFORM 1 FROM public.manager_user_state WHERE singleton = true FOR UPDATE;\n  SELECT * INTO v_transaction FROM public.manager_key_usage_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF lower(v_transaction.username) <> v_username\n       OR upper(COALESCE(v_transaction.usage_snapshot->>'code', v_transaction.usage_snapshot->>'key_code', '')) <> v_code THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN jsonb_build_object('ok', true, 'replayed', true, 'transactionId', p_transaction_id,\n      'row', v_transaction.usage_snapshot, 'userRevision', v_transaction.user_revision);\n  END IF;\n  SELECT * INTO v_key\n  FROM public.manager_keys\n  WHERE upper(COALESCE(NULLIF(code, ''), key_code, '')) = v_code\n  FOR UPDATE;\n  IF NOT FOUND THEN RETURN jsonb_build_object('ok', false, 'error', 'KEY_NOT_FOUND'); END IF;\n\n  v_max := COALESCE(v_key.max_uses, 1);\n  IF v_max < 0 THEN RETURN jsonb_build_object('ok', false, 'error', 'INVALID_MAX_USES'); END IF;\n  IF v_key.expires_at IS NOT NULL AND v_key.expires_at <= now() THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'KEY_EXPIRED');\n  END IF;\n  v_users := CASE WHEN jsonb_typeof(v_key.used_users) = 'array' THEN v_key.used_users ELSE '[]'::jsonb END;\n  IF jsonb_array_length(v_users) > 0 THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM jsonb_array_elements_text(v_users) AS item(value) WHERE btrim(value) <> '';\n  END IF;\n  IF jsonb_array_length(v_users) = 0 AND COALESCE(v_key.used_by, '') <> '' THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM unnest(string_to_array(v_key.used_by, ',')) AS value WHERE btrim(value) <> '';\n  END IF;\n  IF v_users ? v_username THEN RETURN jsonb_build_object('ok', false, 'error', 'ALREADY_USED'); END IF;\n  v_count := GREATEST(COALESCE(v_key.used_count, 0), jsonb_array_length(v_users), CASE WHEN v_key.used THEN 1 ELSE 0 END);\n  IF v_max > 0 AND v_count >= v_max THEN RETURN jsonb_build_object('ok', false, 'error', 'EXHAUSTED'); END IF;\n\n  v_users := v_users || jsonb_build_array(v_username);\n  v_count := v_count + 1;\n  SELECT string_agg(value, ', ' ORDER BY ord) INTO v_used_by\n  FROM jsonb_array_elements_text(v_users) WITH ORDINALITY AS item(value, ord);\n  IF NOT EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE lower(btrim(item.value->>'username')) = v_username\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'REDEEM_USER_MISSING');\n  END IF;\n  v_result := public.apply_manager_users_snapshot_locked(p_expected_revision, p_users, p_allow_empty);\n  IF NOT COALESCE((v_result->>'ok')::boolean, false) THEN RETURN v_result; END IF;\n\n  UPDATE public.manager_keys\n  SET used_users = v_users, used_count = v_count, used_by = v_used_by,\n      used_at = now(), used = (v_max > 0 AND v_count >= v_max)\n  WHERE id = v_key.id\n  RETURNING * INTO v_key;\n  SELECT revision INTO v_user_revision FROM public.manager_user_state WHERE singleton = true;\n  INSERT INTO public.manager_key_usage_transactions(transaction_id, key_id, username, usage_snapshot, user_revision)\n  VALUES (p_transaction_id, v_key.id, v_username, to_jsonb(v_key), v_user_revision);\n  RETURN jsonb_build_object('ok', true, 'transactionId', p_transaction_id,\n    'row', to_jsonb(v_key), 'userRevision', v_user_revision);\nEND;\n$$;\n\nREVOKE ALL ON FUNCTION public.bump_manager_users_revision() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.reject_revoked_manager_session() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.read_manager_users_snapshot() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.read_manager_session(text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.read_manager_authorization(text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.revoke_manager_session(text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.create_manager_user_session(bigint,jsonb) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.apply_manager_users_snapshot_locked(bigint,jsonb,boolean) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.save_manager_users_snapshot(bigint,uuid,jsonb,boolean) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.insert_manager_users_if_absent(jsonb) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.redeem_manager_key_and_save_users(text,text,text,bigint,jsonb,boolean) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.read_manager_users_snapshot() TO service_role;\nGRANT EXECUTE ON FUNCTION public.read_manager_session(text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.read_manager_authorization(text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.revoke_manager_session(text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.create_manager_user_session(bigint,jsonb) TO service_role;\nGRANT EXECUTE ON FUNCTION public.save_manager_users_snapshot(bigint,uuid,jsonb,boolean) TO service_role;\nGRANT EXECUTE ON FUNCTION public.insert_manager_users_if_absent(jsonb) TO service_role;\nGRANT EXECUTE ON FUNCTION public.redeem_manager_key_and_save_users(text,text,text,bigint,jsonb,boolean) TO service_role;\n\n-- Compatibility views for alternative table names & aliases\nCREATE OR REPLACE VIEW public.manager_audit AS SELECT * FROM public.audit_logs;\nCREATE OR REPLACE VIEW public.backups AS SELECT * FROM public.manager_backups;\nCREATE OR REPLACE VIEW public.system_settings AS\nSELECT\n  id,\n  (data->'systemSettings') AS settings,\n  updated_at\nFROM public.bot_registry\nWHERE id = 'default';\n\nCREATE OR REPLACE VIEW public.bot_schedules AS\nSELECT\n  bot_id,\n  COALESCE(bot_schedules, schedules) AS schedules,\n  updated_at\nFROM public.bot_settings;\n\nGRANT ALL ON public.manager_audit TO service_role;\nGRANT ALL ON public.backups TO service_role;\nGRANT ALL ON public.system_settings TO service_role;\nGRANT ALL ON public.bot_schedules TO service_role;\nREVOKE ALL ON public.manager_audit, public.backups, public.system_settings, public.bot_schedules FROM anon, authenticated;\n\n\n\nCREATE TABLE IF NOT EXISTS public.manager_outbox_queue (\n  id text PRIMARY KEY,\n  bot_id integer NOT NULL,\n  type text NOT NULL DEFAULT 'auth_sync',\n  event_type text DEFAULT 'auth_sync',\n  aggregate_type text DEFAULT 'bot',\n  aggregate_id text DEFAULT '',\n  payload jsonb NOT NULL DEFAULT '{}'::jsonb,\n  status text NOT NULL DEFAULT 'pending',\n  attempts integer NOT NULL DEFAULT 0,\n  max_attempts integer NOT NULL DEFAULT 8,\n  next_retry_at timestamptz NOT NULL DEFAULT now(),\n  backoff_ms integer NOT NULL DEFAULT 3000,\n  processing_started_at timestamptz,\n  completed_at timestamptz,\n  lease_owner text,\n  lease_until timestamptz,\n  last_status_code integer,\n  error_code text,\n  last_error text,\n  committed_transaction jsonb,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS bot_id integer;\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS type text NOT NULL DEFAULT 'auth_sync';\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS processing_started_at timestamptz;\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS completed_at timestamptz;\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS payload jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS lease_owner text;\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS lease_until timestamptz;\nALTER TABLE public.manager_outbox_queue ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_outbox_queue FROM PUBLIC, anon, authenticated;\nGRANT ALL ON TABLE public.manager_outbox_queue TO service_role;\n\nCREATE TABLE IF NOT EXISTS public.manager_pending_allocations (\n  id text PRIMARY KEY,\n  username text NOT NULL,\n  target_bot_count integer NOT NULL DEFAULT 1,\n  current_assigned integer NOT NULL DEFAULT 0,\n  missing_bot_count integer NOT NULL DEFAULT 1,\n  preferred_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  status text NOT NULL DEFAULT 'pending_retry',\n  attempts integer NOT NULL DEFAULT 0,\n  max_attempts integer NOT NULL DEFAULT 10,\n  lease_owner text,\n  lease_until timestamptz,\n  last_error text,\n  next_retry_at timestamptz NOT NULL DEFAULT now(),\n  completed_at timestamptz,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_pending_allocations ADD COLUMN IF NOT EXISTS completed_at timestamptz;\nALTER TABLE public.manager_pending_allocations ADD COLUMN IF NOT EXISTS lease_owner text;\nALTER TABLE public.manager_pending_allocations ADD COLUMN IF NOT EXISTS lease_until timestamptz;\nALTER TABLE public.manager_pending_allocations ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_pending_allocations FROM PUBLIC, anon, authenticated;\nGRANT ALL ON TABLE public.manager_pending_allocations TO service_role;\nCREATE UNIQUE INDEX IF NOT EXISTS idx_mgr_pending_alloc_user_pending ON public.manager_pending_allocations (username) WHERE (status IN ('pending', 'pending_retry'));\n\nCREATE TABLE IF NOT EXISTS public.manager_link4m_attempts (\n  attempt_id text PRIMARY KEY,\n  username text NOT NULL,\n  token_hash text NOT NULL,\n  status text NOT NULL DEFAULT 'pending',\n  vietnam_date text NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  expires_at timestamptz NOT NULL,\n  verified_at timestamptz,\n  rewarded_at timestamptz,\n  reward_hours integer NOT NULL DEFAULT 12,\n  ip_address text NOT NULL DEFAULT '',\n  provider_reference text NOT NULL DEFAULT '',\n  failure_reason text NOT NULL DEFAULT '',\n  sync_status text NOT NULL DEFAULT 'synced'\n);\n-- NEW-01 (Wave B1): tách URL rút gọn provider khỏi provider_reference (callback/return URL).\n-- provider_reference = return URL của Manager (audit trail); provider_short_url = link rút gọn\n-- do provider sinh ra SAU khi createRewardLink thành công (persist để nhánh reuse trả đúng URL).\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS provider_short_url text NOT NULL DEFAULT '';\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS attempt_id text;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS username text;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS token_hash text;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending';\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS vietnam_date text;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS expires_at timestamptz;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS verified_at timestamptz;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS rewarded_at timestamptz;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS reward_hours integer NOT NULL DEFAULT 12;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS ip_address text NOT NULL DEFAULT '';\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS provider_reference text NOT NULL DEFAULT '';\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS failure_reason text NOT NULL DEFAULT '';\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS sync_status text NOT NULL DEFAULT 'synced';\n\nCREATE INDEX IF NOT EXISTS idx_link4m_attempts_user_date ON public.manager_link4m_attempts(username, vietnam_date);\nCREATE INDEX IF NOT EXISTS idx_link4m_attempts_status ON public.manager_link4m_attempts(status);\nCREATE INDEX IF NOT EXISTS idx_link4m_attempts_token_hash ON public.manager_link4m_attempts(token_hash);\nCREATE INDEX IF NOT EXISTS idx_link4m_attempts_sync_status ON public.manager_link4m_attempts(sync_status);\n\nALTER TABLE public.manager_link4m_attempts ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON public.manager_link4m_attempts FROM anon, authenticated;\nGRANT ALL ON public.manager_link4m_attempts TO service_role;\n\n-- 1. Atomic RPC: start_manager_link4m_attempt\nCREATE OR REPLACE FUNCTION public.start_manager_link4m_attempt(\n  p_attempt_id text,\n  p_token_hash text,\n  p_username text,\n  p_vietnam_date text,\n  p_daily_limit integer DEFAULT 2,\n  p_reward_hours integer DEFAULT 12,\n  p_ip_address text DEFAULT '',\n  p_provider_reference text DEFAULT ''\n)\nRETURNS jsonb\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $l4m_start$\nDECLARE\n  v_username text := lower(btrim(p_username));\n  v_user record;\n  v_today_count integer;\n  v_active_attempt record;\n  v_now timestamptz := now();\n  v_expires_at timestamptz := v_now + interval '15 minutes';\n  v_limit integer := GREATEST(1, LEAST(10, COALESCE(p_daily_limit, 2)));\n  v_hours integer := GREATEST(1, LEAST(48, COALESCE(p_reward_hours, 12)));\nBEGIN\n  -- §3.2 Null and empty input guards\n  IF p_attempt_id IS NULL OR btrim(p_attempt_id) = '' OR\n     p_token_hash IS NULL OR btrim(p_token_hash) = '' OR\n     p_username IS NULL OR btrim(p_username) = '' OR\n     p_vietnam_date IS NULL OR btrim(p_vietnam_date) = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_ARGUMENTS', 'message', 'Tham số đầu vào không được để trống hoặc NULL.');\n  END IF;\n\n  -- 1. Consistent locking order: Always lock manager_users first\n  SELECT * INTO v_user\n  FROM public.manager_users\n  WHERE lower(btrim(username)) = v_username\n  FOR UPDATE;\n\n  IF NOT FOUND THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_NOT_FOUND', 'message', 'Tài khoản người dùng không tồn tại.');\n  END IF;\n\n  -- §3.2: Strict status allowlist. Only 'active' and 'expired' are permitted; disabled/unknown/null fail-closed\n  IF v_user.status NOT IN ('active', 'expired') OR v_user.status IS NULL THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_LOCKED', 'message', 'Tài khoản không ở trạng thái hợp lệ để vượt link nhận thưởng.');\n  END IF;\n\n  IF v_user.is_permanent IS TRUE THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'PERMANENT_ACCOUNT', 'message', 'Tài khoản VIP Vĩnh viễn không cần vượt link.');\n  END IF;\n\n  -- 2. Lock manager_link4m_attempts second\n  SELECT * INTO v_active_attempt\n  FROM public.manager_link4m_attempts\n  WHERE lower(btrim(username)) = v_username\n    AND status = 'pending'\n    AND expires_at > v_now\n  ORDER BY created_at DESC\n  LIMIT 1\n  FOR UPDATE;\n\n  IF FOUND THEN\n    RETURN jsonb_build_object(\n      'ok', true,\n      'reused', true,\n      'attemptId', v_active_attempt.attempt_id,\n      'expiresAt', v_active_attempt.expires_at,\n      'providerUrl', v_active_attempt.provider_short_url\n    );\n  END IF;\n\n  SELECT count(*) INTO v_today_count\n  FROM public.manager_link4m_attempts\n  WHERE lower(btrim(username)) = v_username\n    AND vietnam_date = p_vietnam_date\n    AND status IN ('pending', 'verified', 'rewarded', 'expired');\n\n  IF v_today_count >= v_limit THEN\n    RETURN jsonb_build_object(\n      'ok', false,\n      'error', 'DAILY_LIMIT_REACHED',\n      'count', v_today_count,\n      'limit', v_limit,\n      'message', 'Đã hết lượt vượt link hôm nay (' || v_today_count || '/' || v_limit || ' lượt). Làm mới lúc 00:00 VN.'\n    );\n  END IF;\n\n  INSERT INTO public.manager_link4m_attempts (\n    attempt_id, username, token_hash, status, vietnam_date,\n    created_at, expires_at, reward_hours, ip_address, provider_reference, sync_status\n  ) VALUES (\n    p_attempt_id, v_username, p_token_hash, 'pending', p_vietnam_date,\n    v_now, v_expires_at, v_hours, COALESCE(p_ip_address, ''), COALESCE(p_provider_reference, ''), 'synced'\n  );\n\n  RETURN jsonb_build_object(\n    'ok', true,\n    'reused', false,\n    'attemptId', p_attempt_id,\n    'todayCount', v_today_count + 1,\n    'remaining', v_limit - (v_today_count + 1),\n    'expiresAt', v_expires_at\n  );\nEND;\n$l4m_start$;\n\n-- 2. Atomic RPC: claim_manager_link4m_reward\nCREATE OR REPLACE FUNCTION public.claim_manager_link4m_reward(\n  p_attempt_id text,\n  p_token_hash text,\n  p_username text,\n  p_reward_hours integer DEFAULT 12,\n  p_provider_reference text DEFAULT ''\n)\nRETURNS jsonb\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $l4m_claim$\nDECLARE\n  v_username text := lower(btrim(p_username));\n  v_user record;\n  v_attempt record;\n  v_now timestamptz := now();\n  v_current_expires_at timestamptz;\n  v_new_expires_at timestamptz;\n  v_new_revision bigint;\n  v_reward_hours integer;\n  v_reward_interval interval;\nBEGIN\n  -- §3.2 Null and empty input guards\n  IF p_attempt_id IS NULL OR btrim(p_attempt_id) = '' OR\n     p_token_hash IS NULL OR btrim(p_token_hash) = '' OR\n     p_username IS NULL OR btrim(p_username) = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_ARGUMENTS', 'message', 'Tham số đầu vào không được để trống hoặc NULL.');\n  END IF;\n\n  -- 1. Consistent locking order: Lock manager_users FIRST across all RPCs\n  SELECT * INTO v_user\n  FROM public.manager_users\n  WHERE lower(btrim(username)) = v_username\n  FOR UPDATE;\n\n  IF NOT FOUND THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_NOT_FOUND', 'message', 'Tài khoản người dùng không tồn tại.');\n  END IF;\n\n  -- §3.2 Strict status allowlist: Only 'active' and 'expired' can claim rewards\n  IF v_user.status NOT IN ('active', 'expired') OR v_user.status IS NULL THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_LOCKED', 'message', 'Tài khoản không ở trạng thái hợp lệ để nhận thưởng.');\n  END IF;\n\n  -- 2. Lock manager_link4m_attempts SECOND\n  SELECT * INTO v_attempt\n  FROM public.manager_link4m_attempts\n  WHERE attempt_id = p_attempt_id\n  FOR UPDATE;\n\n  IF NOT FOUND THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'ATTEMPT_NOT_FOUND', 'message', 'Không tìm thấy phiên vượt link này.');\n  END IF;\n\n  -- §3.2 Null-safe comparisons with IS DISTINCT FROM\n  IF v_attempt.token_hash IS DISTINCT FROM p_token_hash THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_TOKEN', 'message', 'Mã bảo mật phiên vượt link không hợp lệ.');\n  END IF;\n\n  IF lower(btrim(v_attempt.username)) IS DISTINCT FROM v_username THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_MISMATCH', 'message', 'Phiên vượt link không thuộc về tài khoản này.');\n  END IF;\n\n  IF v_attempt.status = 'rewarded' THEN\n    RETURN jsonb_build_object('ok', true, 'replayed', true, 'message', 'Phiên vượt link này đã nhận thưởng trước đó.');\n  END IF;\n\n  IF v_attempt.status NOT IN ('pending', 'verified') THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_STATUS', 'message', 'Trạng thái phiên không hợp lệ: ' || COALESCE(v_attempt.status, 'NULL'));\n  END IF;\n\n  IF v_attempt.expires_at IS NULL OR v_attempt.expires_at <= v_now THEN\n    UPDATE public.manager_link4m_attempts SET status = 'expired', failure_reason = 'Phiên vượt link đã quá hạn hoặc thiếu thời hạn.' WHERE attempt_id = p_attempt_id;\n    RETURN jsonb_build_object('ok', false, 'error', 'ATTEMPT_EXPIRED', 'message', 'Phiên vượt link đã hết hạn thời gian thực hiện.');\n  END IF;\n\n  IF v_user.is_permanent IS TRUE THEN\n    UPDATE public.manager_link4m_attempts SET status = 'rewarded', rewarded_at = v_now, failure_reason = 'Tài khoản VIP Vĩnh viễn (không tiêu thụ thêm thời gian).' WHERE attempt_id = p_attempt_id;\n    RETURN jsonb_build_object('ok', true, 'permanent', true, 'expiresAt', NULL, 'message', 'Tài khoản của bạn là VIP Vĩnh viễn!');\n  END IF;\n\n  v_reward_hours := GREATEST(1, LEAST(48, COALESCE(v_attempt.reward_hours, p_reward_hours, 12)));\n  v_reward_interval := (v_reward_hours || ' hours')::interval;\n\n  v_current_expires_at := v_user.expires_at;\n  IF v_current_expires_at > v_now THEN\n    v_new_expires_at := v_current_expires_at + v_reward_interval;\n  ELSE\n    v_new_expires_at := v_now + v_reward_interval;\n  END IF;\n\n  UPDATE public.manager_users\n  SET expires_at = v_new_expires_at,\n      status = CASE WHEN v_user.status = 'expired' THEN 'active' ELSE v_user.status END,\n      updated_at = v_now\n  WHERE lower(btrim(username)) = v_username;\n  PERFORM public.bump_manager_users_revision();\n  SELECT revision INTO v_new_revision FROM public.manager_user_state WHERE singleton = true;\n\n  UPDATE public.manager_link4m_attempts\n  SET status = 'rewarded',\n      verified_at = COALESCE(verified_at, v_now),\n      rewarded_at = v_now,\n      sync_status = 'synced',\n      provider_reference = COALESCE(NULLIF(p_provider_reference, ''), provider_reference)\n  WHERE attempt_id = p_attempt_id;\n\n  RETURN jsonb_build_object(\n    'ok', true,\n    'username', v_username,\n    'addedHours', v_reward_hours,\n    'expiresAt', v_new_expires_at,\n    'userRevision', v_new_revision,\n    'message', 'Đã cộng thành công ' || v_reward_hours || ' giờ sử dụng vào tài khoản!'\n  );\nEND;\n$l4m_claim$;\n\nCREATE OR REPLACE FUNCTION public.update_manager_link4m_sync_status(\n  p_attempt_id text,\n  p_sync_status text\n)\nRETURNS boolean\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $l4m_sync$\nBEGIN\n  UPDATE public.manager_link4m_attempts\n  SET sync_status = p_sync_status\n  WHERE attempt_id = p_attempt_id;\n  RETURN FOUND;\nEND;\n$l4m_sync$;\n\n-- 3b. Utility RPC: set_manager_link4m_short_url (NEW-01, Wave B1)\n-- Persist URL rút gọn provider SAU khi createRewardLink thành công. Chỉ ghi khi attempt\n-- còn 'pending' (không đụng attempt đã verified/rewarded/expired). Trả false nếu không\n-- tìm thấy attempt hoặc attempt không còn pending — route coi như persist-thất-bại-mềm\n-- (reuse lần sau sẽ sinh lại shortlink, không tiêu thêm hạn mức).\nCREATE OR REPLACE FUNCTION public.set_manager_link4m_short_url(\n  p_attempt_id text,\n  p_short_url text\n)\nRETURNS boolean\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $l4m_short$\nBEGIN\n  UPDATE public.manager_link4m_attempts\n  SET provider_short_url = COALESCE(NULLIF(p_short_url, ''), provider_short_url)\n  WHERE attempt_id = p_attempt_id AND status = 'pending';\n  RETURN FOUND;\nEND;\n$l4m_short$;\n\n-- 4. Utility RPC: rollback_manager_link4m_attempt\nCREATE OR REPLACE FUNCTION public.rollback_manager_link4m_attempt(\n  p_attempt_id text\n)\nRETURNS boolean\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $l4m_rollback$\nBEGIN\n  DELETE FROM public.manager_link4m_attempts\n  WHERE attempt_id = p_attempt_id AND status = 'pending';\n  RETURN FOUND;\nEND;\n$l4m_rollback$;\n\nREVOKE ALL ON FUNCTION public.start_manager_link4m_attempt(text,text,text,text,integer,integer,text,text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.start_manager_link4m_attempt(text,text,text,text,integer,integer,text,text) TO service_role;\n\nREVOKE ALL ON FUNCTION public.claim_manager_link4m_reward(text,text,text,integer,text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.claim_manager_link4m_reward(text,text,text,integer,text) TO service_role;\n\nREVOKE ALL ON FUNCTION public.update_manager_link4m_sync_status(text,text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.update_manager_link4m_sync_status(text,text) TO service_role;\n\nREVOKE ALL ON FUNCTION public.set_manager_link4m_short_url(text,text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.set_manager_link4m_short_url(text,text) TO service_role;\n\nREVOKE ALL ON FUNCTION public.rollback_manager_link4m_attempt(text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.rollback_manager_link4m_attempt(text) TO service_role;\n\nCREATE OR REPLACE FUNCTION public.claim_manager_outbox_batch(\n  p_worker_id text,\n  p_limit integer DEFAULT 10,\n  p_lease_seconds integer DEFAULT 60\n)\nRETURNS SETOF public.manager_outbox_queue\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $outbox_claim$\nDECLARE\n  v_now timestamptz := now();\n  v_lease_until timestamptz := v_now + (p_lease_seconds || ' seconds')::interval;\nBEGIN\n  RETURN QUERY\n  WITH candidate AS (\n    SELECT id\n    FROM public.manager_outbox_queue\n    WHERE (status = 'pending' AND (next_retry_at <= v_now OR next_retry_at IS NULL))\n       OR (status = 'processing' AND lease_until <= v_now)\n    ORDER BY next_retry_at ASC\n    LIMIT GREATEST(1, LEAST(100, p_limit))\n    FOR UPDATE SKIP LOCKED\n  )\n  UPDATE public.manager_outbox_queue q\n  SET status = 'processing',\n      processing_started_at = v_now,\n      lease_until = v_lease_until,\n      lease_owner = p_worker_id,\n      attempts = q.attempts + 1,\n      updated_at = v_now\n  FROM candidate c\n  WHERE q.id = c.id\n  RETURNING q.*;\nEND;\n$outbox_claim$;\n\nREVOKE ALL ON FUNCTION public.claim_manager_outbox_batch(text, integer, integer) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.claim_manager_outbox_batch(text, integer, integer) TO service_role;\n\nCREATE OR REPLACE FUNCTION public.claim_manager_pending_allocations(\n  p_worker_id text,\n  p_limit integer DEFAULT 5,\n  p_lease_seconds integer DEFAULT 60\n)\nRETURNS SETOF public.manager_pending_allocations\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $alloc_claim$\nDECLARE\n  v_now timestamptz := now();\n  v_lease_until timestamptz := v_now + (p_lease_seconds || ' seconds')::interval;\nBEGIN\n  RETURN QUERY\n  WITH candidate AS (\n    SELECT id\n    FROM public.manager_pending_allocations\n    WHERE status = 'pending_retry'\n      AND (next_retry_at <= v_now OR next_retry_at IS NULL)\n      AND (lease_until IS NULL OR lease_until <= v_now)\n    ORDER BY created_at ASC\n    LIMIT GREATEST(1, LEAST(50, p_limit))\n    FOR UPDATE SKIP LOCKED\n  )\n  UPDATE public.manager_pending_allocations a\n  SET lease_owner = p_worker_id,\n      lease_until = v_lease_until,\n      attempts = a.attempts + 1,\n      updated_at = v_now\n  FROM candidate c\n  WHERE a.id = c.id\n  RETURNING a.*;\nEND;\n$alloc_claim$;\n\nREVOKE ALL ON FUNCTION public.claim_manager_pending_allocations(text, integer, integer) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.claim_manager_pending_allocations(text, integer, integer) TO service_role;\n\nCREATE OR REPLACE FUNCTION public.prune_manager_historical_data()\nRETURNS jsonb\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $prune$\nDECLARE\n  v_deleted_tx integer := 0;\n  v_deleted_rev integer := 0;\n  v_deleted_outbox integer := 0;\nBEGIN\n  DELETE FROM public.manager_users_write_transactions WHERE created_at < now() - interval '24 hours';\n  GET DIAGNOSTICS v_deleted_tx = ROW_COUNT;\n  DELETE FROM public.manager_session_revocations WHERE revoked_at < now() - interval '31 days';\n  GET DIAGNOSTICS v_deleted_rev = ROW_COUNT;\n  DELETE FROM public.manager_outbox_queue WHERE status IN ('completed', 'dead_letter') AND updated_at < now() - interval '7 days';\n  GET DIAGNOSTICS v_deleted_outbox = ROW_COUNT;\n  DELETE FROM public.bot_event_logs WHERE created_at < now() - interval '14 days';\n  DELETE FROM public.bot_chat_logs WHERE created_at < now() - interval '14 days';\n  DELETE FROM public.bot_position_logs WHERE changed_at < now() - interval '14 days';\n  RETURN jsonb_build_object('ok', true, 'deleted_write_transactions', v_deleted_tx, 'deleted_session_revocations', v_deleted_rev, 'deleted_outbox_items', v_deleted_outbox);\nEND;\n$prune$;\n\nREVOKE ALL ON FUNCTION public.prune_manager_historical_data() FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.prune_manager_historical_data() TO service_role;\n\nCOMMIT;\nNOTIFY pgrst, 'reload schema';\n";
 
 
 // Phân loại khóa Supabase để chặn khóa công khai (anon/publishable) được dùng làm khóa ghi.
@@ -468,6 +869,43 @@ function getSupabaseKeyRole(key) {
         } catch (_) { /* không phải JWT dạng đọc được */ }
     }
     return 'unknown';
+}
+
+// BUG-20: giá trị ilike phải là literal an toàn theo grammar PostgREST. Đặt trong
+// ngoặc kép (quoted string literal) để dấu phẩy/ngoặc trong từ khóa tìm kiếm không phá
+// vỡ cú pháp `or=(...)`. Ký tự phá quote (`"` và `\`) bị loại bỏ trước khi
+// percent-encode — encodeURIComponent chỉ là URL-encoding, không bảo đảm grammar
+// PostgREST sau khi decode. `%` và `_` vẫn giữ nghĩa wildcard ilike như trước.
+function buildPostgrestIlikePattern(raw) {
+    const safe = String(raw ?? '').replace(/["\\]/g, '').trim();
+    if (!safe) return '';
+    return '"*' + encodeURIComponent(safe) + '*"';
+}
+
+let localFencingTokenCounter = 100;
+const localProcessLocks = new Map();
+async function withLocalProcessLock(lockKey, fn) {
+    const key = String(lockKey);
+    const prevPromise = localProcessLocks.get(key) || Promise.resolve();
+    let release;
+    const nextPromise = new Promise(resolve => { release = resolve; });
+    localProcessLocks.set(key, prevPromise.then(() => nextPromise));
+    await prevPromise;
+    const fencingToken = ++localFencingTokenCounter;
+    const lockContext = {
+        owner: 'local_' + process.pid + '_' + Date.now(),
+        fencingToken,
+        isLockValid: () => true,
+        assertLockValid: () => {}
+    };
+    try {
+        return await fn(lockContext);
+    } finally {
+        release();
+        if (localProcessLocks.get(key) === nextPromise) {
+            localProcessLocks.delete(key);
+        }
+    }
 }
 
 class SupabaseAdapter {
@@ -503,7 +941,35 @@ class SupabaseAdapter {
         return headers;
     }
 
-    async fetchAllRows(table, { order = '', pageSize = 1000, uniqueKey = '' } = {}) {
+    async fetchWithRetry(url, options = {}, { maxRetries = 3, initialDelayMs = 400, maxDelayMs = 3000, timeoutMs = 15000 } = {}) {
+        let attempt = 0;
+        while (attempt < maxRetries) {
+            attempt++;
+            try {
+                const signal = options.signal || AbortSignal.timeout(timeoutMs);
+                const res = await fetch(url, { ...options, signal });
+                if (attempt < maxRetries && [408, 429, 500, 502, 503, 504].includes(res.status)) {
+                    const delay = Math.min(maxDelayMs, initialDelayMs * Math.pow(2, attempt - 1)) + Math.floor(Math.random() * 200);
+                    console.warn(`[SUPABASE RETRY] HTTP ${res.status} khi gọi ${url.split('?')[0]}. Thử lại lần ${attempt}/${maxRetries} sau ${delay}ms...`);
+                    await new Promise(r => setTimeout(r, delay));
+                    continue;
+                }
+                return res;
+            } catch (err) {
+                const isAbort = err.name === 'AbortError' || err.name === 'TimeoutError' || /timeout|aborted/i.test(err.message);
+                const isConnError = /fetch failed|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT/i.test(err.message);
+                if (attempt < maxRetries && (isAbort || isConnError)) {
+                    const delay = Math.min(maxDelayMs, initialDelayMs * Math.pow(2, attempt - 1)) + Math.floor(Math.random() * 200);
+                    console.warn(`[SUPABASE RETRY] Lỗi mạng (${err.message}) khi gọi ${url.split('?')[0]}. Thử lại lần ${attempt}/${maxRetries} sau ${delay}ms...`);
+                    await new Promise(r => setTimeout(r, delay));
+                    continue;
+                }
+                throw err;
+            }
+        }
+    }
+
+    async fetchAllRows(table, { order = '', pageSize = 1000, uniqueKey = '', select = '*' } = {}) {
         if (!this.isEnabled()) throw new Error('Supabase chưa được cấu hình.');
         if (!/^[a-z0-9_]+$/i.test(String(table || ''))) throw new Error('Tên bảng Supabase không hợp lệ.');
         const safePageSize = Math.max(1, Math.min(1000, Number(pageSize) || 1000));
@@ -513,15 +979,14 @@ class SupabaseAdapter {
         let expectedTotal = null;
         for (let page = 0; page < 1000; page++) {
             const params = new URLSearchParams({
-                select: '*',
+                select: String(select || '*'),
                 limit: String(safePageSize),
                 offset: String(offset)
             });
             if (order) params.set('order', order);
-            const res = await fetch(this.url + '/rest/v1/' + table + '?' + params.toString(), {
-                headers: this.getHeaders({ Prefer: 'count=exact' }),
-                signal: AbortSignal.timeout(15000)
-            });
+            const res = await this.fetchWithRetry(this.url + '/rest/v1/' + table + '?' + params.toString(), {
+                headers: this.getHeaders({ Prefer: 'count=exact' })
+            }, { timeoutMs: 15000 });
             if (!res.ok) throw new Error('Đọc ' + table + ' thất bại: HTTP ' + res.status + ' ' + await res.text().catch(() => ''));
             const data = await res.json();
             if (!Array.isArray(data)) throw new Error('Supabase trả payload ' + table + ' không phải array.');
@@ -553,20 +1018,44 @@ class SupabaseAdapter {
         return rows;
     }
 
-    async withManagerLock(lockKey, fn, leaseSeconds = 900) {
+    async withManagerLock(lockKey, fn, leaseSeconds = 900, options = {}) {
+        if (options._localLockHeld !== true) {
+            return await withLocalProcessLock(lockKey, () => this.withManagerLock(lockKey, fn, leaseSeconds, { ...options, _localLockHeld: true }));
+        }
         const owner = crypto.randomUUID();
         const safeLeaseSeconds = Math.max(30, Math.min(3600, Number(leaseSeconds) || 900));
+        const waitTimeoutMs = Math.max(0, Number(options.waitTimeoutMs ?? 15000));
+        const deadline = Date.now() + waitTimeoutMs;
+
         const rpc = async (name, body) => {
-            const res = await fetch(`${this.url}/rest/v1/rpc/${name}`, {
-                method: 'POST', headers: this.getHeaders(), body: JSON.stringify(body), signal: AbortSignal.timeout(8000)
-            });
+            const res = await this.fetchWithRetry(`${this.url}/rest/v1/rpc/${name}`, {
+                method: 'POST', headers: this.getHeaders(), body: JSON.stringify(body)
+            }, { timeoutMs: 8000, maxRetries: 2 });
             const text = await res.text().catch(() => '');
             if (!res.ok) throw new Error('Cloud lock RPC ' + name + ' thất bại (HTTP ' + res.status + '): ' + text.slice(0, 200));
             return text ? JSON.parse(text) : null;
         };
-        const acquired = await rpc('acquire_manager_lock', { p_lock_key: String(lockKey), p_owner_id: owner, p_lease_seconds: safeLeaseSeconds });
-        const isAcquired = acquired === true || (Array.isArray(acquired) && acquired[0] === true);
-        if (!isAcquired) throw new Error('Tác vụ đang được Manager khác xử lý trên Cloud: ' + lockKey);
+
+        let isAcquired = false;
+        let fencingToken = 1;
+        while (true) {
+            const acquired = await rpc('acquire_manager_lock', { p_lock_key: String(lockKey), p_owner_id: owner, p_lease_seconds: safeLeaseSeconds });
+            if (typeof acquired === 'object' && acquired !== null) {
+                isAcquired = acquired.ok === true;
+                if (acquired.fencing_token) fencingToken = Number(acquired.fencing_token);
+            } else if (typeof acquired === 'number' && acquired > 0) {
+                isAcquired = true;
+                fencingToken = acquired;
+            } else {
+                isAcquired = acquired === true || (Array.isArray(acquired) && acquired[0] === true);
+            }
+            if (isAcquired) break;
+            if (Date.now() >= deadline) {
+                throw new Error('Tác vụ đang được Manager khác xử lý trên Cloud: ' + lockKey);
+            }
+            const jitterMs = 200 + Math.floor(Math.random() * 250);
+            await new Promise(r => setTimeout(r, Math.min(jitterMs, Math.max(50, deadline - Date.now()))));
+        }
         let renewalInFlight = null;
         let lockLostError = null;
         let lockLeaseUntil = Date.now() + safeLeaseSeconds * 1000;
@@ -575,7 +1064,7 @@ class SupabaseAdapter {
             renewalInFlight = rpc('renew_manager_lock', {
                 p_lock_key: String(lockKey), p_owner_id: owner, p_lease_seconds: safeLeaseSeconds
             }).then(result => {
-                const renewed = result === true || (Array.isArray(result) && result[0] === true);
+                const renewed = result === true || (Array.isArray(result) && result[0] === true) || (typeof result === 'object' && result?.ok === true);
                 if (!renewed) {
                     lockLostError = new Error('Lock Cloud đã hết hạn hoặc không còn thuộc Manager này.');
                     return false;
@@ -591,9 +1080,20 @@ class SupabaseAdapter {
         };
         const heartbeat = setInterval(() => { void renew(); }, Math.max(5000, Math.min(30000, Math.floor(safeLeaseSeconds * 1000 / 3))));
         if (typeof heartbeat.unref === 'function') heartbeat.unref();
+        // P1-04: Monotonic fencing token context truyền vào callback
+        const lockContext = {
+            owner,
+            fencingToken,
+            isLockValid: () => !lockLostError && Date.now() < lockLeaseUntil - 2000,
+            assertLockValid: () => {
+                if (lockLostError || Date.now() >= lockLeaseUntil - 2000) {
+                    throw new Error('STALE_FENCING_TOKEN: Lock Cloud đã mất quyền sở hữu hoặc lease đã hết hạn: ' + (lockLostError?.message || lockKey));
+                }
+            }
+        };
         try {
-            const result = await fn();
-            if (lockLostError || Date.now() >= lockLeaseUntil) throw new Error('Lock Cloud đã mất quyền sở hữu trong lúc chạy: ' + (lockLostError?.message || lockKey));
+            const result = await fn(lockContext);
+            if (lockLostError || Date.now() >= lockLeaseUntil - 2000) throw new Error('STALE_FENCING_TOKEN: Lock Cloud đã mất quyền sở hữu trong lúc chạy: ' + (lockLostError?.message || lockKey));
             return result;
         } finally {
             clearInterval(heartbeat);
@@ -603,16 +1103,29 @@ class SupabaseAdapter {
         }
     }
 
+    async verifyLockFencing(lockKey, ownerId, fencingToken) {
+        if (!this.isEnabled()) return true;
+        try {
+            const data = await this.callRpc('verify_manager_lock_fencing', {
+                p_lock_key: String(lockKey),
+                p_owner_id: String(ownerId),
+                p_fencing_token: Number(fencingToken)
+            });
+            return data === true || (Array.isArray(data) && data[0] === true);
+        } catch (_) {
+            return false;
+        }
+    }
+
     async callRpc(name, body, timeoutMs = 10000) {
         if (!this.isEnabled() || !/^[a-z][a-z0-9_]*$/i.test(String(name || ''))) {
             throw new Error('Supabase RPC không hợp lệ hoặc chưa được cấu hình.');
         }
-        const res = await fetch(`${this.url}/rest/v1/rpc/${name}`, {
+        const res = await this.fetchWithRetry(`${this.url}/rest/v1/rpc/${name}`, {
             method: 'POST',
             headers: this.getHeaders(),
-            body: JSON.stringify(body || {}),
-            signal: AbortSignal.timeout(timeoutMs)
-        });
+            body: JSON.stringify(body || {})
+        }, { timeoutMs, maxRetries: 3 });
         const text = await res.text().catch(() => '');
         if (!res.ok) {
             const error = new Error('Supabase RPC ' + name + ' thất bại (HTTP ' + res.status + ').');
@@ -636,10 +1149,9 @@ class SupabaseAdapter {
         }
         try {
             const checks = await Promise.all(SUPABASE_REQUIRED_TABLES.map(async table => {
-                const res = await fetch(`${this.url}/rest/v1/${table}?select=*&limit=1`, {
-                    headers: this.getHeaders(),
-                    signal: AbortSignal.timeout(6000)
-                });
+                const res = await this.fetchWithRetry(`${this.url}/rest/v1/${table}?select=*&limit=1`, {
+                    headers: this.getHeaders()
+                }, { timeoutMs: 6000, maxRetries: 2 });
                 return { table, ok: res.ok, status: res.status, text: res.ok ? '' : await res.text().catch(() => '') };
             }));
             const failed = checks.filter(item => !item.ok);
@@ -651,11 +1163,11 @@ class SupabaseAdapter {
                 let rpcAvailable = false;
                 let rpcSpecVerified = false;
                 let rpcProbeError = '';
+                let missingRpcs = [];
                 try {
-                    const specRes = await fetch(`${this.url}/rest/v1/`, {
-                        headers: this.getHeaders(),
-                        signal: AbortSignal.timeout(6000)
-                    });
+                    const specRes = await this.fetchWithRetry(`${this.url}/rest/v1/`, {
+                        headers: this.getHeaders()
+                    }, { timeoutMs: 6000, maxRetries: 2 });
                     if (!specRes.ok) throw new Error('HTTP ' + specRes.status);
                     const spec = await specRes.json().catch(() => null);
                     if (!spec || typeof spec !== 'object' || !spec.paths || typeof spec.paths !== 'object') {
@@ -664,14 +1176,20 @@ class SupabaseAdapter {
                     rpcSpecVerified = true;
                     const paths = Object.keys(spec.paths);
                     const normalizedPaths = paths.map(pathName => String(pathName).replace(/\/+$/, ''));
-                    rpcAvailable = [
+                    const requiredRpcs = [
                         '/rpc/record_bot_position_change', '/rpc/consume_manager_key_usage',
-                        '/rpc/acquire_manager_lock', '/rpc/release_manager_lock', '/rpc/renew_manager_lock',
+                        '/rpc/acquire_manager_lock', '/rpc/release_manager_lock', '/rpc/renew_manager_lock', '/rpc/verify_manager_lock_fencing',
                         '/rpc/read_manager_users_snapshot', '/rpc/save_manager_users_snapshot',
                         '/rpc/insert_manager_users_if_absent', '/rpc/redeem_manager_key_and_save_users',
-                        '/rpc/read_manager_session', '/rpc/read_manager_authorization', '/rpc/create_manager_user_session', '/rpc/revoke_manager_session'
-                    ]
-                        .every(required => normalizedPaths.includes(required));
+                        '/rpc/read_manager_session', '/rpc/read_manager_authorization', '/rpc/create_manager_user_session', '/rpc/revoke_manager_session',
+                        '/rpc/claim_manager_link4m_reward', '/rpc/start_manager_link4m_attempt',
+                        '/rpc/patch_manager_registry', '/rpc/set_bot_log_clear_cutoff',
+                        '/rpc/rollback_manager_link4m_attempt', '/rpc/update_manager_link4m_sync_status',
+                        '/rpc/set_manager_link4m_short_url', '/rpc/claim_manager_outbox_batch', '/rpc/claim_manager_pending_allocations',
+                        '/rpc/prune_manager_historical_data'
+                    ];
+                    missingRpcs = requiredRpcs.filter(r => !normalizedPaths.includes(r));
+                    rpcAvailable = missingRpcs.length === 0;
                 } catch (err) {
                     rpcProbeError = err.message || String(err);
                 }
@@ -682,14 +1200,13 @@ class SupabaseAdapter {
                         this.lastPingError = error;
                         return { ok: false, error, missingRpc: false, rpcVerified: false, rpcProbeError: rpcProbeError || 'OpenAPI spec không đọc được.' };
                     }
-                    const error = 'Thiếu một hoặc nhiều RPC bắt buộc cho user CAS, session revoke, Key transaction hoặc lock. Hãy chạy các migration Supabase theo thứ tự trước khi bật Manager.';
+                    const error = 'Thiếu một hoặc nhiều RPC bắt buộc trên Supabase (' + missingRpcs.join(', ') + '). Hãy chạy các migration Supabase theo thứ tự trước khi bật Manager.';
                     this.lastPingError = error;
-                    return { ok: false, error, missingRpc: true, rpcVerified: true };
+                    return { ok: false, error, missingRpc: true, rpcVerified: true, missingRpcs };
                 }
-                const userColumns = await fetch(`${this.url}/rest/v1/manager_users?select=id,username,allow_account_change,lock_reason,note&limit=0`, {
-                    headers: this.getHeaders(),
-                    signal: AbortSignal.timeout(6000)
-                });
+                const userColumns = await this.fetchWithRetry(`${this.url}/rest/v1/manager_users?select=id,username,allow_account_change,lock_reason,note&limit=0`, {
+                    headers: this.getHeaders()
+                }, { timeoutMs: 6000, maxRetries: 2 });
                 if (!userColumns.ok) {
                     const error = 'Thiếu cột user allow_account_change/lock_reason/note. Hãy chạy migration 20261023_manager_user_transactions.sql.';
                     this.lastPingOk = false;
@@ -719,32 +1236,7 @@ class SupabaseAdapter {
         if (!this.isEnabled()) return null;
         try {
             const data = await this.fetchAllRows('manager_users', { order: 'username.asc', uniqueKey: 'username' });
-            return data.map(u => {
-                const encryptedPassword = String(u.password || '');
-                const password = decryptUserPassword(encryptedPassword);
-                if (encryptedPassword && isUnsupportedCredentialCiphertext(encryptedPassword)) {
-                    throw new Error('Mật khẩu cloud dùng định dạng mã hóa không được hỗ trợ: ' + encryptedPassword.slice(0, 12) + '…');
-                }
-                if (encryptedPassword && isStoredCredentialCiphertext(encryptedPassword) && password === null) {
-                    throw new Error('Không thể giải mã mật khẩu cloud. Hãy giữ nguyên MANAGER_MASTER_KEY khi deploy.');
-                }
-                return {
-                    id: u.id,
-                    username: u.username,
-                    password,
-                    role: u.role || 'user',
-                    status: u.status || 'active',
-                    assignedBotIds: Array.isArray(u.assigned_bot_ids) ? u.assigned_bot_ids : [],
-                    expiresAt: u.expires_at || null,
-                    planName: u.plan_name || 'Gói mặc định',
-                    botAliases: (u.bot_aliases && typeof u.bot_aliases === 'object') ? u.bot_aliases : {},
-                    allowAccountChange: u.allow_account_change !== false,
-                    lockReason: String(u.lock_reason || ''),
-                    note: String(u.note || ''),
-                    createdAt: u.created_at,
-                    updatedAt: u.updated_at
-                };
-            });
+            return data.map(u => this.mapDatabaseUser(u));
         } catch (err) {
             console.error('[SUPABASE] Lỗi tải users:', err.message);
             return null;
@@ -752,22 +1244,31 @@ class SupabaseAdapter {
     }
 
     userToDatabaseRows(users) {
-        return users.map(u => ({
-            id: String(u.id || ('usr_' + u.username)),
-            username: String(u.username || ''),
-            password: encryptUserPassword(String(u.password ?? '')),
-            role: String(u.role || 'user'),
-            status: String(u.status || 'active'),
-            assigned_bot_ids: Array.isArray(u.assignedBotIds) ? u.assignedBotIds : [],
-            expires_at: u.expiresAt ? String(u.expiresAt) : null,
-            plan_name: String(u.planName || 'Gói mặc định'),
-            bot_aliases: (u.botAliases && typeof u.botAliases === 'object' && !Array.isArray(u.botAliases)) ? u.botAliases : {},
-            allow_account_change: u.allowAccountChange !== false,
-            lock_reason: String(u.lockReason || ''),
-            note: String(u.note || ''),
-            created_at: u.createdAt || new Date().toISOString(),
-            updated_at: u.updatedAt || new Date().toISOString()
-        }));
+        return users.map(u => {
+            let encPassword;
+            if (!process.env.MANAGER_MASTER_KEY_PREVIOUS && u._rawEncryptedPassword && isStoredCredentialCiphertext(u._rawEncryptedPassword) && String(u.password ?? '') === u._decryptedPasswordSnapshot) {
+                encPassword = u._rawEncryptedPassword;
+            } else {
+                encPassword = encryptUserPassword(String(u.password ?? ''));
+            }
+            return {
+                id: String(u.id || ('usr_' + u.username)),
+                username: String(u.username || ''),
+                password: encPassword,
+                role: String(u.role || 'user'),
+                status: String(u.status || 'active'),
+                assigned_bot_ids: Array.isArray(u.assignedBotIds) ? u.assignedBotIds : [],
+                expires_at: u.expiresAt ? String(u.expiresAt) : null,
+                is_permanent: Boolean(u.isPermanent === true || u.is_permanent === true || ((u.expiresAt === null || u.expiresAt === undefined) && (u.expires_at === null || u.expires_at === undefined) && String(u.status || 'active').toLowerCase() === 'active' && String(u.role || 'user').toLowerCase() !== 'admin')),
+                plan_name: String(u.planName || 'Gói mặc định'),
+                bot_aliases: (u.botAliases && typeof u.botAliases === 'object' && !Array.isArray(u.botAliases)) ? u.botAliases : {},
+                allow_account_change: u.allowAccountChange !== false,
+                lock_reason: String(u.lockReason || ''),
+                note: String(u.note || ''),
+                created_at: u.createdAt || new Date().toISOString(),
+                updated_at: u.updatedAt || new Date().toISOString()
+            };
+        });
     }
 
     mapDatabaseUser(u) {
@@ -779,7 +1280,7 @@ class SupabaseAdapter {
         if (encryptedPassword && isStoredCredentialCiphertext(encryptedPassword) && password === null) {
             throw new Error('Không thể giải mã mật khẩu cloud. Hãy giữ nguyên MANAGER_MASTER_KEY khi deploy.');
         }
-        return {
+        const mapped = {
             id: u.id,
             username: u.username,
             password,
@@ -787,6 +1288,7 @@ class SupabaseAdapter {
             status: u.status || 'active',
             assignedBotIds: Array.isArray(u.assigned_bot_ids) ? u.assigned_bot_ids : [],
             expiresAt: u.expires_at || null,
+            isPermanent: Boolean(u.is_permanent === true),
             planName: u.plan_name || 'Gói mặc định',
             botAliases: (u.bot_aliases && typeof u.bot_aliases === 'object') ? u.bot_aliases : {},
             allowAccountChange: u.allow_account_change !== false,
@@ -795,6 +1297,21 @@ class SupabaseAdapter {
             createdAt: u.created_at,
             updatedAt: u.updated_at
         };
+        Object.defineProperties(mapped, {
+            _rawEncryptedPassword: { value: encryptedPassword, enumerable: false, writable: true },
+            _decryptedPasswordSnapshot: { value: password, enumerable: false, writable: true }
+        });
+        return mapped;
+    }
+
+    async pruneHistoricalData() {
+        if (!this.isEnabled()) return null;
+        try {
+            return await this.callRpc('prune_manager_historical_data', {});
+        } catch (err) {
+            console.warn('[SUPABASE] prune_manager_historical_data soft failure:', err.message);
+            return null;
+        }
     }
 
     async fetchUsersSnapshot() {
@@ -852,6 +1369,7 @@ class SupabaseAdapter {
                     id: String(userRow.id || ''), username: String(userRow.username || ''), status: String(userRow.status || 'active'),
                     assignedBotIds: Array.isArray(userRow.assigned_bot_ids) ? userRow.assigned_bot_ids.map(Number) : [],
                     expiresAt: userRow.expires_at || null, planName: String(userRow.plan_name || 'Gói thường'),
+                    isPermanent: Boolean(userRow.is_permanent === true || (!userRow.expires_at && String(userRow.status || 'active').toLowerCase() === 'active')),
                     allowAccountChange: userRow.allow_account_change !== false, lockReason: String(userRow.lock_reason || '')
                 } : null
             };
@@ -864,7 +1382,7 @@ class SupabaseAdapter {
         if (!this.isEnabled()) return { ok: false, error: 'Supabase users chưa sẵn sàng.' };
         try {
             const params = new URLSearchParams({
-                select: 'id,username,status,assigned_bot_ids,expires_at,plan_name,allow_account_change,lock_reason',
+                select: 'id,username,status,assigned_bot_ids,expires_at,plan_name,allow_account_change,lock_reason,is_permanent',
                 limit: '2'
             });
             if (userId) params.set('id', 'eq.' + String(userId));
@@ -880,6 +1398,7 @@ class SupabaseAdapter {
                 id: String(row.id || ''), username: String(row.username || ''), status: String(row.status || 'active'),
                 assignedBotIds: Array.isArray(row.assigned_bot_ids) ? row.assigned_bot_ids.map(Number) : [],
                 expiresAt: row.expires_at || null, planName: String(row.plan_name || 'Gói thường'),
+                isPermanent: Boolean(row.is_permanent === true || (!row.expires_at && String(row.status || 'active').toLowerCase() === 'active')),
                 allowAccountChange: row.allow_account_change !== false, lockReason: String(row.lock_reason || '')
             } : null };
         } catch (err) {
@@ -1016,6 +1535,7 @@ class SupabaseAdapter {
                 key: k.code || k.key,
                 code: k.code || k.key,
                 days: k.days,
+                isPermanent: k.days === -1 || k.is_permanent === true,
                 planName: k.plan_name,
                 botIds: Array.isArray(k.bot_ids) ? k.bot_ids : [],
                 botCount: k.bot_count !== undefined ? Number(k.bot_count) : (Array.isArray(k.bot_ids) && k.bot_ids.length ? k.bot_ids.length : 1),
@@ -1047,6 +1567,7 @@ class SupabaseAdapter {
             return {
                 id: String(k.id || ('key_' + code)), code, key_code: code,
                 days: Number(k.days || 1), plan_name: String(k.planName || 'Gói mặc định'),
+                is_permanent: Boolean(k.isPermanent === true || k.days === -1),
                 bot_ids: Array.isArray(k.botIds) ? k.botIds : [],
                 bot_count: Number(k.botCount !== undefined ? k.botCount : (Array.isArray(k.botIds) && k.botIds.length ? k.botIds.length : 1)),
                 used: Boolean(k.used), used_by: k.usedBy ? String(k.usedBy) : null,
@@ -1094,6 +1615,7 @@ class SupabaseAdapter {
                     headers: this.getHeaders({ Prefer: 'return=minimal' }),
                     body: JSON.stringify({
                         days: Number(k.days || 1), plan_name: String(k.planName || 'Gói mặc định'),
+                        is_permanent: Boolean(k.isPermanent === true || k.days === -1),
                         bot_ids: Array.isArray(k.botIds) ? k.botIds : [],
                         bot_count: Number(k.botCount !== undefined ? k.botCount : (Array.isArray(k.botIds) && k.botIds.length ? k.botIds.length : 1)),
                         max_uses: normalizeMaxUses(k.maxUses), expires_at: k.expiresAt || null,
@@ -1251,6 +1773,27 @@ class SupabaseAdapter {
                 if (!registryData || typeof registryData !== 'object') return null;
                 const restored = { ...registryData };
                 restored.botRentalDisabled = normalizeBotRentalDisabled(registryData.botRentalDisabled);
+                restored.pendingAllocations = Array.isArray(registryData.pendingAllocations) ? registryData.pendingAllocations : [];
+                if (Array.isArray(restored.dynamicBots)) {
+                    restored.dynamicBots = restored.dynamicBots.map(b => {
+                        if (b && b.secretKey && isStoredCredentialCiphertext(String(b.secretKey))) {
+                            const plain = decryptUserPassword(String(b.secretKey));
+                            return { ...b, secretKey: plain !== null ? plain : b.secretKey };
+                        }
+                        return b;
+                    });
+                }
+                if (restored.systemSettings && typeof restored.systemSettings === 'object') {
+                    const sys = { ...restored.systemSettings };
+                    for (const field of ['link4mApiToken', 'link4mSecretKey']) {
+                        const stored = String(sys[field] || '');
+                        if (stored && isStoredCredentialCiphertext(stored)) {
+                            const plain = decryptUserPassword(stored);
+                            if (plain !== null) sys[field] = plain;
+                        }
+                    }
+                    restored.systemSettings = sys;
+                }
                 if (registryData.webhook && typeof registryData.webhook === 'object') {
                     const webhook = { ...registryData.webhook };
                     let legacyMaskedSecret = false;
@@ -1291,9 +1834,26 @@ class SupabaseAdapter {
     async saveRegistry(payload) {
         if (!this.isEnabled()) return false;
         try {
+            const encryptedDynamicBots = (payload.dynamicBots || []).map(b => {
+                const item = { ...b };
+                if (item.secretKey) {
+                    const str = String(item.secretKey);
+                    item.secretKey = isStoredCredentialCiphertext(str) ? str : encryptUserPassword(str);
+                }
+                return item;
+            });
+            const encryptedSystemSettings = payload.systemSettings ? {
+                ...payload.systemSettings,
+                link4mApiToken: (payload.systemSettings.link4mApiToken)
+                    ? (isStoredCredentialCiphertext(String(payload.systemSettings.link4mApiToken)) ? String(payload.systemSettings.link4mApiToken) : encryptUserPassword(String(payload.systemSettings.link4mApiToken)))
+                    : '',
+                link4mSecretKey: (payload.systemSettings.link4mSecretKey)
+                    ? (isStoredCredentialCiphertext(String(payload.systemSettings.link4mSecretKey)) ? String(payload.systemSettings.link4mSecretKey) : encryptUserPassword(String(payload.systemSettings.link4mSecretKey)))
+                    : ''
+            } : {};
             const dataToSave = {
                 adminPassword: payload.adminPassword,
-                dynamicBots: payload.dynamicBots || [],
+                dynamicBots: encryptedDynamicBots,
                 disabledEnvUrls: payload.disabledEnvUrls || [],
                 disabledEnvIds: payload.disabledEnvIds || [],
                 overrides: payload.overrides || [],
@@ -1302,12 +1862,25 @@ class SupabaseAdapter {
                 botIdMap: payload.botIdMap || {},
                 botAliases: payload.botAliases || {},
                 botTags: payload.botTags || {},
+                // BUG-03 (Wave A recheck §6.1-3): đường full-save cũng persist per-bot secret
+                // (đã mã hóa at-rest qua cùng serializer với patchRegistry).
+                botSecrets: serializeBotSecretsForCloud(
+                    (payload.botSecrets && typeof payload.botSecrets === 'object' && !Array.isArray(payload.botSecrets))
+                        ? payload.botSecrets
+                        : registry.botSecrets
+                ),
                 botRentalDisabled: normalizeBotRentalDisabled(payload.botRentalDisabled),
-                systemSettings: payload.systemSettings || {},
+                systemSettings: encryptedSystemSettings,
                 lastBotId: payload.lastBotId || 0,
                 pendingResets: (payload.pendingResets && typeof payload.pendingResets === 'object' && !Array.isArray(payload.pendingResets))
                     ? payload.pendingResets
                     : {},
+                pendingAllocations: (payload.pendingAllocations && Array.isArray(payload.pendingAllocations))
+                    ? payload.pendingAllocations
+                    : (Array.isArray(registry.pendingAllocations) ? registry.pendingAllocations : []),
+                outboxQueue: (payload.outboxQueue && Array.isArray(payload.outboxQueue))
+                    ? payload.outboxQueue
+                    : (Array.isArray(registry.outboxQueue) ? registry.outboxQueue : []),
                 mustChangePassword: payload.mustChangePassword === true,
                 supabase: payload.supabase ? {
                     url: payload.supabase.url || '',
@@ -1315,8 +1888,8 @@ class SupabaseAdapter {
                 } : null,
                 webhook: payload.webhook ? {
                     enabled: !!payload.webhook.enabled,
-                    discordUrl: (payload.webhook.discordUrl && payload.webhook.discordUrl !== '[CONFIGURED]') ? encryptUserPassword(String(payload.webhook.discordUrl)) : '',
-                    telegramToken: (payload.webhook.telegramToken && payload.webhook.telegramToken !== '[CONFIGURED]') ? encryptUserPassword(String(payload.webhook.telegramToken)) : '',
+                    discordUrl: (payload.webhook.discordUrl && payload.webhook.discordUrl !== '[CONFIGURED]') ? (isStoredCredentialCiphertext(String(payload.webhook.discordUrl)) ? String(payload.webhook.discordUrl) : encryptUserPassword(String(payload.webhook.discordUrl))) : '',
+                    telegramToken: (payload.webhook.telegramToken && payload.webhook.telegramToken !== '[CONFIGURED]') ? (isStoredCredentialCiphertext(String(payload.webhook.telegramToken)) ? String(payload.webhook.telegramToken) : encryptUserPassword(String(payload.webhook.telegramToken))) : '',
                     telegramChatId: String(payload.webhook.telegramChatId || ''),
                     notifyOnOffline: payload.webhook.notifyOnOffline !== false,
                     notifyOnLowTotem: payload.webhook.notifyOnLowTotem !== false,
@@ -1328,7 +1901,16 @@ class SupabaseAdapter {
                 announcement: payload.announcement || {}
             };
             const pendingResets = dataToSave.pendingResets;
-            return await this.patchRegistry(dataToSave, pendingResets, [], { webhookEncrypted: true });
+            // BUG-05 (Wave B0): RPC patch_manager_registry UPSERT per-key — entry đã xóa
+            // trong RAM sẽ HỒI SINH từ Cloud nếu không truyền p_pending_reset_deletes
+            // (saveRegistryUnlocked đã diff baseline đúng cách; đường full-save này trước
+            // giờ truyền [] nên checkpoint 'completed' cứ sống lại sau mỗi sync).
+            const baselineResetsForDelete = (registryCloudBaseline && registryCloudBaseline.pendingResets && typeof registryCloudBaseline.pendingResets === 'object' && !Array.isArray(registryCloudBaseline.pendingResets))
+                ? registryCloudBaseline.pendingResets
+                : {};
+            const pendingResetDeletes = Object.keys(baselineResetsForDelete)
+                .filter(k => !Object.prototype.hasOwnProperty.call(pendingResets, k));
+            return await this.patchRegistry(dataToSave, pendingResets, pendingResetDeletes, { webhookEncrypted: true });
         } catch (err) {
             console.error('[SUPABASE] Lỗi lưu registry:', err.message);
             return false;
@@ -1340,6 +1922,26 @@ class SupabaseAdapter {
         try {
             const safePatch = { ...patch };
             delete safePatch.pendingResets;
+            if (safePatch.dynamicBots && Array.isArray(safePatch.dynamicBots)) {
+                safePatch.dynamicBots = safePatch.dynamicBots.map(b => {
+                    const item = { ...b };
+                    if (item.secretKey) {
+                        const str = String(item.secretKey);
+                        item.secretKey = isStoredCredentialCiphertext(str) ? str : encryptUserPassword(str);
+                    }
+                    return item;
+                });
+            }
+            if (safePatch.systemSettings && typeof safePatch.systemSettings === 'object') {
+                const sys = { ...safePatch.systemSettings };
+                for (const field of ['link4mApiToken', 'link4mSecretKey']) {
+                    const val = String(sys[field] || '');
+                    if (val && !isStoredCredentialCiphertext(val)) {
+                        sys[field] = encryptUserPassword(val);
+                    }
+                }
+                safePatch.systemSettings = sys;
+            }
             if (safePatch.webhook && typeof safePatch.webhook === 'object') {
                 safePatch.webhook = { ...safePatch.webhook };
                 if (!webhookEncrypted) for (const field of ['discordUrl', 'telegramToken']) {
@@ -1451,6 +2053,7 @@ class SupabaseAdapter {
     }
 
     async deleteSession(tokenHash) {
+        invalidateAuthCache(tokenHash);
         if (!this.isEnabled() || !tokenHash) return false;
         try {
             const data = await this.callRpc('revoke_manager_session', { p_token_hash: String(tokenHash) }, 5000);
@@ -1458,6 +2061,162 @@ class SupabaseAdapter {
         } catch (err) {
             console.error('[SUPABASE] Lỗi thu hồi session trên Cloud:', err.message);
             return false;
+        }
+    }
+
+    // --- LINK4M REWARDS ---
+    async startLink4mAttempt(attemptId, tokenHash, username, vietnamDate, dailyLimit, rewardHours, ipAddress, providerRef) {
+        if (!this.isEnabled()) return { ok: false, error: 'SUPABASE_DISABLED' };
+        try {
+            const data = await this.callRpc('start_manager_link4m_attempt', {
+                p_attempt_id: String(attemptId),
+                p_token_hash: String(tokenHash),
+                p_username: String(username).toLowerCase(),
+                p_vietnam_date: String(vietnamDate),
+                p_daily_limit: parseInt(dailyLimit, 10) || 2,
+                p_reward_hours: parseInt(rewardHours, 10) || 12,
+                p_ip_address: String(ipAddress || ''),
+                p_provider_reference: String(providerRef || '')
+            }, 8000);
+            return data && typeof data === 'object' ? data : { ok: false, error: 'INVALID_RPC_RESPONSE' };
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi gọi start_manager_link4m_attempt:', err.message);
+            return { ok: false, error: 'RPC_FAILED', message: err.message };
+        }
+    }
+
+    async rollbackLink4mAttempt(attemptId) {
+        if (!this.isEnabled() || !attemptId) return false;
+        try {
+            const res = await this.callRpc('rollback_manager_link4m_attempt', {
+                p_attempt_id: String(attemptId)
+            }, 5000);
+            return res === true || (Array.isArray(res) && res[0] === true);
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi rollbackLink4mAttempt:', err.message);
+            return false;
+        }
+    }
+
+    async updateLink4mSyncStatus(attemptId, syncStatus) {
+        if (!this.isEnabled() || !attemptId) return false;
+        try {
+            const res = await this.callRpc('update_manager_link4m_sync_status', {
+                p_attempt_id: String(attemptId),
+                p_sync_status: String(syncStatus)
+            }, 5000);
+            return res === true || (Array.isArray(res) && res[0] === true);
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi updateLink4mSyncStatus:', err.message);
+            return false;
+        }
+    }
+
+    // NEW-01 (Wave B1): persist URL rút gọn provider sau khi createRewardLink thành công.
+    // Fail mềm (false) — reuse lần sau sẽ sinh lại shortlink cho cùng attemptId,
+    // không tiêu thêm hạn mức. Không log URL để tránh lộ token trong link.
+    async setLink4mShortUrl(attemptId, shortUrl) {
+        if (!this.isEnabled() || !attemptId || !shortUrl) return false;
+        try {
+            const res = await this.callRpc('set_manager_link4m_short_url', {
+                p_attempt_id: String(attemptId),
+                p_short_url: String(shortUrl)
+            }, 5000);
+            return res === true || (Array.isArray(res) && res[0] === true);
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi setLink4mShortUrl:', err.message);
+            return false;
+        }
+    }
+    async saveLink4mAttempt(attempt) {
+        if (!this.isEnabled() || !attempt) return false;
+        try {
+            const payload = {
+                attempt_id: attempt.attemptId,
+                username: String(attempt.username || '').toLowerCase(),
+                token_hash: attempt.tokenHash,
+                status: attempt.status || 'pending',
+                vietnam_date: attempt.vietnamDate,
+                created_at: attempt.createdAt || new Date().toISOString(),
+                expires_at: attempt.expiresAt,
+                verified_at: attempt.verifiedAt || null,
+                rewarded_at: attempt.rewardedAt || null,
+                reward_hours: attempt.rewardHours || 12,
+                ip_address: attempt.ipAddress || '',
+                provider_reference: attempt.providerReference || '',
+                failure_reason: attempt.failureReason || ''
+            };
+            const res = await this.fetchWithRetry(`${this.url}/rest/v1/manager_link4m_attempts`, {
+                method: 'POST',
+                headers: this.getHeaders({ 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
+                body: JSON.stringify(payload)
+            }, { timeoutMs: 5000, maxRetries: 2 });
+            return res.ok;
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi lưu manager_link4m_attempts:', err.message);
+            return false;
+        }
+    }
+
+    async fetchLink4mDailyUsage(username, vietnamDate) {
+        if (!this.isEnabled() || !username || !vietnamDate) return { ok: true, count: 0 };
+        try {
+            const params = new URLSearchParams({
+                username: `eq.${String(username).toLowerCase()}`,
+                vietnam_date: `eq.${vietnamDate}`,
+                status: 'in.(pending,verified,rewarded,expired)',
+                select: 'attempt_id'
+            });
+            const res = await this.fetchWithRetry(`${this.url}/rest/v1/manager_link4m_attempts?${params.toString()}`, {
+                headers: this.getHeaders()
+            }, { timeoutMs: 5000, maxRetries: 2 });
+            if (!res.ok) return { ok: false, count: 0, error: `HTTP ${res.status}` };
+            const rows = await res.json();
+            return { ok: true, count: Array.isArray(rows) ? rows.length : 0 };
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi đọc daily usage Link4M:', err.message);
+            return { ok: false, count: 0, error: err.message };
+        }
+    }
+
+    async fetchLink4mActiveAttempt(username) {
+        if (!this.isEnabled() || !username) return { ok: true, attempt: null };
+        try {
+            const nowIso = new Date().toISOString();
+            const params = new URLSearchParams({
+                username: `eq.${String(username).toLowerCase()}`,
+                status: 'eq.pending',
+                expires_at: `gt.${nowIso}`,
+                order: 'created_at.desc',
+                limit: '1',
+                select: '*'
+            });
+            const res = await this.fetchWithRetry(`${this.url}/rest/v1/manager_link4m_attempts?${params.toString()}`, {
+                headers: this.getHeaders()
+            }, { timeoutMs: 5000, maxRetries: 2 });
+            if (!res.ok) return { ok: false, attempt: null, error: `HTTP ${res.status}` };
+            const rows = await res.json();
+            return { ok: true, attempt: Array.isArray(rows) && rows.length > 0 ? rows[0] : null };
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi đọc active attempt Link4M:', err.message);
+            return { ok: false, attempt: null, error: err.message };
+        }
+    }
+
+    async claimLink4mReward(attemptId, tokenHash, username, rewardHours = 12, providerRef = '') {
+        if (!this.isEnabled()) return { ok: false, error: 'SUPABASE_DISABLED' };
+        try {
+            const data = await this.callRpc('claim_manager_link4m_reward', {
+                p_attempt_id: String(attemptId),
+                p_token_hash: String(tokenHash),
+                p_username: String(username).toLowerCase(),
+                p_reward_hours: parseInt(rewardHours, 10) || 12,
+                p_provider_reference: String(providerRef || '')
+            }, 8000);
+            return data && typeof data === 'object' ? data : { ok: false, error: 'INVALID_RPC_RESPONSE' };
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi gọi claim_manager_link4m_reward:', err.message);
+            return { ok: false, error: 'RPC_FAILED', message: err.message };
         }
     }
 
@@ -1469,13 +2228,21 @@ class SupabaseAdapter {
     async fetchBotSettingsStrict(botId) {
         const stableId = String(botId || '').trim();
         if (!this.isEnabled() || !/^[1-9][0-9]{0,8}$/.test(stableId)) throw new Error('BOT_ID không hợp lệ hoặc Supabase chưa cấu hình.');
-        const res = await fetch(this.url + '/rest/v1/bot_settings?bot_id=eq.' + encodeURIComponent(stableId) + '&select=*', {
-            headers: this.getHeaders(), signal: AbortSignal.timeout(8000)
-        });
+        const res = await this.fetchWithRetry(this.url + '/rest/v1/bot_settings?bot_id=eq.' + encodeURIComponent(stableId) + '&select=*', {
+            headers: this.getHeaders()
+        }, { timeoutMs: 8000, maxRetries: 3 });
         if (!res.ok) throw new Error('Đọc bot_settings #' + stableId + ' thất bại: HTTP ' + res.status + ' ' + await res.text().catch(() => ''));
         const rows = await res.json();
         if (!Array.isArray(rows)) throw new Error('Supabase trả payload bot_settings không phải array.');
-        return rows[0] || null;
+        const row = rows[0] || null;
+        if (row && typeof row === 'object') {
+            if (Array.isArray(row.bot_schedules) && !Array.isArray(row.schedules)) {
+                row.schedules = row.bot_schedules;
+            } else if (Array.isArray(row.schedules) && !Array.isArray(row.bot_schedules)) {
+                row.bot_schedules = row.schedules;
+            }
+        }
+        return row;
     }
 
     async fetchAllBotSettings() {
@@ -1523,13 +2290,15 @@ class SupabaseAdapter {
             const settings = incomingSettings || (existing?.settings && typeof existing.settings === 'object' ? { ...existing.settings } : {});
             if (settings.proxy && typeof settings.proxy === 'object') settings.proxy = { ...settings.proxy, password: proxy.password };
             else if (incomingProxy) settings.proxy = { ...proxy };
+            const schedulesData = payload.botSchedules ?? payload.schedules ?? existing?.bot_schedules ?? existing?.schedules ?? [];
             const row = {
                 bot_id: stableId,
                 username: clearCredentials ? '' : (payload.username !== undefined && String(payload.username).trim() ? String(payload.username).trim() : (existing?.username || '')),
                 password,
                 settings,
                 proxy,
-                schedules: payload.botSchedules ?? payload.schedules ?? existing?.schedules ?? [],
+                schedules: schedulesData,
+                bot_schedules: schedulesData,
                 auto_chat: payload.autoChatSchedules ?? payload.auto_chat ?? existing?.auto_chat ?? [],
                 synced_auth: payload.syncedAuth && typeof payload.syncedAuth === 'object'
                     ? payload.syncedAuth
@@ -1537,17 +2306,18 @@ class SupabaseAdapter {
                 manually_stopped: payload.manuallyStopped ?? settings.manuallyStopped ?? existing?.manually_stopped ?? false,
                 updated_at: new Date().toISOString()
             };
-            const res = await fetch(this.url + '/rest/v1/bot_settings?on_conflict=bot_id', {
+            const res = await this.fetchWithRetry(this.url + '/rest/v1/bot_settings?on_conflict=bot_id', {
                 method: 'POST',
                 headers: this.getHeaders({ 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
-                body: JSON.stringify([row]),
-                signal: AbortSignal.timeout(10000)
-            });
+                body: JSON.stringify([row])
+            }, { timeoutMs: 10000, maxRetries: 3 });
             if (!res.ok) throw new Error('HTTP ' + res.status + ': ' + await res.text().catch(() => ''));
             const confirmed = await this.fetchBotSettingsStrict(stableId);
+            const expSched = stableJson(schedulesData);
+            const confSched = stableJson(confirmed?.bot_schedules || confirmed?.schedules || []);
             if (!confirmed || String(confirmed.bot_id) !== stableId || String(confirmed.password || '') !== password || String(confirmed.username || '') !== row.username ||
                 stableJson(confirmed.proxy || {}) !== stableJson(proxy) || stableJson(confirmed.settings || {}) !== stableJson(settings) ||
-                stableJson(confirmed.schedules || []) !== stableJson(row.schedules) || stableJson(confirmed.auto_chat || []) !== stableJson(row.auto_chat) ||
+                confSched !== expSched || stableJson(confirmed.auto_chat || []) !== stableJson(row.auto_chat) ||
                 stableJson(confirmed.synced_auth || {}) !== stableJson(row.synced_auth) ||
                 Boolean(confirmed.manually_stopped) !== Boolean(row.manually_stopped)) {
                 throw new Error('Dữ liệu bot_settings sau khi lưu không khớp payload đã gửi.');
@@ -1706,34 +2476,38 @@ class SupabaseAdapter {
     async restoreBotSettingsRow(row) {
         if (!this.isEnabled() || !row?.bot_id) return false;
         try {
+            const schedulesData = Array.isArray(row.bot_schedules) ? row.bot_schedules : (Array.isArray(row.schedules) ? row.schedules : []);
             const restoredRow = {
                 bot_id: String(row.bot_id),
                 username: String(row.username || ''),
                 password: String(row.password || ''),
                 settings: row.settings && typeof row.settings === 'object' ? row.settings : {},
                 proxy: row.proxy && typeof row.proxy === 'object' ? row.proxy : {},
-                schedules: Array.isArray(row.schedules) ? row.schedules : [],
+                schedules: schedulesData,
+                bot_schedules: schedulesData,
                 auto_chat: Array.isArray(row.auto_chat) ? row.auto_chat : [],
                 manually_stopped: row.manually_stopped === true,
                 synced_auth: row.synced_auth && typeof row.synced_auth === 'object' ? row.synced_auth : {},
                 updated_at: row.updated_at || new Date().toISOString()
             };
-            const res = await fetch(`${this.url}/rest/v1/bot_settings?on_conflict=bot_id`, {
+            const res = await this.fetchWithRetry(`${this.url}/rest/v1/bot_settings?on_conflict=bot_id`, {
                 method: 'POST',
                 headers: this.getHeaders({ 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
-                body: JSON.stringify([restoredRow]),
-                signal: AbortSignal.timeout(8000)
-            });
+                body: JSON.stringify([restoredRow])
+            }, { timeoutMs: 10000, maxRetries: 3 });
             if (!res.ok) return false;
             const confirmed = await this.fetchBotSettingsStrict(restoredRow.bot_id);
+            const expSched = stableJson(schedulesData);
+            const confSched = stableJson(confirmed?.bot_schedules || confirmed?.schedules || []);
             return !!confirmed &&
                 String(confirmed.password || '') === restoredRow.password &&
                 String(confirmed.username || '') === restoredRow.username &&
                 stableJson(confirmed.settings || {}) === stableJson(restoredRow.settings) &&
                 stableJson(confirmed.proxy || {}) === stableJson(restoredRow.proxy) &&
-                stableJson(confirmed.schedules || []) === stableJson(restoredRow.schedules) &&
+                confSched === expSched &&
                 stableJson(confirmed.auto_chat || []) === stableJson(restoredRow.auto_chat) &&
-                Boolean(confirmed.manually_stopped) === restoredRow.manually_stopped;
+                Boolean(confirmed.manually_stopped) === restoredRow.manually_stopped &&
+                stableJson(confirmed.synced_auth || {}) === stableJson(restoredRow.synced_auth || {});
         } catch (err) {
             console.error('[SUPABASE] Lỗi khôi phục bot_settings:', err.message);
             return false;
@@ -1818,12 +2592,24 @@ class SupabaseAdapter {
         try {
             const offset = (page - 1) * limit;
             let query = `select=*&order=timestamp.desc&limit=${limit}&offset=${offset}`;
-            if (logType) query += `&log_type=eq.${encodeURIComponent(logType)}`;
+            if (logType) {
+                if (logType === 'SYSTEM') {
+                    query += `&or=(log_type.eq.SYSTEM,log_type.eq.MANAGER)`;
+                } else {
+                    query += `&log_type=eq.${encodeURIComponent(logType)}`;
+                }
+            }
             if (category) query += `&category=eq.${encodeURIComponent(category)}`;
             if (status) query += `&status=eq.${encodeURIComponent(status)}`;
-            if (actor) query += `&actor_username=ilike.*${encodeURIComponent(actor)}*`;
+            if (actor) {
+                const actorPattern = buildPostgrestIlikePattern(actor);
+                if (actorPattern) query += `&actor_username=ilike.${actorPattern}`;
+            }
             if (botId) query += `&bot_id=eq.${encodeURIComponent(botId)}`;
-            if (q) query += `&or=(action.ilike.*${encodeURIComponent(q)}*,details.ilike.*${encodeURIComponent(q)}*,actor_username.ilike.*${encodeURIComponent(q)}*)`;
+            if (q) {
+                const qPattern = buildPostgrestIlikePattern(q);
+                if (qPattern) query += `&or=(action.ilike.${qPattern},details.ilike.${qPattern},actor_username.ilike.${qPattern})`;
+            }
 
             const res = await fetch(`${this.url}/rest/v1/audit_logs?${query}`, {
                 headers: this.getHeaders({ 'Prefer': 'count=exact' }),
@@ -1842,7 +2628,7 @@ class SupabaseAdapter {
             const logs = data.map(r => ({
                 id: r.id,
                 botId: r.bot_id || null,
-                logType: r.log_type,
+                logType: r.log_type === 'MANAGER' ? 'SYSTEM' : (r.log_type || 'SYSTEM'),
                 timestamp: r.timestamp,
                 actor: {
                     username: r.actor_username,
@@ -1883,11 +2669,17 @@ class SupabaseAdapter {
     async fetchBackups() {
         if (!this.isEnabled()) return null;
         try {
-            const res = await fetch(`${this.url}/rest/v1/manager_backups?select=name,created_at,size_bytes&order=created_at.desc&limit=1000`, {
-                headers: this.getHeaders(), signal: AbortSignal.timeout(8000)
+            const rows = await this.fetchAllRows('manager_backups', {
+                select: 'name,created_at,size_bytes',
+                order: 'created_at.desc',
+                uniqueKey: 'name'
             });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            return (await res.json()).map(row => ({ filename: row.name, createdAt: row.created_at, sizeBytes: row.size_bytes, mtimeMs: Date.parse(row.created_at) || 0 }));
+            return rows.map(row => ({
+                filename: row.name,
+                createdAt: row.created_at,
+                sizeBytes: row.size_bytes,
+                mtimeMs: Date.parse(row.created_at) || 0
+            }));
         } catch (err) {
             console.error('[SUPABASE] Lỗi tải danh sách backup:', err.message);
             return null;
@@ -1942,6 +2734,275 @@ class SupabaseAdapter {
         const results = await Promise.all(extras.map(backup => this.deleteBackup(backup.filename)));
         return results.every(Boolean);
     }
+
+    // --- DISTRIBUTED OUTBOX RPC METHODS (P1-02) ---
+    async saveOutboxItem(item) {
+        if (!this.isEnabled()) return false;
+        try {
+            const bId = Number(item.botId || item.bot_id);
+            const rawStatus = String(item.status || 'pending');
+            const safeStatus = rawStatus === 'dispatched_to_sql' ? 'pending' : rawStatus;
+            const row = {
+                id: String(item.id || ('outbox_' + bId + '_' + Date.now().toString(36))),
+                bot_id: bId,
+                type: String(item.type || 'auth_sync'),
+                status: safeStatus,
+                attempts: Number(item.attempts || 0),
+                max_attempts: Number(item.maxAttempts || item.max_attempts || 8),
+                next_retry_at: item.nextRetryAt ? new Date(item.nextRetryAt).toISOString() : new Date().toISOString(),
+                backoff_ms: Number(item.backoffMs || item.backoff_ms || 3000),
+                processing_started_at: item.processingStartedAt ? new Date(item.processingStartedAt).toISOString() : null,
+                completed_at: item.completedAt ? new Date(item.completedAt).toISOString() : null,
+                lease_owner: item.leaseOwner || item.lease_owner || null,
+                lease_until: item.leaseUntil ? new Date(item.leaseUntil).toISOString() : null,
+                last_status_code: item.lastStatusCode || null,
+                error_code: item.errorCode || null,
+                last_error: item.lastError || null,
+                payload: item.payload || (item.committedTransaction ? { committedTransaction: item.committedTransaction } : {}),
+                committed_transaction: item.committedTransaction || item.committed_transaction || null,
+                created_at: item.createdAt || new Date().toISOString(),
+                updated_at: new Date().toISOString()
+            };
+            const res = await this.fetchWithRetry(`${this.url}/rest/v1/manager_outbox_queue`, {
+                method: 'POST',
+                headers: {
+                    ...this.getHeaders(),
+                    'Prefer': 'resolution=merge-duplicates'
+                },
+                body: JSON.stringify(row)
+            }, { timeoutMs: 8000, maxRetries: 2 });
+            return res.ok;
+        } catch (err) {
+            console.error('[SUPABASE] saveOutboxItem error:', err.message);
+            return false;
+        }
+    }
+
+    async claimOutboxBatch(workerId, limit = 10, leaseSeconds = 60) {
+        if (!this.isEnabled()) return [];
+        try {
+            const data = await this.callRpc('claim_manager_outbox_batch', {
+                p_worker_id: String(workerId),
+                p_limit: Number(limit) || 10,
+                p_lease_seconds: Number(leaseSeconds) || 60
+            });
+            return Array.isArray(data) ? data : [];
+        } catch (err) {
+            console.error('[SUPABASE] claimOutboxBatch error:', err.message);
+            return [];
+        }
+    }
+
+    async completeOutboxItem(itemId, workerId) {
+        if (!this.isEnabled()) return false;
+        try {
+            const res = await this.fetchWithRetry(`${this.url}/rest/v1/manager_outbox_queue?id=eq.${encodeURIComponent(itemId)}&lease_owner=eq.${encodeURIComponent(workerId)}`, {
+                method: 'PATCH',
+                headers: { ...this.getHeaders(), 'Prefer': 'return=representation' },
+                body: JSON.stringify({
+                    status: 'completed',
+                    completed_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString()
+                })
+            }, { timeoutMs: 8000, maxRetries: 2 });
+            if (!res.ok) return false;
+            const updatedRows = await res.json().catch(() => []);
+            return Array.isArray(updatedRows) && updatedRows.length > 0;
+        } catch (err) {
+            console.error('[SUPABASE] completeOutboxItem error:', err.message);
+            return false;
+        }
+    }
+
+    async failOutboxItem(itemId, workerId, errorCode) {
+        if (!this.isEnabled()) return false;
+        try {
+            const res = await this.fetchWithRetry(`${this.url}/rest/v1/manager_outbox_queue?id=eq.${encodeURIComponent(itemId)}&lease_owner=eq.${encodeURIComponent(workerId)}`, {
+                method: 'PATCH',
+                headers: { ...this.getHeaders(), 'Prefer': 'return=representation' },
+                body: JSON.stringify({
+                    status: 'dead_letter',
+                    last_error: String(errorCode || 'MAX_ATTEMPTS_EXCEEDED'),
+                    updated_at: new Date().toISOString()
+                })
+            }, { timeoutMs: 8000, maxRetries: 2 });
+            if (!res.ok) return false;
+            const updatedRows = await res.json().catch(() => []);
+            return Array.isArray(updatedRows) && updatedRows.length > 0;
+        } catch (err) {
+            console.error('[SUPABASE] failOutboxItem error:', err.message);
+            return false;
+        }
+    }
+
+    async rescheduleOutboxItem(itemId, workerId, nextRetryAtIso, reason = 'RETRY') {
+        if (!this.isEnabled()) return false;
+        try {
+            const res = await this.fetchWithRetry(`${this.url}/rest/v1/manager_outbox_queue?id=eq.${encodeURIComponent(itemId)}&lease_owner=eq.${encodeURIComponent(workerId)}`, {
+                method: 'PATCH',
+                headers: { ...this.getHeaders(), 'Prefer': 'return=representation' },
+                body: JSON.stringify({
+                    status: 'pending',
+                    lease_owner: null,
+                    lease_until: null,
+                    next_retry_at: String(nextRetryAtIso),
+                    last_error: String(reason || 'RETRY'),
+                    updated_at: new Date().toISOString()
+                })
+            }, { timeoutMs: 8000, maxRetries: 2 });
+            if (!res.ok) return false;
+            const updatedRows = await res.json().catch(() => []);
+            return Array.isArray(updatedRows) && updatedRows.length > 0;
+        } catch (err) {
+            console.error('[SUPABASE] rescheduleOutboxItem error:', err.message);
+            return false;
+        }
+    }
+
+    async fetchOutboxQueue(limit = 100) {
+        if (!this.isEnabled()) return [];
+        try {
+            const lim = Math.max(1, Math.min(200, Number(limit) || 100));
+            const res = await this.fetchWithRetry(`${this.url}/rest/v1/manager_outbox_queue?select=*&order=updated_at.desc&limit=${lim}`, {
+                method: 'GET',
+                headers: this.getHeaders()
+            }, { timeoutMs: 8000, maxRetries: 2 });
+            if (!res.ok) return [];
+            const data = await res.json().catch(() => []);
+            return Array.isArray(data) ? data : [];
+        } catch (err) {
+            console.error('[SUPABASE] fetchOutboxQueue error:', err.message);
+            return [];
+        }
+    }
+
+    async retryFailedOutboxItems() {
+        if (!this.isEnabled()) return 0;
+        try {
+            const nowIso = new Date().toISOString();
+            const res = await this.fetchWithRetry(`${this.url}/rest/v1/manager_outbox_queue?status=in.(dead_letter,failed_permanent,pending)`, {
+                method: 'PATCH',
+                headers: { ...this.getHeaders(), 'Prefer': 'return=representation' },
+                body: JSON.stringify({
+                    status: 'pending',
+                    attempts: 0,
+                    lease_owner: null,
+                    lease_until: null,
+                    next_retry_at: nowIso,
+                    updated_at: nowIso
+                })
+            }, { timeoutMs: 8000, maxRetries: 2 });
+            if (!res.ok) return 0;
+            const updatedRows = await res.json().catch(() => []);
+            return Array.isArray(updatedRows) ? updatedRows.length : 0;
+        } catch (err) {
+            console.error('[SUPABASE] retryFailedOutboxItems error:', err.message);
+            return 0;
+        }
+    }
+
+    // --- DISTRIBUTED PENDING ALLOCATIONS METHODS (P1-01) ---
+    async claimPendingAllocations(workerId, limit = 10, leaseSeconds = 60) {
+        if (!this.isEnabled()) return [];
+        try {
+            const data = await this.callRpc('claim_manager_pending_allocations', {
+                p_worker_id: String(workerId),
+                p_limit: Number(limit) || 10,
+                p_lease_seconds: Number(leaseSeconds) || 60
+            });
+            return Array.isArray(data) ? data : [];
+        } catch (err) {
+            console.error('[SUPABASE] claimPendingAllocations error:', err.message);
+            return [];
+        }
+    }
+
+    async completePendingAllocation(jobId, finalStatus = 'completed', workerId = null) {
+        if (!this.isEnabled()) return false;
+        try {
+            const updatePayload = {
+                status: finalStatus === 'completed' ? 'completed' : 'failed',
+                completed_at: new Date().toISOString(),
+                lease_owner: null,
+                lease_until: null,
+                updated_at: new Date().toISOString()
+            };
+            if (finalStatus !== 'completed') {
+                updatePayload.last_error = String(finalStatus);
+            }
+            const cleanWorkerId = workerId ? String(workerId).trim() : '';
+            if (!cleanWorkerId) {
+                console.warn('[PENDING_ALLOC] completePendingAllocation rejected: workerId required for lease ownership verification.');
+                return false;
+            }
+            let query = `?id=eq.${encodeURIComponent(jobId)}&lease_owner=eq.${encodeURIComponent(cleanWorkerId)}`;
+            const res = await this.fetchWithRetry(`${this.url}/rest/v1/manager_pending_allocations${query}`, {
+                method: 'PATCH',
+                headers: { ...this.getHeaders(), 'Prefer': 'return=representation' },
+                body: JSON.stringify(updatePayload)
+            }, { timeoutMs: 8000, maxRetries: 2 });
+            if (!res.ok) return false;
+            const updatedRows = await res.json().catch(() => []);
+            return Array.isArray(updatedRows) && updatedRows.length > 0;
+        } catch (err) {
+            console.error('[SUPABASE] completePendingAllocation error:', err.message);
+            return false;
+        }
+    }
+
+    async fetchPendingAllocations(status = 'pending_retry') {
+        if (!this.isEnabled()) return [];
+        try {
+            const query = status ? `?status=eq.${encodeURIComponent(status)}&order=created_at.asc` : '?order=created_at.asc';
+            const res = await this.fetchWithRetry(`${this.url}/rest/v1/manager_pending_allocations${query}`, {
+                headers: this.getHeaders(),
+                signal: AbortSignal.timeout(8000)
+            });
+            if (!res.ok) return [];
+            return await res.json();
+        } catch (err) {
+            console.error('[SUPABASE] fetchPendingAllocations error:', err.message);
+            return [];
+        }
+    }
+
+    async savePendingAllocation(job) {
+        if (!this.isEnabled()) return false;
+        try {
+            const row = {
+                id: String(job.id || ('alloc_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8))),
+                username: String(job.username || '').toLowerCase().trim(),
+                target_bot_count: Number(job.neededCount || job.targetBotCount || 1),
+                current_assigned: Number(job.currentAssigned || 0),
+                missing_bot_count: Number(job.missingBotCount || 1),
+                preferred_bot_ids: Array.isArray(job.preferredBotIds) ? job.preferredBotIds : [],
+                status: String(job.status || 'pending_retry'),
+                attempts: Number(job.attempts || 0),
+                max_attempts: Number(job.maxAttempts || 10),
+                next_retry_at: job.nextRetryAt || new Date().toISOString(),
+                lease_owner: job.leaseOwner || null,
+                lease_until: job.leaseUntil || null,
+                last_error: job.lastError || job.reason || null,
+                updated_at: new Date().toISOString()
+            };
+            if (job.createdAt) row.created_at = job.createdAt;
+            if (job.status === 'completed') row.completed_at = new Date().toISOString();
+
+            const res = await this.fetchWithRetry(`${this.url}/rest/v1/manager_pending_allocations`, {
+                method: 'POST',
+                headers: {
+                    ...this.getHeaders(),
+                    'Prefer': 'resolution=merge-duplicates'
+                },
+                body: JSON.stringify(row)
+            }, { timeoutMs: 8000, maxRetries: 2 });
+            return res.ok;
+        } catch (err) {
+            console.error('[SUPABASE] savePendingAllocation error:', err.message);
+            return false;
+        }
+    }
+
 }
 
 const SUPABASE_CONFIG = {
@@ -1951,7 +3012,13 @@ const SUPABASE_CONFIG = {
 const supabaseAdapter = new SupabaseAdapter(SUPABASE_CONFIG);
 let supabaseStorageReady = false;
 let registryNeedsSave = false;
-const supabaseSyncLocks = { upload: false, syncDown: false };
+let supabaseSyncInProgress = false;
+const supabaseSyncLocks = {
+    get upload() { return supabaseSyncInProgress; },
+    set upload(val) { supabaseSyncInProgress = !!val; },
+    get syncDown() { return supabaseSyncInProgress; },
+    set syncDown(val) { supabaseSyncInProgress = !!val; }
+};
 
 const KEYS_CANDIDATES = [
     path.join(DATA_DIR, 'manager_keys.json'),
@@ -2195,12 +3262,23 @@ async function flushPendingAuditLogs() {
     }
 }
 
-function readAuditLogs({ limit = 50, page = 1 } = {}) {
-    const total = pendingAuditLogs.length;
+function readAuditLogs({ limit = 50, page = 1, logType = '', category = '' } = {}) {
+    let filtered = pendingAuditLogs;
+    if (logType) {
+        if (logType === 'SYSTEM') {
+            filtered = filtered.filter(x => x.logType === 'SYSTEM' || x.logType === 'MANAGER' || x.category === 'SYSTEM');
+        } else {
+            filtered = filtered.filter(x => x.logType === logType);
+        }
+    }
+    if (category) {
+        filtered = filtered.filter(x => x.category === category);
+    }
+    const total = filtered.length;
     const safeLimit = readPositiveInt(limit, 50, 1, 1000);
     const safePage = readPositiveInt(page, 1, 1, 1000000);
     const totalPages = Math.max(1, Math.ceil(total / safeLimit));
-    return { logs: pendingAuditLogs.slice((safePage - 1) * safeLimit, safePage * safeLimit), total, page: safePage, limit: safeLimit, totalPages };
+    return { logs: filtered.slice((safePage - 1) * safeLimit, safePage * safeLimit), total, page: safePage, limit: safeLimit, totalPages };
 }
 
 function exportAuditLogsFile(format = 'csv', entries = []) {
@@ -2258,6 +3336,25 @@ function normalizeRestoreCredentials(payload) {
     for (const user of safe.users || []) {
         if (user.password && typeof user.password === 'string' && !isStoredCredentialCiphertext(user.password)) {
             user.password = encryptUserPassword(user.password);
+        }
+    }
+    if (safe.registry && typeof safe.registry === 'object') {
+        if (Array.isArray(safe.registry.dynamicBots)) {
+            safe.registry.dynamicBots = safe.registry.dynamicBots.map(b => {
+                const item = { ...b };
+                if (item.secretKey && typeof item.secretKey === 'string' && !isStoredCredentialCiphertext(item.secretKey)) {
+                    item.secretKey = encryptUserPassword(item.secretKey);
+                }
+                return item;
+            });
+        }
+        if (safe.registry.systemSettings && typeof safe.registry.systemSettings === 'object') {
+            for (const field of ['link4mApiToken', 'link4mSecretKey']) {
+                const value = String(safe.registry.systemSettings[field] || '').trim();
+                if (value && !isStoredCredentialCiphertext(value)) {
+                    safe.registry.systemSettings[field] = encryptUserPassword(value);
+                }
+            }
         }
     }
     for (const id of Object.keys(safe.botSettings || {})) {
@@ -2411,49 +3508,64 @@ function validateRestorePayload(payload, { allowEmpty = false } = {}) {
 }
 
 async function restoreSystemBackup(filename, { allowEmpty = false } = {}) {
-    const payload = await supabaseAdapter.fetchBackupPayload(filename);
-    const validated = validateRestorePayload(payload, { allowEmpty });
-    if (!validated.ok) return validated;
-    const safePayload = sanitizeBackupPayload(payload);
-    const normalized = normalizeRestoreCredentials(safePayload);
-    const safetyBackup = await createSystemBackup('pre-restore');
-    if (!safetyBackup.ok) return { ok: false, error: 'Không tạo được backup dự phòng; chưa khôi phục dữ liệu.' };
-
-    const applyPayload = async (data, { allowEmpty: replaceEmpty = false } = {}) => {
-        if (!data || !Array.isArray(data.users) || !Array.isArray(data.keys) || !data.registry || !data.botSettings) throw new Error('Backup dự phòng không hợp lệ.');
-        if (!(await supabaseAdapter.replaceUsersSnapshot(data.users, { allowEmpty: replaceEmpty }))) throw new Error('Không khôi phục được users lên Supabase.');
-        if (!(await supabaseAdapter.replaceKeysSnapshot(data.keys, { allowEmpty: replaceEmpty }))) throw new Error('Khôi phục keys lên Supabase thất bại' + (replaceEmpty ? '.' : ' hoặc backup rỗng chưa được xác nhận.'));
-        if (!(await supabaseAdapter.saveRegistry(data.registry))) throw new Error('Không ghi được registry lên Supabase.');
-        if (!(await supabaseAdapter.replaceBotSettingsSnapshot(data.botSettings, { allowEmpty: replaceEmpty }))) throw new Error('Không khôi phục được bot_settings lên Supabase.');
-    };
+    if (supabaseSyncInProgress) return { ok: false, error: 'Đang có tiến trình đồng bộ hoặc khôi phục Supabase đang chạy; vui lòng chờ hoàn tất.' };
+    supabaseSyncInProgress = true;
     try {
-        await applyPayload(normalized, { allowEmpty });
-        if (!(await initSupabaseCloud())) throw new Error('Cloud đã nhận dữ liệu nhưng Manager không thể tải lại trạng thái.');
+        const runRestore = async () => {
+            const payload = await supabaseAdapter.fetchBackupPayload(filename);
+            const validated = validateRestorePayload(payload, { allowEmpty });
+            if (!validated.ok) return validated;
+            const safePayload = sanitizeBackupPayload(payload);
+            const normalized = normalizeRestoreCredentials(safePayload);
+            const safetyBackup = await createSystemBackup('pre-restore');
+            if (!safetyBackup.ok) return { ok: false, error: 'Không tạo được backup dự phòng; chưa khôi phục dữ liệu.' };
 
-        const workers = [];
-        for (const bot of BOT_CONFIG || []) {
+            const applyPayload = async (data, { allowEmpty: replaceEmpty = false } = {}) => {
+                if (!data || !Array.isArray(data.users) || !Array.isArray(data.keys) || !data.registry || !data.botSettings) throw new Error('Backup dự phòng không hợp lệ.');
+                if (!(await supabaseAdapter.replaceUsersSnapshot(data.users, { allowEmpty: replaceEmpty }))) throw new Error('Không khôi phục được users lên Supabase.');
+                if (!(await supabaseAdapter.replaceKeysSnapshot(data.keys, { allowEmpty: replaceEmpty }))) throw new Error('Khôi phục keys lên Supabase thất bại' + (replaceEmpty ? '.' : ' hoặc backup rỗng chưa được xác nhận.'));
+                if (!(await supabaseAdapter.saveRegistry(data.registry))) throw new Error('Không ghi được registry lên Supabase.');
+                if (!(await supabaseAdapter.replaceBotSettingsSnapshot(data.botSettings, { allowEmpty: replaceEmpty }))) throw new Error('Không khôi phục được bot_settings lên Supabase.');
+            };
             try {
-                const result = await fetchChild(bot, '/api/bot/supabase/reload', {
-                    method: 'POST', body: {}, timeoutMs: 8000, headers: { 'X-Manager-Role': 'admin' }
-                });
-                workers.push({ botId: String(bot.id), ok: !!(result.ok && result.data?.ok && String(result.data.botId) === String(bot.id)), error: result.data?.error || (result.ok ? '' : 'Worker chưa kết nối.') });
+                await applyPayload(normalized, { allowEmpty });
+                if (!(await initSupabaseCloud())) throw new Error('Cloud đã nhận dữ liệu nhưng Manager không thể tải lại trạng thái.');
+
+                const workers = [];
+                for (const bot of BOT_CONFIG || []) {
+                    try {
+                        const result = await fetchChild(bot, '/api/bot/supabase/reload', {
+                            method: 'POST', body: {}, timeoutMs: 8000, headers: { 'X-Manager-Role': 'admin' }
+                        });
+                        workers.push({ botId: String(bot.id), ok: !!(result.ok && result.data?.ok && String(result.data.botId) === String(bot.id)), error: result.data?.error || (result.ok ? '' : 'Worker chưa kết nối.') });
+                    } catch (err) {
+                        workers.push({ botId: String(bot.id), ok: false, error: err.message || 'Worker chưa kết nối.' });
+                    }
+                }
+                const auth = await syncAuthToAllBotsDetailed(true);
+                const failed = [...workers.filter(item => !item.ok).map(item => '#' + item.botId + ': ' + item.error), ...auth.results.filter(item => !item.ok).map(item => '#' + item.botId + ' auth: ' + item.error)];
+                logAuditEvent({ action: 'BACKUP_RESTORED', target: { filename }, details: { safetyBackup: safetyBackup.filename, failedWorkers: failed.length }, status: failed.length ? 'PARTIAL' : 'SUCCESS' });
+                return { ok: true, safetyBackup: safetyBackup.filename, workers, authWorkers: auth.results, partial: failed.length > 0, message: failed.length ? 'Cloud đã khôi phục; một số worker chưa đồng bộ: ' + failed.join('; ') : 'Đã khôi phục backup và đồng bộ worker.' };
             } catch (err) {
-                workers.push({ botId: String(bot.id), ok: false, error: err.message || 'Worker chưa kết nối.' });
+                try {
+                    const before = await supabaseAdapter.fetchBackupPayload(safetyBackup.filename);
+                    await applyPayload(before, { allowEmpty: true });
+                    if (!(await initSupabaseCloud())) throw new Error('Manager chưa tải lại được dữ liệu sau rollback.');
+                    return { ok: false, safetyBackup: safetyBackup.filename, error: err.message + ' Đã rollback theo backup dự phòng.' };
+                } catch (rollbackErr) {
+                    return { ok: false, safetyBackup: safetyBackup.filename, error: err.message + ' Rollback tự động cũng lỗi: ' + rollbackErr.message + '. Backup dự phòng: ' + safetyBackup.filename };
+                }
             }
+        };
+
+        if (supabaseAdapter?.isEnabled?.()) {
+            return await supabaseAdapter.withManagerLock('supabase-full-sync', runRestore, 900);
         }
-        const auth = await syncAuthToAllBotsDetailed(true);
-        const failed = [...workers.filter(item => !item.ok).map(item => '#' + item.botId + ': ' + item.error), ...auth.results.filter(item => !item.ok).map(item => '#' + item.botId + ' auth: ' + item.error)];
-        logAuditEvent({ action: 'BACKUP_RESTORED', target: { filename }, details: { safetyBackup: safetyBackup.filename, failedWorkers: failed.length }, status: failed.length ? 'PARTIAL' : 'SUCCESS' });
-        return { ok: true, safetyBackup: safetyBackup.filename, workers, authWorkers: auth.results, partial: failed.length > 0, message: failed.length ? 'Cloud đã khôi phục; một số worker chưa đồng bộ: ' + failed.join('; ') : 'Đã khôi phục backup và đồng bộ worker.' };
-    } catch (err) {
-        try {
-            const before = await supabaseAdapter.fetchBackupPayload(safetyBackup.filename);
-            await applyPayload(before, { allowEmpty: true });
-            if (!(await initSupabaseCloud())) throw new Error('Manager chưa tải lại được dữ liệu sau rollback.');
-            return { ok: false, safetyBackup: safetyBackup.filename, error: err.message + ' Đã rollback theo backup dự phòng.' };
-        } catch (rollbackErr) {
-            return { ok: false, safetyBackup: safetyBackup.filename, error: err.message + ' Rollback tự động cũng lỗi: ' + rollbackErr.message + '. Backup dự phòng: ' + safetyBackup.filename };
-        }
+        return await runRestore();
+    } catch (lockErr) {
+        return { ok: false, error: lockErr.message || 'Không thể lấy khóa khôi phục Supabase.' };
+    } finally {
+        supabaseSyncInProgress = false;
     }
 }
 
@@ -2491,6 +3603,10 @@ function stripBackupSecrets(node, parentKey = '', inSupabaseContext = false) {
     const nextSupabaseContext = inSupabaseContext || parentName.includes('supabase') || looksLikeSupabaseConfig;
     for (const key of Object.keys(node)) {
         const normalizedKey = normalizeBackupFieldName(key);
+        // Do not strip worker auth secretKey in dynamicBots - it will be safely encrypted in sanitizeBackupPayload
+        if (parentName === 'dynamicbots' && normalizedKey === 'secretkey') {
+            continue;
+        }
         if (ALWAYS_STRIP_SECRET_FIELDS.has(normalizedKey) ||
             (nextSupabaseContext && SUPABASE_CONTEXT_SECRET_FIELDS.has(normalizedKey))) {
             delete node[key];
@@ -2529,6 +3645,24 @@ function sanitizeBackupPayload(payload) {
         });
     }
     if (safe.registry && typeof safe.registry === 'object') {
+        if (Array.isArray(safe.registry.dynamicBots)) {
+            safe.registry.dynamicBots = safe.registry.dynamicBots.map(b => {
+                const item = { ...b };
+                if (item.secretKey) {
+                    const str = String(item.secretKey).trim();
+                    item.secretKey = isStoredCredentialCiphertext(str) ? str : encryptUserPassword(str);
+                }
+                return item;
+            });
+        }
+        if (safe.registry.systemSettings && typeof safe.registry.systemSettings === 'object') {
+            for (const field of ['link4mApiToken', 'link4mSecretKey']) {
+                const value = String(safe.registry.systemSettings[field] || '').trim();
+                if (value && !isStoredCredentialCiphertext(value)) {
+                    safe.registry.systemSettings[field] = encryptUserPassword(value);
+                }
+            }
+        }
         if (safe.registry.adminPassword && !String(safe.registry.adminPassword).startsWith('scrypt$')) {
             safe.registry.adminPassword = hashAdminPassword(String(safe.registry.adminPassword));
         }
@@ -2554,6 +3688,23 @@ function sanitizeBackupPayload(payload) {
             if (nestedProxy) row.settings = { ...row.settings, proxy: { ...nestedProxy, password: proxy.password } };
             safe.botSettings[botId] = row;
         }
+    }
+    // BUG-33: row quarantine vẫn phải qua cùng bước che/mã hóa credential như
+    // botSettings — không bao giờ backup plaintext credential ngoài botSettings.
+    if (Array.isArray(safe.quarantine)) {
+        safe.quarantine = safe.quarantine.map(entry => {
+            if (!entry || typeof entry !== 'object' || !entry.row || typeof entry.row !== 'object') return entry;
+            const row = { ...entry.row };
+            const password = String(row.password || '');
+            row.password = !password || isStoredCredentialCiphertext(password) ? password : encryptUserPassword(password);
+            const proxy = row.proxy && typeof row.proxy === 'object' ? { ...row.proxy } : {};
+            const nestedProxy = row.settings?.proxy && typeof row.settings.proxy === 'object' ? { ...row.settings.proxy } : null;
+            const proxyPassword = String(proxy.password || nestedProxy?.password || '');
+            proxy.password = !proxyPassword || isStoredCredentialCiphertext(proxyPassword) ? proxyPassword : encryptUserPassword(proxyPassword);
+            row.proxy = proxy;
+            if (nestedProxy) row.settings = { ...row.settings, proxy: { ...nestedProxy, password: proxy.password } };
+            return { ...entry, row };
+        });
     }
     if (safe.registry?.adminPassword && !isValidAdminHash(safe.registry.adminPassword)) {
         safe.registry.adminPassword = hashAdminPassword(String(safe.registry.adminPassword));
@@ -2587,22 +3738,31 @@ async function createSystemBackup(reason = 'scheduled') {
             return { ok: false, error: 'Không thể tải users/keys/registry từ Supabase để tạo safety backup đầy đủ.' };
         }
         const botSettings = {};
+        // BUG-33: một row bot_id bất thường KHÔNG được làm chặn backup (backup là
+        // safety net cho mọi thao tác destructive). Row hợp lệ vẫn vào botSettings;
+        // row bất thường (id rỗng/0/chữ/trùng) được đưa vào section `quarantine` kèm
+        // lý do để Admin quyết định map/fix — KHÔNG âm thầm bỏ qua (nguy cơ mất dữ
+        // liệu khi restore), KHÔNG fail-closed (mất safety backup).
+        const quarantinedRows = [];
         for (const settings of allBotSettings) {
             const id = String(settings?.bot_id || '');
             if (!/^[1-9][0-9]{0,8}$/.test(id)) {
-                return { ok: false, error: 'bot_settings trên Supabase có row với BOT_ID không hợp lệ; không tạo safety backup để tránh bỏ sót dữ liệu.' };
+                quarantinedRows.push({ reason: 'BOT_ID không hợp lệ (rỗng/0/chữ/quá dài)', botId: id, row: settings });
+                continue;
             }
             if (Object.prototype.hasOwnProperty.call(botSettings, id)) {
-                return { ok: false, error: 'bot_settings trên Supabase có BOT_ID trùng lặp; không tạo safety backup để tránh ghi đè dữ liệu.' };
+                quarantinedRows.push({ reason: 'BOT_ID trùng lặp (bản ghi đầu tiên được giữ trong botSettings)', botId: id, row: settings });
+                continue;
             }
             botSettings[id] = settings;
         }
-        const payload = sanitizeBackupPayload({ version: 3, createdAt, reason: safeReason, registry: { ...safeRegistry, ...cloudRegistry, botRentalDisabled: normalizeBotRentalDisabled(cloudRegistry.botRentalDisabled || safeRegistry.botRentalDisabled) }, users: cloudUsers, keys: cloudKeys, botSettings, activeSessionsCount: activeSessions?.size || 0 });
+        const payload = sanitizeBackupPayload({ version: 3, createdAt, reason: safeReason, registry: { ...safeRegistry, ...cloudRegistry, botRentalDisabled: normalizeBotRentalDisabled(cloudRegistry.botRentalDisabled || safeRegistry.botRentalDisabled) }, users: cloudUsers, keys: cloudKeys, botSettings, quarantine: quarantinedRows, activeSessionsCount: activeSessions?.size || 0 });
         const saved = await supabaseAdapter.saveBackup(filename, payload);
         if (!saved) return { ok: false, error: 'Supabase không xác nhận lưu bản sao lưu.' };
         if (!(await supabaseAdapter.pruneBackups(30))) console.warn('[BACKUP] Đã tạo backup nhưng xoay vòng 30 bản gần nhất chưa hoàn tất.');
-        logAuditEvent({ action: 'BACKUP_CREATED', target: { filename }, details: { reason: safeReason, userCount: payload.users.length } });
-        return { ok: true, filename };
+        logAuditEvent({ action: 'BACKUP_CREATED', target: { filename }, details: { reason: safeReason, userCount: payload.users.length, quarantinedBotSettings: quarantinedRows.length }, status: quarantinedRows.length ? 'PARTIAL' : 'SUCCESS' });
+        if (quarantinedRows.length) console.warn('[BACKUP] Đã cách ly ' + quarantinedRows.length + ' row bot_settings bất thường vào section quarantine của backup ' + filename + '. Admin cần rà soát và quyết định map/fix.');
+        return { ok: true, filename, quarantined: quarantinedRows.length, message: quarantinedRows.length ? 'Đã tạo backup nhưng có ' + quarantinedRows.length + ' row bot_settings bất thường bị cách ly vào section quarantine (xem chi tiết trong file backup).' : 'Đã tạo bản sao lưu thành công!' };
     } catch (err) {
         console.error('[BACKUP] Không thể tạo bản sao lưu Supabase:', err.message);
         return { ok: false, error: err.message };
@@ -2666,6 +3826,7 @@ function setUsersCache(users) {
 }
 
 async function saveUsers(users) {
+    clearAllAuthCache();
     if (!Array.isArray(users)) return false;
     if (!supabaseAdapter || !supabaseAdapter.isEnabled()) {
         const rev = (userSnapshotRevisions.get(users) || 1) + 1;
@@ -2700,6 +3861,53 @@ async function saveUsers(users) {
 }
 
 const activeSessions = new Map();
+
+const AUTH_CACHE_TTL_MS = 8000;
+const authVerificationCache = new Map();
+
+function getCachedAuth(tokenHash) {
+    if (!tokenHash) return null;
+    const entry = authVerificationCache.get(tokenHash);
+    if (!entry) return null;
+    if (Date.now() > entry.expiresAt) {
+        authVerificationCache.delete(tokenHash);
+        return null;
+    }
+    return entry.data;
+}
+
+function setCachedAuth(tokenHash, data) {
+    if (!tokenHash || !data) return;
+    const session = data.session;
+    const user = data.user;
+    const username = (session?.username || user?.username || '').toLowerCase();
+    const userId = session?.userId || user?.id || '';
+    authVerificationCache.set(tokenHash, {
+        data,
+        expiresAt: Date.now() + AUTH_CACHE_TTL_MS,
+        username,
+        userId
+    });
+}
+
+function invalidateAuthCache(tokenHash) {
+    if (tokenHash) authVerificationCache.delete(tokenHash);
+}
+
+function invalidateAuthCacheForUser(usernameOrId) {
+    if (!usernameOrId) return;
+    const target = String(usernameOrId).toLowerCase();
+    for (const [hash, entry] of authVerificationCache.entries()) {
+        if (entry.username === target || entry.userId === target) {
+            authVerificationCache.delete(hash);
+        }
+    }
+}
+
+function clearAllAuthCache() {
+    authVerificationCache.clear();
+}
+
 let persistedSessionHashes = new Set();
 let expiredSessionCleanupPending = false;
 
@@ -2708,17 +3916,42 @@ function hashSessionToken(token) {
     return crypto.createHash('sha256').update(token.trim()).digest('hex');
 }
 
-function setSessionsCache(sessions) {
-    activeSessions.clear();
+// BUG-04: khi tải lại snapshot phiên từ Cloud (boot / Sync Down / verify),
+// các session vừa tạo cục bộ nhưng CHƯA kịp ghi lên Cloud không được phép bị xóa.
+// Merge: giữ lại session local còn "young" (tạo trong 10 phút gần nhất) không có trong snapshot.
+const PRESERVE_YOUNG_LOCAL_SESSION_MS = 10 * 60 * 1000;
+
+function setSessionsCache(sessions, { preserveYoungLocalSessions = false } = {}) {
     const now = Date.now();
     const source = Array.isArray(sessions) ? sessions : [];
-    expiredSessionCleanupPending = source.some(session => Number(session?.expiresAt) <= now);
-    for (const session of Array.isArray(sessions) ? sessions : []) {
+    const merged = new Map();
+    for (const session of source) {
         const tokenHash = String(session?.tokenHash || '').trim();
         if (!tokenHash || Number(session.expiresAt) <= now) continue;
-        activeSessions.set(tokenHash, { ...session, tokenHash });
+        merged.set(tokenHash, { ...session, tokenHash });
     }
+    let preservedLocalCount = 0;
+    if (preserveYoungLocalSessions) {
+        for (const [tokenHash, session] of activeSessions.entries()) {
+            if (merged.has(tokenHash)) continue;
+            const createdAt = Number(session.createdAt || 0);
+            if (createdAt > 0 && now - createdAt <= PRESERVE_YOUNG_LOCAL_SESSION_MS) {
+                merged.set(tokenHash, session);
+                preservedLocalCount++;
+            }
+        }
+    }
+    activeSessions.clear();
+    expiredSessionCleanupPending = source.some(session => Number(session?.expiresAt) <= now);
+    for (const [tokenHash, session] of merged.entries()) {
+        activeSessions.set(tokenHash, session);
+    }
+    // persistedSessionHashes vẫn bám theo SNAPSHOT Cloud: session local được giữ lại
+    // chưa được persist, saveSessions() lần sau sẽ ghi chúng lên Cloud.
     persistedSessionHashes = new Set(source.map(session => String(session?.tokenHash || '').trim()).filter(Boolean));
+    if (preservedLocalCount > 0) {
+        console.log('[SESSIONS] Đã giữ lại ' + preservedLocalCount + ' phiên local mới tạo (chưa kịp persist) sau khi nạp snapshot Cloud.');
+    }
 }
 
 function loadSessions() {
@@ -2738,6 +3971,8 @@ async function saveSessions() {
 }
 
 async function revokeUserSessions(user, { excludeTokenHash = '' } = {}) {
+    invalidateAuthCacheForUser(user?.username);
+    invalidateAuthCacheForUser(user?.id);
     const userId = String(user?.id || '');
     const username = String(user?.username || '').toLowerCase();
     if (!userId && !username) return { ok: false, error: 'Thiếu định danh user để thu hồi session.' };
@@ -2815,11 +4050,16 @@ async function ensureInitialSystemBackup() {
     }
 }
 
-// Tự động tạo bản sao lưu an toàn mỗi 6 giờ
+// Tự động tạo bản sao lưu an toàn và dọn dẹp dữ liệu lịch sử mỗi 6 giờ
 setInterval(() => {
     void createSystemBackup('scheduled-interval-6h').catch(e => {
         console.error('[BACKUP] Lỗi tạo backup định kỳ 6h:', e.message);
     });
+    if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        void supabaseAdapter.pruneHistoricalData().catch(e => {
+            console.warn('[PRUNE] Lỗi dọn dẹp dữ liệu lịch sử định kỳ 6h:', e.message);
+        });
+    }
 }, 6 * 3600 * 1000);
 
 function parseCookies(req) {
@@ -2872,6 +4112,36 @@ function recordLoginAttempt(clientIp, username, success) {
     entry.failures++;
     managerLoginAttempts.set(key, entry);
 }
+
+// REL-02: managerLoginAttempts là Map không có GC — key `${ip}:${username}` của các
+// lần thử brute-force dàn trải có thể tích lũy vô hạn. Dọn entry hết hạn theo TTL và
+// giới hạn kích thước; KHÔNG xóa entry còn trong window (người dùng đang bị lock
+// không được mở khóa sớm chỉ vì cleanup).
+const MANAGER_LOGIN_ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
+const MANAGER_LOGIN_ATTEMPT_TTL_MS = MANAGER_LOGIN_ATTEMPT_WINDOW_MS;
+const MANAGER_LOGIN_ATTEMPT_MAX_KEYS = 20000;
+function sweepManagerLoginAttempts(now = Date.now()) {
+    let removed = 0;
+    for (const [key, entry] of managerLoginAttempts) {
+        if (!entry || now - entry.windowStart >= MANAGER_LOGIN_ATTEMPT_TTL_MS) {
+            managerLoginAttempts.delete(key);
+            removed++;
+        }
+    }
+    let overflow = managerLoginAttempts.size - MANAGER_LOGIN_ATTEMPT_MAX_KEYS;
+    if (overflow > 0) {
+        const oldestFirst = [...managerLoginAttempts.entries()].sort((a, b) => (a[1]?.windowStart || 0) - (b[1]?.windowStart || 0));
+        for (let i = 0; i < overflow && i < oldestFirst.length; i++) {
+            managerLoginAttempts.delete(oldestFirst[i][0]);
+            removed++;
+        }
+    }
+    if (removed > 0) console.log('[AUTH] managerLoginAttempts GC: đã dọn ' + removed + ' entry (size=' + managerLoginAttempts.size + ').');
+    return removed;
+}
+setInterval(() => {
+    try { sweepManagerLoginAttempts(); } catch (err) { console.warn('[AUTH] managerLoginAttempts GC lỗi:', err.message); }
+}, 5 * 60 * 1000);
 class ManagerMemoryRateLimiter {
     constructor({ maxFailures = 5, windowMs = 15 * 60 * 1000, maxEntries = 5000, message = 'Quá nhiều lần thử thất bại. Vui lòng thử lại sau.' } = {}) {
         this.maxFailures = maxFailures; this.windowMs = windowMs; this.maxEntries = maxEntries;
@@ -2919,10 +4189,11 @@ function recordRenewAttempt(req, username, success) { managerRenewLimiter.record
 
 const pendingAuditLogs = [];
 let pendingAuditFlushTimer = null;
-function makeAuditEntry({ req = null, action, actionLabel = '', category = 'SYSTEM', target = {}, details = '', status = 'SUCCESS' } = {}) {
+function makeAuditEntry({ req = null, action, actionLabel = '', logType = 'SYSTEM', category = 'SYSTEM', target = {}, details = '', status = 'SUCCESS' } = {}) {
     const session = req ? getSessionUser(req) : null;
+    const computedLogType = logType ? String(logType) : (target?.botId ? 'BOT' : 'SYSTEM');
     return {
-        id: 'aud_' + crypto.randomUUID(), botId: target?.botId ?? null, logType: 'MANAGER',
+        id: 'aud_' + crypto.randomUUID(), botId: target?.botId ?? null, logType: String(computedLogType || 'SYSTEM'),
         category: String(category || 'SYSTEM'), action: String(action || 'UNKNOWN'), actionLabel: String(actionLabel || action || ''),
         actor: { username: session?.username || 'system', role: session?.role || 'system', ip: req ? getClientIp(req) : '127.0.0.1' },
         target: target && typeof target === 'object' ? target : { value: String(target) },
@@ -3028,6 +4299,21 @@ const summaryRequestSeq = new Map();
 const summaryLastAppliedSeq = new Map();
 const pendingBotUrls = new Set();
 
+function isLinkLocalOrMetadataIp(ipStr) {
+    if (!ipStr || typeof ipStr !== 'string') return false;
+    let ip = ipStr.trim().toLowerCase().replace(/^\[|\]$/g, '');
+    if (ip === '169.254.169.254' || ip === 'metadata.google.internal' || ip.endsWith('.metadata.google.internal')) return true;
+    if (ip.startsWith('::ffff:')) ip = ip.substring(7);
+    const ipType = net.isIP(ip);
+    if (ipType === 4) {
+        const parts = ip.split('.').map(p => parseInt(p, 10));
+        if (parts.length === 4 && parts[0] === 169 && parts[1] === 254) return true; // 169.254.0.0/16 Link-local
+    } else if (ipType === 6) {
+        if (ip.startsWith('fe8') || ip.startsWith('fe9') || ip.startsWith('fea') || ip.startsWith('feb')) return true; // fe80::/10 Link-local
+    }
+    return false;
+}
+
 function isPrivateOrBlockedIp(ipStr) {
     if (!ipStr || typeof ipStr !== 'string') return true;
     let ip = ipStr.trim().toLowerCase();
@@ -3101,12 +4387,45 @@ const rawAllowedHosts = (process.env.ALLOWED_INTERNAL_HOSTS || '')
     .map(s => s.trim().toLowerCase())
     .filter(Boolean);
 
-// Luôn cho phép localhost, 127.0.0.1, 0.0.0.0, container host để Manager kết nối bot nội bộ
-const defaultAllowedHosts = ['localhost', '127.0.0.1', '::1', '0.0.0.0', 'host.docker.internal'];
+// V3-11: Trong production, không tự ý cho phép localhost/internal trừ khi operator cấu hình rõ
+const defaultAllowedHosts = isProdRuntime ? [] : ['localhost', '127.0.0.1', '::1', '0.0.0.0', 'host.docker.internal'];
 const ALLOWED_INTERNAL_HOSTS = new Set([...defaultAllowedHosts, ...rawAllowedHosts]);
 
-const DISABLE_SSRF_CHECK = String(process.env.DISABLE_SSRF_CHECK || '').toLowerCase() === 'true';
-const ALLOW_PRIVATE_BOT_IPS = String(process.env.ALLOW_PRIVATE_BOT_IPS || 'true').toLowerCase() !== 'false';
+// V3-12: Unified Allowlist Serializers (không bao giờ lộ secretKey ra browser/API/log)
+function toAdminBotSummary(botConfig, remote = null) {
+    if (!botConfig) return null;
+    return {
+        id: Number(botConfig.id),
+        label: String(botConfig.label || ('Bot #' + botConfig.id)),
+        url: String(botConfig.url || ''),
+        source: botConfig.source || 'dynamic',
+        rentable: botConfig.rentable !== false,
+        hasSecret: Boolean(botConfig.secretKey),
+        connected: Boolean(remote)
+    };
+}
+
+function toPublicBotSummary(botConfig, remote = null) {
+    if (!botConfig) return null;
+    return {
+        id: Number(botConfig.id),
+        label: String(botConfig.label || ('Bot #' + botConfig.id)),
+        source: botConfig.source || 'dynamic',
+        rentable: botConfig.rentable !== false,
+        connected: Boolean(remote)
+    };
+}
+function getBotRemote(botConfig) {
+    if (!botConfig) return null;
+    const cached = summaryCache.get(Number(botConfig.id))?.data;
+    return (cached && cached.available) ? cached : null;
+}
+
+// V3-11: Cấu hình SSRF fail-closed trên production
+const DISABLE_SSRF_CHECK = !isProdRuntime && String(process.env.DISABLE_SSRF_CHECK || '').toLowerCase() === 'true';
+const ALLOW_PRIVATE_BOT_IPS = isProdRuntime
+    ? String(process.env.ALLOW_PRIVATE_BOT_IPS || 'false').toLowerCase() === 'true'
+    : String(process.env.ALLOW_PRIVATE_BOT_IPS || 'true').toLowerCase() !== 'false';
 
 async function validateSafeBotUrl(rawUrl) {
     const raw = String(rawUrl || '').trim();
@@ -3314,16 +4633,31 @@ function loadRegistry() {
     const defaultAnnouncement = {
         enabled: true,
         id: 'ann_v11_7_customer',
-        title: '📢 THÔNG BÁO VẬN HÀNH HỆ THỐNG (V11.7 PURE RENDER)',
-        content: '🎉 Chào mừng bạn đến với KingMC Bot Manager V11.7 Pure Render Edition!\n\n🚀 TÍNH NĂNG MỚI NỔI BẬT:\n• ⚡ Đồng Bộ Tức Thì: Mọi thao tác nạp key, đổi tên bot, tạo tài khoản đều hiển thị ngay lập tức, không cần F5.\n• 🎯 Giám Sát Chuẩn Xác: Phân biệt rõ ràng giữa bot Offline ingame và bot Lỗi kết nối để hỗ trợ kịp thời.\n• 💬 Hỗ Trợ Discord 24/7: Bấm ngay nút Discord ở chân trang để được đội ngũ kỹ thuật trợ giúp trực tiếp.\n• 🛡️ Tiết Kiệm Băng Thông Tối Đa: Tối ưu dữ liệu truyền tải mượt mà trên Render.\n\nChúc quý khách có trải nghiệm AFK hiệu quả tại máy chủ KingMC!',
+        title: '📢 THÔNG BÁO VẬN HÀNH HỆ THỐNG (V11.8 PURE RENDER)',
+        content: '🎉 Chào mừng bạn đến với KingMC Bot Manager V11.8 Pure Render Edition!\n\n🚀 TÍNH NĂNG MỚI NỔI BẬT:\n• ⚡ Đồng Bộ Tức Thì: Mọi thao tác nạp key, đổi tên bot, tạo tài khoản đều hiển thị ngay lập tức, không cần F5.\n• 🎯 Giám Sát Chuẩn Xác: Phân biệt rõ ràng giữa bot Offline ingame và bot Lỗi kết nối để hỗ trợ kịp thời.\n• 💬 Hỗ Trợ Discord 24/7: Bấm ngay nút Discord ở chân trang để được đội ngũ kỹ thuật trợ giúp trực tiếp.\n• 🛡️ Tiết Kiệm Băng Thông Tối Đa: Tối ưu dữ liệu truyền tải mượt mà trên Render.\n\nChúc quý khách có trải nghiệm AFK hiệu quả tại máy chủ KingMC!',
         mode: 'daily', startDate: '', endDate: '', updatedAt: new Date().toISOString()
     };
     return {
         version: 3,
         dynamicBots: [], disabledEnvUrls: [], disabledEnvIds: [], overrides: [],
         orderUrls: [], order: [], botIdMap: {}, botAliases: {}, botTags: {}, botRentalDisabled: [],
-        systemSettings: { trialGiftEnabled: true, trialDays: 1 }, lastBotId: 0,
+        // BUG-03 (Wave A recheck §6.1-1): default map luôn tồn tại để negotiation secret
+        // và serializer persist không phụ thuộc vào thứ tự restore Cloud.
+        botSecrets: {},
+        systemSettings: {
+            trialGiftEnabled: true,
+            trialDays: 1,
+            link4mRewardEnabled: false,
+            link4mRewardHours: 12,
+            link4mDailyLimit: 2,
+            link4mMode: 'custom_url',
+            link4mUrl: '',
+            link4mApiToken: '',
+            link4mSecretKey: ''
+        }, lastBotId: 0,
         pendingResets: {},
+        outboxQueue: [],
+        pendingAllocations: [],
         supabase: null,
         webhook: {
             enabled: !!(MANAGER_CONFIG.DISCORD_WEBHOOK_URL || MANAGER_CONFIG.TELEGRAM_BOT_TOKEN || process.env.DISCORD_WEBHOOK_URL || process.env.TELEGRAM_BOT_TOKEN),
@@ -3359,15 +4693,28 @@ registry.botRentalDisabled = normalizeBotRentalDisabled(registry.botRentalDisabl
 let BOT_CONFIG = [];
 
 function initializeAdminPassword({ allowBootstrap = false } = {}) {
+    // SEC-03: từ chối các mật khẩu mặc định đã biết (không in giá trị ra log).
+    const KNOWN_DEFAULT_ADMIN_PASSWORDS = new Set([
+        'admin123', 'password', '123456', '12345678',
+        'KingMC_Secret_Pass_2026_Secure!', 'KingMC_Master_Secret_Key_32Byte!'
+    ]);
     const envPass = String(process.env.ADMIN_PASSWORD || process.env.MANAGER_ADMIN_PASSWORD || process.env.MANAGER_PASSWORD || '').trim();
     const configPass = String(MANAGER_CONFIG.ADMIN_PASSWORD || '').trim();
 
+    if (envPass && KNOWN_DEFAULT_ADMIN_PASSWORDS.has(envPass)) {
+        console.error('[SECURITY] ❌ ADMIN_PASSWORD trong biến môi trường trùng mật khẩu mặc định đã biết; bị từ chối. Hãy đặt mật khẩu Admin mạnh.');
+        return { ok: false, source: 'rejected-default', created: false, password: '', error: 'ADMIN_PASSWORD không được dùng mật khẩu mặc định đã biết.' };
+    }
     if (envPass) {
         if (!verifyAdminPassword(envPass, registry.adminPassword)) {
             registry.adminPassword = hashAdminPassword(envPass);
             console.log('[SECURITY] 🔑 Mật khẩu Admin đã được áp dụng từ biến môi trường ADMIN_PASSWORD.');
         }
         return { ok: true, source: 'env', created: false, password: '' };
+    }
+    if (configPass && KNOWN_DEFAULT_ADMIN_PASSWORDS.has(configPass)) {
+        console.error('[SECURITY] ❌ Mật khẩu Admin trong cấu hình trùng mật khẩu mặc định đã biết; bị từ chối.');
+        return { ok: false, source: 'rejected-default', created: false, password: '', error: 'Mật khẩu Admin không được dùng mật khẩu mặc định đã biết.' };
     }
     if (configPass) {
         if (!verifyAdminPassword(configPass, registry.adminPassword)) {
@@ -3382,7 +4729,16 @@ function initializeAdminPassword({ allowBootstrap = false } = {}) {
     if (!allowBootstrap) {
         return { ok: true, source: 'missing', created: false, password: '' };
     }
-    const bootstrapPassword = 'admin123';
+    // BLOCKER-09 (SEC-03, Wave A): trên production KHÔNG còn bootstrap mật khẩu ngẫu nhiên
+    // in ra log (log aggregation có thể lộ plaintext). Operator bắt buộc đặt ADMIN_PASSWORD
+    // trước deploy (render.yaml đã generateValue:true). Local dev giữ nguyên bootstrap.
+    if (isProductionRuntime()) {
+        console.error('[SECURITY] ❌ ADMIN_PASSWORD chưa được cấu hình trên production: không sinh mật khẩu bootstrap qua log. Hãy đặt biến môi trường ADMIN_PASSWORD rồi deploy lại.');
+        return { ok: true, source: 'missing-production', created: false, password: '' };
+    }
+    // SEC-03: bootstrap LUÔN sinh mật khẩu ngẫu nhiên (chỉ local dev — không còn trên production).
+    // Mật khẩu chỉ được in/log một lần tại khởi động dev và buộc đổi ngay (mustChangePassword).
+    const bootstrapPassword = crypto.randomBytes(9).toString('base64url');
     registry.adminPassword = hashAdminPassword(bootstrapPassword);
     registry.mustChangePassword = true;
     return { ok: true, source: 'bootstrap', created: true, fileCreated: false, password: bootstrapPassword };
@@ -3391,6 +4747,9 @@ function initializeAdminPassword({ allowBootstrap = false } = {}) {
 // Chỉ công bố mật khẩu bootstrap sau khi hash đã được xác nhận trên Cloud (hoặc đọc lại thấy đã ghi).
 async function persistAdminBootstrapIfNeeded() {
     const bootstrap = initializeAdminPassword({ allowBootstrap: true });
+    if (bootstrap.source === 'missing-production') {
+        return { persisted: false };
+    }
     if (!bootstrap.created && !bootstrap.usedStoredHash) return { persisted: false };
     let saved = false;
     try {
@@ -3427,6 +4786,39 @@ function encodeStoredCredentialForCloud(value) {
     return encryptUserPassword(raw);
 }
 
+// BUG-03 (Wave A — BLOCKER-03): serialize per-bot secret map để persist lên Cloud.
+// - Giá trị được MÃ HÓA at-rest bằng khóa credential hiện hành.
+// - Nếu baseline Cloud đã có ciphertext giải mã ra cùng plaintext → tái dùng ciphertext
+//   cũ để diff registry ổn định (không re-upload do IV ngẫu nhiên thay đổi mỗi lần save).
+// - Giá trị ciphertext trong memory (restore từ Cloud) được giữ nguyên.
+// - Lỗi mã hóa (thiếu khóa master) → bỏ entry kèm cảnh báo, KHÔNG làm hỏng cả registry save.
+function serializeBotSecretsForCloud(map) {
+    const source = (map && typeof map === 'object' && !Array.isArray(map)) ? map : {};
+    const baseline = (registryCloudBaseline && registryCloudBaseline.botSecrets && typeof registryCloudBaseline.botSecrets === 'object' && !Array.isArray(registryCloudBaseline.botSecrets)) ? registryCloudBaseline.botSecrets : {};
+    const out = {};
+    for (const [botId, rawValue] of Object.entries(source)) {
+        const plain = String(rawValue ?? '').trim();
+        if (!plain) continue;
+        const idKey = String(botId);
+        if (isStoredCredentialCiphertext(plain)) { out[idKey] = plain; continue; }
+        const baselineCipher = String(baseline[idKey] ?? '');
+        if (baselineCipher && isStoredCredentialCiphertext(baselineCipher)) {
+            const baselinePlain = decryptUserPassword(baselineCipher);
+            if (baselinePlain !== null && baselinePlain === plain) { out[idKey] = baselineCipher; continue; }
+        }
+        try {
+            out[idKey] = encryptUserPassword(plain);
+        } catch (err) {
+            // NEW-05 (Wave A recheck §5): KHÔNG âm thầm bỏ entry — phân biệt 'không có
+            // secret' với 'không mã hóa được secret'. Fail save rõ ràng để hàng đợi retry,
+            // tránh trạng thái nửa thành công khó chẩn đoán (secret không được persist mà
+            // registry save vẫn báo OK). Không bao giờ log giá trị secret.
+            throw new Error('Không mã hóa được per-bot secret #' + idKey + ' (thiếu/khóa master không hợp lệ?); đã HỦY registry save lần này để tránh mất secret: ' + err.message);
+        }
+    }
+    return out;
+}
+
 function saveRegistry() {
     const run = () => saveRegistryUnlocked();
     const operation = registrySaveQueue.then(run, run);
@@ -3434,9 +4826,30 @@ function saveRegistry() {
     return operation;
 }
 
+const LOCAL_REGISTRY_FILE = path.join(__dirname, 'bot_registry_local.json');
+
 async function saveRegistryUnlocked() {
     try {
         if (!supabaseAdapter || !supabaseAdapter.isEnabled()) {
+            try {
+                // V3-04: Lưu registry cục bộ bền vững (durable) khi không dùng Supabase
+                const localData = {
+                    version: 3,
+                    dynamicBots: Array.isArray(BOT_CONFIG) ? BOT_CONFIG.filter(b => b.source === 'dynamic') : (registry.dynamicBots || []),
+                    botIdMap: registry.botIdMap || {},
+                    lastBotId: registry.lastBotId || 0,
+                    outboxQueue: Array.isArray(registry.outboxQueue) ? registry.outboxQueue : [],
+                    pendingResets: registry.pendingResets || {},
+                    pendingAllocations: Array.isArray(registry.pendingAllocations) ? registry.pendingAllocations : [],
+                    updatedAt: new Date().toISOString()
+                };
+                const tmpFile = LOCAL_REGISTRY_FILE + '.tmp.' + process.pid + '.' + Date.now();
+                fs.writeFileSync(tmpFile, JSON.stringify(localData, null, 2), 'utf8');
+                fs.renameSync(tmpFile, LOCAL_REGISTRY_FILE);
+            } catch (err) {
+                console.error('[REGISTRY] Lỗi lưu registry cục bộ:', err.message);
+                return false;
+            }
             return true;
         }
         if (!supabaseStorageReady) {
@@ -3449,7 +4862,8 @@ async function saveRegistryUnlocked() {
                 .filter(bot => bot.source === 'dynamic')
                 .map(bot => ({
                     label: bot.label,
-                    url: bot.url
+                    url: bot.url,
+                    secretKey: bot.secretKey || undefined
                 }));
         } else if (Array.isArray(registry.dynamicBots)) {
             dynamicBotsToSave = registry.dynamicBots.map(bot => ({
@@ -3480,18 +4894,33 @@ async function saveRegistryUnlocked() {
                 .filter(item => item.sourceUrl || item.url || item.label),
             orderUrls: currentBots.map(bot => bot.url),
             order: Array.isArray(registry.order) ? registry.order : [],
+            pendingAllocations: Array.isArray(registry.pendingAllocations) ? registry.pendingAllocations : [],
+            outboxQueue: Array.isArray(registry.outboxQueue) ? registry.outboxQueue : [],
             botIdMap: registry.botIdMap || {},
             botAliases: registry.botAliases || {},
             botTags: registry.botTags || {},
             botRentalDisabled: normalizeBotRentalDisabled(registry.botRentalDisabled),
+            // BUG-03 (Wave A): per-bot secret map được persist (đã mã hóa at-rest).
+            botSecrets: serializeBotSecretsForCloud(registry.botSecrets),
             systemSettings: {
+                ...(registry.systemSettings || {}),
                 trialGiftEnabled: registry.systemSettings?.trialGiftEnabled !== false,
-                trialDays: Math.max(1, Math.min(365, parseInt(registry.systemSettings?.trialDays, 10) || 1))
+                trialDays: Math.max(1, Math.min(365, parseInt(registry.systemSettings?.trialDays, 10) || 1)),
+                link4mRewardEnabled: registry.systemSettings?.link4mRewardEnabled === true,
+                link4mRewardHours: Math.max(1, Math.min(48, Number(registry.systemSettings?.link4mRewardHours) || 12)),
+                link4mDailyLimit: Math.max(1, Math.min(10, Number(registry.systemSettings?.link4mDailyLimit) || 2)),
+                link4mMode: registry.systemSettings?.link4mMode === 'api' ? 'api' : 'custom_url',
+                link4mUrl: String(registry.systemSettings?.link4mUrl || '').trim(),
+                link4mApiToken: String(registry.systemSettings?.link4mApiToken || '').trim(),
+                link4mSecretKey: String(registry.systemSettings?.link4mSecretKey || '').trim()
             },
             lastBotId: Number(registry.lastBotId) || 0,
             pendingResets: (registry.pendingResets && typeof registry.pendingResets === 'object' && !Array.isArray(registry.pendingResets))
                 ? registry.pendingResets
                 : {},
+            outboxQueue: (registry.outboxQueue && Array.isArray(registry.outboxQueue))
+                ? registry.outboxQueue
+                : [],
             supabase: registry.supabase ? {
                 url: registry.supabase.url,
                 enabled: !!registry.supabase.enabled
@@ -3511,8 +4940,8 @@ async function saveRegistryUnlocked() {
             announcement: registry.announcement || {
                 enabled: true,
                 id: 'ann_v11_7_customer',
-                title: '📢 THÔNG BÁO VẬN HÀNH HỆ THỐNG (V11.7 PURE RENDER)',
-                content: '🎉 Chào mừng bạn đến với KingMC Bot Manager V11.7 Pure Render Edition!\n\n🚀 TÍNH NĂNG MỚI NỔI BẬT:\n• ⚡ Đồng Bộ Tức Thì: Mọi thao tác nạp key, đổi tên bot, tạo tài khoản đều hiển thị ngay lập tức, không cần F5.\n• 🎯 Giám Sát Chuẩn Xác: Phân biệt rõ ràng giữa bot Offline ingame và bot Lỗi kết nối để hỗ trợ kịp thời.\n• 💬 Hỗ Trợ Discord 24/7: Bấm ngay nút Discord ở chân trang để được đội ngũ kỹ thuật trợ giúp trực tiếp.\n• 🛡️ Tiết Kiệm Băng Thông Tối Đa: Tối ưu dữ liệu truyền tải mượt mà trên Render.\n\nChúc quý khách có trải nghiệm AFK hiệu quả tại máy chủ KingMC!',
+                title: '📢 THÔNG BÁO VẬN HÀNH HỆ THỐNG (V11.8 PURE RENDER)',
+                content: '🎉 Chào mừng bạn đến với KingMC Bot Manager V11.8 Pure Render Edition!\n\n🚀 TÍNH NĂNG MỚI NỔI BẬT:\n• ⚡ Đồng Bộ Tức Thì: Mọi thao tác nạp key, đổi tên bot, tạo tài khoản đều hiển thị ngay lập tức, không cần F5.\n• 🎯 Giám Sát Chuẩn Xác: Phân biệt rõ ràng giữa bot Offline ingame và bot Lỗi kết nối để hỗ trợ kịp thời.\n• 💬 Hỗ Trợ Discord 24/7: Bấm ngay nút Discord ở chân trang để được đội ngũ kỹ thuật trợ giúp trực tiếp.\n• 🛡️ Tiết Kiệm Băng Thông Tối Đa: Tối ưu dữ liệu truyền tải mượt mà trên Render.\n\nChúc quý khách có trải nghiệm AFK hiệu quả tại máy chủ KingMC!',
                 mode: 'daily',
                 startDate: '',
                 endDate: '',
@@ -3583,6 +5012,7 @@ function buildManagerBotConfig() {
     const dynamicBots = registry.dynamicBots.map(bot => ({
         label: bot.label,
         url: bot.url,
+        secretKey: bot.secretKey ? String(bot.secretKey).trim() : undefined,
         source: 'dynamic',
         sourceUrl: bot.url,
         legacyNumber: null
@@ -3636,6 +5066,7 @@ function buildManagerBotConfig() {
         finalBots.push({
             label: bot.label || `Bot ${finalBots.length + 1}`,
             url,
+            secretKey: bot.secretKey ? String(bot.secretKey).trim() : undefined,
             source: bot.source,
             sourceUrl: normalizeRegistryUrl(bot.sourceUrl || url),
             legacyNumber: bot.legacyNumber || null
@@ -3719,12 +5150,14 @@ function buildManagerBotConfig() {
         if (!finalLabel || lowerLabel === 'bot1' || lowerLabel === 'bot 1') {
             finalLabel = `Bot ${bId}`;
         }
+        const bSecret = String(getRegistryBotSecret(bId) || bot.secretKey || '').trim();
         return {
             ...bot,
             id: bId,
             label: finalLabel,
             tags: (registry.botTags && registry.botTags[bId]) || [],
-            rentable: !rentalDisabledSet.has(bId)
+            rentable: !rentalDisabledSet.has(bId),
+            secretKey: bSecret || undefined
         };
     });
 
@@ -3753,11 +5186,37 @@ applyRegistryOverridesAndOrder();
 
 function sanitizeBotForSession(botData, session) {
     if (!botData) return botData;
-    if (session && session.role === 'admin') return botData;
     const copy = { ...botData };
+    delete copy.secretKey;
+    if (session && session.role === 'admin') return copy;
     copy.url = '';
     delete copy.sourceUrl;
     delete copy.registryFile;
+    // BLOCKER-10 (SEC-06/BUG-17, Wave A): DTO theo role áp cho TOÀN BỘ dữ liệu bot trả
+    // về cho session — không chỉ proxy. spawnCommands và lệnh trong botSchedules có thể
+    // chứa lệnh đổi tài Minecraft/credential → user không đủ quyền đổi account bị mask/strip.
+    const canChangeAccount = !(session && session.allowAccountChange === false);
+    if (!canChangeAccount) {
+        if (copy.settings && typeof copy.settings === 'object' && typeof copy.settings.spawnCommands === 'string') {
+            copy.settings = { ...copy.settings, spawnCommands: copy.settings.spawnCommands ? '********' : '' };
+        }
+        if (Array.isArray(copy.botSchedules)) {
+            copy.botSchedules = copy.botSchedules.map(sch => (sch && Array.isArray(sch.items))
+                ? { ...sch, items: sch.items.map(item => {
+                    if (item && typeof item === 'object' && item.command !== undefined) {
+                        const { command, ...rest } = item;
+                        return rest;
+                    }
+                    return item;
+                }) }
+                : sch);
+        }
+    }
+    // SEC-06/BUG-17: khách thuê không được thấy chi tiết proxy (host/port/username/password),
+    // chỉ còn trạng thái BẬT/TẮT. Admin xem chi tiết qua route /api/manager/bot/:id/proxy.
+    if (copy.settings && typeof copy.settings === 'object' && copy.settings.proxy && typeof copy.settings.proxy === 'object') {
+        copy.settings = { ...copy.settings, proxy: { enabled: copy.settings.proxy.enabled === true } };
+    }
     return copy;
 }
 
@@ -3777,7 +5236,11 @@ function finiteNonNegativeNumberOrNull(value) {
         : null;
 }
 
-function buildUnavailableSummary(botConfig, error = 'Chưa kết nối được tới bot.') {
+function buildUnavailableSummary(botConfig, error = 'Chưa kết nối được tới bot.', httpStatus = null, apiState = {}) {
+    const isMismatch = error ? (error.includes('409') || error.toLowerCase().includes('secret') || error.includes('lệch key')) : false;
+    const resolvedStatus = httpStatus || (error && error.includes('404') ? 404 : (isMismatch ? 409 : (error && (error.includes('503') || error.includes('502') || error.includes('Timeout')) ? 503 : null)));
+    // BUG-02/API-STATE-01: phân biệt rõ 4 trạng thái để watchdog + UI không nhầm lẫn
+    // "process sống" với "đã xác thực service" và "đã xác minh danh tính bot".
     return {
         id: botConfig.id,
         url: botConfig.url || '',
@@ -3817,6 +5280,13 @@ function buildUnavailableSummary(botConfig, error = 'Chưa kết nối được 
         memory: null,
         rssMb: 0,
         heapMb: 0,
+        httpStatus: resolvedStatus,
+        lastError: error,
+        secretMismatch: isMismatch,
+        processReachable: apiState.processReachable === true,
+        serviceAuthenticated: apiState.serviceAuthenticated === true,
+        identityVerified: apiState.identityVerified === true,
+        lastErrorCode: apiState.lastErrorCode || null,
         error
     };
 }
@@ -3922,13 +5392,77 @@ app.use((req, res, next) => {
 
 // Authenticate private worker-to-manager requests. Keep the check fail-closed
 // when no shared secret is configured, matching bot.js's X-Bot-Secret header.
+// BLOCKER-01 (SEC-01/SEC-04, Wave A): chỉ so khớp với secret đã CHUẨN HÓA fail-closed
+// (hằng BOT_SECRET_KEY sau khi blank literal mặc định), KHÔNG đọc raw env tại đây như trước.
+// BUG-03/BUG-16 (Wave A): chấp nhận thêm per-bot secret đã lưu (registry.botSecrets) để
+// hợp đồng xác thực hai chiều Manager<->Worker đối xứng với mô hình per-bot secret.
 function isBotSecretRequest(req) {
-    const expected = String(process.env.BOT_SECRET_KEY || MANAGER_CONFIG.BOT_SECRET_KEY || '').trim();
     const incoming = String(req?.headers?.['x-bot-secret'] || '').trim();
-    if (!expected || !incoming) return false;
-    const expectedBuffer = Buffer.from(expected);
-    const incomingBuffer = Buffer.from(incoming);
-    return expectedBuffer.length === incomingBuffer.length && crypto.timingSafeEqual(expectedBuffer, incomingBuffer);
+    if (!incoming) return false;
+    const normalizedGlobalSecret = String(BOT_SECRET_KEY || '').trim();
+    if (normalizedGlobalSecret && timingSafeStringEquals(incoming, normalizedGlobalSecret)) return true;
+    const identity = String((typeof getRequestBotIdentity === 'function'
+        ? getRequestBotIdentity(req)
+        : (req?.headers?.['x-manager-bot-id'] || req?.headers?.['x-expected-bot-id'] || req?.body?.botId || req?.body?.id || req?.query?.botId || req?.params?.id || '')) || '').trim();
+    if (identity) {
+        const candidate = String(getRegistryBotSecret(identity) || '').trim();
+        if (candidate && timingSafeStringEquals(incoming, candidate)) return true;
+    }
+    // NEW-03 & Audit v2 §3.6 (Fail-closed): Nếu request không mang danh tính bot đích,
+    // tuyệt đối KHÔNG duyệt qua map per-bot secrets (ngăn Worker A mạo danh Worker B hoặc gọi route không rõ danh tính).
+    return false;
+}
+
+// NEW-03 (Wave B0 — kiểm tra lại §5): ràng buộc per-bot secret với bot ID của request.
+// - Global secret (BOT_SECRET_KEY của Manager) giữ quyền full-trust trên mọi bot
+//   (không phá triển khai single-secret hiện có).
+// - Per-bot secret CHỈ hợp lệ khi request đang hành động ĐÚNG bot sở hữu secret đó.
+//   Danh tính bot được đọc từ header X-Manager-Bot-Id / X-Expected-Bot-ID (fetchChild
+//   luôn gửi) hoặc body/query/params botId (verify-bot-access gửi body.botId).
+// - FAIL-CLOSED: per-bot secret không kèm danh tính → từ chối (secret worker A gọi
+//   dưới danh tính worker B → từ chối — SEC-E2E-02).
+function getRequestBotIdentity(req) {
+    const candidates = [
+        req?.headers?.['x-manager-bot-id'],
+        req?.headers?.['x-expected-bot-id'],
+        req?.body?.botId,
+        req?.body?.id,
+        req?.query?.botId,
+        req?.params?.id
+    ];
+    for (const candidate of candidates) {
+        const value = String(candidate ?? '').trim();
+        if (value) return value;
+    }
+    return '';
+}
+
+function isBotSecretRequestForBot(req, botId) {
+    const wanted = String(botId ?? '').trim();
+    const incoming = String(req?.headers?.['x-bot-secret'] || '').trim();
+    if (!incoming) return false;
+    const normalizedGlobalSecret = String(BOT_SECRET_KEY || '').trim();
+    if (normalizedGlobalSecret && timingSafeStringEquals(incoming, normalizedGlobalSecret)) return true;
+    if (!wanted) return false; // per-bot secret bắt buộc phải có danh tính bot đích
+    const candidate = String(getRegistryBotSecret(wanted) || '').trim();
+    if (!candidate) return false;
+    if (!timingSafeStringEquals(incoming, candidate)) return false;
+    const identity = getRequestBotIdentity(req);
+    return identity !== '' && identity === wanted;
+}
+
+// Phân loại lỗi Secret Key giữa Manager và Bot Worker (HTTP 409 vs 401/403)
+function isSecretMismatchError(status, data) {
+    if (!status) return false;
+    if (data?.secretMismatch === true) return true;
+    const err = String(data?.error || (typeof data === 'string' ? data : '') || '').toLowerCase();
+    if (status === 409) {
+        return err.includes('chưa xác thực') || err.includes('bot_id') || err.includes('x-bot-secret') || err.includes('unauthorized');
+    }
+    if (status === 401 || status === 403) {
+        return err.includes('x-bot-secret') || err.includes('khóa bảo mật') || err.includes('khóa bí mật') || err.includes('manager') || err.includes('secret') || !err;
+    }
+    return false;
 }
 
 // CSRF Protection Middleware for Browser state-changing requests
@@ -4000,14 +5534,17 @@ app.use((req, res, next) => {
             ? cachedUsers.find(u => String(u.id) === String(localSession.userId) || String(u.username).toLowerCase() === String(localSession.username).toLowerCase())
             : null;
         const expiry = user?.expiresAt ? Date.parse(user.expiresAt) : NaN;
-        const invalidUser = !user || user.status !== 'active' || (user.expiresAt && (!Number.isFinite(expiry) || expiry <= Date.now()));
+        const isExpired = Boolean(user?.expiresAt && (!Number.isFinite(expiry) || expiry <= Date.now()));
+        const invalidUser = !user || user.status === 'disabled';
         if (invalidUser) {
             activeSessions.delete(tokenHash);
             req.managerAuthSession = null;
             return next();
         }
         localSession.assignedBotIds = user.assignedBotIds || [];
-        localSession.status = 'active';
+        localSession.status = isExpired ? 'expired' : 'active';
+        localSession.isExpired = isExpired;
+        localSession.isPermanent = Boolean(user.isPermanent === true || user.is_permanent === true || user.expiresAt === null);
         localSession.planName = user.planName || '';
         localSession.expiresAtRental = user.expiresAt;
         localSession.allowAccountChange = user.allowAccountChange;
@@ -4017,13 +5554,18 @@ app.use((req, res, next) => {
         return next();
     }
     Promise.resolve().then(async () => {
-        const stored = await supabaseAdapter?.fetchManagerAuthorization?.(tokenHash);
-        if (!stored?.ok) {
-            return res.status(503).json({ ok: false, error: 'Không thể xác minh phiên đăng nhập trên Supabase; quyền truy cập đã bị tạm dừng.' });
+        let stored = getCachedAuth(tokenHash);
+        if (!stored) {
+            stored = await supabaseAdapter?.fetchManagerAuthorization?.(tokenHash);
+            if (!stored?.ok) {
+                return res.status(503).json({ ok: false, error: 'Không thể xác minh phiên đăng nhập trên Supabase; quyền truy cập đã bị tạm dừng.' });
+            }
+            setCachedAuth(tokenHash, stored);
         }
         const session = stored.session;
         if (session) session.role = normalizeManagerRole(session.role);
         if (!session || Number(session.expiresAt) <= Date.now()) {
+            invalidateAuthCache(tokenHash);
             activeSessions.delete(tokenHash);
             req.managerAuthChecked = true;
             req.managerAuthSession = null;
@@ -4032,10 +5574,12 @@ app.use((req, res, next) => {
         if (session.role !== 'admin') {
             const user = stored.user;
             const expiry = user?.expiresAt ? Date.parse(user.expiresAt) : NaN;
+            const isExpired = Boolean(user?.expiresAt && (!Number.isFinite(expiry) || expiry <= Date.now()));
             const invalidUser = !user || String(user.id) !== String(session.userId) ||
                 String(user.username).toLowerCase() !== String(session.username).toLowerCase() ||
-                user.status !== 'active' || (user.expiresAt && (!Number.isFinite(expiry) || expiry <= Date.now()));
+                user.status === 'disabled';
             if (invalidUser) {
+                invalidateAuthCache(tokenHash);
                 activeSessions.delete(tokenHash);
                 await supabaseAdapter.deleteSession(tokenHash);
                 req.managerAuthChecked = true;
@@ -4043,7 +5587,9 @@ app.use((req, res, next) => {
                 return next();
             }
             session.assignedBotIds = user.assignedBotIds;
-            session.status = 'active';
+            session.status = isExpired ? 'expired' : 'active';
+            session.isExpired = isExpired;
+            session.isPermanent = Boolean(user.isPermanent === true || user.is_permanent === true || user.expiresAt === null);
             session.planName = user.planName;
             session.expiresAtRental = user.expiresAt;
             session.allowAccountChange = user.allowAccountChange;
@@ -4060,7 +5606,228 @@ app.use((err, req, res, next) => {
     if (err && (err.type === 'entity.parse.failed' || err instanceof SyntaxError)) {
         return res.status(400).json({ ok: false, error: 'JSON request không hợp lệ.' });
     }
+    if (err && (err.type === 'entity.too.large' || err.status === 413)) {
+        return res.status(413).json({ ok: false, error: 'Payload quá lớn (vượt quá giới hạn 512KB).' });
+    }
     return next(err);
+});
+
+
+// ----------------------------------------------------------------------------
+// LINK4M +12H REWARD ENGINE
+// ----------------------------------------------------------------------------
+const localLink4mAttempts = new Map();
+
+// ============================================================================
+// LINK4M PROVIDER ADAPTER
+// Encapsulates provider communication, dynamic shortlink creation, and
+// strict server-to-server postback cryptographic verification.
+// ============================================================================
+class Link4MProviderAdapter {
+    constructor(config = {}) {
+        this.apiEndpoint = config.apiEndpoint || 'https://link4m.co/api-shorten/v2';
+        this.legacyApiEndpoint = 'https://link4m.co/api';
+        this.apiToken = String(config.apiToken || '').trim();
+        this.secretKey = String(config.secretKey || '').trim();
+        this.mode = config.mode || 'api'; // 'api' | 'custom_url'
+        this.customUrl = String(config.customUrl || '').trim();
+    }
+
+    hasPostbackConfigured() {
+        return Boolean(this.secretKey);
+    }
+
+    async createRewardLink(returnUrl, attemptId, nonceToken) {
+        if (this.mode === 'api') {
+            if (!this.apiToken) {
+                throw new Error('Chưa cấu hình API Token cho Link4M trong hệ thống.');
+            }
+            const v2Url = `${this.apiEndpoint}?api=${encodeURIComponent(this.apiToken)}&url=${encodeURIComponent(returnUrl)}`;
+            try {
+                let res = await fetch(v2Url, { signal: AbortSignal.timeout(8000) });
+                if (!res.ok || res.status === 404) {
+                    res = await fetch(`${this.legacyApiEndpoint}?api=${encodeURIComponent(this.apiToken)}&url=${encodeURIComponent(returnUrl)}`, { signal: AbortSignal.timeout(8000) });
+                }
+                if (!res.ok) throw new Error(`Link4M trả về lỗi HTTP ${res.status}`);
+                const data = await res.json();
+                if (data?.status === 'success' && data?.shortenedUrl) {
+                    return data.shortenedUrl;
+                }
+                throw new Error(data?.message || 'Link4M không trả về shortenedUrl hợp lệ.');
+            } catch (err) {
+                throw new Error(`Không thể kết nối đến máy chủ Link4M (${err.message})`);
+            }
+        } else {
+            if (!this.customUrl) {
+                throw new Error('Chưa cấu hình đường dẫn Link rút gọn cố định.');
+            }
+            const sep = this.customUrl.includes('?') ? '&' : '?';
+            return `${this.customUrl}${sep}attempt=${encodeURIComponent(attemptId)}&token=${encodeURIComponent(nonceToken)}`;
+        }
+    }
+
+    verifyCompletion(req, attempt) {
+        if (!this.hasPostbackConfigured()) {
+            return {
+                ok: false,
+                status: 503,
+                error: 'POSTBACK_NOT_CONFIGURED',
+                message: 'Chưa cấu hình Secret Key cho Webhook/Postback. Yêu cầu bị từ chối để chống gian lận.'
+            };
+        }
+
+        const authHeader = String(req.headers['authorization'] || '').trim();
+        const bearerSecret = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : '';
+        const incomingKey = String(
+            bearerSecret ||
+            req.headers['x-link4m-secret'] ||
+            req.headers['x-webhook-secret'] ||
+            req.query.secret ||
+            req.body?.secret ||
+            ''
+        ).trim();
+
+        // L4M-SEC-01: so sánh webhook secret constant-time (timingSafeEqual) sau khi
+        // chuẩn hóa encoding/length; so sánh === tạo timing oracle theo byte khớp đầu.
+        const incomingBuf = Buffer.from(String(incomingKey), 'utf8');
+        const secretBuf = Buffer.from(String(this.secretKey), 'utf8');
+        const secretMatch = incomingBuf.length === secretBuf.length && crypto.timingSafeEqual(incomingBuf, secretBuf);
+        if (!incomingKey || !secretMatch) {
+            return {
+                ok: false,
+                status: 403,
+                error: 'INVALID_WEBHOOK_SECRET',
+                message: 'Mã bí mật xác thực webhook không hợp lệ.'
+            };
+        }
+
+        const token = String(req.query.token || req.body?.token || '').trim();
+        const signature = String(req.headers['x-link4m-signature'] || req.query.signature || req.body?.signature || '').trim();
+
+        if (!token && !signature) {
+            return {
+                ok: false,
+                status: 400,
+                error: 'MISSING_COMPLETION_EVIDENCE',
+                message: 'Yêu cầu Webhook bắt buộc phải có token bằng chứng hoàn tất hoặc chữ ký HMAC.'
+            };
+        }
+
+        const expectedHash = attempt.token_hash || attempt.tokenHash;
+        if (token) {
+            const callerHash = crypto.createHash('sha256').update(token).digest('hex');
+            if (callerHash !== expectedHash) {
+                return {
+                    ok: false,
+                    status: 403,
+                    error: 'INVALID_COMPLETION_TOKEN',
+                    message: 'Token bằng chứng hoàn tất không khớp với phiên vượt link.'
+                };
+            }
+        } else if (signature) {
+            const attemptId = String(attempt.attempt_id || attempt.attemptId || '');
+            const expectedSig = crypto.createHmac('sha256', this.secretKey).update(attemptId).digest('hex');
+            if (signature !== expectedSig) {
+                return {
+                    ok: false,
+                    status: 403,
+                    error: 'INVALID_SIGNATURE',
+                    message: 'Chữ ký hoàn tất HMAC không khớp.'
+                };
+            }
+        }
+
+        return { ok: true };
+    }
+}
+
+
+// Mutex map to serialize concurrent start requests per username
+const localUserStartMutex = new Map(); // username -> Promise
+async function acquireUserStartLock(username, fn) {
+    const key = String(username || '').toLowerCase();
+    const prev = localUserStartMutex.get(key) || Promise.resolve();
+    let release;
+    const current = new Promise(resolve => { release = resolve; });
+    // REL-01: Map lưu đúng `tail` (promise nối tiếp), không phải `current`.
+    // Trước đây map value là `prev.then(() => current)` nhưng cleanup so sánh với
+    // `current` → không bao giờ khớp → entry rò rỉ sau khi mọi tác vụ kết thúc.
+    const tail = prev.then(() => current);
+    localUserStartMutex.set(key, tail);
+    try {
+        await prev;
+        return await fn();
+    } finally {
+        release();
+        // Chỉ xóa khi không có tác vụ mới đã xếp hàng thay thế tail.
+        if (localUserStartMutex.get(key) === tail) {
+            localUserStartMutex.delete(key);
+        }
+    }
+}
+ // attemptId -> attemptRecord
+
+function getVietnamDateString(date = new Date()) {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+}
+
+
+function getLink4mAdapter() {
+    return new Link4MProviderAdapter({
+        apiToken: registry.systemSettings?.link4mApiToken || process.env.LINK4M_API_KEY || '',
+        secretKey: registry.systemSettings?.link4mSecretKey || process.env.LINK4M_SECRET_KEY || '',
+        mode: registry.systemSettings?.link4mMode || 'api',
+        customUrl: registry.systemSettings?.link4mUrl || process.env.LINK4M_CUSTOM_URL || ''
+    });
+}
+
+// L4M-URL-01: callback origin phải đến từ cấu hình tin cậy (PUBLIC_BASE_URL /
+// RENDER_EXTERNAL_URL), KHÔNG dựng từ Host / X-Forwarded-Host của request inbound
+// (header này do caller kiểm soát → host header injection khi gửi returnUrl cho provider).
+// Production: chỉ chấp nhận HTTPS; thiếu cấu hình → fail-closed 503.
+// Dev/local: fallback request host (kèm warning) vì chưa có domain công khai.
+function getPublicBaseUrl(req) {
+    const configured = String(process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '');
+    // NEW-02 (Wave A recheck §5): dùng helper production THỐNG NHẤT (NODE_ENV hoặc
+    // tín hiệu Render) — không chỉ NODE_ENV. Trong production: KHÔNG tin request host,
+    // chỉ chấp nhận canonical HTTPS URL từ cấu hình.
+    const isProd = isProductionRuntime();
+    if (configured) {
+        try {
+            const parsed = new URL(configured);
+            const httpsOk = parsed.protocol === 'https:';
+            if ((httpsOk || !isProd) && parsed.host) {
+                return { ok: true, baseUrl: `${parsed.protocol}//${parsed.host}`, source: 'config' };
+            }
+            if (isProd && !httpsOk) {
+                console.warn('[LINK4M] PUBLIC_BASE_URL/RENDER_EXTERNAL_URL không dùng HTTPS trong production; không dùng làm callback origin.');
+            }
+        } catch (_) {
+            console.warn('[LINK4M] PUBLIC_BASE_URL/RENDER_EXTERNAL_URL không phải URL hợp lệ:', configured ? '(đã ẩn giá trị)' : '');
+        }
+    }
+    if (isProd) {
+        return {
+            ok: false,
+            code: 'PUBLIC_BASE_URL_NOT_CONFIGURED',
+            message: 'Hệ thống chưa cấu hình PUBLIC_BASE_URL (HTTPS) cho callback Link4M trong môi trường production. Vui lòng liên hệ Quản trị viên.'
+        };
+    }
+    const host = req?.get?.('x-forwarded-host') || req?.get?.('host') || `localhost:${HTTP_PORT}`;
+    return { ok: true, baseUrl: `http://${host}`, source: 'request-host', warning: true };
+}
+
+function getNextVietnamMidnight(date = new Date()) {
+    const vnDateStr = getVietnamDateString(date);
+    const [y, m, d] = vnDateStr.split('-').map(Number);
+    const tomorrowUtcMs = Date.UTC(y, m - 1, d + 1, 0, 0, 0) - (7 * 3600 * 1000);
+    return new Date(tomorrowUtcMs);
+}
+
+const link4mStartLimiter = new ManagerMemoryRateLimiter({
+    maxFailures: 6,
+    windowMs: 5 * 60 * 1000,
+    message: 'Bạn thao tác quá nhanh. Vui lòng đợi ít phút trước khi tạo lượt vượt link mới.'
 });
 
 function canChangeMinecraftAccount(user) {
@@ -4078,17 +5845,56 @@ const RESTRICTED_MINECRAFT_ACCOUNT_COMMANDS = new Set([
     '/unregister',
     '/unreg',
     '/authme',
-    '/user'
+    '/user',
+    '/dk',
+    'dk',
+    '/email',
+    'email',
+    '/totp',
+    'totp',
+    '/2fa',
+    '2fa'
 ]);
 
 function isRestrictedMinecraftAccountCommand(value) {
-    const command = String(value || '').trim().toLowerCase().split(/\s+/, 1)[0];
-    return RESTRICTED_MINECRAFT_ACCOUNT_COMMANDS.has(command);
+    if (!value) return false;
+    let raw = String(value).trim().toLowerCase();
+    raw = raw.replace(/^\/+/, '').trim();
+    const tokens = raw.split(/\s+/).filter(Boolean);
+    const firstToken = tokens[0] || '';
+    const cmdName = firstToken.includes(':') ? firstToken.split(':').pop() : firstToken;
+    const slashCmd = '/' + cmdName;
+    if (RESTRICTED_MINECRAFT_ACCOUNT_COMMANDS.has(slashCmd) || RESTRICTED_MINECRAFT_ACCOUNT_COMMANDS.has(cmdName)) {
+        return true;
+    }
+    if (['dn', 'login', 'l'].includes(cmdName) && tokens.length > 1) {
+        return true;
+    }
+    return false;
 }
 
 function hasRestrictedMinecraftAccountCommand(schedules) {
     return Array.isArray(schedules) && schedules.some(schedule =>
         Array.isArray(schedule?.messages) && schedule.messages.some(isRestrictedMinecraftAccountCommand)
+    );
+}
+
+// BUG-31: validator cho chuỗi spawnCommands (cùng cách tách với worker runSpawnCommands).
+function hasRestrictedMinecraftAccountCommandInSpawnCommands(raw) {
+    const cmds = String(raw || '').split(/[\r\n;]+/).map(s => s.trim()).filter(Boolean);
+    return cmds.some(isRestrictedMinecraftAccountCommand);
+}
+
+// BUG-31: validator cho lịch Bot (items[].action === 'command').
+function hasRestrictedMinecraftAccountCommandInBotSchedules(body) {
+    const raw = body && typeof body === 'object' ? body : {};
+    const list = Array.isArray(raw.botSchedules)
+        ? raw.botSchedules
+        : (raw.botSchedules && typeof raw.botSchedules === 'object' ? [raw.botSchedules] : []);
+    return list.some(schedule =>
+        Array.isArray(schedule?.items) && schedule.items.some(item =>
+            item && item.action === 'command' && isRestrictedMinecraftAccountCommand(item.command)
+        )
     );
 }
 
@@ -4567,7 +6373,7 @@ async function buildBotAuthSyncPayload(botConfig, options = {}) {
         customerResetLogCutoff: syncedAuth.customerResetLogCutoff || null,
         updatedAt: new Date().toISOString()
     };
-    const resetMarker = String(options.resetMarker || syncedAuth.resetMarker || '');
+    const resetMarker = String(options.resetMarker || syncedAuth.resetMarker || localBotResetMarkers.get(botId) || '');
     if (/^[a-f0-9]{32}$/i.test(resetMarker)) payload.resetMarker = resetMarker;
     return payload;
 }
@@ -4575,6 +6381,8 @@ async function buildBotAuthSyncPayload(botConfig, options = {}) {
 const lastAuthSyncSignatures = new Map();
 const syncInFlight = new Set();
 const lastAuthSyncErrors = new Map();
+const lastAuthSyncStatusCodes = new Map();
+const localBotResetMarkers = new Map();
 
 async function syncAuthToBot(botConfig, force = false, options = {}) {
     if (supabaseAdapter?.isEnabled?.() && !supabaseStorageReady) { lastAuthSyncErrors.set(Number(botConfig?.id), 'Supabase auth chưa được khôi phục vào Manager.'); return false; }
@@ -4614,18 +6422,49 @@ async function syncAuthToBot(botConfig, force = false, options = {}) {
             const workerRevision = Number(status.data?.authRevision || 0);
             latest.payload.authRevision = nextAuthSyncRevision(workerRevision);
             latest.payload.authSignature = latest.signature;
-            const res = await fetchChild(botConfig, '/api/bot/auth-sync', { method: 'POST', body: latest.payload, timeoutMs: 5000 });
+            let res = null;
+            try {
+                res = await fetchChild(botConfig, '/api/bot/auth-sync', { method: 'POST', body: latest.payload, timeoutMs: 5000 });
+            } catch (netErr) {
+                res = { ok: false, status: 0, data: { error: netErr.message } };
+            }
+            const statusCode = Number(res?.status || 0);
+            lastAuthSyncStatusCodes.set(botId, statusCode);
             if (res.ok && res.data?.ok === true && Number(res.data.managerBotId) === botId && Number(res.data.syncedUsersCount) === latest.payload.users.length && res.data.authSignature === latest.signature) {
                 lastAuthSyncSignatures.set(botId, latest.signature);
                 lastAuthSyncErrors.delete(botId);
+                lastAuthSyncStatusCodes.set(botId, 200);
+                localBotResetMarkers.delete(botId);
                 return true;
             }
-            lastAuthSyncErrors.set(botId, res.data?.error || ('Worker auth-sync response không khớp (HTTP ' + res.status + ').'));
+            if (supabaseAdapter?.isEnabled?.() && supabaseStorageReady) {
+                try {
+                    const existingRow = await supabaseAdapter.fetchBotSettingsStrict(String(botId)).catch(() => null);
+                    const currentMarker = existingRow?.resetMarker || existingRow?.reset_marker;
+                    if (existingRow && (!currentMarker || currentMarker === (latest.payload.resetMarker || ''))) {
+                        await supabaseAdapter.saveBotSettings(String(botId), {
+                            syncedAuth: { ...latest.payload, resetMarker: undefined }
+                        }).catch(() => false);
+                    }
+                } catch (_) {}
+            }
+            if (res.status === 401 || res.status === 403) {
+                lastAuthSyncErrors.set(botId, res.data?.error || (`Worker từ chối xác thực (HTTP ${res.status}).`));
+            } else if (res.status === 503) {
+                lastAuthSyncErrors.set(botId, 'Worker đang ngủ đông hoặc khởi động lại trên host (HTTP 503).');
+            } else if (res.status === 404) {
+                lastAuthSyncErrors.set(botId, 'Worker URL không tồn tại (HTTP 404 - instance có thể đã bị xóa trên host).');
+            } else if (res.status === 409) {
+                lastAuthSyncErrors.set(botId, res.data?.error || 'Lệch Secret Key (HTTP 409 - Đang thử đàm phán key).');
+            } else {
+                lastAuthSyncErrors.set(botId, res.data?.error || ('Worker auth-sync response không khớp (HTTP ' + res.status + ').'));
+            }
             return false;
         };
         if (options.distributedAuthLockHeld === true || !supabaseAdapter?.isEnabled?.()) return await sendLatest();
         return await supabaseAdapter.withManagerLock('bot-auth-sync-' + botId, sendLatest, 120);
     } catch (err) {
+        lastAuthSyncStatusCodes.set(botId, 0);
         lastAuthSyncErrors.set(botId, err.message || 'Không kết nối được worker.');
         return false;
     } finally {
@@ -4669,60 +6508,563 @@ async function syncAuthToBotAfterOwnershipChange(botConfig, options = {}) {
 setInterval(() => {
     syncAuthToAllBots(false).catch(() => {});
 }, 60000);
+
+// ---------------------------------------------------------------------------
+// Helper: Sanitize error messages (remove passwords, tokens, secrets)
+// ---------------------------------------------------------------------------
+function sanitizeErrorMessage(msg) {
+    if (!msg || typeof msg !== 'string') return '';
+    return msg
+        .replace(/([?&](?:key|secret|token|password)=)[^&\s]+/gi, '$1[REDACTED]')
+        .replace(/("?(?:password|secret|token|api_?key)"?\s*[:=]\s*)"[^"]+"/gi, '$1"[REDACTED]"')
+        .replace(/\b[a-f0-9]{40,64}\b/gi, '[REDACTED_HASH]')
+        .slice(0, 500);
+}
+
+// ---------------------------------------------------------------------------
+// §4.2: Durable Outbox Retry Queue for Worker Sync
+// Handles exponential backoff, bounded retries, and stops immediately on 401/403.
+// ---------------------------------------------------------------------------
+function getOutboxQueue() {
+    if (!registry.outboxQueue || !Array.isArray(registry.outboxQueue)) {
+        registry.outboxQueue = [];
+    }
+    return registry.outboxQueue;
+}
+
+async function enqueueOutboxSync(botId, details = {}) {
+    const bId = Number(botId);
+    if (!Number.isSafeInteger(bId) || bId <= 0) return null;
+    const queue = getOutboxQueue();
+    const now = Date.now();
+    const existing = queue.find(item => Number(item.botId) === bId && (item.status === 'pending' || item.status === 'processing'));
+    if (existing) {
+        existing.updatedAt = new Date(now).toISOString();
+        if (details.committedTransaction) existing.committedTransaction = details.committedTransaction;
+        existing.nextRetryAt = Math.min(Number(existing.nextRetryAt) || now, now);
+        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+            try {
+                const sqlSaved = await supabaseAdapter.saveOutboxItem(existing);
+                if (sqlSaved) {
+                    const idx = queue.indexOf(existing);
+                    if (idx !== -1) queue.splice(idx, 1);
+                }
+            } catch (err) {
+                console.warn('[OUTBOX] Không thể cập nhật outbox job vào Supabase SQL:', err.message);
+            }
+        }
+        await saveRegistry().catch(() => {});
+        return existing;
+    }
+    const item = {
+        id: 'outbox_' + bId + '_' + now.toString(36) + '_' + Math.random().toString(36).slice(2, 7),
+        type: details.type || 'auth_sync',
+        botId: bId,
+        bot_id: bId,
+        attempts: 0,
+        maxAttempts: Number(details.maxAttempts || 8),
+        status: 'pending',
+        nextRetryAt: now,
+        backoffMs: 3000,
+        lastStatusCode: null,
+        errorCode: null,
+        lastError: null,
+        createdAt: new Date(now).toISOString(),
+        updatedAt: new Date(now).toISOString(),
+        committedTransaction: details.committedTransaction || null,
+        payload: details.payload || (details.committedTransaction ? { committedTransaction: details.committedTransaction } : {})
+    };
+    let sqlSaved = false;
+    if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        try {
+            sqlSaved = await supabaseAdapter.saveOutboxItem(item);
+        } catch (err) {
+            console.warn('[OUTBOX] Không thể lưu outbox job vào Supabase SQL:', err.message);
+        }
+    }
+    if (!sqlSaved) {
+        queue.push(item);
+    }
+    if (queue.length > 200) {
+        const cutoff = now - 24 * 3600 * 1000;
+        registry.outboxQueue = queue.filter(q => q.status === 'pending' || q.status === 'processing' || Date.parse(q.updatedAt || q.createdAt) > cutoff);
+    }
+    await saveRegistry().catch(() => {});
+    return item;
+}
+
+
+const MANAGER_WORKER_ID = 'mgr_' + process.pid + '_' + (process.env.RENDER_INSTANCE_ID || Math.random().toString(36).slice(2, 8));
+let outboxProcessingLock = false;
+async function processOutboxQueue() {
+    if (outboxProcessingLock) return;
+    outboxProcessingLock = true;
+    try {
+        const now = Date.now();
+        // P1-02 & V4-10: Distributed atomic claim qua PostgreSQL SELECT ... FOR UPDATE SKIP LOCKED khi Supabase bật
+        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+            // Rescue / flush các item pending trong memory queue sang SQL nếu có
+            const memQueue = getOutboxQueue();
+            let memQueueChanged = false;
+            for (let i = memQueue.length - 1; i >= 0; i--) {
+                const mItem = memQueue[i];
+                if (mItem && (mItem.status === 'pending' || mItem.status === 'dispatched_to_sql')) {
+                    try {
+                        const sOk = await supabaseAdapter.saveOutboxItem(mItem);
+                        if (sOk) {
+                            memQueue.splice(i, 1);
+                            memQueueChanged = true;
+                        }
+                    } catch (_) {}
+                }
+            }
+            if (memQueueChanged) {
+                await saveRegistry().catch(() => {});
+            }
+            const claimedBatch = await supabaseAdapter.claimOutboxBatch(MANAGER_WORKER_ID, 10, 60);
+            if (Array.isArray(claimedBatch) && claimedBatch.length > 0) {
+                for (const item of claimedBatch) {
+                    try {
+                        const targetBotId = item.bot_id || item.aggregate_id;
+                        const targetBot = (typeof BOT_CONFIG !== 'undefined' && Array.isArray(BOT_CONFIG))
+                            ? BOT_CONFIG.find(b => String(b.id) === String(targetBotId))
+                            : null;
+                        if (!targetBot) {
+                            await supabaseAdapter.failOutboxItem(item.id, MANAGER_WORKER_ID, 'BOT_NOT_FOUND');
+                            continue;
+                        }
+                        let syncSuccess = false;
+                        let syncErr = '';
+                        let statusCode = 0;
+                        try {
+                            syncSuccess = await syncAuthToBot(targetBot, true);
+                            statusCode = lastAuthSyncStatusCodes.get(targetBot.id) || (syncSuccess ? 200 : 0);
+                            syncErr = syncSuccess ? '' : (lastAuthSyncErrors.get(targetBot.id) || 'Worker chưa xác nhận auth-sync.');
+                        } catch (err) {
+                            syncSuccess = false;
+                            syncErr = err.message || 'Lỗi kết nối worker.';
+                            statusCode = 0;
+                        }
+
+                        if (syncSuccess) {
+                            await supabaseAdapter.completeOutboxItem(item.id, MANAGER_WORKER_ID);
+                            continue;
+                        }
+
+                        const isForbiddenOrUnauthorized = statusCode === 401 || statusCode === 403 ||
+                            /401|403|unauthorized|forbidden|secret_mismatch/i.test(syncErr);
+                        if (isForbiddenOrUnauthorized) {
+                            await supabaseAdapter.failOutboxItem(item.id, MANAGER_WORKER_ID, statusCode === 401 ? 'HTTP_401_UNAUTHORIZED' : 'AUTH_REJECTED');
+                            continue;
+                        }
+
+                        // RPC claim_manager_outbox_batch đã tăng attempts = q.attempts + 1
+                        const attempts = Number(item.attempts || 1);
+                        if (attempts >= Number(item.max_attempts || 8)) {
+                            await supabaseAdapter.failOutboxItem(item.id, MANAGER_WORKER_ID, 'MAX_ATTEMPTS_EXCEEDED');
+                        } else {
+                            const backoff = Math.floor(Math.random() * Math.min(120000, 2000 * Math.pow(2, attempts)));
+                            await supabaseAdapter.rescheduleOutboxItem(item.id, MANAGER_WORKER_ID, new Date(now + backoff).toISOString(), syncErr || 'DISPATCH_RETRY');
+                        }
+                    } catch (itemErr) {
+                        console.error('[OUTBOX-DISTRIBUTED] Lỗi dispatch item ' + item.id + ':', itemErr.message);
+                    }
+                }
+            }
+            return; // Cloud mode: phân tán hoàn toàn qua PostgreSQL; không chạy song song với memory queue
+        }
+
+        const queue = getOutboxQueue();
+
+        // V3-04: Thu hồi các item bị kẹt trạng thái 'processing' quá 60s (do crash/restart)
+        const STUCK_LEASE_MS = 60000;
+        let reclaimedCount = 0;
+        for (const item of queue) {
+            if (item && item.status === 'processing') {
+                const startedAt = item.processingStartedAt || Date.parse(item.updatedAt || item.createdAt) || 0;
+                if (now - startedAt > STUCK_LEASE_MS) {
+                    console.warn('[OUTBOX] [V3-04] Thu hồi outbox item ' + item.id + ' cho Bot #' + item.botId + ' bị kẹt trạng thái processing >60s');
+                    if (item.attempts >= (item.maxAttempts || 8)) {
+                        item.status = 'failed_permanent';
+                        item.errorCode = 'MAX_ATTEMPTS_EXCEEDED';
+                        item.lastError = 'Stuck processing lease expired after max attempts.';
+                    } else {
+                        item.status = 'pending';
+                        item.nextRetryAt = now;
+                    }
+                    item.updatedAt = new Date().toISOString();
+                    reclaimedCount++;
+                }
+            }
+        }
+
+        const pendingItems = queue.filter(item => item && item.status === 'pending' && Number(item.nextRetryAt || 0) <= now);
+        if (pendingItems.length === 0 && reclaimedCount === 0) return;
+
+        let modified = reclaimedCount > 0;
+        for (const item of pendingItems) {
+            const botConfig = (typeof BOT_CONFIG !== 'undefined' ? BOT_CONFIG : []).find(b => Number(b.id) === item.botId);
+            if (!botConfig) {
+                item.status = 'failed_permanent';
+                item.errorCode = 'BOT_NOT_FOUND';
+                item.lastError = `Bot #${item.botId} không còn tồn tại trong cấu hình; hủy retry outbox.`;
+                item.updatedAt = new Date().toISOString();
+                modified = true;
+                continue;
+            }
+
+            item.status = 'processing';
+            item.processingStartedAt = now;
+            item.leaseUntil = now + 60000;
+            item.attempts = Number(item.attempts || 0) + 1;
+            item.updatedAt = new Date().toISOString();
+            // V4-10: Xác nhận lưu trạng thái processing kèm lease bền vững TRƯỚC KHI dispatch sang worker
+            const saveOk = await saveRegistry();
+            if (!saveOk) {
+                console.warn('[OUTBOX] Không thể lưu trạng thái processing vào registry; hủy dispatch để đảm bảo an toàn.');
+                item.status = 'pending';
+                item.attempts = Math.max(0, Number(item.attempts || 1) - 1);
+                continue;
+            }
+
+            let syncSuccess = false;
+            let syncErr = '';
+            let statusCode = 0;
+            try {
+                syncSuccess = await syncAuthToBot(botConfig, true);
+                statusCode = lastAuthSyncStatusCodes.get(item.botId) || (syncSuccess ? 200 : 0);
+                syncErr = syncSuccess ? '' : (lastAuthSyncErrors.get(item.botId) || 'Worker chưa xác nhận auth-sync.');
+            } catch (err) {
+                syncSuccess = false;
+                syncErr = err.message || 'Lỗi kết nối worker.';
+                statusCode = 0;
+            }
+
+            item.lastStatusCode = statusCode;
+            if (syncSuccess) {
+                item.status = 'completed';
+                item.completedAt = new Date().toISOString();
+                item.lastError = null;
+                item.errorCode = null;
+                modified = true;
+                registry.outboxQueue = registry.outboxQueue.filter(q => q.id !== item.id);
+                continue;
+            }
+
+            // §4.2: Phân loại lỗi: KHÔNG retry vô hạn các lỗi 401/403
+            const isForbiddenOrUnauthorized = statusCode === 401 || statusCode === 403 ||
+                /401|403|unauthorized|forbidden|secret_mismatch/i.test(syncErr);
+
+            if (isForbiddenOrUnauthorized) {
+                item.status = 'failed_permanent';
+                item.errorCode = statusCode === 401 ? 'HTTP_401_UNAUTHORIZED' : (statusCode === 403 ? 'HTTP_403_FORBIDDEN' : 'AUTH_REJECTED');
+                item.lastError = sanitizeErrorMessage(`Worker từ chối xác thực (HTTP ${statusCode || '401/403'}: ${syncErr}). Ngừng retry outbox để tránh lặp vô hạn; cần Admin kiểm tra secret.`);
+                item.updatedAt = new Date().toISOString();
+                logAuditEvent({
+                    action: 'OUTBOX_SYNC_PERMANENT_ERROR',
+                    target: { botId: item.botId },
+                    details: `Dừng retry outbox cho Bot #${item.botId} do lỗi xác thực ${item.errorCode}: ${item.lastError}`,
+                    status: 'FAILED'
+                });
+                modified = true;
+                continue;
+            }
+
+            // Kiểm tra số lần thử tối đa
+            if (item.attempts >= (item.maxAttempts || 8)) {
+                item.status = 'failed_permanent';
+                item.errorCode = 'MAX_ATTEMPTS_EXCEEDED';
+                item.lastError = sanitizeErrorMessage(`Đã thử ${item.attempts} lần nhưng thất bại (${syncErr}). Ngừng retry; cần Admin kiểm tra kết nối bot.`);
+                item.updatedAt = new Date().toISOString();
+                logAuditEvent({
+                    action: 'OUTBOX_SYNC_MAX_ATTEMPTS_EXCEEDED',
+                    target: { botId: item.botId },
+                    details: `Outbox sync Bot #${item.botId} đạt tối đa ${item.attempts} lần thất bại (${syncErr}).`,
+                    status: 'FAILED'
+                });
+                modified = true;
+                continue;
+            }
+
+            // Lỗi tạm thời (502, 503, timeout, socket hangup) -> AWS Full-Jitter Exponential Backoff (V3-04)
+            item.status = 'pending';
+            const maxBackoff = Math.min(300000, 3000 * Math.pow(2, Math.max(0, item.attempts - 1)));
+            // V4-10: AWS standard full-jitter formula random(0, cap)
+            const backoff = Math.floor(Math.random() * maxBackoff);
+            item.backoffMs = backoff;
+            item.nextRetryAt = Date.now() + backoff;
+            item.errorCode = 'RETRY_SCHEDULED';
+            item.lastError = sanitizeErrorMessage(syncErr);
+            item.updatedAt = new Date().toISOString();
+            modified = true;
+        }
+
+        if (modified) {
+            await saveRegistry().catch(() => {});
+        }
+    } catch (e) {
+        console.error('[OUTBOX] Lỗi xử lý outbox queue:', e.message);
+    } finally {
+        outboxProcessingLock = false;
+    }
+}
+
+setInterval(() => {
+    processOutboxQueue().catch(() => {});
+}, 5000);
+
+let pendingAllocationsProcessorInFlight = false;
+async function processPendingAllocations() {
+    if (pendingAllocationsProcessorInFlight) return;
+    pendingAllocationsProcessorInFlight = true;
+    try {
+        const now = Date.now();
+        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+            const claimedJobs = await supabaseAdapter.claimPendingAllocations(MANAGER_WORKER_ID, 10, 60);
+            if (Array.isArray(claimedJobs) && claimedJobs.length > 0) {
+                for (const job of claimedJobs) {
+                    try {
+                        const result = await reconcileUserReactivationAndBotAllocation(job.username, {
+                            context: 'background_pending_retry',
+                            existingJobId: job.id,
+                            attempts: Number(job.attempts || 1)
+                        });
+                        if (result.ok && result.allocationStatus === 'allocated') {
+                            await supabaseAdapter.completePendingAllocation(job.id, 'completed', MANAGER_WORKER_ID);
+                        } else {
+                            // RPC claim_manager_pending_allocations đã tăng attempts = a.attempts + 1; KHÔNG cộng dồn thêm lần nữa
+                            const attempts = Number(job.attempts || 1);
+                            if (attempts >= Number(job.max_attempts || 10)) {
+                                await supabaseAdapter.completePendingAllocation(job.id, 'MAX_ATTEMPTS_EXCEEDED', MANAGER_WORKER_ID);
+                            } else {
+                                const backoff = Math.floor(Math.random() * Math.min(120000, 2000 * Math.pow(2, attempts)));
+                                const nextRetryAt = new Date(now + backoff).toISOString();
+                                const patchRes = await supabaseAdapter.fetchWithRetry(`${supabaseAdapter.url}/rest/v1/manager_pending_allocations?id=eq.${encodeURIComponent(job.id)}&lease_owner=eq.${encodeURIComponent(MANAGER_WORKER_ID)}`, {
+                                    method: 'PATCH',
+                                    headers: { ...supabaseAdapter.getHeaders(), 'Prefer': 'return=representation' },
+                                    body: JSON.stringify({
+                                        status: 'pending_retry',
+                                        lease_owner: null,
+                                        lease_until: null,
+                                        attempts,
+                                        next_retry_at: nextRetryAt,
+                                        last_error: result.error || 'STILL_MISSING_BOTS',
+                                        updated_at: new Date().toISOString()
+                                    })
+                                }, { timeoutMs: 8000, maxRetries: 2 });
+                                const patched = patchRes.ok ? await patchRes.json().catch(() => []) : [];
+                                if (!Array.isArray(patched) || patched.length === 0) {
+                                    console.warn('[ALLOCATION] Cảnh báo: Lease owner không khớp hoặc job đã bị manager khác chiếm khi retry:', job.id);
+                                }
+                            }
+                        }
+                    } catch (jobErr) {
+                        console.error('[ALLOCATION-PROCESSOR] Lỗi xử lý job ' + job.id + ':', jobErr.message);
+                    }
+                }
+            }
+        } else {
+            // Local mode
+            const jobs = Array.isArray(registry.pendingAllocations) ? registry.pendingAllocations : [];
+            const readyJobs = jobs.filter(j => j.status === 'pending_retry' && (!j.nextRetryAt || Date.parse(j.nextRetryAt) <= now));
+            for (const job of readyJobs) {
+                try {
+                    const result = await reconcileUserReactivationAndBotAllocation(job.username, {
+                        context: 'background_pending_retry',
+                        existingJobId: job.id,
+                        attempts: Number(job.attempts || 0)
+                    });
+                    if (result.ok && result.allocationStatus === 'allocated') {
+                        job.status = 'completed';
+                        job.completedAt = new Date().toISOString();
+                    } else {
+                        job.attempts = Number(job.attempts || 0) + 1;
+                        if (job.attempts >= Number(job.maxAttempts || 10)) {
+                            job.status = 'failed';
+                            job.lastError = 'MAX_ATTEMPTS_EXCEEDED';
+                        } else {
+                            const backoff = Math.floor(Math.random() * Math.min(120000, 2000 * Math.pow(2, job.attempts)));
+                            job.nextRetryAt = new Date(now + backoff).toISOString();
+                        }
+                    }
+                    job.updatedAt = new Date().toISOString();
+                } catch (jobErr) {
+                    console.error('[ALLOCATION-PROCESSOR] Local job error:', jobErr.message);
+                }
+            }
+            if (readyJobs.length > 0) {
+                await saveRegistry();
+            }
+        }
+    } catch (err) {
+        console.error('[ALLOCATION-PROCESSOR] Lỗi chu kỳ xử lý:', err.message);
+    } finally {
+        pendingAllocationsProcessorInFlight = false;
+    }
+}
+setInterval(() => { void processPendingAllocations().catch(() => {}); }, 15000);
+
 const safeHostDnsCache = new Map();
 
 async function assertSafeChildUrl(childUrl) {
     if (!childUrl) throw new Error('URL bot rỗng.');
-    const parsed = new URL(childUrl);
+    let parsed;
+    try {
+        parsed = new URL(childUrl);
+    } catch (_) {
+        throw new Error('URL bot không hợp lệ.');
+    }
+    // V4-11: Scheme chỉ chấp nhận http: hoặc https:
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new Error(`Giao thức '${parsed.protocol}' không được phép; chỉ chấp nhận http: và https:.`);
+    }
+    // V4-11: Chặn userinfo / credentials trong URL
+    if (parsed.username || parsed.password) {
+        throw new Error('URL bot không được phép chứa thông tin xác thực (userinfo).');
+    }
     const hostname = parsed.hostname.toLowerCase();
-
-    // Luôn chặn endpoint Cloud Metadata (AWS 169.254.169.254 / GCP metadata.google.internal)
-    if (hostname === '169.254.169.254' || hostname === 'metadata.google.internal' || hostname.endsWith('.metadata.google.internal')) {
-        throw new Error(`Hostname '${hostname}' bị chặn do chính sách bảo mật đám mây.`);
+    // V4-11: Chặn trailing dot
+    if (hostname.endsWith('.')) {
+        throw new Error(`Hostname '${hostname}' có trailing dot không hợp lệ.`);
     }
 
-    if (DISABLE_SSRF_CHECK || ALLOWED_INTERNAL_HOSTS.has(hostname)) return;
+    // Luôn chặn endpoint Cloud Metadata & Link-Local IP (169.254.0.0/16 / fe80::/10 / metadata.google.internal) TRƯỚC TIÊN
+    if (isLinkLocalOrMetadataIp(hostname)) {
+        throw new Error(`Hostname '${hostname}' bị chặn do chính sách bảo mật đám mây (Link-Local / Metadata).`);
+    }
+
+    const isAllowlisted = ALLOWED_INTERNAL_HOSTS.has(hostname);
+    let resolvedIp = null;
+    if (DISABLE_SSRF_CHECK) {
+        return { pinnedIp: net.isIP(hostname) !== 0 ? hostname : null, hostname };
+    }
 
     if (net.isIP(hostname) !== 0) {
-        if (!ALLOW_PRIVATE_BOT_IPS && isPrivateOrBlockedIp(hostname)) {
+        if (isLinkLocalOrMetadataIp(hostname)) {
+            throw new Error(`Địa chỉ IP đích '${hostname}' là Link-Local / Metadata bị chặn.`);
+        }
+        if (!ALLOW_PRIVATE_BOT_IPS && !isAllowlisted && isPrivateOrBlockedIp(hostname)) {
             throw new Error(`Địa chỉ IP đích '${hostname}' là địa chỉ nội bộ bị chặn (SSRF).`);
         }
-        return;
+        return { pinnedIp: hostname, hostname };
     }
 
     const now = Date.now();
     const cached = safeHostDnsCache.get(hostname);
     if (cached && (now - cached.timestamp < 30000)) {
         if (!cached.safe) throw new Error(cached.error);
-        return;
+        if (cached.ip && isLinkLocalOrMetadataIp(cached.ip)) {
+            throw new Error(`Hostname '${hostname}' trỏ về Link-Local / Metadata IP '${cached.ip}' bị chặn.`);
+        }
+        if (cached.ip) return { pinnedIp: cached.ip, hostname };
     }
 
     try {
         const records = await dns.promises.lookup(hostname, { all: true });
+        if (!records || records.length === 0) {
+            throw new Error(`Không tìm thấy bản ghi DNS nào cho '${hostname}'.`);
+        }
         for (const rec of records) {
-            if (rec.address === '169.254.169.254' || rec.address.startsWith('169.254.')) {
-                const errStr = `Hostname '${hostname}' trỏ về Cloud Metadata IP '${rec.address}' bị chặn.`;
+            // Chặn Link-Local / Metadata IP TRƯỚC TIÊN, TUYỆT ĐỐI KHÔNG CÓ NGOẠI LỆ ALLOWLIST
+            if (isLinkLocalOrMetadataIp(rec.address)) {
+                const errStr = `Hostname '${hostname}' trỏ về Link-Local / Metadata IP '${rec.address}' bị chặn.`;
                 safeHostDnsCache.set(hostname, { safe: false, error: errStr, timestamp: now });
                 throw new Error(errStr);
             }
-            if (!ALLOW_PRIVATE_BOT_IPS && isPrivateOrBlockedIp(rec.address)) {
+            if (!ALLOW_PRIVATE_BOT_IPS && !isAllowlisted && isPrivateOrBlockedIp(rec.address)) {
                 const errStr = `Hostname '${hostname}' trỏ về IP nội bộ '${rec.address}' bị chặn (SSRF DNS rebinding).`;
                 safeHostDnsCache.set(hostname, { safe: false, error: errStr, timestamp: now });
                 throw new Error(errStr);
             }
+            if (!resolvedIp) resolvedIp = rec.address;
         }
-        safeHostDnsCache.set(hostname, { safe: true, timestamp: now });
+        if (!resolvedIp) {
+            throw new Error(`Không thể tìm thấy địa chỉ IP hợp lệ khi phân giải '${hostname}'.`);
+        }
+        safeHostDnsCache.set(hostname, { safe: true, ip: resolvedIp, timestamp: now });
+        return { pinnedIp: resolvedIp, hostname };
     } catch (e) {
-        if (e.message.includes('SSRF') || e.message.includes('bị chặn')) {
-            safeHostDnsCache.set(hostname, { safe: false, error: e.message, timestamp: now });
-            throw e;
-        }
-        if (ALLOW_PRIVATE_BOT_IPS && (e.code === 'ENOTFOUND' || e.code === 'EAI_AGAIN')) {
-            safeHostDnsCache.set(hostname, { safe: true, timestamp: now });
-            return;
-        }
-        throw new Error(`Lỗi phân giải DNS cho '${hostname}': ${e.message}`);
+        safeHostDnsCache.set(hostname, { safe: false, error: e.message, timestamp: now });
+        throw new Error(`Lỗi phân giải DNS an toàn cho '${hostname}': ${e.message}`);
     }
+}
+
+
+const lastSecretNegotiationAt = new Map();
+const SECRET_NEGOTIATION_COOLDOWN_MS = 60000;
+
+
+function dispatchPinnedRequest(urlStr, options = {}) {
+    return new Promise((resolve, reject) => {
+        const u = new URL(urlStr);
+        const isHttps = u.protocol === 'https:';
+        const client = isHttps ? https : http;
+        const pinnedIp = options.pinnedIp;
+
+        const reqOptions = {
+            method: options.method || 'GET',
+            protocol: u.protocol,
+            host: (pinnedIp && net.isIP(pinnedIp) !== 0) ? pinnedIp : u.hostname,
+            port: u.port || (isHttps ? 443 : 80),
+            path: u.pathname + u.search,
+            headers: {
+                ...(options.headers || {}),
+                'Host': u.host
+            },
+            signal: options.signal
+        };
+        if (isHttps) {
+            reqOptions.servername = u.hostname;
+            reqOptions.rejectUnauthorized = true;
+            reqOptions.checkServerIdentity = (servername, cert) => {
+                return tls.checkServerIdentity(u.hostname, cert);
+            };
+        }
+        const req = client.request(reqOptions, (res) => {
+            const peerIp = req.socket && req.socket.remoteAddress;
+            if (pinnedIp && peerIp && net.isIP(peerIp) !== 0) {
+                const normPeer = peerIp.startsWith('::ffff:') ? peerIp.slice(7) : peerIp;
+                const normPinned = pinnedIp.startsWith('::ffff:') ? pinnedIp.slice(7) : pinnedIp;
+                if (normPeer !== normPinned) {
+                    req.destroy(new Error(`Socket peer IP ${normPeer} does not match pinned IP ${normPinned}`));
+                    return;
+                }
+            }
+            const maxBytes = Number(options.maxResponseBytes) || (5 * 1024 * 1024);
+            let totalBytes = 0;
+            const chunks = [];
+            res.on('data', chunk => {
+                totalBytes += chunk.length;
+                if (totalBytes > maxBytes) {
+                    req.destroy(new Error('Response body từ Worker vượt quá giới hạn 5MB.'));
+                    return;
+                }
+                chunks.push(chunk);
+            });
+            res.on('error', reject);
+            res.on('end', () => {
+                const body = Buffer.concat(chunks).toString('utf8');
+                resolve({
+                    status: res.statusCode,
+                    statusText: res.statusMessage,
+                    ok: res.statusCode >= 200 && res.statusCode < 300,
+                    headers: {
+                        get: (name) => {
+                            const val = res.headers[name.toLowerCase()];
+                            return Array.isArray(val) ? val.join(', ') : (val || null);
+                        }
+                    },
+                    json: async () => JSON.parse(body),
+                    text: async () => body
+                });
+            });
+        });
+        req.on('error', reject);
+        if (options.body) {
+            req.write(options.body);
+        }
+        req.end();
+    });
 }
 
 async function fetchChild(botConfig, path, options = {}) {
@@ -4730,7 +7072,7 @@ async function fetchChild(botConfig, path, options = {}) {
         throw new Error('Chưa cấu hình URL cho bot.');
     }
 
-    await assertSafeChildUrl(botConfig.url);
+    const safety = await assertSafeChildUrl(botConfig.url);
 
     const controller = new AbortController();
     const timeoutMs = readPositiveInt(
@@ -4741,13 +7083,21 @@ async function fetchChild(botConfig, path, options = {}) {
     );
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-    const botSecret = String(botConfig.secretKey || BOT_SECRET_KEY || '').trim();
+    const botSecret = String(
+        botConfig.secretKey ||
+        process.env[`BOT_${botConfig.id}_SECRET_KEY`] ||
+        getRegistryBotSecret(botConfig.id) ||
+        BOT_SECRET_KEY ||
+        ''
+    ).trim();
+    const requestId = options.requestId || crypto.randomUUID();
     const botIdHeaders = options.omitBotIdHeaders ? {} : {
         'X-Manager-Bot-Id': String(botConfig.id || ''),
         'X-Expected-Bot-ID': String(botConfig.id || '')
     };
     let secretHeaders = {
-        'X-Bot-Secret': botSecret
+        'X-Bot-Secret': botSecret,
+        'X-Request-Id': requestId
     };
 
     try {
@@ -4765,6 +7115,7 @@ async function fetchChild(botConfig, path, options = {}) {
         let payloadBody = options.body !== undefined ? JSON.stringify(options.body) : undefined;
         let response = null;
 
+        let currentSafety = (typeof safety !== 'undefined') ? safety : null;
         for (let hop = 0; hop <= 5; hop++) {
             const requestHeaders = {
                 'Accept': 'application/json',
@@ -4773,15 +7124,15 @@ async function fetchChild(botConfig, path, options = {}) {
                 ...secretHeaders,
                 ...(payloadBody !== undefined ? { 'Content-Type': 'application/json' } : {})
             };
-            response = await fetch(
+            // P1-04: HTTPS DNS pinning ở connection layer không phân giải lại DNS và kiểm tra peer IP
+            response = await dispatchPinnedRequest(
                 currentUrl,
                 {
                     method,
                     headers: requestHeaders,
                     body: payloadBody,
-                    cache: 'no-store',
-                    redirect: 'manual',
-                    signal: controller.signal
+                    signal: controller.signal,
+                    pinnedIp: currentSafety ? currentSafety.pinnedIp : null
                 }
             );
             if (![301, 302, 303, 307, 308].includes(response.status)) break;
@@ -4793,9 +7144,13 @@ async function fetchChild(botConfig, path, options = {}) {
             } catch (_) {
                 throw new Error('Redirect của bot trả về địa chỉ không hợp lệ: ' + location);
             }
+            // V4-11: Chặn redirect hạ cấp từ HTTPS xuống HTTP
+            if (currentUrl.startsWith('https:') && nextUrl.protocol === 'http:') {
+                throw new Error('Từ chối redirect hạ cấp bảo mật từ HTTPS xuống HTTP.');
+            }
             // Đích redirect phải vượt qua kiểm tra SSRF như URL bot gốc.
             if (!secretAllowed(nextUrl)) throw new Error('Từ chối redirect khác origin để bảo vệ dữ liệu trong request body.');
-            await assertSafeChildUrl(nextUrl.href);
+            currentSafety = await assertSafeChildUrl(nextUrl.href);
             if ([301, 302, 303].includes(response.status) && method !== 'GET' && method !== 'HEAD') {
                 method = 'GET';
                 payloadBody = undefined;
@@ -4818,6 +7173,44 @@ async function fetchChild(botConfig, path, options = {}) {
             }
         }
 
+        // Tự động đàm phán fallback Secret Key nếu worker phản hồi 401 hoặc 409 (Secret Mismatch)
+        const botIdKey = String(botConfig?.id ?? '');
+        const nowMs = Date.now();
+        const lastNegotiated = lastSecretNegotiationAt.get(botIdKey) || 0;
+        const canNegotiate = !options.noRetryAuth && (nowMs - lastNegotiated >= SECRET_NEGOTIATION_COOLDOWN_MS);
+
+        if (!response.ok && (response.status === 401 || response.status === 409) && canNegotiate) {
+            lastSecretNegotiationAt.set(botIdKey, nowMs);
+            // SEC-04: chỉ đàm phán với các khóa dịch vụ hợp lệ của bot.
+            // Đã loại bỏ mật khẩu Admin và các secret mặc định hard-code khỏi danh sách candidates.
+            const candidateSecrets = [
+                String(botConfig.secretKey || '').trim(),
+                String(process.env[`BOT_${botConfig.id}_SECRET_KEY`] || '').trim(),
+                String(getRegistryBotSecret(botConfig.id) || '').trim(),
+                String(BOT_SECRET_KEY || '').trim()
+            ].filter(Boolean);
+            const remaining = Array.from(new Set(candidateSecrets)).filter(k => k !== botSecret);
+            for (const altSecret of remaining) {
+                try {
+                    const altRes = await fetchChild(
+                        { ...botConfig, secretKey: altSecret },
+                        path,
+                        { ...options, noRetryAuth: true }
+                    );
+                    if (altRes.ok) {
+                        // BUG-03 (Wave A recheck §6.1-2): bảo đảm map tồn tại trước khi lưu
+                        // secret thương lượng được — không còn nuốt kết quả khi map chưa có.
+                        if (botConfig.id) {
+                            if (!registry.botSecrets || typeof registry.botSecrets !== 'object' || Array.isArray(registry.botSecrets)) registry.botSecrets = {};
+                            registry.botSecrets[botConfig.id] = altSecret;
+                            registryNeedsSave = true;
+                        }
+                        return altRes;
+                    }
+                } catch (_) {}
+            }
+        }
+
         return {
             ok: response.ok,
             status: response.status,
@@ -4836,6 +7229,9 @@ async function fetchChild(botConfig, path, options = {}) {
 function normalizeSnapshotToSummary(botConfig, snapshotData) {
     const data = snapshotData?.bot || snapshotData || {};
     const inv = snapshotData?.inventory || {};
+    // BLOCKER-02 (API-STATE-01, Wave A): identity phải xác minh trước; botId rỗng/sai
+    // (bao gồm chuỗi rỗng) → identityVerified=false → available=false (fail-closed).
+    const identityVerified = String(data.botId ?? '') === String(botConfig.id);
     return {
         id: botConfig.id,
         url: botConfig.url || '',
@@ -4843,7 +7239,7 @@ function normalizeSnapshotToSummary(botConfig, snapshotData) {
         botId: String(data.botId ?? botConfig.id),
         label: String(botConfig.label || data.label || ('Bot ' + botConfig.id)),
         configured: true,
-        available: true,
+        available: identityVerified,
         username: String(data.username || ''),
         status: String(data.status || 'offline'),
         ready: !!data.ready,
@@ -4876,6 +7272,15 @@ function normalizeSnapshotToSummary(botConfig, snapshotData) {
         rssMb: Number(data.rssMb || data.memory?.rssMb || 0),
         heapMb: Number(data.heapMb || data.memory?.heapMb || 0),
         hostHardware: data.hostHardware || data.system || null,
+        httpStatus: 200,
+        lastError: null,
+        secretMismatch: false,
+        // BLOCKER-02: available bám theo identityVerified — snapshot 200 không còn
+        // tự động coi là worker điều khiển được khi danh tính chưa xác minh.
+        processReachable: true,
+        serviceAuthenticated: true,
+        identityVerified,
+        lastErrorCode: identityVerified ? null : 'BOT_ID_MISMATCH',
         error: null
     };
 }
@@ -4966,9 +7371,27 @@ async function fetchBotSummary(botConfig) {
         if (snapshotRes.ok && snapshotRes.data?.rev) {
             botLastRevMap.set(botConfig.id, snapshotRes.data.rev);
         }
+        // BUG-02/BLOCKER-02: secret sai / bị từ chối auth (401/403) hoặc secret-mismatch
+        // phiên bản (409) → KHÔNG rơi vào fallback /api/bot hay /health
+        // (health không xác thực sẽ che mất tín hiệu lỗi auth và làm bot "online" giả).
+        if (snapshotRes.status === 401 || snapshotRes.status === 403 || snapshotRes.status === 409) {
+            const authCode = snapshotRes.status === 403 ? 'FORBIDDEN' : 'SECRET_MISMATCH';
+            return buildUnavailableSummary(
+                botConfig,
+                (snapshotRes.data && snapshotRes.data.error) || (authCode === 'SECRET_MISMATCH'
+                    ? 'Worker từ chối X-Bot-Secret (lệch khóa service-to-service).'
+                    : 'Worker từ chối request (403 Forbidden).'),
+                snapshotRes.status,
+                { processReachable: true, serviceAuthenticated: false, identityVerified: false, lastErrorCode: authCode }
+            );
+        }
         if (snapshotRes.ok && snapshotRes.data?.bot) {
             const data = snapshotRes.data.bot;
             const inv = snapshotRes.data.inventory || {};
+            // BLOCKER-02 (API-STATE-01): danh tính phải được xác minh TRƯỚC khi coi bot
+            // là khả dụng. botId rỗng hoặc sai (bao gồm chuỗi rỗng — ?? không thay thế '')
+            // → identityVerified=false → available=false (không điều khiển được).
+            const identityVerified = String(data.botId ?? '') === String(botConfig.id);
             return {
                 id: botConfig.id,
                 url: botConfig.url || '',
@@ -4976,7 +7399,7 @@ async function fetchBotSummary(botConfig) {
                 botId: String(data.botId ?? botConfig.id),
                 label: String(botConfig.label || data.label || `Bot ${botConfig.id}`),
                 configured: true,
-                available: true,
+                available: identityVerified,
                 username: String(data.username || ''),
                 status: String(data.status || 'offline'),
                 ready: !!data.ready,
@@ -5001,14 +7424,24 @@ async function fetchBotSummary(botConfig) {
                 goldenAppleCount: Number(inv.goldenAppleCount || data.goldenAppleCount || 0),
                 isDead: !!data.isDead,
                 deathCount: Number(data.deathCount || 0),
-                lastDeathCoords: data.lastDeathCoords || '',
+                lastDeathCoords: String(data.lastDeathCoords || ''),
                 manuallyStopped: !!data.manuallyStopped,
-                lastKickReason: data.lastKickReason || '',
+                lastKickReason: String(data.lastKickReason || ''),
                 currentWindow: data.currentWindow || null,
                 memory: data.memory || null,
                 rssMb: Number(data.rssMb || data.memory?.rssMb || 0),
                 heapMb: Number(data.heapMb || data.memory?.heapMb || 0),
                 hostHardware: data.hostHardware || data.system || null,
+                httpStatus: 200,
+                lastError: null,
+                secretMismatch: false,
+                // BUG-02/BLOCKER-02: snapshot đầy đủ = process sống + đã xác thực service.
+                // identityVerified chỉ true khi botId worker trả về khớp cấu hình;
+                // available bám theo identityVerified (fail-closed).
+                processReachable: true,
+                serviceAuthenticated: true,
+                identityVerified,
+                lastErrorCode: identityVerified ? null : 'BOT_ID_MISMATCH',
                 error: null
             };
         }
@@ -5016,6 +7449,18 @@ async function fetchBotSummary(botConfig) {
         const result = await fetchChild(botConfig, '/api/bot', { timeoutMs: 12000 });
 
         if (!result.ok || !result.data) {
+            // BUG-02/BLOCKER-02: auth failure trên /api/bot (401/403/409) cũng KHÔNG được fallback sang /health.
+            if (result.status === 401 || result.status === 403 || result.status === 409) {
+                const authCode = result.status === 403 ? 'FORBIDDEN' : 'SECRET_MISMATCH';
+                return buildUnavailableSummary(
+                    botConfig,
+                    (result.data && result.data.error) || (authCode === 'SECRET_MISMATCH'
+                        ? 'Worker từ chối X-Bot-Secret (lệch khóa service-to-service).'
+                        : 'Worker từ chối request (403 Forbidden).'),
+                    result.status,
+                    { processReachable: true, serviceAuthenticated: false, identityVerified: false, lastErrorCode: authCode }
+                );
+            }
             try {
                 const healthRes = await fetchChild(botConfig, '/health', { timeoutMs: 8000, omitBotIdHeaders: true });
                 if (healthRes.ok && healthRes.data) {
@@ -5031,10 +7476,13 @@ async function fetchBotSummary(botConfig) {
                         botId: String(botConfig.id),
                         label: String(botConfig.label || `Bot ${botConfig.id}`),
                         configured: true,
-                        available: true,
+                        // BLOCKER-02 (API-STATE-01): /health không xác thực service và không
+                        // xác minh danh tính → KHÔNG được tính là worker điều khiển được
+                        // (available=false); chỉ là bằng chứng process đang sống.
+                        available: false,
                         username: '',
                         status: String(hData.botStatus || (hData.online ? 'online' : 'offline')),
-                        ready: !!hData.online,
+                        ready: false,
                         ping: null,
                         tps: null,
                         serverTps: null,
@@ -5054,6 +7502,15 @@ async function fetchBotSummary(botConfig) {
                         memory: null,
                         rssMb: 0,
                         heapMb: 0,
+                        httpStatus: 200,
+                        lastError: null,
+                        secretMismatch: false,
+                        // BUG-02/BLOCKER-02: /health không xác thực — dữ liệu rút gọn chưa qua
+                        // xác thực service, KHÔNG phải snapshot đầy đủ đáng tin và không điều khiển được.
+                        processReachable: true,
+                        serviceAuthenticated: false,
+                        identityVerified: false,
+                        lastErrorCode: 'HEALTH_FALLBACK',
                         error: null
                     };
                 }
@@ -5090,6 +7547,13 @@ async function fetchBotSummary(botConfig) {
                 memory: null,
                 rssMb: 0,
                 heapMb: 0,
+                httpStatus: result.status,
+                lastError: result.data?.error || (isWaking ? 'Render Sleep / Timeout (503)' : `HTTP ${result.status}`),
+                secretMismatch: !!(result.status === 409 || result.data?.secretMismatch || String(result.data?.error || '').includes('chưa xác thực') || String(result.data?.error || '').toLowerCase().includes('secret') || String(result.data?.error || '').includes('lệch key')),
+                processReachable: false,
+                serviceAuthenticated: false,
+                identityVerified: false,
+                lastErrorCode: isWaking ? 'WAKING' : `HTTP_${result.status}`,
                 error: isWaking
                     ? 'Đang khởi động dịch vụ Cloud (Render)...'
                     : (result.data?.error || `Bot trả HTTP ${result.status}.`)
@@ -5130,14 +7594,21 @@ async function fetchBotSummary(botConfig) {
             goldenAppleCount: Number(data.goldenAppleCount || 0),
             isDead: !!data.isDead,
             deathCount: Number(data.deathCount || 0),
-            lastDeathCoords: data.lastDeathCoords || '',
+            lastDeathCoords: String(data.lastDeathCoords || ''),
             manuallyStopped: !!data.manuallyStopped,
-            lastKickReason: data.lastKickReason || '',
+            lastKickReason: String(data.lastKickReason || ''),
             currentWindow: data.currentWindow || null,
             memory: data.memory || null,
             rssMb: Number(data.rssMb || data.memory?.rssMb || 0),
             heapMb: Number(data.heapMb || data.memory?.heapMb || 0),
             hostHardware: data.hostHardware || data.system || null,
+            httpStatus: 200,
+            lastError: null,
+            secretMismatch: false,
+            processReachable: true,
+            serviceAuthenticated: true,
+            identityVerified: String(data.botId || '') === String(botConfig.id),
+            lastErrorCode: String(data.botId || '') === String(botConfig.id) ? null : 'BOT_ID_MISMATCH',
             error: null
         };
     } catch (err) {
@@ -5169,6 +7640,13 @@ async function fetchBotSummary(botConfig) {
             settings: null,
             totemCount: 0,
             foodCount: 0,
+            httpStatus: isTimeout ? 503 : (err.status || 0),
+            lastError: isTimeout ? 'Render Sleep / Timeout (503)' : (err.message || 'Mất kết nối'),
+            secretMismatch: false,
+            processReachable: false,
+            serviceAuthenticated: false,
+            identityVerified: false,
+            lastErrorCode: isTimeout ? 'TIMEOUT' : 'NETWORK_ERROR',
             error: isTimeout
                 ? 'Đang kết nối bot (Render có thể đang khởi động từ chế độ ngủ, vui lòng chờ)...'
                 : (err.message || 'Không thể kết nối tới bot.')
@@ -5306,15 +7784,17 @@ async function runChildAction(id, path, body, extraHeaders = {}, method = 'POST'
             }
         );
 
+        const childData = result.data || {
+            ok: result.ok,
+            error: result.ok ? null : `HTTP ${result.status}`
+        };
+        if (result.status === 409 && (childData.secretMismatch || String(childData.error || '').includes('chưa xác thực'))) {
+            childData.secretMismatch = true;
+        }
         return {
             ok: result.ok,
             status: result.status,
-            data:
-                result.data ||
-                {
-                    ok: result.ok,
-                    error: result.ok ? null : `HTTP ${result.status}`
-                }
+            data: childData
         };
     } catch (err) {
         return {
@@ -5347,16 +7827,21 @@ const PUBLIC_LOGIN_HTML = String.raw`<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>KBOT — Cổng Đăng Nhập Hệ Thống AFK KingMC</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
 :root {
   color-scheme: dark;
-  --bg: #070a12;
-  --bg-gradient: radial-gradient(circle at 10% 15%, rgba(30, 58, 138, 0.5) 0%, transparent 45%),
-                 radial-gradient(circle at 90% 85%, rgba(88, 28, 135, 0.45) 0%, transparent 50%),
-                 radial-gradient(circle at 50% 50%, rgba(15, 23, 42, 0.95) 0%, #070a12 100%);
-  --card-bg: rgba(15, 23, 42, 0.88);
+  --bg: #040711;
+  --bg-gradient:
+    radial-gradient(ellipse at 8% 12%, rgba(14, 165, 233, 0.18) 0%, transparent 42%),
+    radial-gradient(ellipse at 92% 88%, rgba(124, 58, 237, 0.16) 0%, transparent 48%),
+    radial-gradient(ellipse at 55% 0%, rgba(16, 185, 129, 0.1) 0%, transparent 36%),
+    radial-gradient(circle at 50% 50%, rgba(8, 14, 26, 0.98) 0%, #040711 100%);
+  --card-bg: rgba(10, 18, 32, 0.92);
   --border: rgba(255, 255, 255, 0.08);
-  --border-glow: rgba(56, 189, 248, 0.35);
+  --border-glow: rgba(56, 189, 248, 0.42);
   --text: #f8fafc;
   --muted: #94a3b8;
   --cyan: #38bdf8;
@@ -5366,25 +7851,90 @@ const PUBLIC_LOGIN_HTML = String.raw`<!doctype html>
   --red: #f87171;
   --gold: #fbbf24;
 }
+
+@keyframes fadeUpIn {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes auroraFloat {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(28px, -18px) scale(1.08); }
+}
+@keyframes textShine {
+  0% { background-position: 0% center; }
+  100% { background-position: 250% center; }
+}
+@keyframes sonarPulse {
+  0% { transform: scale(1); opacity: 0.85; }
+  70% { transform: scale(2.4); opacity: 0; }
+  100% { transform: scale(2.4); opacity: 0; }
+}
+@keyframes shimmerSlide {
+  0% { transform: translateX(-140%); }
+  100% { transform: translateX(280%); }
+}
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  overflow-x: hidden;
+  max-width: 100vw;
+  width: 100%;
+}
 body {
   margin: 0; min-height: 100vh;
-  background: var(--bg-gradient); background-attachment: fixed;
-  color: var(--text); font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg) var(--bg-gradient);
+  background-attachment: fixed;
+  background-image: var(--bg-gradient),
+    linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+  background-size: auto, 32px 32px, 32px 32px;
+  background-position: 0 0, -1px -1px, -1px -1px;
+  color: var(--text);
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   display: flex; align-items: center; justify-content: center; padding: 24px 16px;
+  overflow-x: hidden;
 }
 .kbot-portal-container {
+  position: relative;
   width: 100%; max-width: 1120px;
   display: grid; grid-template-columns: 1.15fr 0.95fr; gap: 36px;
   align-items: stretch; margin: auto;
 }
+.kbot-portal-container::before {
+  content: '';
+  position: absolute;
+  top: -80px; left: -60px;
+  width: min(380px, 80vw); height: min(380px, 80vw);
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(14, 165, 233, 0.22) 0%, transparent 70%);
+  filter: blur(50px);
+  pointer-events: none;
+  animation: auroraFloat 14s ease-in-out infinite;
+  z-index: 0;
+}
+.kbot-portal-container::after {
+  content: '';
+  position: absolute;
+  bottom: -60px; right: -40px;
+  width: min(400px, 80vw); height: min(400px, 80vw);
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(16, 185, 129, 0.16) 0%, transparent 70%);
+  filter: blur(55px);
+  pointer-events: none;
+  animation: auroraFloat 16s ease-in-out infinite reverse;
+  z-index: 0;
+}
 @media (max-width: 920px) {
-  .kbot-portal-container { grid-template-columns: 1fr; gap: 24px; max-width: 500px; }
+  .kbot-portal-container { grid-template-columns: 1fr; gap: 24px; max-width: 500px; width: 100%; overflow: hidden; border-radius: 24px; }
   .kbot-showcase-col { display: none !important; }
 }
 
 /* SHOWCASE COLUMN (LEFT) */
 .kbot-showcase-col {
+  position: relative;
+  z-index: 1;
   display: flex; flex-direction: column; justify-content: center;
   padding: 20px 10px;
 }
@@ -5393,47 +7943,59 @@ body {
 }
 .brand-tag {
   display: inline-flex; align-items: center; gap: 6px;
-  font-size: 11px; font-weight: 800; padding: 4px 10px; border-radius: 999px;
+  font-size: 11px; font-weight: 800; padding: 5px 12px; border-radius: 999px;
   background: rgba(56, 189, 248, 0.15); color: var(--cyan);
   border: 1px solid rgba(56, 189, 248, 0.35); letter-spacing: 0.5px;
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.15);
 }
 .server-pulse-tag {
   display: inline-flex; align-items: center; gap: 6px;
-  font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; padding: 5px 12px; border-radius: 999px;
   background: rgba(52, 211, 153, 0.12); color: var(--green);
   border: 1px solid rgba(52, 211, 153, 0.3);
 }
 .pulse-circle {
   width: 7px; height: 7px; border-radius: 50%; background: #10b981;
-  box-shadow: 0 0 8px #10b981; animation: pulseGlow 2s infinite;
+  box-shadow: 0 0 8px #10b981;
+  position: relative;
+  flex-shrink: 0;
 }
-@keyframes pulseGlow {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.5; transform: scale(0.85); }
+.pulse-circle::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #10b981;
+  animation: sonarPulse 2s ease-out infinite;
 }
 .showcase-headline {
-  font-size: 32px; font-weight: 900; line-height: 1.25; margin-bottom: 12px;
+  font-size: 34px; font-weight: 900; line-height: 1.25; margin-bottom: 14px;
   letter-spacing: -0.02em; color: #fff;
 }
 .gradient-headline {
-  background: linear-gradient(135deg, #38bdf8 0%, #818cf8 50%, #c084fc 100%);
+  background: linear-gradient(135deg, #38bdf8 0%, #818cf8 35%, #34d399 70%, #38bdf8 100%);
+  background-size: 250% auto;
   -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: textShine 5s linear infinite;
 }
 .showcase-desc {
-  font-size: 14px; color: var(--muted); line-height: 1.6; margin-bottom: 22px;
+  font-size: 14px; color: var(--muted); line-height: 1.6; margin-bottom: 24px;
 }
 
 /* DISCORD BUTTON */
 .discord-card-btn {
   display: flex; align-items: center; gap: 14px;
-  padding: 12px 18px; border-radius: 14px;
+  padding: 14px 18px; border-radius: 14px;
   background: rgba(88, 101, 242, 0.18); border: 1px solid rgba(88, 101, 242, 0.45);
   color: #fff; text-decoration: none; margin-bottom: 24px;
-  transition: all 0.2s ease; box-shadow: 0 4px 16px rgba(88, 101, 242, 0.2);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 6px 20px rgba(88, 101, 242, 0.2), inset 0 1px 0 rgba(255,255,255,0.08);
 }
 .discord-card-btn:hover {
-  background: rgba(88, 101, 242, 0.3); border-color: #5865F2;
-  transform: translateY(-2px); box-shadow: 0 8px 24px rgba(88, 101, 242, 0.35);
+  background: rgba(88, 101, 242, 0.28); border-color: rgba(88, 101, 242, 0.7);
+  transform: translateY(-3px);
+  box-shadow: 0 12px 32px rgba(88, 101, 242, 0.38), 0 0 20px rgba(88,101,242,0.15), inset 0 1px 0 rgba(255,255,255,0.1);
 }
 .discord-icon { flex-shrink: 0; fill: #5865F2; }
 .discord-text { flex: 1; display: flex; flex-direction: column; text-align: left; }
@@ -5449,12 +8011,22 @@ body {
   display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px;
 }
 .bento-feature-item {
-  background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 12px; padding: 12px 14px; display: flex; align-items: flex-start; gap: 10px;
-  transition: all 0.2s;
+  position: relative;
+  background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 13px; padding: 13px 15px; display: flex; align-items: flex-start; gap: 10px;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.08);
+  animation: fadeUpIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
+.bento-feature-item:nth-child(1) { animation-delay: 0.08s; }
+.bento-feature-item:nth-child(2) { animation-delay: 0.14s; }
+.bento-feature-item:nth-child(3) { animation-delay: 0.20s; }
+.bento-feature-item:nth-child(4) { animation-delay: 0.26s; }
 .bento-feature-item:hover {
-  background: rgba(255, 255, 255, 0.06); border-color: rgba(56, 189, 248, 0.3);
+  background: rgba(56, 189, 248, 0.08);
+  border-color: rgba(56, 189, 248, 0.4);
+  transform: translateY(-2px);
+  box-shadow: 0 10px 24px rgba(0,0,0,0.35), 0 0 20px rgba(56,189,248,0.12), inset 0 1px 0 rgba(255,255,255,0.12);
 }
 .bento-icon { font-size: 20px; flex-shrink: 0; line-height: 1; margin-top: 2px; }
 .bento-text strong { display: block; font-size: 12.5px; font-weight: 750; color: #f1f5f9; margin-bottom: 2px; }
@@ -5469,16 +8041,19 @@ body {
 
 /* LOGIN CARD (RIGHT) */
 .login-card {
+  position: relative;
+  z-index: 1;
   background: var(--card-bg);
   border: 1px solid var(--border-glow);
   border-radius: 24px; padding: 36px 32px;
-  box-shadow: 0 25px 60px rgba(0,0,0,0.8), 0 0 40px rgba(56, 189, 248, 0.12);
-  backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 32px 80px rgba(0,0,0,0.85), 0 0 50px rgba(56, 189, 248, 0.12), inset 0 1px 0 rgba(255,255,255,0.12);
+  backdrop-filter: blur(24px) saturate(180%); -webkit-backdrop-filter: blur(24px) saturate(180%);
   display: flex; flex-direction: column; justify-content: center;
-  text-align: center; position: relative;
+  text-align: center;
+  animation: fadeUpIn 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 .login-card-header { margin-bottom: 22px; text-align: center; }
-.login-logo { font-size: 38px; margin-bottom: 8px; }
+.login-logo { font-size: 40px; margin-bottom: 8px; filter: drop-shadow(0 0 16px rgba(56, 189, 248, 0.5)); }
 .login-title {
   font-size: 22px; font-weight: 850; color: #fff; margin-bottom: 6px;
   letter-spacing: -0.02em;
@@ -5494,11 +8069,15 @@ body {
 .auth-tab-btn {
   flex: 1; padding: 10px 12px; background: transparent; border: none;
   color: var(--muted); font-size: 13px; font-weight: 750; border-radius: 8px;
-  cursor: pointer; transition: all 0.18s ease;
+  cursor: pointer; transition: all 0.2s ease;
+  font-family: inherit;
 }
 .auth-tab-btn.active {
-  background: rgba(56, 189, 248, 0.2); color: #38bdf8;
-  border: 1px solid rgba(56, 189, 248, 0.4); box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.25) 0%, rgba(37, 99, 235, 0.2) 100%);
+  color: #7dd3fc;
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.08);
+  font-weight: 800;
 }
 
 /* FORM FIELDS */
@@ -5510,12 +8089,15 @@ body {
 .input-wrap { position: relative; }
 .input-wrap input {
   width: 100%; padding: 12px 14px 12px 38px;
-  background: rgba(11, 17, 26, 0.9); border: 1px solid var(--border);
+  background: rgba(7, 12, 22, 0.85); border: 1px solid rgba(255,255,255,0.08);
   border-radius: 10px; color: #fff; font-size: 13.5px; outline: none;
-  transition: all 0.2s;
+  font-family: inherit;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.3);
 }
 .input-wrap input:focus {
-  border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+  border-color: var(--cyan);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.22), inset 0 2px 4px rgba(0,0,0,0.3);
 }
 .input-icon {
   position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
@@ -5536,23 +8118,83 @@ body {
   margin-bottom: 16px; display: flex; align-items: center; gap: 8px; line-height: 1.35;
 }
 
+/* iOS-style Toggle Switch */
 .check-row {
-  display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted);
+  display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--muted);
   cursor: pointer; margin: 12px 0 20px; user-select: none; text-align: left;
 }
-.check-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: #0284c7; cursor: pointer; }
+.check-row input[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 38px;
+  height: 22px;
+  min-width: 38px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.12);
+  border: 1px solid rgba(255,255,255,0.15);
+  position: relative;
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  padding: 0;
+  box-shadow: inset 0 1px 3px rgba(0,0,0,0.4);
+  flex-shrink: 0;
+}
+.check-row input[type="checkbox"]::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.check-row input[type="checkbox"]:checked {
+  background: linear-gradient(135deg, #10b981, #0ea5e9);
+  border-color: rgba(16, 185, 129, 0.6);
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.35), inset 0 1px 3px rgba(0,0,0,0.2);
+}
+.check-row input[type="checkbox"]:checked::after {
+  left: calc(100% - 19px);
+}
 
 button.primary-cta {
-  width: 100%; padding: 13px;
-  background: linear-gradient(180deg, #0284c7 0%, #0369a1 100%);
-  border: 1px solid #38bdf8; border-radius: 11px; color: #fff;
-  font-size: 14.5px; font-weight: 800; cursor: pointer;
-  box-shadow: 0 4px 18px rgba(2, 132, 199, 0.45); transition: all 0.2s;
+  position: relative;
+  overflow: hidden;
+  width: 100%; padding: 14px;
+  background: linear-gradient(135deg, #0ea5e9 0%, #2563eb 100%);
+  border: 1px solid rgba(56, 189, 248, 0.55);
+  border-radius: 12px; color: #fff;
+  font-size: 14.5px; font-weight: 800;
+  font-family: inherit;
+  cursor: pointer; letter-spacing: 0.01em;
+  box-shadow: 0 6px 22px rgba(14, 165, 233, 0.4), inset 0 1px 0 rgba(255,255,255,0.15);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+button.primary-cta::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0;
+  width: 50%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
+  transform: translateX(-140%);
+}
+button.primary-cta:hover::after {
+  animation: shimmerSlide 0.65s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 button.primary-cta:hover:not(:disabled) {
-  transform: translateY(-1px); box-shadow: 0 6px 24px rgba(2, 132, 199, 0.65);
+  background: linear-gradient(135deg, #22b8fc 0%, #3b7ff5 100%);
+  transform: translateY(-2px);
+  box-shadow: 0 10px 32px rgba(14, 165, 233, 0.55), inset 0 1px 0 rgba(255,255,255,0.18);
 }
-button.primary-cta:disabled { opacity: 0.6; cursor: not-allowed; }
+button.primary-cta:active:not(:disabled) {
+  transform: scale(0.97);
+}
+button.primary-cta:disabled { opacity: 0.55; cursor: not-allowed; }
 
 .login-alert {
   padding: 11px 14px; border-radius: 10px; font-size: 13px;
@@ -5573,9 +8215,32 @@ button.primary-cta:disabled { opacity: 0.6; cursor: not-allowed; }
 }
 .login-footer-info code {
   background: rgba(255, 255, 255, 0.08); padding: 2px 6px; border-radius: 4px;
-  color: var(--cyan); font-family: monospace; font-size: 11.5px;
+  color: var(--cyan); font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
 }
 .hidden { display: none !important; }
+
+@media (max-width: 480px) {
+  body { padding: 12px 8px; }
+  .login-card { padding: 24px 16px; border-radius: 18px; }
+  .login-title { font-size: 20px; }
+  .auth-tabs { gap: 4px; padding: 4px; }
+  .auth-tab-btn { font-size: 12px; padding: 8px 10px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+button:focus-visible, input:focus-visible, a:focus-visible {
+  outline: 2px solid var(--cyan) !important;
+  outline-offset: 2px !important;
+}
 </style>
 </head>
 <body>
@@ -5743,6 +8408,7 @@ button.primary-cta:disabled { opacity: 0.6; cursor: not-allowed; }
     <div class="login-footer-info">
       • Quản trị viên: Đăng nhập bằng tài khoản <code>admin</code>.<br>
       • Khách thuê: Sử dụng tài khoản cá nhân để xem bot và điều khiển.<br>
+      • Tài khoản hết hạn: Đăng nhập để nạp Key hoặc vượt link nhận +12h miễn phí.<br>
       • Cần trợ giúp? Liên hệ ngay qua <a href="https://discord.gg/mJWX5Xp3z" target="_blank" rel="noopener noreferrer" style="color:#38bdf8;text-decoration:underline;">Discord Hỗ Trợ 24/7</a>.
     </div>
   </div>
@@ -5876,30 +8542,66 @@ const HTML = String.raw`<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>KBOT — Hệ Thống Cho Thuê Bot AFK KingMC Thương Mại Cao Cấp</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
 :root {
   color-scheme: dark;
-  --bg: #070a0f;
-  --bg-gradient: radial-gradient(circle at 14% 16%, rgba(26, 42, 66, 0.75) 0%, transparent 45%),
-                 radial-gradient(circle at 86% 84%, rgba(32, 22, 58, 0.65) 0%, transparent 50%),
-                 radial-gradient(circle at 50% 50%, rgba(13, 21, 33, 0.9) 0%, #070a0f 100%);
-  --card: rgba(15, 23, 34, 0.82);
-  --card-hover: rgba(21, 33, 49, 0.92);
-  --card2: rgba(11, 17, 26, 0.7);
+  --bg: #040711;
+  --bg-gradient:
+    radial-gradient(ellipse at 12% 10%, rgba(14, 165, 233, 0.16) 0%, transparent 45%),
+    radial-gradient(ellipse at 88% 88%, rgba(124, 58, 237, 0.14) 0%, transparent 50%),
+    radial-gradient(ellipse at 55% 0%, rgba(16, 185, 129, 0.09) 0%, transparent 35%),
+    radial-gradient(circle at 50% 50%, rgba(8, 14, 26, 0.98) 0%, #040711 100%);
+  --card: rgba(13, 20, 34, 0.82);
+  --card-hover: rgba(18, 28, 46, 0.92);
+  --card2: rgba(9, 14, 24, 0.78);
   --border: rgba(255, 255, 255, 0.08);
-  --border-glow: rgba(77, 163, 255, 0.45);
+  --border-glow: rgba(56, 189, 248, 0.42);
   --text: #f0f6fc;
   --muted: #8b9bb4;
-  --green: #30d158;
-  --green-glow: rgba(48, 209, 88, 0.35);
-  --red: #ff453a;
-  --red-glow: rgba(255, 69, 58, 0.35);
-  --yellow: #ffd60a;
-  --yellow-glow: rgba(255, 214, 10, 0.35);
-  --blue: #4da3ff;
-  --blue-glow: rgba(77, 163, 255, 0.35);
-  --accent: #58a6ff;
-  --gold: #f59e0b;
+  --green: #10b981;
+  --green-glow: rgba(16, 185, 129, 0.35);
+  --red: #ef4444;
+  --red-glow: rgba(239, 68, 68, 0.35);
+  --yellow: #f59e0b;
+  --yellow-glow: rgba(245, 158, 11, 0.35);
+  --blue: #38bdf8;
+  --blue-glow: rgba(56, 189, 248, 0.35);
+  --accent: #38bdf8;
+  --gold: #fbbf24;
+  --purple: #a78bfa;
+}
+
+@keyframes fadeUpIn {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes auroraFloat {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(28px, -18px) scale(1.08); }
+}
+@keyframes barShimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+@keyframes shimmer {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(280%); }
+}
+@keyframes sonarPulse {
+  0% { transform: scale(1); opacity: 0.85; }
+  70% { transform: scale(2.4); opacity: 0; }
+  100% { transform: scale(2.4); opacity: 0; }
+}
+@keyframes textShine {
+  0% { background-position: 0% center; }
+  100% { background-position: 250% center; }
+}
+@keyframes modalSpringIn {
+  from { opacity: 0; transform: scale(0.92) translateY(16px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
 }
 
 * {
@@ -5909,11 +8611,16 @@ const HTML = String.raw`<!doctype html>
 body {
   margin: 0;
   min-height: 100vh;
-  background: var(--bg-gradient);
+  background: var(--bg);
+  background-image: var(--bg-gradient),
+    linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+  background-size: auto, 32px 32px, 32px 32px;
   background-attachment: fixed;
   color: var(--text);
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   overflow-x: hidden;
 }
 
@@ -5926,60 +8633,89 @@ button, input, select, textarea {
 }
 
 button {
+  position: relative;
+  overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 10px;
-  background: linear-gradient(180deg, #1c2734 0%, #151e28 100%);
+  background: linear-gradient(160deg, rgba(28, 40, 58, 0.95) 0%, rgba(18, 28, 44, 0.98) 100%);
   color: var(--text);
   padding: 9px 14px;
   cursor: pointer;
   font-weight: 600;
-  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
-  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.25);
+  font-family: inherit;
+  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255,255,255,0.07);
   user-select: none;
+  letter-spacing: 0.01em;
+}
+
+button::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0;
+  width: 45%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.12), transparent);
+  transform: translateX(-120%);
+  transition: transform 0s;
+}
+
+button:hover::after {
+  transform: translateX(280%);
+  transition: transform 0.55s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 button:hover, button:hover:not(:disabled) {
-  background: linear-gradient(180deg, #253444 0%, #1a2734 100%);
-  border-color: rgba(255, 255, 255, 0.2);
+  background: linear-gradient(160deg, rgba(36, 52, 74, 0.98) 0%, rgba(24, 38, 58, 0.99) 100%);
+  border-color: rgba(255, 255, 255, 0.16);
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255,255,255,0.1);
 }
 
 button:active, button:active:not(:disabled) {
-  transform: scale(0.97);
+  transform: scale(0.96) translateY(0);
 }
 
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
-  outline: 2px solid var(--blue);
+  outline: 2px solid var(--cyan);
   outline-offset: 2px;
 }
 
 button.primary {
-  background: linear-gradient(180deg, #1f7ae0 0%, #1562b8 100%);
-  border-color: #388bfd;
-  box-shadow: 0 2px 8px rgba(31, 122, 224, 0.35);
+  background: linear-gradient(135deg, #0ea5e9 0%, #2563eb 100%);
+  border-color: rgba(56, 189, 248, 0.55);
+  box-shadow: 0 4px 16px rgba(14, 165, 233, 0.35), inset 0 1px 0 rgba(255,255,255,0.15);
+  color: #fff;
+  font-weight: 700;
 }
 
 button.primary:hover, button.primary:hover:not(:disabled) {
-  background: linear-gradient(180deg, #2b88f0 0%, #1a6fcf 100%);
-  box-shadow: 0 4px 15px rgba(31, 122, 224, 0.5);
+  background: linear-gradient(135deg, #22b8fc 0%, #3b7ff5 100%);
+  border-color: rgba(56, 189, 248, 0.7);
+  box-shadow: 0 6px 24px rgba(14, 165, 233, 0.5), inset 0 1px 0 rgba(255,255,255,0.18);
+  transform: translateY(-2px);
 }
 
 button.danger {
-  background: linear-gradient(180deg, #a8282b 0%, #7d1b1d 100%);
-  border-color: #da3633;
-  box-shadow: 0 2px 8px rgba(218, 54, 51, 0.35);
+  background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
+  border-color: rgba(239, 68, 68, 0.55);
+  box-shadow: 0 4px 16px rgba(239, 68, 68, 0.3), inset 0 1px 0 rgba(255,255,255,0.1);
+  color: #fff;
+  font-weight: 700;
 }
 
 button.danger:hover, button.danger:hover:not(:disabled) {
-  background: linear-gradient(180deg, #c43236 0%, #912022 100%);
-  box-shadow: 0 4px 15px rgba(218, 54, 51, 0.5);
+  background: linear-gradient(135deg, #f87171 0%, #dc2626 100%);
+  border-color: rgba(239, 68, 68, 0.7);
+  box-shadow: 0 6px 24px rgba(239, 68, 68, 0.45), inset 0 1px 0 rgba(255,255,255,0.12);
+  transform: translateY(-2px);
 }
 
 button:disabled {
-  opacity: 0.45;
+  opacity: 0.38;
   cursor: not-allowed;
   transform: none !important;
+  filter: grayscale(30%);
 }
 
 input, select, textarea {
@@ -5987,15 +8723,18 @@ input, select, textarea {
   padding: 10px 12px;
   border-radius: 10px;
   border: 1px solid var(--border);
-  background: rgba(10, 16, 24, 0.7);
+  background: rgba(7, 12, 22, 0.85);
   color: var(--text);
   outline: none;
-  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+  font-family: inherit;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.3);
 }
 
 input:focus, select:focus, textarea:focus {
-  border-color: var(--blue);
-  box-shadow: 0 0 0 3px rgba(77, 163, 255, 0.2);
+  border-color: var(--cyan);
+  background: rgba(7, 12, 22, 0.95);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.22), inset 0 2px 4px rgba(0,0,0,0.3);
 }
 
 .app {
@@ -6031,17 +8770,34 @@ input:focus, select:focus, textarea:focus {
 
 /* Fleet Welcome Header */
 .fleet-welcome-header {
+  position: relative;
   display: flex;
   justify-content: space-between;
   align-items: center;
   flex-wrap: wrap;
   gap: 16px;
   margin-bottom: 22px;
-  padding: 16px 20px;
-  background: rgba(15, 23, 42, 0.65);
-  backdrop-filter: blur(14px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 18px;
+  padding: 22px 26px;
+  background: linear-gradient(135deg, rgba(14, 23, 42, 0.75) 0%, rgba(9, 14, 26, 0.88) 100%);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 20px;
+  box-shadow: 0 16px 40px -8px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.1);
+  overflow: hidden;
+  animation: fadeUpIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.fleet-welcome-header::before {
+  content: '';
+  position: absolute;
+  top: -80px;
+  left: 20%;
+  width: 260px;
+  height: 260px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(56, 189, 248, 0.12) 0%, transparent 70%);
+  filter: blur(40px);
+  pointer-events: none;
 }
 .fleet-welcome-title-wrap {
   display: flex;
@@ -6081,36 +8837,56 @@ input:focus, select:focus, textarea:focus {
 }
 .kpi-card {
   position: relative;
-  background: rgba(15, 23, 42, 0.75);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background: rgba(11, 18, 32, 0.82);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 16px;
-  padding: 16px 18px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  border-radius: 18px;
+  padding: 18px 20px;
+  box-shadow: 0 12px 36px -4px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.09);
   overflow: hidden;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: all 0.28s cubic-bezier(0.16, 1, 0.3, 1);
   display: flex;
   flex-direction: column;
   justify-content: space-between;
+  animation: fadeUpIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
+.kpi-card:nth-child(1) { animation-delay: 0.05s; }
+.kpi-card:nth-child(2) { animation-delay: 0.1s; }
+.kpi-card:nth-child(3) { animation-delay: 0.15s; }
+.kpi-card:nth-child(4) { animation-delay: 0.2s; }
+.kpi-card:nth-child(5) { animation-delay: 0.25s; }
 .kpi-card:hover {
-  transform: translateY(-2px);
-  border-color: rgba(56, 189, 248, 0.35);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35), 0 0 16px rgba(56, 189, 248, 0.1);
+  transform: translateY(-4px);
+  border-color: rgba(56, 189, 248, 0.45);
+  box-shadow: 0 20px 48px -4px rgba(0, 0, 0, 0.7), 0 0 28px rgba(56, 189, 248, 0.12), inset 0 1px 0 rgba(255,255,255,0.15);
 }
 .kpi-card::before {
   content: '';
   position: absolute;
   top: 0; left: 0; right: 0;
   height: 3px;
-  background: linear-gradient(90deg, var(--blue), transparent);
+  background: linear-gradient(90deg, #38bdf8, transparent);
 }
+.kpi-card::after {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 70px;
+  background: radial-gradient(ellipse at top, rgba(56, 189, 248, 0.15), transparent 70%);
+  pointer-events: none;
+}
+
+/* 6 distinct states for 6 KPI cards */
 .kpi-card.kpi-total::before { background: linear-gradient(90deg, #38bdf8, transparent); }
-.kpi-card.kpi-afk::before { background: linear-gradient(90deg, var(--green), transparent); }
-.kpi-card.kpi-online::before { background: linear-gradient(90deg, var(--blue), transparent); }
-.kpi-card.kpi-offline::before { background: linear-gradient(90deg, var(--red), transparent); }
-.kpi-card.kpi-totem::before { background: linear-gradient(90deg, var(--gold), transparent); }
+.kpi-card.kpi-total::after { background: radial-gradient(ellipse at top, rgba(56, 189, 248, 0.18), transparent 70%); }
+.kpi-card.kpi-health::before { background: linear-gradient(90deg, #10b981, transparent); }
+.kpi-card.kpi-health::after { background: radial-gradient(ellipse at top, rgba(16, 185, 129, 0.18), transparent 70%); }
+.kpi-card.kpi-afk::before { background: linear-gradient(90deg, #34d399, transparent); }
+.kpi-card.kpi-afk::after { background: radial-gradient(ellipse at top, rgba(52, 211, 153, 0.18), transparent 70%); }
+.kpi-card.kpi-online::before { background: linear-gradient(90deg, #3b82f6, transparent); }
+.kpi-card.kpi-online::after { background: radial-gradient(ellipse at top, rgba(59, 130, 246, 0.18), transparent 70%); }
+.kpi-card.kpi-offline::before { background: linear-gradient(90deg, #ef4444, transparent); }
+.kpi-card.kpi-offline::after { background: radial-gradient(ellipse at top, rgba(239, 68, 68, 0.18), transparent 70%); }
+.kpi-card.kpi-unreachable::before { background: linear-gradient(90deg, #f97316, transparent); }
+.kpi-card.kpi-unreachable::after { background: radial-gradient(ellipse at top, rgba(249, 115, 22, 0.18), transparent 70%); }
 
 .kpi-header {
   display: flex;
@@ -6130,11 +8906,13 @@ input:focus, select:focus, textarea:focus {
   opacity: 0.85;
 }
 .kpi-value {
-  font-size: 26px;
+  font-size: 28px;
   font-weight: 900;
   letter-spacing: -0.02em;
-  margin: 2px 0;
+  margin: 3px 0;
   line-height: 1.1;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
 }
 .kpi-sub {
   font-size: 11px;
@@ -6150,11 +8928,13 @@ input:focus, select:focus, textarea:focus {
   flex-wrap: wrap;
   gap: 10px;
   margin-bottom: 14px;
-  background: rgba(15, 23, 42, 0.6);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(9, 16, 28, 0.72);
+  backdrop-filter: blur(16px) saturate(150%);
+  -webkit-backdrop-filter: blur(16px) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 14px;
-  padding: 10px 14px;
+  padding: 11px 15px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.06);
 }
 .fleet-toolbar-primary {
   display: flex;
@@ -6232,10 +9012,11 @@ input:focus, select:focus, textarea:focus {
 }
 
 .tab-btn.active {
-  background: linear-gradient(180deg, #1f7ae0 0%, #1562b8 100%);
-  color: #fff;
-  border-color: #388bfd;
-  box-shadow: 0 2px 10px rgba(31, 122, 224, 0.4);
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.25) 0%, rgba(37, 99, 235, 0.2) 100%);
+  color: #7dd3fc;
+  border-color: rgba(56, 189, 248, 0.5);
+  box-shadow: 0 2px 12px rgba(14, 165, 233, 0.25), inset 0 1px 0 rgba(255,255,255,0.08);
+  font-weight: 700;
 }
 
 /* Grids & Panels */
@@ -6248,15 +9029,13 @@ input:focus, select:focus, textarea:focus {
   align-items: stretch;
 }
 
-.bot-card, .panel {
+.panel {
   border: 1px solid var(--border);
   border-radius: 16px;
-  background: var(--card);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
+  background: rgba(10, 18, 32, 0.94);
   padding: 16px;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
-  transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.22s ease, box-shadow 0.22s ease;
+  box-shadow: 0 12px 36px -4px rgba(0, 0, 0, 0.5), inset 0 1px 0 0 rgba(255, 255, 255, 0.08);
+  transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.28s, box-shadow 0.28s;
 }
 
 .bot-card {
@@ -6264,29 +9043,42 @@ input:focus, select:focus, textarea:focus {
   width: 100%;
   max-width: 100%;
   box-sizing: border-box;
-  background: rgba(15, 23, 42, 0.85);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background: #090e1a;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 16px;
-  padding: 12px 14px;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  border-radius: 18px;
+  padding: 14px 16px;
+  box-shadow: 0 12px 36px -4px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   cursor: pointer;
   display: flex;
   flex-direction: column;
-  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.28s, box-shadow 0.28s;
   overflow: hidden;
+  min-height: 250px;
+  animation: fadeUpIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .bot-card:hover {
   border-color: rgba(56, 189, 248, 0.45);
   transform: translateY(-3px);
-  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.5), 0 0 20px rgba(56, 189, 248, 0.15);
+  box-shadow: 0 20px 50px -4px rgba(0, 0, 0, 0.65), 0 0 28px rgba(56, 189, 248, 0.14), inset 0 1px 0 rgba(255,255,255,0.12);
 }
 
-.bot-card.status-afk { border-left: 3px solid #30d158; }
-.bot-card.status-waiting { border-left: 3px solid #eab308; }
-.bot-card.status-offline { border-left: 3px solid #ef4444; }
+.bot-card.status-afk {
+  border-left: 3px solid #10b981;
+  box-shadow: 0 12px 36px -4px rgba(0, 0, 0, 0.5), inset 3px 0 14px rgba(16, 185, 129, 0.16);
+}
+.bot-card.status-waiting {
+  border-left: 3px solid #f59e0b;
+  box-shadow: 0 12px 36px -4px rgba(0, 0, 0, 0.5), inset 3px 0 14px rgba(245, 158, 11, 0.16);
+}
+.bot-card.status-offline {
+  border-left: 3px solid #ef4444;
+  box-shadow: 0 12px 36px -4px rgba(0, 0, 0, 0.5), inset 3px 0 14px rgba(239, 68, 68, 0.16);
+}
+.bot-card.status-unreachable {
+  border-left: 3px solid #f97316;
+  box-shadow: 0 12px 36px -4px rgba(0, 0, 0, 0.5), inset 3px 0 14px rgba(249, 115, 22, 0.16);
+}
 
 .bot-card-topbar {
   display: flex;
@@ -6305,7 +9097,8 @@ input:focus, select:focus, textarea:focus {
 .bot-id-chip {
   font-size: 11px;
   font-weight: 800;
-  font-family: monospace;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
   background: rgba(56, 189, 248, 0.15);
   color: #38bdf8;
   border: 1px solid rgba(56, 189, 248, 0.3);
@@ -6386,15 +9179,146 @@ input:focus, select:focus, textarea:focus {
   color: #f87171;
   border: 1px solid rgba(239, 68, 68, 0.35);
 }
+.bot-status-pill.orange, .bot-status-pill.warning {
+  background: rgba(249, 115, 22, 0.16);
+  color: #fb923c;
+  border: 1px solid rgba(249, 115, 22, 0.45);
+}
+.bot-status-pill.purple, .bot-status-pill.sleep {
+  background: rgba(168, 85, 247, 0.16);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.45);
+}
+.bot-status-pill.blue {
+  background: rgba(56, 189, 248, 0.14);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+}
+.bot-status-pill.gray {
+  background: rgba(148, 163, 184, 0.12);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+}
 .pulse-status-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   display: inline-block;
+  position: relative;
+  flex-shrink: 0;
 }
-.pulse-status-dot.green { background: #30d158; box-shadow: 0 0 8px #30d158; }
-.pulse-status-dot.yellow { background: #eab308; box-shadow: 0 0 8px #eab308; }
-.pulse-status-dot.red { background: #ef4444; box-shadow: 0 0 8px #ef4444; }
+.pulse-status-dot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  animation: sonarPulse 2.2s ease-out infinite;
+}
+.pulse-status-dot.green { background: #10b981; box-shadow: 0 0 7px #10b981; }
+.pulse-status-dot.green::after { background: #10b981; }
+.pulse-status-dot.yellow { background: #f59e0b; box-shadow: 0 0 7px #f59e0b; }
+.pulse-status-dot.yellow::after { background: #f59e0b; animation-duration: 1.8s; }
+.pulse-status-dot.red { background: #ef4444; box-shadow: 0 0 7px #ef4444; }
+.pulse-status-dot.red::after { background: #ef4444; animation-duration: 2.5s; }
+.pulse-status-dot.orange, .pulse-status-dot.warning { background: #f97316; box-shadow: 0 0 7px #f97316; }
+.pulse-status-dot.orange::after, .pulse-status-dot.warning::after { background: #f97316; animation-duration: 2s; }
+.pulse-status-dot.purple, .pulse-status-dot.sleep { background: #a855f7; box-shadow: 0 0 7px #a855f7; }
+.pulse-status-dot.purple::after, .pulse-status-dot.sleep::after { background: #a855f7; animation-duration: 3s; }
+.pulse-status-dot.blue { background: #38bdf8; box-shadow: 0 0 7px #38bdf8; }
+.pulse-status-dot.blue::after { background: #38bdf8; animation-duration: 2.8s; }
+.pulse-status-dot.gray { background: #64748b; box-shadow: none; }
+.pulse-status-dot.gray::after { display: none; }
+
+.bot-error-action-banner {
+  margin: 6px 0 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  box-sizing: border-box;
+}
+.bot-error-action-banner.warning {
+  background: rgba(249, 115, 22, 0.12);
+  border: 1px solid rgba(249, 115, 22, 0.35);
+  color: #fb923c;
+}
+.bot-error-action-banner.sleep {
+  background: rgba(168, 85, 247, 0.12);
+  border: 1px solid rgba(168, 85, 247, 0.35);
+  color: #c084fc;
+}
+.bot-error-action-banner.danger {
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #f87171;
+}
+.bot-error-text {
+  flex: 1;
+  min-width: 140px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: break-word;
+}
+.bot-action-chip {
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  white-space: nowrap;
+  transition: all 0.2s ease;
+}
+.bot-action-chip:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+.bot-action-chip.warning {
+  background: rgba(249, 115, 22, 0.25);
+  border-color: rgba(249, 115, 22, 0.5);
+  color: #ffedd5;
+}
+.bot-action-chip.warning:hover {
+  background: rgba(249, 115, 22, 0.4);
+}
+.bot-action-chip.danger {
+  background: rgba(239, 68, 68, 0.25);
+  border-color: rgba(239, 68, 68, 0.5);
+  color: #fee2e2;
+}
+.bot-action-chip.danger:hover {
+  background: rgba(239, 68, 68, 0.4);
+}
+.bot-action-chip.info {
+  background: rgba(56, 189, 248, 0.25);
+  border-color: rgba(56, 189, 248, 0.5);
+  color: #e0f2fe;
+}
+.bot-action-chip.info:hover {
+  background: rgba(56, 189, 248, 0.4);
+}
+.spinner-sm {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+  vertical-align: middle;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
 
 .eco-badge-glow {
   font-size: 9.5px;
@@ -6459,7 +9383,8 @@ input:focus, select:focus, textarea:focus {
   display: flex;
   align-items: center;
   gap: 4px;
-  font-family: monospace;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
   font-size: 10.5px;
   color: #c084fc;
   cursor: pointer;
@@ -6486,13 +9411,19 @@ input:focus, select:focus, textarea:focus {
   margin-bottom: 8px;
 }
 .vital-card {
-  background: rgba(255, 255, 255, 0.025);
+  background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 8px;
-  padding: 5px 8px;
+  border-radius: 10px;
+  padding: 7px 10px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+.vital-card:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(56, 189, 248, 0.25);
 }
 .vital-label-row {
   display: flex;
@@ -6508,21 +9439,34 @@ input:focus, select:focus, textarea:focus {
   letter-spacing: 0.3px;
 }
 .vital-val {
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 800;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
 }
 .hp-bar-track {
   width: 100%;
-  height: 4px;
+  height: 5px;
   background: rgba(255, 255, 255, 0.08);
   border-radius: 999px;
   overflow: hidden;
-  margin-top: 2px;
+  margin-top: 3px;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.4);
 }
 .hp-bar-fill {
   height: 100%;
   border-radius: 999px;
-  transition: width 0.3s ease;
+  transition: width 0.35s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.35s ease;
+  box-shadow: 0 0 10px currentColor;
+  position: relative;
+  overflow: hidden;
+}
+.hp-bar-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
+  animation: barShimmer 2.4s ease-in-out infinite;
 }
 .totem-warning-badge {
   font-size: 9.5px;
@@ -6569,6 +9513,12 @@ input:focus, select:focus, textarea:focus {
   font-size: 10.5px;
   color: #facc15;
   margin-bottom: 7px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: break-word;
 }
 .bot-ram-meter-box {
   background: rgba(0, 0, 0, 0.2);
@@ -6586,30 +9536,38 @@ input:focus, select:focus, textarea:focus {
 }
 .ram-meter-track {
   width: 100%;
-  height: 4px;
-  background: rgba(255, 255, 255, 0.06);
+  height: 5px;
+  background: rgba(255, 255, 255, 0.08);
   border-radius: 999px;
   overflow: hidden;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.4);
 }
 .ram-meter-bar-fill {
   height: 100%;
   border-radius: 999px;
-  transition: width 0.3s ease;
+  transition: width 0.35s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.35s ease;
+  box-shadow: 0 0 10px currentColor;
 }
 .card-quick-actions {
   display: flex;
-  gap: 5px;
+  gap: 6px;
   margin-top: auto;
-  padding-top: 8px;
+  padding-top: 10px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
-.card-btn {
+.card-quick-actions .card-btn {
   flex: 1;
-  font-size: 10.5px;
-  font-weight: 700;
-  padding: 5px 4px;
-  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 750;
+  padding: 6px 4px;
+  border-radius: 8px;
   text-align: center;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.06);
+}
+.card-quick-actions .card-btn:hover {
+  transform: translateY(-1.5px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.1);
 }
 .detail-link-btn {
   background: rgba(56, 189, 248, 0.12) !important;
@@ -6684,9 +9642,9 @@ input:focus, select:focus, textarea:focus {
 .modal {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.72);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: rgba(2, 6, 18, 0.8);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -6700,16 +9658,18 @@ input:focus, select:focus, textarea:focus {
 }
 
 .modal-card {
-  width: min(520px, 100%);
+  width: min(540px, 100%);
   max-height: calc(100vh - 32px);
   overflow-y: auto;
   overscroll-behavior: contain;
-  background: rgba(18, 27, 40, 0.96);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 18px;
-  padding: 22px;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
-  animation: modalZoomIn 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  background: rgba(8, 14, 26, 0.96);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  border-radius: 22px;
+  padding: 26px;
+  box-shadow: 0 32px 80px rgba(0, 0, 0, 0.85), 0 0 45px rgba(56, 189, 248, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  animation: modalSpringIn 0.35s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .modal-card h3 {
@@ -6739,7 +9699,7 @@ input:focus, select:focus, textarea:focus {
 }
 
 .modal-card.modal-lg {
-  width: min(840px, 98vw);
+  width: min(880px, 98vw);
   max-height: 88vh;
   overflow-y: auto;
 }
@@ -6846,34 +9806,42 @@ input:focus, select:focus, textarea:focus {
 .user-table-wrap {
   margin: 14px 0;
   overflow-x: auto;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: rgba(0,0,0,0.25);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  background: rgba(7, 12, 22, 0.7);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 .user-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: 12.5px;
   text-align: left;
 }
 .user-table th {
-  background: rgba(255,255,255,0.05);
-  padding: 10px 12px;
+  background: rgba(12, 19, 34, 0.98);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 13px 16px;
   color: var(--muted);
-  font-weight: 700;
-  border-bottom: 1px solid var(--border);
+  font-weight: 750;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
   white-space: nowrap;
 }
 .user-table td {
-  padding: 11px 12px;
-  border-bottom: 1px solid rgba(255,255,255,0.05);
+  padding: 13px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
   vertical-align: middle;
+  transition: background 0.18s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .user-table tr:last-child td {
   border-bottom: none;
 }
 .user-table tr:hover td {
-  background: rgba(255,255,255,0.03);
+  background: rgba(56, 189, 248, 0.06);
 }
 
 .bot-checkbox-grid {
@@ -7213,36 +10181,53 @@ input:focus, select:focus, textarea:focus {
 }
 
 .dot {
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   display: inline-block;
-  background: #697582;
+  background: #4b5a6e;
+  position: relative;
   transition: all 0.25s ease;
+  flex-shrink: 0;
+}
+
+.dot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  animation: sonarPulse 2.2s ease-out infinite;
+  opacity: 0;
 }
 
 .dot.green {
   background: var(--green);
-  animation: pulseGreen 2.2s infinite ease-in-out;
+  box-shadow: 0 0 6px var(--green);
 }
+.dot.green::after { background: var(--green); }
 
 .dot.yellow {
   background: var(--yellow);
-  animation: pulseYellow 2s infinite ease-in-out;
+  box-shadow: 0 0 6px var(--yellow);
 }
+.dot.yellow::after { background: var(--yellow); animation-duration: 1.8s; }
 
 .dot.red {
   background: var(--red);
-  animation: pulseRed 2.5s infinite ease-in-out;
+  box-shadow: 0 0 6px var(--red);
 }
+.dot.red::after { background: var(--red); animation-duration: 2.5s; }
 
 .dot.blue {
   background: var(--blue);
+  box-shadow: 0 0 6px var(--blue);
 }
+.dot.blue::after { background: var(--blue); animation-duration: 3s; }
 
 .dot.gray {
-  background: #94a3b8;
+  background: #64748b;
 }
+.dot.gray::after { display: none; }
 
 .summary-grid {
   display: grid;
@@ -7270,6 +10255,8 @@ input:focus, select:focus, textarea:focus {
   font-size: 12px;
   font-weight: 700;
   word-break: break-word;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Detail Page Layout */
@@ -7343,13 +10330,26 @@ input:focus, select:focus, textarea:focus {
   font-size: 14px;
   font-weight: 700;
   word-break: break-word;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
 }
 
 .controls {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   flex-wrap: wrap;
-  margin-top: 14px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.controls button {
+  flex: 1;
+  min-width: 100px;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 750;
+  border-radius: 11px;
 }
 
 .chat-panel {
@@ -7381,56 +10381,75 @@ input:focus, select:focus, textarea:focus {
 }
 
 .chip {
-  padding: 5px 11px;
+  padding: 5px 12px;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 650;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: var(--text);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  color: var(--muted);
   cursor: pointer;
-  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   user-select: none;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 
 .chip:hover {
-  background: rgba(77, 163, 255, 0.22);
-  border-color: var(--blue);
-  color: #fff;
-  transform: translateY(-1px);
-  box-shadow: 0 0 10px var(--blue-glow);
+  background: rgba(56, 189, 248, 0.16);
+  border-color: rgba(56, 189, 248, 0.5);
+  color: #e0f2fe;
+  transform: translateY(-2px);
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.25), inset 0 1px 0 rgba(255,255,255,0.1);
 }
 
 .chip:active {
-  transform: scale(0.95);
+  transform: scale(0.94) translateY(0);
 }
 
 .copyable {
   cursor: pointer;
-  transition: all 0.18s ease;
+  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .copyable:hover {
-  border-color: var(--blue);
-  background: rgba(77, 163, 255, 0.08);
-  box-shadow: 0 0 8px var(--blue-glow);
+  border-color: rgba(56, 189, 248, 0.5) !important;
+  background: rgba(56, 189, 248, 0.1) !important;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3), 0 0 12px rgba(56, 189, 248, 0.25) !important;
+  transform: translateY(-2px);
 }
 
 .log, .chat-log {
   height: 440px;
   overflow: auto;
-  background: rgba(8, 12, 17, 0.95);
-  border: 1px solid var(--border);
-  border-radius: 11px;
-  padding: 12px;
-  font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+  background: #060911;
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font: 12.5px/1.6 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
   white-space: pre-wrap;
   word-break: break-word;
-  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.5);
+  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.6), 0 4px 16px rgba(0,0,0,0.3);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(56, 189, 248, 0.25) transparent;
+}
+
+.log::-webkit-scrollbar, .chat-log::-webkit-scrollbar {
+  width: 5px;
+}
+.log::-webkit-scrollbar-thumb, .chat-log::-webkit-scrollbar-thumb {
+  background: rgba(56, 189, 248, 0.25);
+  border-radius: 99px;
 }
 
 .line {
-  padding: 2px 0;
+  padding: 3px 8px;
+  border-radius: 5px;
+  transition: background 0.12s ease;
+}
+
+.line:hover {
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .note {
@@ -7441,30 +10460,32 @@ input:focus, select:focus, textarea:focus {
 }
 
 @keyframes toastSlideIn {
-  from { opacity: 0; transform: translateY(16px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: translateY(20px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 .toast {
   position: fixed;
-  right: 18px;
-  bottom: 18px;
+  right: 20px;
+  bottom: 20px;
   display: none;
-  max-width: 380px;
-  padding: 12px 16px;
-  border: 1px solid var(--border-glow);
-  border-radius: 12px;
-  background: rgba(22, 33, 48, 0.95);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  max-width: 400px;
+  padding: 14px 18px 14px 22px;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  border-radius: 14px;
+  background: rgba(10, 18, 32, 0.97);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255,255,255,0.06);
   z-index: 2000;
   font-size: 13px;
   font-weight: 600;
-  animation: toastSlideIn 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  animation: toastSlideIn 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+  border-left: 4px solid var(--blue);
+  line-height: 1.45;
 }
 
-/* Inventory Styles */
+/* Inventory & Equipment Area - AAA Game Standard Architecture */
 .inventory-area {
   display: flex;
   flex-direction: column;
@@ -7495,11 +10516,13 @@ input:focus, select:focus, textarea:focus {
 .inventory-stat .info-value {
   font-size: 14px;
   font-weight: 700;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
 }
 
 .bar {
   width: 100%;
-  height: 9px;
+  height: 10px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.06);
   box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.5);
@@ -7512,16 +10535,28 @@ input:focus, select:focus, textarea:focus {
   height: 100%;
   width: 0;
   transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.bar > span::after, .bar>span::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
+  animation: barShimmer 2.2s ease-in-out infinite;
 }
 
 .health-bar > span, .health-bar>span {
-  background: linear-gradient(90deg, #ff453a, #ff6961);
-  box-shadow: 0 0 10px rgba(255, 69, 58, 0.5);
+  background: linear-gradient(90deg, #ef4444, #f87171);
+  box-shadow: 0 0 12px rgba(239, 68, 68, 0.55);
+  border-radius: 999px;
 }
 
 .hunger-bar > span, .hunger-bar>span {
-  background: linear-gradient(90deg, #e69d00, #ffd60a);
-  box-shadow: 0 0 10px rgba(255, 214, 10, 0.5);
+  background: linear-gradient(90deg, #f59e0b, #fbbf24);
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.55);
+  border-radius: 999px;
 }
 
 .equipment-row {
@@ -7531,47 +10566,15 @@ input:focus, select:focus, textarea:focus {
   margin: 8px 0 14px;
 }
 
-.equipment-slot {
-  min-height: 64px;
-  padding: 8px 4px;
-  border: 1px solid var(--border);
+/* 5 Equipment Slots & 36 Inventory Slots - Single Authoritative Specification */
+.equipment-slot, .inventory-slot {
+  background: linear-gradient(145deg, rgba(18, 27, 44, 0.92), rgba(10, 15, 26, 0.98)) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
   border-radius: 10px;
-  background: rgba(11, 17, 24, 0.85);
-  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.4);
-  text-align: center;
-  font-size: 10px;
-  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.equipment-slot .equip-label, .equip-label {
-  font-size: 8px;
-  color: var(--muted);
-  font-weight: 700;
-  text-transform: uppercase;
-  margin-bottom: 5px;
-}
-
-.equipment-slot.dragover {
-  border-color: var(--green);
-  background: rgba(16, 35, 24, 0.9);
-  box-shadow: 0 0 12px var(--green-glow);
-}
-
-.slot-grid {
-  display: grid;
-  grid-template-columns: repeat(9, minmax(0, 1fr));
-  gap: 6px;
-  margin-top: 10px;
-}
-
-.inventory-slot {
-  min-width: 0;
-  min-height: 60px;
-  padding: 6px 4px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: rgba(11, 17, 24, 0.85);
-  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.4);
+  min-height: 64px !important;
+  position: relative;
+  padding: 8px 6px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 3px 8px rgba(0, 0, 0, 0.4);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -7579,14 +10582,23 @@ input:focus, select:focus, textarea:focus {
   text-align: center;
   cursor: pointer;
   overflow: hidden;
-  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   user-select: none;
 }
 
-.inventory-slot:hover {
-  border-color: var(--blue);
+.equipment-slot:hover, .inventory-slot:hover {
+  border-color: rgba(56, 189, 248, 0.45) !important;
   transform: translateY(-2px);
-  box-shadow: 0 5px 12px rgba(0, 0, 0, 0.4), inset 0 1px 3px rgba(255, 255, 255, 0.08);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5), 0 0 12px rgba(56, 189, 248, 0.15), inset 0 1px 0 rgba(255,255,255,0.1);
+}
+
+.equipment-slot .equip-label, .equip-label {
+  font-size: 8.5px;
+  color: var(--muted);
+  font-weight: 700;
+  text-transform: uppercase;
+  margin-bottom: 5px;
+  letter-spacing: 0.3px;
 }
 
 .inventory-slot:active, .inventory-slot.active {
@@ -7598,60 +10610,119 @@ input:focus, select:focus, textarea:focus {
 }
 
 .inventory-slot.selected {
-  border-color: var(--green);
-  box-shadow: 0 0 12px var(--green-glow), inset 0 0 6px rgba(48, 209, 88, 0.3);
-  background: rgba(16, 33, 23, 0.85);
+  border-color: #34d399 !important;
+  box-shadow: 0 0 16px rgba(52, 211, 153, 0.4), inset 0 0 6px rgba(52, 211, 153, 0.15) !important;
+  background: linear-gradient(145deg, rgba(16, 36, 26, 0.95), rgba(10, 24, 18, 0.98)) !important;
 }
 
-.inventory-slot.dragover, .inventory-slot.selected.dragover {
-  border-color: var(--blue);
-  background: rgba(18, 38, 58, 0.85);
-  box-shadow: 0 0 12px var(--blue-glow);
+.inventory-slot.selected-for-move, .equipment-slot.selected-for-move {
+  outline: 2px solid #fbbf24 !important;
+  border-color: #fbbf24 !important;
+  box-shadow: 0 0 18px rgba(251, 191, 36, 0.6), inset 0 0 8px rgba(251, 191, 36, 0.25) !important;
+  transform: scale(1.04);
+  animation: movePulse 1.5s ease-in-out infinite;
+  z-index: 5;
+}
+
+@keyframes movePulse {
+  0%, 100% { box-shadow: 0 0 12px rgba(251, 191, 36, 0.4), inset 0 0 6px rgba(251, 191, 36, 0.2); }
+  50% { box-shadow: 0 0 22px rgba(251, 191, 36, 0.8), inset 0 0 10px rgba(251, 191, 36, 0.35); }
+}
+
+.touch-move-hint {
+  background: rgba(251, 191, 36, 0.12);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  color: #fbbf24;
+  padding: 8px 14px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.equipment-slot.dragover, .inventory-slot.dragover, .inventory-slot.selected.dragover {
+  border-color: #38bdf8 !important;
+  background: rgba(18, 38, 58, 0.95) !important;
+  box-shadow: 0 0 14px rgba(56, 189, 248, 0.4) !important;
+}
+
+.slot-grid {
+  display: grid;
+  grid-template-columns: repeat(9, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 10px;
 }
 
 .slot-index {
-  color: var(--muted);
-  font-size: 8px;
-  font-weight: 600;
-  margin-bottom: 3px;
+  position: absolute;
+  top: 4px;
+  left: 6px;
+  font-size: 9px;
+  font-weight: 700;
+  color: rgba(148, 163, 184, 0.5);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  line-height: 1;
 }
 
 .slot-name {
-  font-size: 8px;
-  font-weight: 700;
-  line-height: 1.2;
+  font-size: 10px !important;
+  font-weight: 700 !important;
+  color: #f1f5f9 !important;
+  text-align: center;
+  line-height: 1.25;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
   word-break: break-word;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  padding: 0 2px;
 }
 
 .slot-count {
-  font-size: 10px;
+  position: absolute;
+  bottom: 4px;
+  right: 5px;
+  background: rgba(14, 165, 233, 0.22);
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  padding: 1px 5px;
+  border-radius: 5px;
+  font-size: 9.5px;
   font-weight: 800;
-  margin-top: 3px;
-  color: #fff;
+  color: #38bdf8;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
 }
 
-.drop-zone {
+.drop-zone, #dropZone {
   margin-top: 14px;
-  min-height: 50px;
-  border: 2px dashed rgba(255, 255, 255, 0.15);
-  border-radius: 11px;
-  background: rgba(11, 17, 24, 0.5);
-  color: var(--muted);
+  min-height: 52px;
+  border: 2px dashed rgba(239, 68, 68, 0.35);
+  border-radius: 12px;
+  background: rgba(22, 12, 16, 0.6);
+  color: #fca5a5;
   display: flex;
   align-items: center;
   justify-content: center;
   text-align: center;
   padding: 10px;
   font-size: 12px;
-  font-weight: 600;
-  transition: all 0.2s;
+  font-weight: 700;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.drop-zone.dragover {
-  border-color: var(--red);
-  background: rgba(45, 18, 20, 0.8);
-  color: var(--text);
-  box-shadow: 0 0 14px var(--red-glow);
+.drop-zone:hover, .drop-zone.dragover, .drop-zone.drag-over, #dropZone:hover, #dropZone.drag-over {
+  border-color: #ef4444 !important;
+  background: rgba(35, 12, 18, 0.8) !important;
+  box-shadow: 0 0 20px rgba(239, 68, 68, 0.25) !important;
+  color: #fff;
 }
 
 .position-value, .revision {
@@ -7702,10 +10773,45 @@ input:focus, select:focus, textarea:focus {
   border-color: rgba(255, 255, 255, 0.1);
 }
 
-.check-row input {
-  width: auto;
-  accent-color: var(--blue);
+.check-row input[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 38px;
+  height: 22px;
+  min-width: 38px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  position: relative;
   cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  padding: 0;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4);
+  flex-shrink: 0;
+}
+
+.check-row input[type="checkbox"]::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.check-row input[type="checkbox"]:checked {
+  background: linear-gradient(135deg, #10b981, #0ea5e9);
+  border-color: rgba(16, 185, 129, 0.6);
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.35), inset 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.check-row input[type="checkbox"]:checked::after {
+  left: calc(100% - 19px);
 }
 
 .schedule-list {
@@ -8115,11 +11221,12 @@ input:focus, select:focus, textarea:focus {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 12px;
   background: linear-gradient(135deg, rgba(16, 24, 38, 0.75) 0%, rgba(10, 16, 26, 0.85) 100%);
-  border: 1px solid rgba(77, 163, 255, 0.15);
+  border: 1px solid rgba(56, 189, 248, 0.2);
   border-radius: 14px;
   padding: 14px 18px;
   margin-bottom: 18px;
-  backdrop-filter: blur(12px);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
@@ -8127,29 +11234,32 @@ input:focus, select:focus, textarea:focus {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 6px 10px;
+  padding: 8px 12px;
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.02);
-  border: 1px solid rgba(255, 255, 255, 0.04);
-  transition: all 0.2s ease;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .fleet-res-item:hover {
-  background: rgba(255, 255, 255, 0.04);
-  border-color: rgba(77, 163, 255, 0.25);
-  transform: translateY(-1px);
+  background: rgba(56, 189, 248, 0.06);
+  border-color: rgba(56, 189, 248, 0.3);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3);
 }
 
 .fleet-res-icon {
-  font-size: 22px;
+  font-size: 20px;
   display: flex;
   align-items: center;
   justify-content: center;
   width: 40px;
   height: 40px;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.05);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+  background: rgba(56, 189, 248, 0.08);
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.15);
   flex-shrink: 0;
 }
 
@@ -8163,6 +11273,7 @@ input:focus, select:focus, textarea:focus {
 }
 
 .fleet-res-val {
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
   font-size: 15px;
   font-weight: 800;
   color: var(--text);
@@ -8261,15 +11372,41 @@ input:focus, select:focus, textarea:focus {
   display: flex;
   width: min(1080px, 96vw);
   max-height: 90vh;
-  background: linear-gradient(145deg, rgba(11, 19, 38, 0.95) 0%, rgba(6, 15, 28, 0.97) 100%);
-  border: 1px solid rgba(56, 189, 248, 0.28);
+  background: rgba(10, 18, 32, 0.95);
+  border: 1px solid rgba(56, 189, 248, 0.35);
   border-radius: 26px;
-  box-shadow: 0 35px 80px rgba(0, 0, 0, 0.85), 0 0 50px rgba(16, 185, 129, 0.12);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
+  box-shadow: 0 35px 80px rgba(0, 0, 0, 0.85), 0 0 50px rgba(56, 189, 248, 0.12), inset 0 1px 0 rgba(255,255,255,0.1);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
   overflow: hidden;
   position: relative;
-  animation: modalZoomIn 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+  animation: modalSpringIn 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.kbot-portal-wrapper::before {
+  content: '';
+  position: absolute;
+  top: -40%;
+  left: -20%;
+  width: 500px;
+  height: 500px;
+  background: radial-gradient(circle, rgba(56, 189, 248, 0.15) 0%, transparent 70%);
+  filter: blur(60px);
+  pointer-events: none;
+  z-index: 0;
+  animation: auroraFloat 18s ease-in-out infinite alternate;
+}
+.kbot-portal-wrapper::after {
+  content: '';
+  position: absolute;
+  bottom: -40%;
+  right: -20%;
+  width: 500px;
+  height: 500px;
+  background: radial-gradient(circle, rgba(16, 185, 129, 0.12) 0%, transparent 70%);
+  filter: blur(60px);
+  pointer-events: none;
+  z-index: 0;
+  animation: auroraFloat 22s ease-in-out infinite alternate-reverse;
 }
 
 @media (max-width: 920px) {
@@ -8284,6 +11421,8 @@ input:focus, select:focus, textarea:focus {
   flex: 1.25;
   padding: 32px 30px;
   overflow-y: auto;
+  position: relative;
+  z-index: 1;
   border-right: 1px solid rgba(255, 255, 255, 0.07);
   background: radial-gradient(circle at 10% 20%, rgba(16, 185, 129, 0.08) 0%, transparent 60%);
 }
@@ -8302,6 +11441,8 @@ input:focus, select:focus, textarea:focus {
   display: flex;
   align-items: center;
   justify-content: center;
+  position: relative;
+  z-index: 1;
   background: rgba(15, 23, 42, 0.45);
 }
 
@@ -8327,7 +11468,16 @@ input:focus, select:focus, textarea:focus {
   border-radius: 50%;
   background: #10b981;
   box-shadow: 0 0 8px #10b981;
-  animation: pulseGreen 1.8s infinite;
+  position: relative;
+  flex-shrink: 0;
+}
+.kbot-pulse-dot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #10b981;
+  animation: sonarPulse 2s ease-out infinite;
 }
 
 .kbot-landing-title {
@@ -8341,9 +11491,11 @@ input:focus, select:focus, textarea:focus {
 
 .kbot-gradient-text {
   display: block;
-  background: linear-gradient(135deg, #34d399 0%, #38bdf8 100%);
+  background: linear-gradient(135deg, #34d399 0%, #38bdf8 50%, #818cf8 100%);
+  background-size: 200% auto;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
+  animation: textShine 6s linear infinite;
 }
 
 .kbot-landing-desc {
@@ -8426,15 +11578,17 @@ input:focus, select:focus, textarea:focus {
   align-items: flex-start;
   gap: 10px;
   background: rgba(255, 255, 255, 0.025);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 10px;
-  padding: 8px 12px;
-  transition: all 0.2s ease;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  padding: 10px 14px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .kbot-benefit-card:hover {
-  background: rgba(56, 189, 248, 0.06);
-  border-color: rgba(56, 189, 248, 0.25);
-  transform: translateX(3px);
+  background: rgba(56, 189, 248, 0.07);
+  border-color: rgba(56, 189, 248, 0.3);
+  transform: translateX(4px) translateY(-1px);
+  box-shadow: 0 8px 24px rgba(56, 189, 248, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 .kbot-benefit-icon {
   font-size: 18px;
@@ -8527,7 +11681,7 @@ input:focus, select:focus, textarea:focus {
 }
 
 /* ==========================================================================
-   V11.6 COMMERCIAL ENTERPRISE EDITION — GLOBAL NAV, OVERLAYS & FULL PAGE SECTIONS
+   V11.7 COMMERCIAL ENTERPRISE EDITION — GLOBAL NAV, OVERLAYS & FULL PAGE SECTIONS
    ========================================================================== */
 
 /* Account Restriction Blur & Overlays */
@@ -8667,11 +11821,11 @@ input:focus, select:focus, textarea:focus {
   justify-content: space-between;
   align-items: center;
   padding: 8px 16px;
-  background: rgba(10, 15, 30, 0.95);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background: rgba(10, 15, 30, 0.92);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
   border-bottom: 1px solid rgba(56, 189, 248, 0.2);
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
   box-sizing: border-box;
 }
 .global-header-left {
@@ -8729,10 +11883,10 @@ input:focus, select:focus, textarea:focus {
   color: #fff;
 }
 .nav-pill-btn.active {
-  background: #0284c7;
-  border-color: #38bdf8;
+  background: linear-gradient(135deg, #0ea5e9, #2563eb);
+  border-color: rgba(56, 189, 248, 0.6);
   color: #fff;
-  box-shadow: 0 0 12px rgba(56, 189, 248, 0.4);
+  box-shadow: 0 0 14px rgba(14, 165, 233, 0.45);
 }
 .global-header-right {
   display: flex;
@@ -8935,7 +12089,7 @@ input:focus, select:focus, textarea:focus {
   margin-top: 6px;
 }
 .quick-renew-btn {
-  padding: 3px 7px;
+  padding: 4px 8px;
   border-radius: 6px;
   background: rgba(56, 189, 248, 0.12);
   border: 1px solid rgba(56, 189, 248, 0.3);
@@ -8943,12 +12097,17 @@ input:focus, select:focus, textarea:focus {
   font-size: 11px;
   font-weight: 750;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .quick-renew-btn:hover {
   background: #0284c7;
   color: #fff;
   border-color: #38bdf8;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(56, 189, 248, 0.3);
+}
+.quick-renew-btn:active {
+  transform: translateY(0);
 }
 .quick-renew-btn.minus {
   background: rgba(239, 68, 68, 0.12);
@@ -8958,6 +12117,8 @@ input:focus, select:focus, textarea:focus {
 .quick-renew-btn.minus:hover {
   background: #ef4444;
   color: #fff;
+  border-color: #f87171;
+  box-shadow: 0 2px 8px rgba(239, 68, 68, 0.3);
 }
 .quick-renew-btn.vip {
   background: rgba(234, 179, 8, 0.15);
@@ -8965,8 +12126,10 @@ input:focus, select:focus, textarea:focus {
   color: #eab308;
 }
 .quick-renew-btn.vip:hover {
-  background: #eab308;
+  background: linear-gradient(135deg, #eab308, #ca8a04);
   color: #000;
+  border-color: #fde047;
+  box-shadow: 0 2px 8px rgba(234, 179, 8, 0.4);
 }
 .quick-renew-btn.custom {
   background: rgba(148, 163, 184, 0.15);
@@ -8976,6 +12139,7 @@ input:focus, select:focus, textarea:focus {
 .quick-renew-btn.custom:hover {
   background: rgba(255, 255, 255, 0.2);
   color: #fff;
+  border-color: rgba(255, 255, 255, 0.4);
 }
 .bot-check-item.bot-occupied {
   opacity: 0.65;
@@ -9128,6 +12292,28 @@ input:focus, select:focus, textarea:focus {
   .slot-index, .slot-name, .equip-label, .vital-label, .summary-label {
     font-size: 11px;
   }
+}
+
+/* Technical data: monospace tabular numbers */
+.vital-val, .bot-id-chip, .kpi-value, .position-value, .revision,
+.bot-ip-pill, .vip-pill, .platform-pill, .ram-pill,
+.slot-count, .slot-name, .slot-index {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible {
+  outline: 2px solid var(--cyan) !important;
+  outline-offset: 2px !important;
 }
 
 </style>
@@ -9327,7 +12513,8 @@ input:focus, select:focus, textarea:focus {
 
         <div style="margin-top:14px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.06);font-size:11.5px;color:var(--muted);line-height:1.5;">
           • Quản trị viên: Đăng nhập tài khoản <code>admin</code>.<br/>
-          • Khách mới: Tự đăng ký tài khoản (tặng 1 ngày dùng thử hoặc nhập Key).
+          • Khách mới: Tự đăng ký tài khoản (tặng 1 ngày dùng thử hoặc nhập Key).<br/>
+          • Tài khoản hết hạn: Đăng nhập để nạp Key hoặc vượt link nhận +12h miễn phí.
         </div>
       </div>
     </div>
@@ -9369,6 +12556,14 @@ input:focus, select:focus, textarea:focus {
       </div>
       <div id="expiredKeyAlert" class="login-alert hidden" style="margin-top:8px;"></div>
     </div>
+
+    <!-- LINK4M REWARD BOX FOR EXPIRED ACCOUNTS -->
+    <div style="margin:12px 0 14px;padding:14px;background:rgba(56,189,248,0.08);border:1px solid rgba(56,189,248,0.25);border-radius:10px;text-align:center;">
+      <div style="font-size:12.5px;color:#cbd5e1;margin-bottom:8px;font-weight:600;">Chưa có Key? Bạn có thể nhận ngay 12h dùng thử miễn phí:</div>
+      <button type="button" id="btnExpiredLink4mReward" class="primary" onclick="startLink4mReward(this)" style="display:inline-flex;align-items:center;gap:6px;padding:9px 18px;font-weight:800;background:linear-gradient(135deg, #0284c7 0%, #0369a1 100%);box-shadow:0 0 15px rgba(2,132,199,0.35);cursor:pointer;">
+        <span>⚡</span> Vượt link +12h hồi sinh tài khoản <span id="expiredLink4mUsageBadge" style="font-size:11px;background:rgba(0,0,0,0.35);padding:2px 6px;border-radius:4px;margin-left:4px;">0/2 lượt</span>
+      </button>
+    </div>
     <div class="restriction-actions">
       <a href="https://discord.gg/mJWX5Xp3z" target="_blank" rel="noopener noreferrer" class="btn-discord">
         💬 Vào Discord KingMC Gia Hạn
@@ -9387,7 +12582,7 @@ input:focus, select:focus, textarea:focus {
       <div class="global-header-brand" onclick="navigateTo('dashboard')">
         <span class="global-logo">👑</span>
         <span class="global-brand-text">KBOT</span>
-        <span class="vip-pill-mini">V11.6 PRO</span>
+        <span class="vip-pill-mini">V11.8 PRO</span>
       </div>
       <nav class="global-nav-pills">
         <button type="button" class="nav-pill-btn active" id="navPillHome" onclick="navigateTo('dashboard')">
@@ -9500,7 +12695,7 @@ input:focus, select:focus, textarea:focus {
       <div class="fleet-welcome-text">
         <div class="fleet-welcome-title-wrap">
           <h1 class="fleet-welcome-title">👋 Bảng Điều Khiển Hạm Đội Bot</h1>
-          <span class="vip-pill">👑 KBOT V11.6 PRO</span>
+          <span class="vip-pill">👑 KBOT V11.8 PRO</span>
           <span id="userRoleBadge" class="vip-pill" style="background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.3);">🔒 CHƯA ĐĂNG NHẬP</span>
           <span class="platform-pill">⚡ RENDER CLOUD</span>
           <span class="ram-pill">📊 RAM: <strong id="managerRamUsage">-- MB</strong></span>
@@ -9512,6 +12707,7 @@ input:focus, select:focus, textarea:focus {
         <button id="btnAnnouncementAdmin" class="admin-only" onclick="openAnnouncementAdminModal()">📢 Thông Báo User</button>
         <button class="admin-only" onclick="openBatchSettingsModal()">⚙ Đồng Bộ Setting</button>
         <button class="admin-only" onclick="openAdminModal()">🔑 Mật Khẩu Bot</button>
+        <button class="secondary admin-only" onclick="openSupabaseModal()" title="Mở trung tâm sao lưu & phục hồi dữ liệu Supabase Cloud">☁️ Supabase Cloud</button>
       </div>
     </div>
 
@@ -9530,7 +12726,10 @@ input:focus, select:focus, textarea:focus {
           </div>
         </div>
       </div>
-      <div style="display:flex;align-items:center;gap:8px;">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <button id="btnUserLink4mReward" class="small secondary" onclick="startLink4mReward(this)" style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;font-weight:700;color:#38bdf8;border-color:rgba(56,189,248,0.4);background:rgba(56,189,248,0.12);" title="Vượt link quảng cáo để nhận thêm 12 giờ sử dụng">
+          <span>⚡</span> Vượt link +12h <span id="link4mUsageBadge" style="font-size:11px;background:rgba(56,189,248,0.25);padding:2px 6px;border-radius:4px;color:#fff;">0/2 lượt</span>
+        </button>
         <button class="small primary" onclick="openRenewModal()" style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;font-weight:600;">
           <span>🎁</span> Nạp Key Gia Hạn
         </button>
@@ -9635,6 +12834,7 @@ input:focus, select:focus, textarea:focus {
         <button id="allStopButton" class="danger" onclick="runAllAction('stop')">⏹ Dừng tất cả</button>
         <button id="allRestartButton" class="small" onclick="runAllAction('restart')">↻ Chạy lại tất cả</button>
         <button class="small warning-btn" onclick="reconnectOfflineBots()" title="Chỉ kết nối lại các bot đang Offline hoặc Kicked">⚡ Reconnect lỗi</button>
+        <button id="btnCleanDeadBots" class="small danger-btn admin-only" onclick="cleanDeadBots()" title="Tự động phát hiện và dọn dẹp các bot chết (404/Unreachable)">🧹 Dọn bot chết</button>
       </div>
       <div class="fleet-toolbar-tools">
         <button class="small" onclick="openBroadcastModal()" title="Bắn lệnh hàng loạt tới toàn bộ bot">📡 Broadcast</button>
@@ -9691,7 +12891,7 @@ input:focus, select:focus, textarea:focus {
         </div>
       </div>
       <div class="detail-hud" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-        <span class="vip-pill">👑 KBOT V11.6 PRO</span>
+        <span class="vip-pill">👑 KBOT V11.8 PRO</span>
         <span id="detailUserRoleBadge" class="vip-pill" style="background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.3);">🔒 CHƯA ĐĂNG NHẬP</span>
         <span class="platform-pill">⚡ RENDER CLOUD</span>
         <span class="ram-pill">📊 RAM: <strong id="detailManagerRamUsage">-- MB</strong></span>
@@ -9794,18 +12994,18 @@ input:focus, select:focus, textarea:focus {
 
         <div class="info-label">EQUIPMENT / OFFHAND</div>
         <div class="equipment-row">
-          <div id="equipHeadBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'head')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'head')" ondblclick="unequipDetail('head')"><div class="equip-label">HEAD</div><div id="equipHead">-</div></div>
-          <div id="equipTorsoBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'torso')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'torso')" ondblclick="unequipDetail('torso')"><div class="equip-label">CHEST</div><div id="equipTorso">-</div></div>
-          <div id="equipLegsBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'legs')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'legs')" ondblclick="unequipDetail('legs')"><div class="equip-label">LEGS</div><div id="equipLegs">-</div></div>
-          <div id="equipFeetBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'feet')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'feet')" ondblclick="unequipDetail('feet')"><div class="equip-label">FEET</div><div id="equipFeet">-</div></div>
-          <div id="equipOffhandBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'off-hand')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'off-hand')" ondblclick="unequipDetail('off-hand')"><div class="equip-label">OFFHAND</div><div id="equipOffhand">-</div></div>
+          <div id="equipHeadBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'head')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'head')" onclick="handleDetailEquipmentClick('head')" ondblclick="unequipDetail('head')"><div class="equip-label">HEAD</div><div id="equipHead">-</div></div>
+          <div id="equipTorsoBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'torso')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'torso')" onclick="handleDetailEquipmentClick('torso')" ondblclick="unequipDetail('torso')"><div class="equip-label">CHEST</div><div id="equipTorso">-</div></div>
+          <div id="equipLegsBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'legs')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'legs')" onclick="handleDetailEquipmentClick('legs')" ondblclick="unequipDetail('legs')"><div class="equip-label">LEGS</div><div id="equipLegs">-</div></div>
+          <div id="equipFeetBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'feet')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'feet')" onclick="handleDetailEquipmentClick('feet')" ondblclick="unequipDetail('feet')"><div class="equip-label">FEET</div><div id="equipFeet">-</div></div>
+          <div id="equipOffhandBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'off-hand')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'off-hand')" onclick="handleDetailEquipmentClick('off-hand')" ondblclick="unequipDetail('off-hand')"><div class="equip-label">OFFHAND</div><div id="equipOffhand">-</div></div>
         </div>
 
         <div class="info-label">INVENTORY 27 SLOTS</div>
         <div id="detailInventory" class="slot-grid"></div>
         <div class="info-label" style="margin-top:12px;">HOTBAR 9 SLOTS</div>
         <div id="detailHotbar" class="slot-grid"></div>
-        <div id="detailDropZone" class="drop-zone" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropDetailItemToWorld(event)">Kéo item vào đây để vứt</div>
+        <div id="detailDropZone" class="drop-zone" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropDetailItemToWorld(event)" onclick="handleDetailDropZoneClick()">Kéo item vào đây để vứt</div>
         <div id="detailInventoryRevision" class="note">revision 0</div>
       </div>
 
@@ -9818,6 +13018,9 @@ input:focus, select:focus, textarea:focus {
           <label class="check-row"><input id="detailSettingAntiHungry" type="checkbox"> <span>Anti Hungry / Auto Eat</span></label>
           <label class="check-row"><input id="detailSettingAutoReconnect" type="checkbox"> <span>Auto Reconnect + LOGIN/DN/MENU</span></label>
           <label class="check-row"><input id="detailSettingAntiAfkKick" type="checkbox"> <span>Smart Anti-AFK Kick (Xoay đầu, vung tay nhẹ)</span></label>
+          <label for="detailSpawnCommands" style="display:block;font-size:12px;font-weight:600;margin-top:6px;">⚡ Spawn Commands (lệnh chạy khi vào AFK, phân tách bằng ; hoặc xuống dòng)</label>
+          <textarea id="detailSpawnCommands" rows="3" style="width:100%;box-sizing:border-box;border-radius:6px;padding:6px 8px;font-family:monospace;font-size:12px;background:rgba(15,23,42,0.6);border:1px solid var(--border);resize:vertical;" placeholder="/server town;&#10;/fly;&#10;/home afk" oninput="markDetailSettingsDirty()"></textarea>
+          <div class="note" style="margin-top:4px;">Nếu hiển thị ******** nghĩa là tài khoản của bạn không có quyền đổi tài khoản Minecraft — giữ nguyên để không thay đổi cấu hình.</div>
         </div>
         <button id="saveDetailSettingsButton" class="primary" onclick="saveDetailSettings()">Lưu setting</button>
       </div>
@@ -9866,8 +13069,8 @@ input:focus, select:focus, textarea:focus {
         <div class="note">Áp dụng ngay cho bot. Bấm "Lưu & Chạy lại ngay" để bot đăng nhập tài khoản mới lập tức.</div>
       </div>
 
-      <!-- PANEL CẤU HÌNH PROXY RIÊNG CỦA TỪNG BOT -->
-      <div class="panel" id="detailProxyPanel">
+      <!-- PANEL CẤU HÌNH PROXY RIÊNG CỦA TỪNG BOT (BUG-19) -->
+      <div class="panel admin-only" id="detailProxyPanel">
         <div class="chat-title-row">
           <h3>🌐 Cấu hình Proxy Riêng</h3>
           <span id="detailProxyBadge" class="capacity-badge" style="background:var(--border);color:var(--muted);">TẮT</span>
@@ -9940,6 +13143,17 @@ input:focus, select:focus, textarea:focus {
             <input type="number" id="trialDaysInput" min="1" max="365" value="1" title="Số ngày dùng thử tặng khi đăng ký tài khoản mới" style="width:52px;padding:3px 6px;font-size:12px;border-radius:4px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);text-align:center;" onchange="saveTrialDaysSetting()">
             <span style="font-size:11px;">ngày</span>
           </label>
+        </div>
+
+        <!-- CỤM CẤU HÌNH VƯỢT LINK +12H (ADMIN) -->
+        <div class="admin-only" style="display:inline-flex;align-items:center;gap:6px;background:rgba(15,23,42,0.6);border:1px solid rgba(234,179,8,0.35);border-radius:8px;padding:3px 8px;">
+          <button id="link4mToggleBtn" class="small" onclick="toggleLink4mSetting()" title="Bật/Tắt tính năng vượt link Link4M nhận +12h" style="background:transparent;border:none;color:#facc15;font-weight:700;padding:2px 4px;cursor:pointer;">
+            <span id="link4mBtnLabel">⚡ Vượt Link +12h:</span> <span id="link4mStatusBadge">TẮT</span>
+          </button>
+          <span style="color:var(--border);">|</span>
+          <button type="button" class="small" onclick="openLink4mConfigModal()" title="Cấu hình Link rút gọn hoặc API Token Link4M" style="background:rgba(234,179,8,0.15);border:1px solid rgba(234,179,8,0.3);color:#facc15;padding:2px 8px;border-radius:5px;cursor:pointer;font-weight:600;">
+            ⚙ Cấu hình Link
+          </button>
         </div>
         <button class="primary" onclick="openCreateUserModal()">＋ Thêm Người Dùng Mới</button>
         <button class="secondary" onclick="switchUserMgmtSubTab('keys')">🎟️ Quản Lý Key</button>
@@ -10232,6 +13446,72 @@ input:focus, select:focus, textarea:focus {
   </div>
 </div>
 
+
+<!-- MODAL CẤU HÌNH LINK4M (ADMIN) -->
+<div id="link4mSettingsModal" class="modal hidden">
+  <div class="modal-card" style="max-width:540px;width:100%;box-sizing:border-box;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:10px;">
+      <h3 style="margin:0;color:#facc15;display:flex;align-items:center;gap:8px;">⚡ Cài Đặt Vượt Link +12h (Link4M)</h3>
+      <button type="button" class="small" onclick="closeLink4mConfigModal()">✕</button>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:14px;font-size:13px;">
+      <div style="padding:10px 12px;background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.4);border-radius:8px;color:#fca5a5;font-size:12px;line-height:1.5;">
+        ⚠️ <strong>LƯU Ý QUY ĐỊNH LINK4M (INCENTIVIZED TRAFFIC):</strong><br>
+        Chính sách của Link4M cấm lưu lượng truy cập có thưởng trừ khi được thỏa thuận và phê duyệt trước. Vui lòng đảm bảo bạn đã xin phép Link4M và cấu hình <strong>Khóa bí mật Webhook Postback</strong> để hệ thống chỉ cộng giờ khi nhận tín hiệu hoàn tất thực sự từ server Link4M.
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:rgba(15,23,42,0.6);border:1px solid var(--border);border-radius:8px;">
+        <div>
+          <strong style="color:var(--text);display:block;">Bật tính năng Vượt Link:</strong>
+          <span style="font-size:11.5px;color:var(--muted);">Cho phép khách thuê tự vượt link nhận +12h vào tài khoản</span>
+        </div>
+        <input type="checkbox" id="link4mModalEnabled" style="width:20px;height:20px;cursor:pointer;">
+      </div>
+
+      <div>
+        <label style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Chế độ tạo liên kết:</label>
+        <select id="link4mModalMode" style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);" onchange="updateLink4mModalFields()">
+          <option value="custom_url">🔗 Link Rút Gọn Cố Định (Admin tự tạo link dán vào)</option>
+          <option value="api">🤖 Tự Động Gọi API Link4M (Tạo link động cho từng lượt)</option>
+        </select>
+      </div>
+
+      <div id="link4mCustomUrlGroup">
+        <label style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Đường dẫn Link rút gọn gán vào:</label>
+        <input type="text" id="link4mModalUrl" placeholder="Ví dụ: https://link4m.co/abcxyz" style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
+        <span style="font-size:11.5px;color:var(--muted);display:block;margin-top:4px;">Khi người dùng bấm vượt link, hệ thống sẽ mở link này.</span>
+      </div>
+
+      <div id="link4mApiTokenGroup" style="display:none;">
+        <label style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Link4M Publisher API Token:</label>
+        <input type="text" id="link4mModalApiToken" placeholder="Nhập API Token từ tài khoản Link4M của bạn..." style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
+        <span style="font-size:11.5px;color:var(--muted);display:block;margin-top:4px;">Backend sẽ tự gọi https://link4m.co/api để rút gọn link trả thưởng động.</span>
+      </div>
+
+      <div style="display:flex;gap:12px;">
+        <div style="flex:1;">
+          <label style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Số giờ cộng mỗi lượt:</label>
+          <input type="number" id="link4mModalHours" min="1" max="48" value="12" style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
+        </div>
+        <div style="flex:1;">
+          <label style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Giới hạn lượt / ngày (VN):</label>
+          <input type="number" id="link4mModalDailyLimit" min="1" max="10" value="2" style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
+        </div>
+      </div>
+
+      <div>
+        <label style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Khóa bí mật Webhook Postback (Tùy chọn):</label>
+        <input type="text" id="link4mModalSecretKey" placeholder="Để trống nếu không dùng server postback..." style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
+      </div>
+    </div>
+
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;border-top:1px solid var(--border);padding-top:12px;">
+      <button type="button" class="secondary" onclick="closeLink4mConfigModal()">Đóng</button>
+      <button type="button" class="primary" onclick="saveLink4mConfigModal()">💾 Lưu Cài Đặt</button>
+    </div>
+  </div>
+</div>
+
 <!-- MODAL TÙY CHỈNH HẠN THUÊ USER (ADMIN) -->
 <div id="customRenewModal" class="modal hidden">
   <div class="modal-card" style="max-width:440px;">
@@ -10333,6 +13613,19 @@ input:focus, select:focus, textarea:focus {
     <div class="form-row admin-only" style="margin-bottom:10px;">
       <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">Web URL bot con</label>
       <input id="editBotUrl" placeholder="https://kbot-instance.onrender.com" autocomplete="off" style="width:100%;box-sizing:border-box;">
+    </div>
+    <div class="form-row admin-only" style="margin-bottom:10px;">
+      <label style="display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">
+        <span>Khóa bảo mật Worker (Secret Key)</span>
+        <small style="color:var(--muted);font-weight:normal;">Bỏ trống để dùng mặc định</small>
+      </label>
+      <div style="position:relative;display:flex;align-items:center;">
+        <input id="editBotSecretKey" type="password" placeholder="Khóa kết nối Service-to-Service nội bộ..." autocomplete="off" style="width:100%;box-sizing:border-box;padding-right:60px;">
+        <button type="button" class="small" onclick="toggleEditSecretKeyVisibility()" style="position:absolute;right:4px;padding:3px 8px;font-size:11px;">Hiện</button>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:3px;">
+        Cần khớp với <code>BOT_SECRET_KEY</code> của worker trên Render để khắc phục lỗi lệch key (409).
+      </div>
     </div>
     <div class="form-row" style="margin-bottom:12px;">
       <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">🏷️ Nhóm Tags (ngăn cách bởi dấu phẩy)</label>
@@ -10699,7 +13992,7 @@ input:focus, select:focus, textarea:focus {
     <div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:12px;border-bottom:1px solid rgba(255,255,255,0.08);">
       <div>
         <h3 style="margin:0;display:flex;align-items:center;gap:8px;">📜 Nhật Ký Cập Nhật & Lịch Sử Phiên Bản</h3>
-        <div style="color:var(--muted);font-size:11.5px;margin-top:2px;">Hành trình tối ưu và nâng cấp KingMC Sentinel (V1.0 - V11.3 Pure Render)</div>
+        <div style="color:var(--muted);font-size:11.5px;margin-top:2px;">Hành trình tối ưu và nâng cấp KingMC Sentinel (V1.0 - V11.8 Pure Render)</div>
       </div>
       <button class="small" onclick="closeChangelogModal()">✕</button>
     </div>
@@ -11121,15 +14414,15 @@ input:focus, select:focus, textarea:focus {
 <div class="app-footer">
   <div class="footer-recent-wrap">
     <div class="footer-recent-left">
-      <span class="footer-recent-tag">🚀 KBOT V11.7 COMMERCIAL ENTERPRISE</span>
+      <span class="footer-recent-tag">🚀 KBOT V11.8 COMMERCIAL ENTERPRISE</span>
       <span class="footer-recent-desc">Nền Tảng Cho Thuê Bot AFK KingMC Thương Mại Số 1 • Pure Render Native • Zero Bandwidth Waste • 99.9% Uptime.</span>
     </div>
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-      <a href="https://discord.gg/kingmc" target="_blank" rel="noopener noreferrer" class="footer-discord-btn" title="Tham gia máy chủ Discord hỗ trợ KingMC">
+      <a href="https://discord.gg/mJWX5Xp3z" target="_blank" rel="noopener noreferrer" class="footer-discord-btn" title="Tham gia máy chủ Discord hỗ trợ KingMC">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994.021-.041.001-.09-.041-.106a13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.929 1.793 8.18 1.793 12.061 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.894.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.028zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
         Discord
       </a>
-      <button class="footer-changelog-btn" onclick="openChangelogModal()">📜 Xem Lịch Sử Cập Nhật (V1.0 - V11.7)</button>
+      <button class="footer-changelog-btn" onclick="openChangelogModal()">📜 Xem Lịch Sử Cập Nhật (V1.0 - V11.8)</button>
     </div>
   </div>
   <div class="footer-copy">© 2026 KBOT — Hệ Thống Cho Thuê Bot AFK KingMC Thương Mại Cao Cấp. All rights reserved.</div>
@@ -11235,9 +14528,12 @@ function normalizeClientBotUrl(value) {
 }
 
 function setDetailSettingsDisabled(disabled) {
-  document.querySelectorAll('#detailSettingEcoMode, #detailSettingAutoTotem, #detailSettingAntiHungry, #detailSettingAutoReconnect, #detailSettingAntiAfkKick, #saveDetailSettingsButton')
+  document.querySelectorAll('#detailSettingEcoMode, #detailSettingAutoTotem, #detailSettingAntiHungry, #detailSettingAutoReconnect, #detailSettingAntiAfkKick, #detailSpawnCommands, #saveDetailSettingsButton')
     .forEach(el => { el.disabled = !!disabled; });
 }
+
+// BUG-24: Detail settings giờ có field Spawn Commands; textarea input phải bật cờ dirty.
+function markDetailSettingsDirty() { detailSettingsDirty = true; }
 
 function setDetailAutoChatDisabled(disabled) {
   document.querySelectorAll('#detailAutoChatPanel button, #detailAutoChatPanel input, #detailAutoChatPanel select, #detailAutoChatPanel textarea')
@@ -11266,7 +14562,7 @@ document.addEventListener('input',event=>{
     detailBotScheduleDirty=true;
     return;
   }
-  if(['detailSettingEcoMode','detailSettingAutoTotem','detailSettingAntiHungry','detailSettingAutoReconnect','detailSettingAntiAfkKick'].includes(event.target?.id)){
+  if(['detailSettingEcoMode','detailSettingAutoTotem','detailSettingAntiHungry','detailSettingAutoReconnect','detailSettingAntiAfkKick','detailSpawnCommands'].includes(event.target?.id)){
     detailSettingsDirty=true;
   }
 });
@@ -11279,34 +14575,61 @@ document.addEventListener('change',event=>{
     detailBotScheduleDirty=true;
     return;
   }
-  if(['detailSettingEcoMode','detailSettingAutoTotem','detailSettingAntiHungry','detailSettingAutoReconnect','detailSettingAntiAfkKick'].includes(event.target?.id)){
+  if(['detailSettingEcoMode','detailSettingAutoTotem','detailSettingAntiHungry','detailSettingAutoReconnect','detailSettingAntiAfkKick','detailSpawnCommands'].includes(event.target?.id)){
     detailSettingsDirty=true;
   }
 });
 
-function statusMeta(status, available=true, manuallyStopped=false) {
-  if (!available) return ['red','UNREACHABLE'];
+function statusMeta(status, available=true, manuallyStopped=false, bot=null) {
+  if (!available) {
+    const httpStatus = bot?.httpStatus;
+    const isSecretMismatch = !!(bot?.secretMismatch || httpStatus === 409 || String(bot?.lastError || bot?.error || '').includes('409') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('secret') || String(bot?.lastError || bot?.error || '').includes('khóa') || String(bot?.lastError || bot?.error || '').includes('lệch key'));
+    if (isSecretMismatch) {
+      return ['orange', 'Lệch Secret Key (409)', 'secret_mismatch'];
+    }
+    const isSleep = !!(httpStatus === 503 || httpStatus === 502 || bot?.status === 'waking' || String(bot?.lastError || bot?.error || '').includes('503') || String(bot?.lastError || bot?.error || '').includes('502') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('sleep') || String(bot?.lastError || bot?.error || '').includes('ngủ') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('timeout') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('waking'));
+    if (isSleep) {
+      return ['purple', 'Render Sleep / Timeout (503)', 'render_sleep'];
+    }
+    const isNotFound = !!(httpStatus === 404 || String(bot?.lastError || bot?.error || '').includes('404') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('not found') || String(bot?.lastError || bot?.error || '').includes('không tồn tại'));
+    if (isNotFound) {
+      return ['red', 'URL không tồn tại (404)', 'not_found'];
+    }
+    return ['red', 'Mất kết nối / Unreachable', 'unreachable'];
+  }
   if (manuallyStopped && (status === 'offline' || status === 'kicked' || status === 'stopped')) {
-    return ['gray', 'STOPPED'];
+    return ['gray', 'STOPPED', 'stopped'];
   }
   const map={
-    online:['green','ONLINE'],
-    afk:['green','AFK'],
-    connecting:['yellow','CONNECTING'],
-    authenticating:['blue','AUTH'],
-    entering:['blue','ENTERING SERVER'],
-    kicked:['red','KICKED'],
-    offline:['red','OFFLINE']
+    online:['green','ONLINE','online'],
+    afk:['green','AFK','afk'],
+    connecting:['yellow','CONNECTING','connecting'],
+    authenticating:['blue','AUTH','authenticating'],
+    entering:['blue','ENTERING SERVER','entering'],
+    kicked:['red','KICKED','kicked'],
+    offline:['red','OFFLINE','offline']
   };
-  return map[status] || ['red','OFFLINE'];
+  return map[status] || ['red','OFFLINE','offline'];
 }
 
-function showToast(message) {
+function showToast(message, type = 'info', duration = 3200) {
   const toast=document.getElementById('toast');
-  toast.textContent=message||'';
+  if(!toast) return;
+  const icons = {
+    success: '✅ ',
+    error: '❌ ',
+    warning: '⚠️ ',
+    info: 'ℹ️ '
+  };
+  const icon = icons[type] || '';
+  toast.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">' +
+    '<span>' + icon + escapeHtml(message || '') + '</span>' +
+    '<span style="cursor:pointer;opacity:0.6;font-size:14px;padding:0 2px;" onclick="document.getElementById(\'toast\').style.display=\'none\'" title="Đóng">✕</span>' +
+    '</div>';
+  toast.className = 'toast toast-' + type;
   toast.style.display='block';
   clearTimeout(showToast.timer);
-  showToast.timer=setTimeout(()=>{toast.style.display='none'},2500);
+  showToast.timer=setTimeout(()=>{toast.style.display='none'}, duration);
 }
 
 function escapeHtml(value) {
@@ -11320,7 +14643,7 @@ function escapeHtml(value) {
 
 function botCardHtml(bot) {
   if (!bot) return '';
-  const [color, label] = statusMeta(bot.status, bot.available, !!bot.manuallyStopped);
+  const [color, label, errorType] = statusMeta(bot.status, bot.available, !!bot.manuallyStopped, bot);
   const username = bot.username || 'Chưa đặt';
   const pingRaw = bot.ping;
 
@@ -11427,6 +14750,34 @@ function botCardHtml(bot) {
       '</div>')
     : (isAdmin ? '<button type="button" class="bot-mini-btn" onclick="event.stopPropagation(); editBotTags(' + id + ')" title="Gắn tag phân loại bot (+tag)" style="padding:1px 5px;font-size:10px;opacity:0.6;">＋tag</button>' : '');
 
+  let errorBannerHtml = '';
+  if (!bot.available) {
+    if (errorType === 'secret_mismatch') {
+      errorBannerHtml = '<div class="bot-error-action-banner warning">' +
+        '<div class="bot-error-text">⚠️ <strong>Lệch Secret Key (409):</strong> Worker từ chối lệnh do khóa bí mật không khớp với Manager.</div>' +
+        (isAdmin ? '<button type="button" class="bot-action-chip warning" onclick="event.stopPropagation(); openEditSecretModal(' + id + ')" title="Cập nhật Secret Key cho Bot #' + idStr + '">🔑 Sửa Secret Key</button>' : '') +
+      '</div>';
+    } else if (errorType === 'render_sleep') {
+      errorBannerHtml = '<div class="bot-error-action-banner sleep">' +
+        '<div class="bot-error-text">💤 <strong>Render Sleep / Timeout (503):</strong> Máy chủ Cloud đang khởi động từ chế độ ngủ đông (~30-50s) hoặc timeout.</div>' +
+        '<button type="button" class="bot-action-chip info" onclick="event.stopPropagation(); quickBotAction(event,' + id + ',\'restart\')" title="Ping lại kết nối">⚡ Thử lại</button>' +
+      '</div>';
+    } else if (errorType === 'not_found') {
+      errorBannerHtml = '<div class="bot-error-action-banner danger">' +
+        '<div class="bot-error-text">❌ <strong>URL không tồn tại (404):</strong> URL worker bị sai hoặc app đã bị xoá khỏi Render.</div>' +
+        '<div style="display:flex;gap:4px;">' +
+          (isAdmin ? '<button type="button" class="bot-action-chip danger" onclick="event.stopPropagation(); deleteBot(event,' + id + ')" title="Xoá bot này khỏi registry">🗑 Xoá</button>' : '') +
+          (isAdmin ? '<button type="button" class="bot-action-chip" onclick="event.stopPropagation(); editBot(event,' + id + ')" title="Sửa lại URL">✏ Sửa URL</button>' : '') +
+        '</div>' +
+      '</div>';
+    } else {
+      errorBannerHtml = '<div class="bot-error-action-banner danger">' +
+        '<div class="bot-error-text">⚠️ <strong>Mất kết nối:</strong> ' + escapeHtml(bot.lastError || bot.error || 'Worker không phản hồi.') + '</div>' +
+        (isAdmin ? '<button type="button" class="bot-action-chip danger" onclick="event.stopPropagation(); deleteBot(event,' + id + ')" title="Xoá bot này khỏi registry">🗑 Xoá bot</button>' : '') +
+      '</div>';
+    }
+  }
+
   return '<div class="bot-card ' + statusGlowClass + '" data-bot-id="' + id + '" draggable="' + (isAdmin ? 'true' : 'false') + '" ' +
     (isAdmin ? 'ondragstart="startBotDrag(event,' + id + ')" ondragover="allowBotDrop(event)" ondrop="dropBot(event,' + id + ')"' : '') +
     ' onclick="openBot(' + id + ')">' +
@@ -11453,14 +14804,16 @@ function botCardHtml(bot) {
       '<div class="bot-owner-wrap">' + ownerBadgeHtml + '</div>' +
       tagsHtml +
     '</div>' +
+    errorBannerHtml +
 
     '<div class="bot-ingame-row">' +
       '<div class="bot-ingame-user" title="Nhân vật Minecraft ingame">' +
         '<span class="ingame-icon">🎮</span>' +
         '<span class="ingame-name">' + escapeHtml(username) + '</span>' +
       '</div>' +
-      '<div class="bot-ip-pill" title="IP Bot: ' + escapeHtml(ipDisplay) + '">' +
+      '<div class="bot-ip-pill btn-copy-bot-ip" data-ip="' + escapeHtml(ipDisplay) + '" title="Click để copy IP Bot: ' + escapeHtml(ipDisplay) + '" style="cursor:pointer;">' +
         '<span>🌐 ' + escapeHtml(ipDisplay) + '</span>' +
+        (ipDisplay !== '--' ? '<button type="button" class="btn-copy-bot-ip bot-mini-btn" data-ip="' + escapeHtml(ipDisplay) + '" title="Copy IP bot" style="padding:1px 4px;font-size:10px;margin-left:4px;cursor:pointer;">📋</button>' : '') +
       '</div>' +
     '</div>' +
 
@@ -11568,6 +14921,11 @@ function editBot(event,id){
   document.getElementById('editBotId').value=String(id);
   document.getElementById('editBotUrl').value=bot.url||'';
   document.getElementById('editBotLabel').value=bot.label||'';
+  const secInput = document.getElementById('editBotSecretKey');
+  if (secInput) {
+    secInput.value = bot.secretKey || '';
+    secInput.type = 'password';
+  }
   const tagsVal = Array.isArray(bot.tags) ? bot.tags.join(', ') : '';
   const tagsInput = document.getElementById('editBotTags');
   if (tagsInput) tagsInput.value = tagsVal;
@@ -11581,6 +14939,8 @@ async function saveEditBot(){
   const id=Number(document.getElementById('editBotId').value);
   const url=document.getElementById('editBotUrl').value.trim();
   const label=document.getElementById('editBotLabel').value.trim();
+  const secInput = document.getElementById('editBotSecretKey');
+  const secretKey = secInput ? secInput.value.trim() : undefined;
   const rawTags=document.getElementById('editBotTags')?.value || '';
   const tags = rawTags.split(/[,;\s]+/).map(t => t.trim().toLowerCase().replace(/^#/, '')).filter(Boolean);
   const rentable = document.getElementById('editBotRentable') ? document.getElementById('editBotRentable').checked : true;
@@ -11603,7 +14963,9 @@ async function saveEditBot(){
         if (titleEl) titleEl.textContent = detailBot.label;
       }
     } else {
-      const result=await requestJson('/api/manager/bot/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,label,tags,rentable})});
+      const payload = { url, label, tags, rentable };
+      if (secretKey !== undefined) payload.secretKey = secretKey;
+      const result=await requestJson('/api/manager/bot/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
       data=result.data||{};
       if(!result.ok)throw new Error(data.error||'Không thể sửa bot.');
       const found = bots.find(b => Number(b.id) === id);
@@ -11611,9 +14973,11 @@ async function saveEditBot(){
         if (data.bot.label) found.label = data.bot.label;
         if (data.bot.tags) found.tags = data.bot.tags;
         found.rentable = data.bot.rentable !== false;
+        if (data.bot.secretKey !== undefined) found.secretKey = data.bot.secretKey;
       }
       if (detailBot && Number(detailBot.id) === id && data.bot?.label) {
         detailBot.label = data.bot.label;
+        if (data.bot.secretKey !== undefined) detailBot.secretKey = data.bot.secretKey;
         const titleEl = document.getElementById('detailTitle');
         if (titleEl) titleEl.textContent = detailBot.label;
       }
@@ -11789,6 +15153,7 @@ async function handleLoginSubmit(event) {
       await refreshHome();
       scheduleNextManagerPoll();
       checkAndShowAnnouncement();
+      if (typeof checkRewardQueryParams === 'function') checkRewardQueryParams();
     }, 350);
 
   } catch (err) {
@@ -11967,6 +15332,12 @@ function applyUserRoleUI() {
   const renewBtnDropdown = document.getElementById('globalRenewKeyBtn');
   if (renewBtnTop) renewBtnTop.style.display = (isAdmin || isPermanentUser) ? 'none' : '';
   if (renewBtnDropdown) renewBtnDropdown.style.display = (isAdmin || isPermanentUser) ? 'none' : '';
+
+  if (typeof loadLink4mAdminSetting === 'function' && isAdmin) {
+    void loadLink4mAdminSetting();
+  } else if (typeof loadLink4mStatus === 'function' && !isAdmin) {
+    void loadLink4mStatus();
+  }
 }
 
 function toggleUserProfileDropdown(event) {
@@ -12410,7 +15781,7 @@ async function submitChangePassword(event) {
 }
 
 // ============================================================================
-// V11.6 COMMERCIAL ENTERPRISE EDITION — ROUTER & USER MANAGEMENT CONTROLLER
+// V11.7 COMMERCIAL ENTERPRISE EDITION — ROUTER & USER MANAGEMENT CONTROLLER
 // ============================================================================
 
 let currentEditingUserId = null;
@@ -12422,11 +15793,7 @@ let currentNavPage = 'dashboard';
 
 // Điều hướng trang lớn (Full-Page Navigation Router)
 function navigateTo(pageName) {
-  if (pageName === 'backup') {
-    openSupabaseModal();
-    pageName = 'dashboard';
-  }
-  if (pageName === 'users' || pageName === 'audit') {
+  if (pageName === 'users' || pageName === 'audit' || pageName === 'backup') {
     if (!currentUser || currentUser.role !== 'admin') {
       pageName = 'dashboard';
     }
@@ -13310,7 +16677,7 @@ async function submitCreateKeysFromMgmt() {
   const isPermanent = daysVal === 'lifetime';
   let days = 7;
   if (isPermanent) {
-    days = 36500;
+    days = -1;
   } else if (daysVal === 'custom') {
     const customVal = parseInt(customInp?.value, 10);
     if (!Number.isFinite(customVal) || customVal < 1) {
@@ -13335,13 +16702,14 @@ async function submitCreateKeysFromMgmt() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         days,
+        isPermanent,
+        setPermanent: isPermanent,
         planName: planName || (isPermanent ? 'VIP Vĩnh Viễn' : ('Gói ' + days + ' Ngày')),
         count,
         botCount,
         customKey: customKey || undefined,
         maxUses: isNaN(maxUses) ? 1 : maxUses,
-        validDays: validDays > 0 ? validDays : undefined,
-        setPermanent: isPermanent
+        validDays: validDays > 0 ? validDays : undefined
       })
     });
     if (!res.ok) throw new Error(res.data?.error || 'Không thể tạo mã Key.');
@@ -13486,24 +16854,33 @@ async function handleImportFile(event) {
     const text = await file.text();
     const data = JSON.parse(text);
     if (!Array.isArray(data)) throw new Error('File JSON không đúng định dạng danh sách bot.');
-    let added = 0;
     showToast('Đang khôi phục ' + data.length + ' bot từ file...');
-    for (const item of data) {
-      const rawUrl = item.url || item.endpoint || item.sourceUrl;
-      const url = normalizeClientBotUrl(rawUrl);
-      if (!url) continue;
-      const label = String(item.label || item.name || '').trim();
-      try {
-        const res = await requestJson('/api/manager/bots', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url, label })
-        });
-        if (res.ok) added++;
-      } catch (_) {}
+    const botsToImport = data.map(item => ({
+      url: normalizeClientBotUrl(item.url || item.endpoint || item.sourceUrl),
+      label: String(item.label || item.name || '').trim(),
+      secretKey: item.secretKey ? String(item.secretKey).trim() : undefined
+    })).filter(b => Boolean(b.url));
+
+    if (!botsToImport.length) {
+      showToast('Không tìm thấy URL bot hợp lệ nào trong file JSON.');
+      return;
     }
-    showToast('Đã khôi phục thành công ' + added + ' bot mới!');
-    await refreshHome();
+
+    const res = await requestJson('/api/manager/bots/batch-import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bots: botsToImport })
+    });
+    if (res.ok) {
+      const payload = res.data || {};
+      const added = payload.addedCount || (payload.bots || []).length || 0;
+      const skipped = payload.skippedCount || (payload.skipped || []).length || 0;
+      showToast('Đã khôi phục thành công ' + added + ' bot mới!' + (skipped ? ' (Bỏ qua ' + skipped + ')' : ''));
+      lastHomeSig = '';
+      await refreshHome();
+    } else {
+      showToast('Lỗi nhập bot: ' + (res.data?.error || 'Thao tác không thành công.'));
+    }
   } catch (err) {
     showToast('Lỗi đọc file: ' + (err.message || 'Không thể khôi phục.'));
   }
@@ -14369,6 +17746,98 @@ async function deleteBot(event,id) {
   }
 }
 
+// BUG-26: chỉ 404 có ngữ nghĩa "không còn tồn tại" mới đủ bằng chứng xóa. Các trạng
+// thái khác (503 cold start, timeout, DNS, 401/403/409 secret mismatch...) KHÔNG chứng
+// minh bot đã bị xóa → chỉ cảnh báo, không nằm trong danh sách xóa hàng loạt.
+function classifyUnreachableBotEvidence(b) {
+    const status = Number(b.httpStatus);
+    const errText = String(b.lastError || b.error || '');
+    const lower = errText.toLowerCase();
+    if (status === 404 || errText.includes('404') || lower.includes('not found') || errText.includes('không tồn tại')) return '404';
+    if (status === 503 || lower.includes('cold start') || lower.includes('waking') || lower.includes('spinning up')) return '503/waking';
+    if (status === 401 || status === 403 || lower.includes('secret') || lower.includes('unauthorized') || lower.includes('forbidden')) return '401/403 secret';
+    if (status === 409) return '409';
+    if (lower.includes('timeout') || lower.includes('abort') || lower.includes('econn') || lower.includes('enotfound') || lower.includes('dns')) return 'timeout/DNS';
+    return 'unknown';
+}
+
+async function cleanDeadBots() {
+  if (currentUser?.role !== 'admin') {
+    showToast('Chỉ Quản trị viên mới có quyền dọn dẹp bot.', 'error');
+    return;
+  }
+  // Nhóm 1 — bằng chứng mạnh: 404 (endpoint tin cậy xác nhận "không còn tồn tại").
+  const deadBots = bots.filter(b => !b.available && classifyUnreachableBotEvidence(b) === '404');
+  // Nhóm 2 — chưa xác minh/unreachable: chỉ cảnh báo, tuyệt đối không xóa hàng loạt.
+  const unreachables = bots.filter(b => !b.available && classifyUnreachableBotEvidence(b) !== '404');
+
+  if (deadBots.length === 0) {
+    if (unreachables.length === 0) {
+      showToast('✨ Hạm đội hoạt động hoàn hảo! Không có bot chết hay mất kết nối nào.', 'success', 3500);
+      return;
+    }
+    // BUG-26: không còn mở confirm xóa toàn bộ unreachable. Chỉ cảnh báo kèm bằng
+    // chứng từng bot; Admin phải dùng nút Xóa riêng trên từng bot nếu thật sự muốn.
+    const msg = '⚠️ Không có bot nào bị xác nhận 404 (đã xoá trên Cloud), nhưng có ' + unreachables.length +
+      ' bot đang mất kết nối. Các bot này CHƯA được xác minh là đã bị xóa (có thể do 503 Render cold start, timeout, DNS, hoặc secret mismatch) nên hệ thống KHÔNG tự động xóa:\n' +
+      unreachables.map(b => '• #' + b.id + ': ' + b.label + ' — bằng chứng: ' + classifyUnreachableBotEvidence(b) + ' — ' + String(b.lastError || b.error || 'không rõ lỗi').slice(0, 120)).join('\n') +
+      '\n\nHãy kiểm tra từng bot (thử Start/Refresh hoặc sửa secret) và chỉ xóa thủ công nếu chắc chắn.';
+    showToast(msg.replace(/\n/g, ' '), 'warning', 8000);
+    return;
+  }
+
+  // Có 404 xác nhận: chỉ đề xuất xóa đúng nhóm 404, đồng thời nêu rõ nhóm unreachable
+  // bị loại khỏi danh sách xóa (hai nhóm hiển thị riêng biệt).
+  const confirmMsg = 'Phát hiện ' + deadBots.length + ' bot KHÔNG CÒN TỒN TẠI trên Cloud (bằng chứng 404 từ endpoint tin cậy):\n' +
+    deadBots.map(b => '• #' + b.id + ': ' + b.label + ' (' + (b.url || 'chưa cấu hình URL') + ')').join('\n') +
+    (unreachables.length
+      ? '\n\n⚠️ Ngoài ra còn ' + unreachables.length + ' bot chỉ mất kết nối (chưa xác minh 404: ' + unreachables.map(b => '#' + b.id + ' ' + classifyUnreachableBotEvidence(b)).join(', ') + ') — các bot này KHÔNG bị xóa.'
+      : '') +
+    '\n\nBạn có chắc chắn muốn dọn dẹp và xoá vĩnh viễn CHỈ các bot 404 xác nhận khỏi hệ thống không?';
+  if (!confirm(confirmMsg)) return;
+  return executeCleanBots(deadBots);
+}
+
+async function executeCleanBots(list) {
+  showToast('⏳ Đang dọn dẹp ' + list.length + ' bot chết khỏi registry...', 'info', 6000);
+  let successCount = 0;
+  let failCount = 0;
+  for (const b of list) {
+    try {
+      const res = await requestJson('/api/manager/bot/' + Number(b.id), { method: 'DELETE' });
+      if (res.ok || res.data?.partial) successCount++;
+      else failCount++;
+    } catch (_) {
+      failCount++;
+    }
+  }
+  lastHomeSig = '';
+  await refreshHome();
+  if (failCount === 0) {
+    showToast('✅ Đã dọn dẹp thành công ' + successCount + ' bot chết khỏi registry!', 'success', 4500);
+  } else {
+    showToast('⚠️ Đã xoá ' + successCount + ' bot, có ' + failCount + ' bot gặp lỗi.', 'warning', 4500);
+  }
+}
+
+function openEditSecretModal(id) {
+  editBot(null, id);
+  setTimeout(() => {
+    const input = document.getElementById('editBotSecretKey');
+    if (input) {
+      input.focus();
+      input.select?.();
+      input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, 120);
+}
+
+function toggleEditSecretKeyVisibility() {
+  const input = document.getElementById('editBotSecretKey');
+  if (!input) return;
+  input.type = input.type === 'password' ? 'text' : 'password';
+}
+
 function openBot(id) {
   selectedBotId=Number(id);
   invalidateDetailReads();
@@ -14385,8 +17854,8 @@ function openBot(id) {
   const selected=bots.find(item=>Number(item.id)===selectedBotId);
   const url=new URL(window.location.href);
   url.searchParams.set('bot',String(selectedBotId));
-  if(selected?.url) url.searchParams.set('botUrl',selected.url); else url.searchParams.delete('botUrl');
-  history.pushState({bot:selectedBotId,botUrl:selected?.url||''},'',url);
+  url.searchParams.delete('botUrl');
+  history.pushState({bot:selectedBotId},'',url);
   document.getElementById('homePage').classList.add('hidden');
   document.getElementById('detailPage').classList.remove('hidden');
   lastEventRevision=-1;
@@ -14418,13 +17887,21 @@ async function resolveRouteFromUrl() {
   routeResolving=true;
   try {
     const url=new URL(window.location.href);
+    const botIdParam = url.searchParams.get('bot') || url.searchParams.get('botId') || url.searchParams.get('id');
     const identity=normalizeClientBotUrl(url.searchParams.get('botUrl'));
-    if(identity){
+    if(identity || botIdParam){
       try{
         const result=await requestJson('/api/manager/registry');
-        const match=(result.data?.bots||[]).find(item=>normalizeClientBotUrl(item.url)===identity);
+        const list = result.data?.bots || [];
+        const match = botIdParam
+          ? list.find(item => String(item.id) === String(botIdParam))
+          : (identity ? list.find(item => item.url && normalizeClientBotUrl(item.url) === identity) : null);
         if(match){
           selectedBotId=Number(match.id);
+          url.searchParams.set('bot',String(match.id));
+          url.searchParams.delete('botUrl');
+          url.searchParams.delete('botId');
+          history.replaceState({bot:selectedBotId},'',url);
           invalidateDetailReads();
           document.getElementById('homePage').classList.add('hidden');
           document.getElementById('detailPage').classList.remove('hidden');
@@ -14440,18 +17917,18 @@ lastPositionHistoryFetchedAt=0;
           await refreshDetail(true);
           return true;
         }
-        // A persisted URL identity that no longer exists must never silently fall
-        // through to a recycled numeric runtime id.
-        selectedBotId=null;
-        document.getElementById('detailPage').classList.add('hidden');
-        document.getElementById('homePage').classList.remove('hidden');
-        return false;
+        if (identity) {
+          selectedBotId=null;
+          document.getElementById('detailPage').classList.add('hidden');
+          document.getElementById('homePage').classList.remove('hidden');
+          return false;
+        }
       }catch(_) {
         // Keep legacy numeric fallback only when the identity lookup itself failed.
       }
     }
 
-    const id=Number(url.searchParams.get('bot'));
+    const id=Number(botIdParam);
     if(Number.isInteger(id)&&id>0){
       selectedBotId=id;
       invalidateDetailReads();
@@ -14508,9 +17985,28 @@ async function runAllAction(action) {
 
 function detailStatusHtml() {
   if(!detailBot) return;
-  const [color,label]=statusMeta(detailBot.status,detailBot.available,!!detailBot.manuallyStopped);
-  document.getElementById('detailStatus').innerHTML='<span class="dot '+color+'"></span>'+escapeHtml(label);
   const numId = selectedBotId || detailBot.id;
+  const [color,label,errorType]=statusMeta(detailBot.status,detailBot.available,!!detailBot.manuallyStopped,detailBot);
+  let statusDetailHtml = '<span class="dot '+color+'"></span>'+escapeHtml(label);
+  if (!detailBot.available) {
+    if (errorType === 'secret_mismatch') {
+      statusDetailHtml += '<div style="font-size:12px;color:#fb923c;margin-top:8px;font-weight:600;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">' +
+        '<span>⚠️ Worker từ chối lệnh do lệch Secret Key (409).</span>' +
+        '<button type="button" class="small warning-btn" onclick="openEditSecretModal(' + numId + ')" style="padding:2px 8px;font-size:11px;">🔑 Cập nhật Key</button>' +
+      '</div>';
+    } else if (errorType === 'render_sleep') {
+      statusDetailHtml += '<div style="font-size:12px;color:#c084fc;margin-top:8px;font-weight:600;">' +
+        '💤 Máy chủ Cloud (Render) đang ngủ đông (503) hoặc timeout. Đang thử kết nối lại...' +
+      '</div>';
+    } else if (errorType === 'not_found') {
+      statusDetailHtml += '<div style="font-size:12px;color:#f87171;margin-top:8px;font-weight:600;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">' +
+        '<span>❌ Địa chỉ bot trả về 404 Not Found (URL sai hoặc app bị xoá).</span>' +
+        '<button type="button" class="small danger" onclick="deleteBot(event,' + numId + ')" style="padding:2px 8px;font-size:11px;">🗑 Xoá Bot</button>' +
+        '<button type="button" class="small" onclick="editBot(event,' + numId + ')" style="padding:2px 8px;font-size:11px;">✏ Sửa URL</button>' +
+      '</div>';
+    }
+  }
+  document.getElementById('detailStatus').innerHTML=statusDetailHtml;
   const rawLbl = String(detailBot.label || '').trim();
   const hasCustom = rawLbl && rawLbl !== ('Bot ' + numId) && rawLbl !== ('bot' + numId) && rawLbl !== ('Bot #' + numId);
   const detailTitle = hasCustom ? ('Bot #' + numId + ' (' + rawLbl + ')') : ('Bot #' + numId);
@@ -14657,14 +18153,25 @@ function detailStatusHtml() {
     recEl.textContent = String(detailBot.reconnectAttempts || detailBot.reconnectCount || 0);
   }
 
-  // 6. Phân quyền đổi tài khoản Minecraft (Cứ cấp bot là auto được đổi)
+  // 6. Phân quyền đổi tài khoản Minecraft theo allowAccountChange
+  const canChangeAccount = currentUser?.role === 'admin' || currentUser?.allowAccountChange !== false;
   const accountPanel = document.getElementById('detailAccountPanel');
   if (accountPanel) {
-    accountPanel.style.display = 'block';
+    accountPanel.style.display = canChangeAccount ? 'block' : 'none';
   }
 
-  // Render Proxy riêng của Bot
-  renderDetailProxy(detailBot.settings?.proxy);
+  // BUG-19: Ẩn #detailProxyPanel và #botProxyPanel trên giao diện theo role và quyền (allowAccountChange === false)
+  const canManageProxy = currentUser?.role === 'admin' && canChangeAccount;
+  const proxyPanels = document.querySelectorAll('#detailProxyPanel, #botProxyPanel');
+  proxyPanels.forEach(panel => {
+    panel.style.display = canManageProxy ? 'block' : 'none';
+  });
+
+  // Render Proxy riêng của Bot (masked {enabled} từ snapshot; admin nạp chi tiết sau)
+  if (canManageProxy) {
+    renderDetailProxy(detailBot.settings?.proxy);
+    void loadFullSettingsForAdmin();
+  }
 
   // 7. Render Remote GUI Inspector
   renderDetailRemoteGui(detailBot.currentWindow);
@@ -14876,7 +18383,7 @@ async function refreshKeysTable() {
 
       return '<tr style="border-bottom:1px solid var(--border);">' +
         '<td style="padding:8px 10px;font-family:monospace;font-weight:750;color:#38bdf8;">' + escapeHtml(k.key) + '</td>' +
-        '<td style="padding:8px 10px;">' + escapeHtml(k.planName || (k.days + ' Ngày')) + ' • <span style="color:#a78bfa;font-weight:700;">' + (k.botCount || 1) + ' Bot</span></td>' +
+        '<td style="padding:8px 10px;">' + escapeHtml(k.planName || ((k.days === -1 || k.isPermanent) ? 'VIP Vĩnh Viễn' : (k.days + ' Ngày'))) + ' • <span style="color:#a78bfa;font-weight:700;">' + (k.botCount || 1) + ' Bot</span></td>' +
         '<td style="padding:8px 10px;">' + statusBadge + '</td>' +
         '<td style="padding:8px 10px;color:var(--muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(usersText) + '">' + escapeHtml(usersText) + '</td>' +
         '<td style="padding:8px 10px;color:var(--muted);font-size:12px;">' + escapeHtml(expText) + '</td>' +
@@ -14922,8 +18429,11 @@ async function submitCreateKeys() {
   if (keyMutationState.creating) return;
   const daysSelect = document.getElementById('createKeyDays')?.value;
   const customInp = document.getElementById('createKeyCustomDays');
+  const isPermanent = daysSelect === 'lifetime';
   let days = 7;
-  if (daysSelect === 'custom') {
+  if (isPermanent) {
+    days = -1;
+  } else if (daysSelect === 'custom') {
     const customVal = parseInt(customInp?.value, 10);
     if (!Number.isFinite(customVal) || customVal < 1) {
       showToast('Vui lòng nhập số ngày hợp lệ (tối thiểu 1 ngày).', 'error');
@@ -14934,7 +18444,7 @@ async function submitCreateKeys() {
   } else {
     days = Number(daysSelect) || 7;
   }
-  const defaultPlanName = 'Gói ' + days + ' Ngày';
+  const defaultPlanName = isPermanent ? 'VIP Vĩnh Viễn' : ('Gói ' + days + ' Ngày');
   const planName = document.getElementById('createKeyPlan')?.value.trim() || defaultPlanName;
   const count = Number(document.getElementById('createKeyCount')?.value) || 1;
   const botCount = Number(document.getElementById('createKeyBotCount')?.value) || 1;
@@ -14949,7 +18459,7 @@ async function submitCreateKeys() {
     const res = await requestJson('/api/manager/keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ days, planName, count, botCount, maxUses })
+      body: JSON.stringify({ days, isPermanent, setPermanent: isPermanent, planName, count, botCount, maxUses })
     });
     if (!res.ok) throw new Error(res.data?.error || 'Lỗi tạo key');
     showToast(res.data?.message || 'Đã tạo key thành công!');
@@ -15329,10 +18839,17 @@ async function loadDetailLogs(force=false, expectedGeneration=detailRefreshGener
     const data=await detailGet('/logs');
     if(!currentUser || (expectedGeneration!==null && (expectedGeneration!==detailRefreshGeneration || expectedBotId!==selectedBotId))) return;
     const box=document.getElementById('detailEventLogs');
+    const sel = typeof window.getSelection === 'function' ? window.getSelection() : null;
+    if (!force && sel && sel.rangeCount > 0 && !sel.isCollapsed && box?.contains(sel.anchorNode)) {
+      return;
+    }
     const keep=nearBottom(box);
-    box.innerHTML=(data.logs||[]).map(line=>'<div class="line">'+escapeHtml(line)+'</div>').join('');
+    const newHtml=(data.logs||[]).map(line=>'<div class="line">'+escapeHtml(line)+'</div>').join('');
+    if (box && box.innerHTML !== newHtml) {
+      box.innerHTML = newHtml;
+    }
     lastEventRevision=Number(data.revision||0);
-    if(keep) box.scrollTop=box.scrollHeight;
+    if(keep && box) box.scrollTop=box.scrollHeight;
   } finally {eventLoading=false;}
 }
 
@@ -15344,10 +18861,17 @@ async function loadDetailChat(force=false, expectedGeneration=detailRefreshGener
     const data=await detailGet('/chat-logs');
     if(!currentUser || (expectedGeneration!==null && (expectedGeneration!==detailRefreshGeneration || expectedBotId!==selectedBotId))) return;
     const box=document.getElementById('detailChatLogs');
+    const sel = typeof window.getSelection === 'function' ? window.getSelection() : null;
+    if (!force && sel && sel.rangeCount > 0 && !sel.isCollapsed && box?.contains(sel.anchorNode)) {
+      return;
+    }
     const keep=nearBottom(box);
-    box.innerHTML=(data.logs||[]).map(line=>'<div class="line">'+escapeHtml(line)+'</div>').join('');
+    const newHtml=(data.logs||[]).map(line=>'<div class="line">'+escapeHtml(line)+'</div>').join('');
+    if (box && box.innerHTML !== newHtml) {
+      box.innerHTML = newHtml;
+    }
     lastChatRevision=Number(data.revision||0);
-    if(keep) box.scrollTop=box.scrollHeight;
+    if(keep && box) box.scrollTop=box.scrollHeight;
   } finally {chatLoading=false;}
 }
 
@@ -15382,6 +18906,92 @@ function itemLabel(item) {
   return String(name).replace(/_/g,' ')+(count>1?' x'+count:'');
 }
 
+
+let selectedDetailMoveSlot = null;
+
+function updateDetailTouchHint() {
+  let hintEl = document.getElementById('detailTouchHint');
+  if (!hintEl) {
+    const invGrid = document.getElementById('detailInventory');
+    if (invGrid && invGrid.parentNode) {
+      hintEl = document.createElement('div');
+      hintEl.id = 'detailTouchHint';
+      hintEl.className = 'touch-move-hint';
+      invGrid.parentNode.insertBefore(hintEl, invGrid);
+    }
+  }
+  if (!hintEl) return;
+  if (selectedDetailMoveSlot === null) {
+    hintEl.style.display = 'none';
+    hintEl.innerHTML = '';
+  } else {
+    const item = detailInventory?.slots?.[String(selectedDetailMoveSlot)];
+    const label = item ? itemLabel(item) : 'ô #' + selectedDetailMoveSlot;
+    hintEl.style.display = 'flex';
+    hintEl.innerHTML = '<span>⚡ Đang chọn <strong>' + escapeHtml(label) + '</strong>. Chạm ô khác để chuyển, chạm ô Trang bị để mặc, hoặc chạm vùng Vứt đồ.</span><button type="button" class="small" onclick="cancelDetailSlotSelection(event)" style="padding:2px 8px;margin-left:8px;">Hủy</button>';
+  }
+}
+
+function cancelDetailSlotSelection(e) {
+  if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+  selectedDetailMoveSlot = null;
+  document.querySelectorAll('#detailPage .inventory-slot.selected-for-move, #detailPage .equipment-slot.selected-for-move').forEach(function(el) {
+    el.classList.remove('selected-for-move');
+  });
+  updateDetailTouchHint();
+}
+
+function handleDetailSlotClick(slot, item, e) {
+  if (selectedDetailMoveSlot === null) {
+    if (!item) {
+      if (slot >= 36 && slot <= 44) selectDetailHotbar(slot - 36);
+      return;
+    }
+    selectedDetailMoveSlot = slot;
+    document.querySelectorAll('#detailPage .inventory-slot.selected-for-move, #detailPage .equipment-slot.selected-for-move').forEach(function(el) {
+      el.classList.remove('selected-for-move');
+    });
+    const targetEl = document.querySelector('#detailPage .inventory-slot[data-slot="' + slot + '"]');
+    if (targetEl) targetEl.classList.add('selected-for-move');
+    if (slot >= 36 && slot <= 44) selectDetailHotbar(slot - 36);
+    updateDetailTouchHint();
+    return;
+  }
+
+  if (selectedDetailMoveSlot === slot) {
+    cancelDetailSlotSelection(e);
+    return;
+  }
+
+  const fromSlot = selectedDetailMoveSlot;
+  cancelDetailSlotSelection(e);
+  void moveDetailItem(fromSlot, slot);
+}
+
+function handleDetailEquipmentClick(dest) {
+  if (selectedDetailMoveSlot !== null) {
+    const fromSlot = selectedDetailMoveSlot;
+    cancelDetailSlotSelection();
+    void equipDetailItem(fromSlot, dest);
+  }
+}
+
+function handleDetailDropZoneClick() {
+  if (selectedDetailMoveSlot !== null) {
+    const fromSlot = selectedDetailMoveSlot;
+    cancelDetailSlotSelection();
+    if (detailInventoryBusy || !detailInventory) return;
+    detailInventoryBusy = true;
+    detailPost('/inventory/drop', { sourceSlot: fromSlot, revision: detailInventory.revision }).then(function(result) {
+      if (result.data?.inventory) { detailInventory = result.data.inventory; renderDetailInventory(); }
+      showToast(result.data?.message || result.data?.error || 'Đã xử lý.');
+      if (!result.ok) refreshDetail(true);
+    }).finally(function() {
+      detailInventoryBusy = false;
+    });
+  }
+}
+
 function createDetailSlot(item,slot,selected) {
   const el=document.createElement('div');
   el.className='inventory-slot'+(selected?' selected':'')+(!item?' empty':'');
@@ -15391,7 +19001,7 @@ function createDetailSlot(item,slot,selected) {
   el.ondragover=allowDrop;
   el.ondragleave=clearDragOver;
   el.ondrop=function(e){dropDetailInventory(e,slot);};
-  if(slot>=36&&slot<=44) el.onclick=function(){selectDetailHotbar(slot-36);};
+  el.onclick=function(e){handleDetailSlotClick(slot,item,e);};
   const idx=document.createElement('div');idx.className='slot-index';idx.textContent=slot>=36?String(slot-35):String(slot-8);
   const name=document.createElement('div');name.className='slot-name';name.textContent=itemLabel(item);
   const count=document.createElement('div');count.className='slot-count';count.textContent=item&&Number(item.count||0)>1?String(item.count):'';
@@ -15461,8 +19071,16 @@ function dropDetailInventory(event,destinationSlot){
 }
 async function unequipAndMove(destination,slot){
   showToast('Đang tháo trang bị...');
-  const result=await detailPost('/inventory/unequip',{destination});
-  if(!result.ok){showToast(result.data?.error||'Không thể tháo trang bị.');return;}
+  // BUG-22: Worker /inventory/unequip kiểm tra inventory revision và trả 409 khi
+  // revision thiếu/sai. Gửi revision đúng từ snapshot; nếu 409 (dữ liệu đã đổi) thì
+  // refresh từ response của worker rồi thử lại đúng 1 lần.
+  let result=await detailPost('/inventory/unequip',{destination,revision:detailInventory?detailInventory.revision:0});
+  if(!result.ok&&result.status===409&&result.data?.inventory){
+    detailInventory=result.data.inventory;
+    renderDetailInventory();
+    result=await detailPost('/inventory/unequip',{destination,revision:detailInventory.revision});
+  }
+  if(!result.ok){showToast(result.data?.error||'Không thể tháo trang bị.');await refreshDetail(true);return;}
   await refreshDetail(true);
   if(!detailInventory) return;
   const targetSlot = result.data?.unequippedToSlot ?? result.data?.slot;
@@ -15561,12 +19179,17 @@ function renderDetailSettings(data){
   const h=document.getElementById('detailSettingAntiHungry');
   const r=document.getElementById('detailSettingAutoReconnect');
   const k=document.getElementById('detailSettingAntiAfkKick');
+  const sp=document.getElementById('detailSpawnCommands');
 
   if(eco&&!detailSettingsDirty)eco.checked=settings.ecoMode!==false;
   if(a&&!detailSettingsDirty)a.checked=settings.autoTotem!==false;
   if(h&&!detailSettingsDirty)h.checked=settings.antiHungry!==false;
   if(r&&!detailSettingsDirty)r.checked=settings.autoReconnect!==false;
   if(k&&!detailSettingsDirty)k.checked=settings.antiAfkKick!==false;
+  // BUG-24: Worker hỗ trợ spawnCommands nhưng trang Detail trước đây không có field →
+  // renderer/save bỏ qua. Với user không đủ quyền, worker trả '********' (masked);
+  // giữ nguyên khi lưu để không ghi đè cấu hình cũ.
+  if(sp&&!detailSettingsDirty)sp.value=typeof settings.spawnCommands==='string'?settings.spawnCommands:'';
 }
 
 function renderDetailAutoChatSchedules(schedules){
@@ -15619,13 +19242,21 @@ function dropDetailAutoChat(event,targetIndex){event.preventDefault();const from
 function endDetailScheduleDrag(element){if(element)element.classList.remove('dragging');draggedDetailAutoChatIndex=null;draggedDetailBotScheduleIndex=null;}
 
 function detailDefaultFixedTime(index){const hour=(3+Number(index||0)*3)%24;return String(hour).padStart(2,'0')+':00';}
+// BUG-21: Worker sanitizer chấp nhận action 'command' (+ trường command). Trước đây
+// normalize chỉ cho start/stop nên action 'command' bị âm thầm đổi thành 'stop' khi
+// Admin mở trang Detail và lưu lại. Giữ nguyên action/command để không phá cấu hình.
+function normalizeDetailBotScheduleAction(item){
+  return item?.action==='start'?'start':(item?.action==='command'?'command':'stop');
+}
 function normalizeDetailBotScheduler(schedules){
   const raw=Array.isArray(schedules)?schedules[0]:null;
   if(!raw)return{id:String(Date.now()),enabled:true,mode:'fixed',items:[]};
   const mode=raw.mode==='cycle'?'cycle':'fixed';
   let items=Array.isArray(raw.items)?raw.items.slice():[];
   if(!items.length&&Array.isArray(schedules))items=schedules.filter(s=>(s.mode==='cycle'?'cycle':'fixed')===mode).flatMap(s=>mode==='fixed'?[{id:s.id,action:s.action,time:s.time}]:[{id:String(s.id||'')+'-stop',action:'stop',afterMinutes:clampClientNumber(s.offAfterMinutes,120,1,43200)},{id:String(s.id||'')+'-start',action:'start',afterMinutes:clampClientNumber(s.onAfterMinutes,300,1,43200)}]);
-  return{id:String(raw.id||Date.now()),enabled:raw.enabled!==false,mode,items:items.map((item,i)=>mode==='fixed'?{id:String(item.id||Date.now()+'-'+i),action:item.action==='start'?'start':'stop',time:String(item.time||'03:00')}:{id:String(item.id||Date.now()+'-'+i),action:item.action==='start'?'start':'stop',afterMinutes:clampClientNumber(item.afterMinutes,i===0?120:300,1,43200)})};
+  return{id:String(raw.id||Date.now()),enabled:raw.enabled!==false,mode,items:items.map((item,i)=>mode==='fixed'
+    ?{id:String(item.id||Date.now()+'-'+i),action:normalizeDetailBotScheduleAction(item),time:String(item.time||'03:00'),...(normalizeDetailBotScheduleAction(item)==='command'?{command:String(item.command||'')}:{})}
+    :{id:String(item.id||Date.now()+'-'+i),action:normalizeDetailBotScheduleAction(item),afterMinutes:clampClientNumber(item.afterMinutes,i===0?120:300,1,43200),...(normalizeDetailBotScheduleAction(item)==='command'?{command:String(item.command||'')}:{})})};
 }
 function renderDetailBotScheduleModeNote(mode){const note=document.getElementById('detailBotScheduleModeNote');if(!note)return;note.textContent=mode==='cycle'?'Mỗi dòng kích hoạt sau khoảng thời gian tính từ dòng ngay phía trên. Dòng đầu tiên tính từ lúc bấm Lưu. Kéo ⋮⋮ để đổi thứ tự.':'Mỗi dòng dùng giờ Việt Nam (GMT+7). Có thể thêm nhiều giờ: 03:00 Tắt → 06:00 Bật → 12:00 Tắt → 19:00 Bật.';}
 function renderDetailBotSchedules(schedules){
@@ -15634,21 +19265,36 @@ function renderDetailBotSchedules(schedules){
   document.getElementById('detailBotScheduleMode').value=scheduler.mode;document.getElementById('detailBotScheduleEnabled').checked=scheduler.enabled!==false;renderDetailBotScheduleModeNote(scheduler.mode);
   if(!scheduler.items.length){box.innerHTML='<div class="note">Chưa có dòng hẹn giờ. Bấm “＋ Thêm” để tạo dòng đầu tiên.</div>';return;}
   box.innerHTML=scheduler.items.map((item,i)=>{
-    const action=item.action==='start'?'start':'stop';const actionText=action==='start'?'Bật Bot':'Tắt Bot';
+    const action=normalizeDetailBotScheduleAction(item);const actionText=action==='start'?'Bật Bot':(action==='command'?'Chạy lệnh':'Tắt Bot');
     const timing=scheduler.mode==='fixed'?'<input data-field="time" class="time-input" type="time" value="'+escapeHtml(item.time||'03:00')+'">':'<input data-field="afterMinutes" class="minutes-input" type="number" min="1" max="43200" value="'+clampClientNumber(item.afterMinutes,i===0?120:300,1,43200)+'" title="Phút">';
+    const commandInput='<input data-field="command" class="command-input" style="flex:1 1 140px;min-width:120px;display:'+(action==='command'?'inline-block':'none')+';" value="'+escapeHtml(item.command||'')+'" placeholder="/say Xin chao (lệnh chạy khi đến giờ)" oninput="markDetailBotScheduleDirty()">';
     const relation=scheduler.mode==='fixed'?'Mỗi ngày':(i===0?'Tính từ lúc lưu':'Tính từ dòng '+i);
     return '<div class="schedule-row" draggable="true" data-index="'+i+'" data-id="'+escapeHtml(item.id)+'" ondragstart="dragDetailBotSchedule(event,'+i+')" ondragover="allowDetailBotScheduleDrop(event)" ondrop="dropDetailBotSchedule(event,'+i+')" ondragend="endDetailScheduleDrag(this)">'+
-      '<div class="schedule-row-top"><div class="schedule-handle" title="Kéo để đổi thứ tự">⋮⋮</div><div class="schedule-row-title">'+(i+1)+'. '+actionText+'</div><div class="schedule-inline"><select data-field="action" class="action-select"><option value="stop"'+(action==='stop'?' selected':'')+'>Tắt</option><option value="start"'+(action==='start'?' selected':'')+'>Bật</option></select>'+timing+'</div><button class="small danger" type="button" onclick="removeDetailBotSchedule('+i+')">Xóa</button></div>'+ 
+      '<div class="schedule-row-top"><div class="schedule-handle" title="Kéo để đổi thứ tự">⋮⋮</div><div class="schedule-row-title">'+(i+1)+'. '+actionText+'</div><div class="schedule-inline"><select data-field="action" class="action-select" onchange="detailBotScheduleRowActionChanged(this)"><option value="stop"'+(action==='stop'?' selected':'')+'>Tắt</option><option value="start"'+(action==='start'?' selected':'')+'>Bật</option><option value="command"'+(action==='command'?' selected':'')+'>Lệnh</option></select>'+timing+commandInput+'</div><button class="small danger" type="button" onclick="removeDetailBotSchedule('+i+')">Xóa</button></div>'+ 
       '<div class="schedule-meta" style="margin-top:5px;"><span>'+relation+'</span>'+(scheduler.mode==='cycle'?'<span>•</span><span>Tính từ dòng kề trên</span>':'')+'</div></div>';
   }).join('');
 }
+function markDetailBotScheduleDirty(){detailBotScheduleDirty=true;}
+function detailBotScheduleRowActionChanged(select) {
+  detailBotScheduleDirty = true;
+  const row = select?.closest('.schedule-row');
+  if (!row) return;
+  const cmdInput = row.querySelector('[data-field="command"]');
+  if (cmdInput) cmdInput.style.display = select.value === 'command' ? 'inline-block' : 'none';
+  const titleEl = row.querySelector('.schedule-row-title');
+  const idx = Number(row.dataset.index || 0) + 1;
+  if (titleEl) {
+    titleEl.textContent = idx + '. ' + (select.value === 'start' ? 'Bật Bot' : (select.value === 'command' ? 'Chạy lệnh' : 'Tắt Bot'));
+  }
+}
+window.detailBotScheduleRowActionChanged = detailBotScheduleRowActionChanged;
 function collectDetailBotSchedules(){
   const box=document.getElementById('detailBotSchedules');if(!box)return[];const mode=document.getElementById('detailBotScheduleMode')?.value==='cycle'?'cycle':'fixed';const current=normalizeDetailBotScheduler(detailBotSchedules);
-  const items=[...box.querySelectorAll('.schedule-row')].map((row,i)=>{const get=f=>row.querySelector('[data-field="'+f+'"]');const id=row.dataset.id||current.items[i]?.id||(Date.now()+'-'+i);return mode==='fixed'?{id,action:get('action')?.value==='start'?'start':'stop',time:String(get('time')?.value||'').trim()}:{id,action:get('action')?.value==='start'?'start':'stop',afterMinutes:clampClientNumber(get('afterMinutes')?.value,i===0?120:300,1,43200)};});
+  const items=[...box.querySelectorAll('.schedule-row')].map((row,i)=>{const get=f=>row.querySelector('[data-field="'+f+'"]');const id=row.dataset.id||current.items[i]?.id||(Date.now()+'-'+i);const action=get('action')?.value==='start'?'start':(get('action')?.value==='command'?'command':'stop');const item=mode==='fixed'?{id,action,time:String(get('time')?.value||'').trim()}:{id,action,afterMinutes:clampClientNumber(get('afterMinutes')?.value,i===0?120:300,1,43200)};if(action==='command')item.command=String(get('command')?.value||'').trim();return item;});
   return items.length?[{id:current.id||String(Date.now()),enabled:!!document.getElementById('detailBotScheduleEnabled')?.checked,mode,items}]:[];
 }
-function validateDetailBotSchedules(schedules){if(!schedules.length)return'';if(schedules.length!==1)return'Chỉ được lưu một chế độ hẹn giờ Bot cùng lúc.';const s=schedules[0];if(!s.items.length)return'Hẹn giờ Bot chưa có dòng nào.';if(s.mode==='fixed'){const seen=new Set();for(let i=0;i<s.items.length;i++){if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(s.items[i].time))return'Dòng #'+(i+1)+' có giờ không hợp lệ.';if(seen.has(s.items[i].time))return'Dòng #'+(i+1)+' bị trùng giờ '+s.items[i].time+'.';seen.add(s.items[i].time);}}else for(let i=0;i<s.items.length;i++){const v=Number(s.items[i].afterMinutes);if(!Number.isFinite(v)||v<1||v>43200)return'Dòng #'+(i+1)+' có thời gian chờ không hợp lệ.';}return'';}
-function detailBotScheduleModeChanged(select){const current=collectDetailBotSchedules();const s=normalizeDetailBotScheduler(current.length?current:detailBotSchedules);const mode=select?.value==='cycle'?'cycle':'fixed';const items=s.items.map((item,i)=>mode==='fixed'?{id:item.id,action:item.action,time:detailDefaultFixedTime(i)}:{id:item.id,action:item.action,afterMinutes:i===0?120:300});detailBotSchedules=[{id:s.id||String(Date.now()),enabled:!!document.getElementById('detailBotScheduleEnabled')?.checked,mode,items}];detailBotScheduleDirty=true;renderDetailBotSchedules(detailBotSchedules);}
+function validateDetailBotSchedules(schedules){if(!schedules.length)return'';if(schedules.length!==1)return'Chỉ được lưu một chế độ hẹn giờ Bot cùng lúc.';const s=schedules[0];if(!s.items.length)return'Hẹn giờ Bot chưa có dòng nào.';for(let i=0;i<s.items.length;i++){if(s.items[i].action==='command'&&!String(s.items[i].command||'').trim())return'Dòng #'+(i+1)+' chọn hành động Lệnh nhưng chưa nhập lệnh.';}if(s.mode==='fixed'){const seen=new Set();for(let i=0;i<s.items.length;i++){if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(s.items[i].time))return'Dòng #'+(i+1)+' có giờ không hợp lệ.';if(seen.has(s.items[i].time))return'Dòng #'+(i+1)+' bị trùng giờ '+s.items[i].time+'.';seen.add(s.items[i].time);}}else for(let i=0;i<s.items.length;i++){const v=Number(s.items[i].afterMinutes);if(!Number.isFinite(v)||v<1||v>43200)return'Dòng #'+(i+1)+' có thời gian chờ không hợp lệ.';}return'';}
+function detailBotScheduleModeChanged(select){const current=collectDetailBotSchedules();const s=normalizeDetailBotScheduler(current.length?current:detailBotSchedules);const mode=select?.value==='cycle'?'cycle':'fixed';const items=s.items.map((item,i)=>mode==='fixed'?{id:item.id,action:item.action,time:detailDefaultFixedTime(i),...(item.action==='command'?{command:item.command}:{})}:{id:item.id,action:item.action,afterMinutes:i===0?120:300,...(item.action==='command'?{command:item.command}:{})});detailBotSchedules=[{id:s.id||String(Date.now()),enabled:!!document.getElementById('detailBotScheduleEnabled')?.checked,mode,items}];detailBotScheduleDirty=true;renderDetailBotSchedules(detailBotSchedules);}
 function addDetailBotSchedule(){const current=collectDetailBotSchedules();const s=normalizeDetailBotScheduler(current.length?current:detailBotSchedules);const i=s.items.length;const item=s.mode==='fixed'?{id:Date.now()+'-'+Math.random().toString(36).slice(2,8),action:'stop',time:detailDefaultFixedTime(i)}:{id:Date.now()+'-'+Math.random().toString(36).slice(2,8),action:i%2===0?'stop':'start',afterMinutes:i===0?120:300};s.items.push(item);detailBotSchedules=[s];detailBotScheduleDirty=true;renderDetailBotSchedules(detailBotSchedules);}
 function removeDetailBotSchedule(index){if(detailBotScheduleSaveInFlight)return;const s=normalizeDetailBotScheduler(collectDetailBotSchedules());s.items.splice(index,1);detailBotSchedules=s.items.length?[s]:[];detailBotScheduleDirty=true;renderDetailBotSchedules(detailBotSchedules);}
 let draggedDetailBotScheduleIndex=null;
@@ -15659,12 +19305,16 @@ function dropDetailBotSchedule(event,targetIndex){event.preventDefault();const f
 async function saveDetailSettings(){
   if(detailSettingsSaveInFlight)return;
   invalidateDetailReads();
+  const spawnElement=document.getElementById('detailSpawnCommands');
   const body={settings:{
     ecoMode:!!document.getElementById('detailSettingEcoMode')?.checked,
     autoTotem:!!document.getElementById('detailSettingAutoTotem')?.checked,
     antiHungry:!!document.getElementById('detailSettingAntiHungry')?.checked,
     autoReconnect:!!document.getElementById('detailSettingAutoReconnect')?.checked,
-    antiAfkKick:!!document.getElementById('detailSettingAntiAfkKick')?.checked
+    antiAfkKick:!!document.getElementById('detailSettingAntiAfkKick')?.checked,
+    // BUG-24: đồng bộ Spawn Commands từ trang Detail (worker sanitizer cắt 5000 ký tự).
+    // Giá trị '********' (masked) được worker phía sau hiểu là "giữ nguyên".
+    ...(spawnElement?{spawnCommands:String(spawnElement.value||'')}:{})
   }};
   detailSettingsSaveInFlight=true;setDetailSettingsDisabled(true);
   try{const result=await detailPost('/settings',body);showToast(result.data?.message||result.data?.error||'Đã xử lý.');if(result.ok){detailSettingsDirty=false;renderDetailSettings(result.data.settings||result.data);}}finally{detailSettingsSaveInFlight=false;setDetailSettingsDisabled(false);}
@@ -15884,6 +19534,22 @@ function renderDetailProxy(proxy) {
   if (passwordInput && document.activeElement !== passwordInput) passwordInput.value = p.password || '';
 }
 
+// SEC-06/BUG-17: snapshot công khai chỉ chứa proxy { enabled }. Admin phải tải chi
+// tiết đầy đủ (host/port/username + mật khẩu masked) từ GET /settings và render lại.
+// Non-admin gọi hàm này là no-op (proxy đã bị Manager strip khỏi session data).
+async function loadFullSettingsForAdmin() {
+  if (currentUser?.role !== 'admin' || selectedBotId === null) return;
+  try {
+    const data = await detailGet('/settings');
+    const settings = data?.settings || data || {};
+    if (settings.proxy) renderDetailProxy(settings.proxy);
+    const sp = document.getElementById('detailSpawnCommands');
+    if (sp && !detailSettingsDirty && typeof settings.spawnCommands === 'string') sp.value = settings.spawnCommands;
+  } catch (_) {
+    // Không phá trang nếu worker offline — badge {enabled} từ snapshot vẫn hiển thị.
+  }
+}
+
 async function saveDetailProxy() {
   if (selectedBotId === null) return;
   const enabled = !!document.getElementById('detailProxyEnabled')?.checked;
@@ -16035,6 +19701,280 @@ async function saveTrialDaysSetting() {
     showToast('Lỗi: ' + err.message);
   }
 }
+
+// --- CLIENT-SIDE LINK4M REWARD & ADMIN SETTINGS CONTROLLER ---
+async function loadLink4mStatus() {
+  try {
+    const res = await requestJson('/api/rewards/link4m/status');
+    if (!res.ok) return;
+    const data = res.data;
+    const badge = document.getElementById('link4mUsageBadge');
+    const expiredBadge = document.getElementById('expiredLink4mUsageBadge');
+    const btn = document.getElementById('btnUserLink4mReward');
+    const expBtn = document.getElementById('btnExpiredLink4mReward');
+
+    if (!data.enabled) {
+      if (btn) btn.style.display = 'none';
+      if (expBtn) expBtn.style.display = 'none';
+      return;
+    }
+
+    if (btn) btn.style.display = 'inline-flex';
+    if (expBtn) expBtn.style.display = 'inline-flex';
+
+    const text = data.todayCount + '/' + data.dailyLimit + ' lượt';
+    if (badge) badge.textContent = text;
+    if (expiredBadge) expiredBadge.textContent = text;
+
+    if (data.remainingAttempts <= 0) {
+      if (btn) {
+        btn.disabled = true;
+        btn.style.opacity = '0.6';
+        btn.title = 'Bạn đã dùng hết ' + data.dailyLimit + ' lượt vượt link hôm nay. Làm mới lúc 00:00.';
+      }
+      if (expBtn) {
+        expBtn.disabled = true;
+        expBtn.style.opacity = '0.6';
+      }
+    } else {
+      if (btn) {
+        btn.disabled = false;
+        btn.style.opacity = '1';
+        btn.title = 'Vượt link nhận thêm 12h thời gian sử dụng bot';
+      }
+      if (expBtn) {
+        expBtn.disabled = false;
+        expBtn.style.opacity = '1';
+      }
+    }
+  } catch (_) {}
+}
+
+async function startLink4mReward(btn) {
+  if (btn) {
+    btn.disabled = true;
+    btn.setAttribute('data-original-html', btn.innerHTML);
+    btn.innerHTML = '<span>⏳</span> Đang tạo liên kết...';
+  }
+
+  try {
+    const res = await requestJson('/api/rewards/link4m/start', { method: 'POST', body: {} });
+    if (!res.ok || !res.data?.redirectUrl) {
+      showToast(res.data?.error || 'Không thể tạo liên kết vượt link.');
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = btn.getAttribute('data-original-html') || '<span>⚡</span> Vượt link +12h';
+      }
+      return;
+    }
+
+    showToast('Đang chuyển hướng tới trang vượt link...');
+    setTimeout(function() {
+      window.location.href = res.data.redirectUrl;
+    }, 400);
+  } catch (err) {
+    showToast('Lỗi: ' + err.message);
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = btn.getAttribute('data-original-html') || '<span>⚡</span> Vượt link +12h';
+    }
+  }
+}
+
+// Admin Link4M settings
+async function loadLink4mAdminSetting() {
+  try {
+    const res = await requestJson('/api/manager/settings/system');
+    if (res.ok && res.data?.settings) {
+      const s = res.data.settings;
+      const isEnabled = s.link4mRewardEnabled === true;
+      const badge = document.getElementById('link4mStatusBadge');
+      if (badge) {
+        badge.textContent = isEnabled ? 'BẬT' : 'TẮT';
+        badge.style.color = isEnabled ? '#4ade80' : '#f87171';
+      }
+    }
+  } catch (_) {}
+}
+
+async function toggleLink4mSetting() {
+  const badge = document.getElementById('link4mStatusBadge');
+  const currentEnabled = badge ? badge.textContent.trim() === 'BẬT' : false;
+  const newEnabled = !currentEnabled;
+
+  try {
+    const res = await requestJson('/api/manager/settings/system', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: { link4mRewardEnabled: newEnabled }
+    });
+    if (res.ok) {
+      if (badge) {
+        badge.textContent = newEnabled ? 'BẬT' : 'TẮT';
+        badge.style.color = newEnabled ? '#4ade80' : '#f87171';
+      }
+      showToast('Đã ' + (newEnabled ? 'BẬT' : 'TẮT') + ' tính năng Vượt Link +12h!');
+      void loadLink4mStatus();
+    } else {
+      showToast('Lỗi cập nhật: ' + (res.data?.error || ''));
+    }
+  } catch (err) {
+    showToast('Lỗi: ' + err.message);
+  }
+}
+
+async function openLink4mConfigModal() {
+  try {
+    const res = await requestJson('/api/manager/settings/system');
+    if (res.ok && res.data?.settings) {
+      const s = res.data.settings;
+      const enabledCb = document.getElementById('link4mModalEnabled');
+      if (enabledCb) enabledCb.checked = s.link4mRewardEnabled === true;
+      const modeSel = document.getElementById('link4mModalMode');
+      if (modeSel) modeSel.value = s.link4mMode || 'custom_url';
+      const urlInp = document.getElementById('link4mModalUrl');
+      if (urlInp) urlInp.value = s.link4mUrl || '';
+      const apiTokenInp = document.getElementById('link4mModalApiToken');
+      if (apiTokenInp) apiTokenInp.value = s.link4mApiToken || '';
+      const hoursInp = document.getElementById('link4mModalHours');
+      if (hoursInp) hoursInp.value = s.link4mRewardHours || 12;
+      const limitInp = document.getElementById('link4mModalDailyLimit');
+      if (limitInp) limitInp.value = s.link4mDailyLimit || 2;
+      const secretInp = document.getElementById('link4mModalSecretKey');
+      if (secretInp) secretInp.value = s.link4mSecretKey || '';
+      updateLink4mModalFields();
+    }
+  } catch (_) {}
+  const modal = document.getElementById('link4mSettingsModal');
+  if (modal) modal.classList.remove('hidden');
+}
+
+function closeLink4mConfigModal() {
+  const modal = document.getElementById('link4mSettingsModal');
+  if (modal) modal.classList.add('hidden');
+}
+
+function updateLink4mModalFields() {
+  const mode = document.getElementById('link4mModalMode')?.value || 'custom_url';
+  const customGrp = document.getElementById('link4mCustomUrlGroup');
+  const apiGrp = document.getElementById('link4mApiTokenGroup');
+  if (customGrp) customGrp.style.display = mode === 'custom_url' ? 'block' : 'none';
+  if (apiGrp) apiGrp.style.display = mode === 'api' ? 'block' : 'none';
+}
+
+async function saveLink4mConfigModal() {
+  const enabled = document.getElementById('link4mModalEnabled')?.checked === true;
+  const mode = document.getElementById('link4mModalMode')?.value || 'custom_url';
+  const url = document.getElementById('link4mModalUrl')?.value || '';
+  const apiToken = document.getElementById('link4mModalApiToken')?.value || '';
+  const hours = parseInt(document.getElementById('link4mModalHours')?.value, 10) || 12;
+  const dailyLimit = parseInt(document.getElementById('link4mModalDailyLimit')?.value, 10) || 2;
+  const secretKey = document.getElementById('link4mModalSecretKey')?.value || '';
+
+  try {
+    const res = await requestJson('/api/manager/settings/system', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: {
+        link4mRewardEnabled: enabled,
+        link4mMode: mode,
+        link4mUrl: url,
+        link4mApiToken: apiToken,
+        link4mRewardHours: hours,
+        link4mDailyLimit: dailyLimit,
+        link4mSecretKey: secretKey
+      }
+    });
+    if (res.ok) {
+      showToast('Đã lưu cấu hình Link4M thành công!');
+      closeLink4mConfigModal();
+      void loadLink4mAdminSetting();
+      void loadLink4mStatus();
+    } else {
+      showToast('Lỗi: ' + (res.data?.error || 'Không thể lưu cài đặt'));
+    }
+  } catch (err) {
+    showToast('Lỗi: ' + err.message);
+  }
+}
+
+// BUG-10: loadCurrentUser chưa từng được định nghĩa trong UI script trong khi
+// checkRewardQueryParams gọi nó sau khi nhận thưởng Link4M → ReferenceError bị nuốt,
+// thông tin thuê bao (giờ còn lại) không refresh. Định nghĩa lại hàm này.
+async function loadCurrentUser() {
+  try {
+    const res = await requestJson('/api/auth/me');
+    if (res.ok && res.data?.user) {
+      currentUser = res.data.user;
+      try { applyUserRoleUI(); } catch (_) {}
+      // Chỉ re-render home khi user đang ở giao diện đã đăng nhập (loginGate đã ẩn).
+      const loginGate = document.getElementById('loginGate');
+      if (loginGate?.classList.contains('hidden') && typeof renderHome === 'function') {
+        void renderHome();
+      }
+    }
+    return res.ok;
+  } catch (_) {
+    return false;
+  }
+}
+window.loadCurrentUser = loadCurrentUser;
+
+// Check reward query param on dashboard load
+function checkRewardQueryParams() {
+  const params = new URLSearchParams(window.location.search);
+  const reward = params.get('reward');
+  const attemptId = params.get('attempt') || '';
+  if (reward === 'success') {
+    const added = params.get('added') || '12h';
+    showToast('🎉 Chúc mừng! Bạn đã vượt link thành công và được cộng thêm ' + added + ' sử dụng!');
+    void loadCurrentUser();
+    void loadLink4mStatus();
+    window.history.replaceState({}, document.title, window.location.pathname);
+  } else if (reward === 'pending') {
+    const msg = params.get('message') || 'Đang chờ máy chủ Link4M gửi xác nhận hoàn tất (Postback)...';
+    showToast('⏳ ' + msg);
+    window.history.replaceState({}, document.title, window.location.pathname);
+    // Poll verify endpoint for up to 30s to see if postback completes in background
+    if (attemptId) {
+      let pollCount = 0;
+      const pollTimer = setInterval(async () => {
+        pollCount++;
+        if (pollCount > 10) { clearInterval(pollTimer); return; }
+        try {
+          const res = await requestJson('/api/rewards/link4m/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: { attemptId }
+          });
+          if (res.ok && res.data?.isRewarded) {
+            clearInterval(pollTimer);
+            showToast('🎉 Xác nhận từ Link4M thành công! Đã cộng +' + (res.data.rewardHours || 12) + 'h vào tài khoản!');
+            void loadCurrentUser();
+            void loadLink4mStatus();
+          }
+        } catch (_) {}
+      }, 3000);
+    }
+  } else if (reward === 'already') {
+    showToast('⚠️ Phiên vượt link này đã được nhận thưởng trước đó.');
+    window.history.replaceState({}, document.title, window.location.pathname);
+  } else if (reward === 'error') {
+    const msg = params.get('message') || 'Xác thực vượt link không thành công.';
+    showToast('⚠️ Lỗi nhận thưởng: ' + msg);
+    window.history.replaceState({}, document.title, window.location.pathname);
+  }
+}
+
+window.loadLink4mStatus = loadLink4mStatus;
+window.startLink4mReward = startLink4mReward;
+window.loadLink4mAdminSetting = loadLink4mAdminSetting;
+window.toggleLink4mSetting = toggleLink4mSetting;
+window.openLink4mConfigModal = openLink4mConfigModal;
+window.closeLink4mConfigModal = closeLink4mConfigModal;
+window.updateLink4mModalFields = updateLink4mModalFields;
+window.saveLink4mConfigModal = saveLink4mConfigModal;
+
 window.toggleTrialGiftSetting = toggleTrialGiftSetting;
 window.saveTrialDaysSetting = saveTrialDaysSetting;
 
@@ -16275,14 +20215,48 @@ async function saveSupabaseConfig() {
   }
 }
 
+function formatSupabaseCounts(counts, isUpload) {
+  if (!counts || typeof counts !== 'object') return '';
+  const parts = [];
+  if (typeof counts.bots === 'number') parts.push(counts.bots + ' bot');
+  if (typeof counts.users === 'number') parts.push(counts.users + ' users');
+  if (typeof counts.keys === 'number') parts.push(counts.keys + ' keys');
+  if (typeof counts.botSettings === 'number' && counts.botSettings > 0) parts.push(counts.botSettings + ' cấu hình');
+  if (typeof counts.workersSynced === 'number' && counts.workersSynced > 0) parts.push(counts.workersSynced + ' worker');
+  if (parts.length === 0) {
+    const fallback = Object.entries(counts)
+      .filter(([k, v]) => typeof v === 'number' && v > 0)
+      .map(([k, v]) => v + ' ' + k);
+    return fallback.join(', ');
+  }
+  return parts.join(', ');
+}
+
 async function runSupabaseSyncAction(buttonId, endpoint, busyText, successPrefix) {
   const btn = document.getElementById(buttonId);
+  const otherBtnId = buttonId === 'supabaseSyncBtn' ? 'supabaseSyncDownBtn' : 'supabaseSyncBtn';
+  const otherBtn = document.getElementById(otherBtnId);
+  const saveBtn = document.getElementById('supabaseSaveBtn');
   const alertBox = document.getElementById('supabaseAlertBox');
   if (btn?.disabled) return;
-  if (btn) { btn.disabled = true; btn.dataset.originalText = btn.textContent; btn.textContent = busyText; }
-  if (alertBox) alertBox.className = 'login-alert hidden';
+
+  const isUpload = endpoint.includes('upload');
+
+  if (btn) {
+    btn.disabled = true;
+    btn.dataset.originalHtml = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner-sm"></span> ' + escapeHtml(busyText);
+  }
+  if (otherBtn) otherBtn.disabled = true;
+  if (saveBtn) saveBtn.disabled = true;
+
+  if (alertBox) {
+    alertBox.innerHTML = '<div style="display:flex;align-items:center;gap:8px;"><span class="spinner-sm"></span><span>' + escapeHtml(busyText) + ' Đang xử lý dữ liệu với Supabase Cloud...</span></div>';
+    alertBox.className = 'login-alert info';
+  }
+
   try {
-    const res = await requestJson(endpoint, { method: 'POST' });
+    const res = await requestJson(endpoint, { method: 'POST', timeoutMs: 35000 });
     if (!res.ok) {
       const error = new Error(res.data?.error || 'Thao tác Supabase thất bại.');
       error.counts = res.data?.counts;
@@ -16290,19 +20264,50 @@ async function runSupabaseSyncAction(buttonId, endpoint, busyText, successPrefix
     }
     const counts = res.data?.counts;
     const partial = res.data?.partial === true;
-    const countText = counts ? ' (' + Object.entries(counts).map(([key, value]) => key + ': ' + value).join(', ') + ')' : '';
-    const message = (res.data?.message || 'Hoàn tất.') + countText;
-    if (alertBox) { alertBox.textContent = (partial ? '⚠️ ' : '✅ ') + message; alertBox.className = 'login-alert ' + (partial ? 'error' : 'success'); }
-    showToast((partial ? '⚠️ ' : successPrefix) + message);
+    const countSummary = formatSupabaseCounts(counts, isUpload);
+
+    let detailedMsg = '';
+    if (countSummary) {
+      detailedMsg = isUpload
+        ? ('Đã sao lưu thành công ' + countSummary + ' lên Supabase Cloud.')
+        : ('Đã tải thành công ' + countSummary + ' từ Supabase Cloud.');
+    } else {
+      detailedMsg = res.data?.message || 'Hoàn tất đồng bộ Supabase Cloud.';
+    }
+
+    if (partial) {
+      const warnMsg = '⚠️ ' + (res.data?.message || detailedMsg);
+      if (alertBox) {
+        alertBox.textContent = warnMsg;
+        alertBox.className = 'login-alert error';
+      }
+      showToast(warnMsg, 'warning', 6000);
+    } else {
+      if (alertBox) {
+        alertBox.textContent = '✅ ' + detailedMsg;
+        alertBox.className = 'login-alert success';
+      }
+      showToast('✅ ' + detailedMsg, 'success', 5000);
+    }
+
     lastHomeSig = '';
     await Promise.allSettled([refreshHome(), refreshUserManagementPage(), refreshKeysTable()]);
     if (selectedBotId !== null) await refreshDetail(true);
   } catch (err) {
-    const message = (err.message || 'Không thể đồng bộ Supabase.') + (err.counts ? ' (' + Object.entries(err.counts).map(([key, value]) => key + ': ' + value).join(', ') + ')' : '');
-    if (alertBox) { alertBox.textContent = '⚠️ ' + message; alertBox.className = 'login-alert error'; }
-    showToast('⚠️ ' + message);
+    const errCountSummary = formatSupabaseCounts(err.counts, isUpload);
+    const message = (err.message || 'Không thể đồng bộ Supabase.') + (errCountSummary ? (' (' + errCountSummary + ')') : '');
+    if (alertBox) {
+      alertBox.textContent = '⚠️ ' + message;
+      alertBox.className = 'login-alert error';
+    }
+    showToast('⚠️ ' + message, 'error', 6000);
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = btn.dataset.originalText || (buttonId === 'supabaseSyncBtn' ? '⬆ Tải lên Supabase Cloud' : '⬇ Đồng bộ xuống'); }
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = btn.dataset.originalHtml || (buttonId === 'supabaseSyncBtn' ? '⬆ Tải lên Supabase Cloud' : '⬇ Đồng bộ xuống');
+    }
+    if (otherBtn) otherBtn.disabled = false;
+    if (saveBtn) saveBtn.disabled = false;
   }
 }
 async function syncAllToSupabase() {
@@ -16340,6 +20345,9 @@ window.editBot = editBot;
 window.equipDetailItem = equipDetailItem;
 window.goHome = goHome;
 window.loadAdminCredentials = loadAdminCredentials;
+window.handleDetailEquipmentClick = handleDetailEquipmentClick;
+window.handleDetailDropZoneClick = handleDetailDropZoneClick;
+window.cancelDetailSlotSelection = cancelDetailSlotSelection;
 window.moveDetailItem = moveDetailItem;
 window.openAddBotModal = openAddBotModal;
 window.openAdminModal = openAdminModal;
@@ -16449,6 +20457,9 @@ window.renderDetailRemoteGui = renderDetailRemoteGui;
 window.clickDetailGuiSlot = clickDetailGuiSlot;
 window.closeDetailGuiWindow = closeDetailGuiWindow;
 window.saveAndRestartBot = saveAndRestartBot;
+window.cleanDeadBots = cleanDeadBots;
+window.openEditSecretModal = openEditSecretModal;
+window.toggleEditSecretKeyVisibility = toggleEditSecretKeyVisibility;
 
 window.addEventListener('error',event=>{
   try{console.error('[MANAGER UI]',event.error||event.message||'Unknown UI error');}catch(_){}
@@ -16488,6 +20499,7 @@ window.addEventListener('unhandledrejection',event=>{
       if (!routed) await refreshHome();
       scheduleNextManagerPoll();
       checkAndShowAnnouncement();
+      if (typeof checkRewardQueryParams === 'function') checkRewardQueryParams();
     } else if (res.status === 401) {
       currentUser = null;
       bots = [];
@@ -16633,6 +20645,7 @@ setInterval(updateUserHeaderCountdown, 5000);
                 <option value="7" selected>7 Ngày (1 Tuần)</option>
                 <option value="14">14 Ngày (2 Tuần)</option>
                 <option value="30">30 Ngày (1 Tháng)</option>
+                <option value="lifetime">👑 Vĩnh Viễn</option>
                 <option value="custom">✏️ Tùy chỉnh ngày...</option>
               </select>
               <input type="number" id="createKeyCustomDays" min="1" max="3650" placeholder="Số ngày" style="display:none;width:75px;background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px;border-radius:6px;font-size:13px;" />
@@ -16699,7 +20712,34 @@ function withRegisterLock(fn) {
 
 async function resetBotsForAssignmentUnlocked(botIds, reason = 'reassignment') {
     if (!Array.isArray(botIds) || botIds.length === 0) return { ok: true };
+    // BUG-06 (Wave B0 — recheck §7-4): PREFLIGHT toàn bộ danh sách TRƯỚC khi có side effect
+    // (thu hồi quyền/reset worker). Chặn sớm nếu danh sách không thể thành công, tránh
+    // trạng thái dở dang "bot 1 đã reset, bot 2 chết rồi dừng".
+    // Lưu ý: reset mang tính phá hủy (không thể un-reset credential) nên "compensation"
+    // ở đây là (1) chặn sớm danh sách hỏng, (2) khi fail giữa chừng — báo đúng bot nào
+    // đã reset qua trạng thái bền vững pendingResets (resume được) và KHÔNG cấp bot fail.
+    const preflightFailures = [];
+    for (const rawId of botIds) {
+        const bId = Number(rawId);
+        const botConfig = BOT_CONFIG.find(c => Number(c.id) === bId);
+        if (!botConfig) {
+            preflightFailures.push({ botId: bId, error: 'BOT_NOT_FOUND' });
+            continue;
+        }
+        const pending = getPendingResets()[String(bId)];
+        if (pending && pending.status !== 'completed') {
+            preflightFailures.push({ botId: bId, error: 'RESET_PENDING_IN_PROGRESS', resetStatus: String(pending.status || '') });
+        }
+    }
+    if (preflightFailures.length > 0) {
+        console.error(`[RESET_ASSIGN] Preflight thất bại (${reason}): ` + preflightFailures.map(p => `#${p.botId}=${p.error}`).join('; '));
+        return { ok: false, error: 'RESET_PREFLIGHT_FAILED', partial: false, preflight: preflightFailures };
+    }
+    const sagaTransactionId = 'saga_assign_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 7);
     let partial = false;
+    const succeededBots = [];
+    const pending = getPendingResets();
+
     for (const rawId of botIds) {
         const bId = Number(rawId);
         const botConfig = BOT_CONFIG.find(c => Number(c.id) === bId);
@@ -16708,9 +20748,62 @@ async function resetBotsForAssignmentUnlocked(botIds, reason = 'reassignment') {
             // Use the same durable state machine as the dedicated reset route so a
             // Manager restart can resume an interrupted handover instead of leaving
             // the bot half-reset. The old owner's Cloud access is revoked first.
-            const begin = await beginCustomerReset(bId, `resetBotsForAssignment: ${reason}`);
+            const begin = await beginCustomerReset(bId, `resetBotsForAssignment: ${reason}`, {
+                ownerAfter: { reason, sagaTransactionId }
+            });
             if (!begin.ok) {
                 console.error(`[RESET_ASSIGN] Không bắt đầu được reset bot #${bId} (${reason}):`, begin.error);
+                const failedError = begin.error || 'RESET_START_FAILED';
+                if (succeededBots.length > 0) {
+                    // §3.7 Multi-bot assignment: nếu bot 1 thành công nhưng bot 2 thất bại,
+                    // lưu checkpoint transaction, giữ conflict state, không để bot mất trạng thái và ghi audit log.
+                    for (const s of succeededBots) {
+                        const sContext = pending[String(s.botId)] || s.context || { botId: s.botId };
+                        sContext.status = 'conflict';
+                        sContext.errorCode = 'MULTI_BOT_PARTIAL_FAILURE';
+                        sContext.lastError = sanitizeErrorMessage(`Multi-bot assignment saga thất bại: Bot #${s.botId} đã reset nhưng Bot #${bId} thất bại (${failedError}). Giữ conflict để tránh mất trạng thái bot.`);
+                        sContext.sagaTransactionId = sagaTransactionId;
+                        sContext.batchBotIds = [...botIds];
+                        sContext.succeededBots = succeededBots.map(x => x.botId);
+                        sContext.failedBots = [bId];
+                        sContext.updatedAt = new Date().toISOString();
+                        await persistPendingReset(s.botId, sContext);
+                    }
+                    const fContext = pending[String(bId)] || begin.existing || {
+                        botId: bId,
+                        resetTransactionId: 'conflict_' + bId + '_' + Date.now().toString(36),
+                        resetId: 'conflict_' + bId + '_' + Date.now().toString(36),
+                        createdAt: new Date().toISOString()
+                    };
+                    fContext.status = 'conflict';
+                    fContext.errorCode = 'MULTI_BOT_PARTIAL_FAILURE';
+                    fContext.lastError = sanitizeErrorMessage(`Multi-bot assignment saga thất bại tại bot này (${failedError}) trong khi các bot khác trong cùng batch đã reset (${succeededBots.map(x => x.botId).join(', ')}). Giữ conflict để admin xử lý.`);
+                    fContext.sagaTransactionId = sagaTransactionId;
+                    fContext.batchBotIds = [...botIds];
+                    fContext.succeededBots = succeededBots.map(x => x.botId);
+                    fContext.failedBots = [bId];
+                    fContext.updatedAt = new Date().toISOString();
+                    await persistPendingReset(bId, fContext);
+
+                    logAuditEvent({
+                        action: 'SAGA_MULTI_BOT_ASSIGNMENT_CONFLICT',
+                        target: { botIds, succeededBots: succeededBots.map(x => x.botId), failedBotId: bId },
+                        details: `Multi-bot assignment saga [${sagaTransactionId}] thất bại giữa chừng: bot(s) [${succeededBots.map(x => x.botId).join(', ')}] đã reset nhưng bot #${bId} thất bại (${failedError}). Tất cả bot liên quan đã được lưu checkpoint CONFLICT để bảo toàn trạng thái; cần Admin xử lý qua /api/manager/pending-resets.`,
+                        status: 'CONFLICT'
+                    });
+                    return {
+                        ok: false,
+                        conflict: true,
+                        botId: bId,
+                        botReset: false,
+                        error: 'MULTI_BOT_ASSIGNMENT_PARTIAL_FAILURE',
+                        partial: true,
+                        succeededBots: succeededBots.map(x => x.botId),
+                        failedBots: [bId],
+                        sagaTransactionId,
+                        reset: fContext
+                    };
+                }
                 return {
                     ok: false,
                     botId: bId,
@@ -16720,9 +20813,58 @@ async function resetBotsForAssignmentUnlocked(botIds, reason = 'reassignment') {
                     reset: begin.existing || null
                 };
             }
+
+            begin.context.sagaTransactionId = sagaTransactionId;
+            begin.context.batchBotIds = [...botIds];
             const resetResult = await executeCustomerReset(bId, { context: begin.context });
             if (!resetResult.ok) {
                 console.error(`[RESET_ASSIGN] Bot #${bId} reset thất bại khi ${reason}:`, resetResult.error || resetResult.warning);
+                const failedError = resetResult.error || resetResult.warning || 'RESET_FAILED';
+                if (succeededBots.length > 0) {
+                    // §3.7 Multi-bot assignment: nếu bot 1 thành công nhưng bot 2 thất bại
+                    for (const s of succeededBots) {
+                        const sContext = pending[String(s.botId)] || s.context || { botId: s.botId };
+                        sContext.status = 'conflict';
+                        sContext.errorCode = 'MULTI_BOT_PARTIAL_FAILURE';
+                        sContext.lastError = sanitizeErrorMessage(`Multi-bot assignment saga thất bại: Bot #${s.botId} đã reset nhưng Bot #${bId} thất bại (${failedError}). Giữ conflict để tránh mất trạng thái bot.`);
+                        sContext.sagaTransactionId = sagaTransactionId;
+                        sContext.batchBotIds = [...botIds];
+                        sContext.succeededBots = succeededBots.map(x => x.botId);
+                        sContext.failedBots = [bId];
+                        sContext.updatedAt = new Date().toISOString();
+                        await persistPendingReset(s.botId, sContext);
+                    }
+                    const fContext = pending[String(bId)] || begin.context;
+                    fContext.status = 'conflict';
+                    fContext.errorCode = 'MULTI_BOT_PARTIAL_FAILURE';
+                    fContext.lastError = sanitizeErrorMessage(`Multi-bot assignment saga thất bại tại bot này (${failedError}) trong khi các bot khác trong cùng batch đã reset (${succeededBots.map(x => x.botId).join(', ')}). Giữ conflict để admin xử lý.`);
+                    fContext.sagaTransactionId = sagaTransactionId;
+                    fContext.batchBotIds = [...botIds];
+                    fContext.succeededBots = succeededBots.map(x => x.botId);
+                    fContext.failedBots = [bId];
+                    fContext.updatedAt = new Date().toISOString();
+                    await persistPendingReset(bId, fContext);
+
+                    logAuditEvent({
+                        action: 'SAGA_MULTI_BOT_ASSIGNMENT_CONFLICT',
+                        target: { botIds, succeededBots: succeededBots.map(x => x.botId), failedBotId: bId },
+                        details: `Multi-bot assignment saga [${sagaTransactionId}] thất bại giữa chừng: bot(s) [${succeededBots.map(x => x.botId).join(', ')}] đã reset nhưng bot #${bId} thất bại (${failedError}). Tất cả bot liên quan đã được lưu checkpoint CONFLICT để bảo toàn trạng thái; cần Admin xử lý qua /api/manager/pending-resets.`,
+                        status: 'CONFLICT'
+                    });
+                    return {
+                        ok: false,
+                        conflict: true,
+                        botId: bId,
+                        botReset: false,
+                        ownershipRevoked: resetResult.ownershipRevoked === true,
+                        error: 'MULTI_BOT_ASSIGNMENT_PARTIAL_FAILURE',
+                        partial: true,
+                        succeededBots: succeededBots.map(x => x.botId),
+                        failedBots: [bId],
+                        sagaTransactionId,
+                        resetId: resetResult.resetId
+                    };
+                }
                 return {
                     ok: false,
                     botId: bId,
@@ -16733,33 +20875,98 @@ async function resetBotsForAssignmentUnlocked(botIds, reason = 'reassignment') {
                     resetId: resetResult.resetId
                 };
             }
+            succeededBots.push({ botId: bId, resetId: resetResult.resetId, context: begin.context });
             if (resetResult.partial === true) partial = true;
             summaryCache.delete(bId);
             try { await refreshSummary(botConfig, true); } catch (_) {}
         } catch (e) {
             console.error(`[RESET_ASSIGN] Không thể kết nối để reset bot #${bId} khi ${reason}:`, e.message);
+            if (succeededBots.length > 0) {
+                for (const s of succeededBots) {
+                    const sContext = pending[String(s.botId)] || s.context || { botId: s.botId };
+                    sContext.status = 'conflict';
+                    sContext.errorCode = 'MULTI_BOT_PARTIAL_FAILURE';
+                    sContext.lastError = sanitizeErrorMessage(`Multi-bot assignment saga thất bại: Bot #${s.botId} đã reset nhưng Bot #${bId} gặp ngoại lệ (${e.message}). Giữ conflict để tránh mất trạng thái bot.`);
+                    sContext.sagaTransactionId = sagaTransactionId;
+                    sContext.batchBotIds = [...botIds];
+                    sContext.succeededBots = succeededBots.map(x => x.botId);
+                    sContext.failedBots = [bId];
+                    sContext.updatedAt = new Date().toISOString();
+                    await persistPendingReset(s.botId, sContext);
+                }
+                const fContext = pending[String(bId)] || {
+                    botId: bId,
+                    resetTransactionId: 'conflict_' + bId + '_' + Date.now().toString(36),
+                    resetId: 'conflict_' + bId + '_' + Date.now().toString(36),
+                    createdAt: new Date().toISOString()
+                };
+                fContext.status = 'conflict';
+                fContext.errorCode = 'MULTI_BOT_PARTIAL_FAILURE';
+                fContext.lastError = sanitizeErrorMessage(`Multi-bot assignment saga gặp ngoại lệ tại bot này (${e.message}) trong khi các bot khác đã reset. Giữ conflict để admin xử lý.`);
+                fContext.sagaTransactionId = sagaTransactionId;
+                fContext.batchBotIds = [...botIds];
+                fContext.succeededBots = succeededBots.map(x => x.botId);
+                fContext.failedBots = [bId];
+                fContext.updatedAt = new Date().toISOString();
+                await persistPendingReset(bId, fContext);
+
+                logAuditEvent({
+                    action: 'SAGA_MULTI_BOT_ASSIGNMENT_CONFLICT',
+                    target: { botIds, succeededBots: succeededBots.map(x => x.botId), failedBotId: bId },
+                    details: `Multi-bot assignment saga [${sagaTransactionId}] gặp ngoại lệ khi kết nối Bot #${bId} (${e.message}) sau khi đã reset Bot(s) [${succeededBots.map(x => x.botId).join(', ')}]. Lưu checkpoint CONFLICT; cần Admin xử lý.`,
+                    status: 'CONFLICT'
+                });
+                return {
+                    ok: false,
+                    conflict: true,
+                    botId: bId,
+                    ownershipRevoked: true,
+                    error: 'MULTI_BOT_ASSIGNMENT_PARTIAL_FAILURE',
+                    partial: true,
+                    succeededBots: succeededBots.map(x => x.botId),
+                    failedBots: [bId],
+                    sagaTransactionId
+                };
+            }
             return { ok: false, botId: bId, ownershipRevoked: true, error: e.message, partial: true };
         }
     }
-    return { ok: true, partial };
+    return { ok: true, partial, succeededBots: succeededBots.map(x => x.botId) };
 }
 
 async function resetBotsForAssignment(botIds, reason = 'reassignment') {
     if (!Array.isArray(botIds) || botIds.length === 0) return { ok: true };
     if (!supabaseAdapter?.isEnabled?.()) {
+        // NEW-04 (Wave B0 — recheck §5): KHÔNG nuốt lỗi. Reset local phải được worker
+        // xác nhận (HTTP ok + data.ok !== false) trước khi bot được tính là đã dọn sạch.
+        // Worker offline / sai secret / {ok:false} → bot KHÔNG được cấp, báo partial.
+        let anyFailure = false;
         for (const rawId of botIds) {
             const bId = Number(rawId);
             const botConfig = BOT_CONFIG.find(c => Number(c.id) === bId);
             if (!botConfig) continue;
+            let resetOk = false;
             try {
-                await fetchChild(botConfig, '/api/bot/reset-customer', {
+                const expectedTxId = crypto.randomUUID();
+                const localReset = await fetchChild(botConfig, '/api/bot/reset-customer', {
                     method: 'POST',
-                    body: { resetTransactionId: crypto.randomUUID() },
+                    body: { resetTransactionId: expectedTxId },
                     timeoutMs: 4000
                 });
-            } catch (_) {}
+                resetOk = isWorkerResetPayloadConfirmed(localReset, expectedTxId);
+                if (resetOk && /^[a-f0-9]{32}$/i.test(String(localReset?.data?.resetMarker || ''))) {
+                    localBotResetMarkers.set(bId, String(localReset.data.resetMarker));
+                }
+            } catch (_) { resetOk = false; }
+            if (!resetOk) {
+                console.error(`[RESET_ASSIGN] Reset local Bot #${bId} không được worker xác nhận (offline/sai secret/{ok:false}) — báo thất bại, không giả thành công.`);
+                anyFailure = true;
+            }
         }
-        return { ok: true, partial: false };
+        // NEW-04: trả kết quả trung thực để caller chặn việc bàn giao bot chưa được dọn.
+        return anyFailure
+            ? { ok: false, partial: true, error: 'LOCAL_RESET_NOT_CONFIRMED' }
+            : { ok: true, partial: false };
     }
     if (!supabaseStorageReady) return { ok: false, error: 'Supabase chưa sẵn sàng để khóa reset trên Cloud.', partial: true };
     try { return await supabaseAdapter.withManagerLock('bot-ownership-mutation', () => resetBotsForAssignmentUnlocked(botIds, reason), 900); }
@@ -17066,7 +21273,17 @@ async function persistPendingResetOrThrow(botId, context) {
     return true;
 }
 
-async function beginCustomerReset(botId, requestedBy = 'admin') {
+const SAGA_RESET_STATES = Object.freeze({
+    PENDING: 'pending',
+    RUNNING: 'running',
+    WAITING_WORKER: 'waiting_worker',
+    CONFLICT: 'conflict',
+    COMPLETED: 'completed',
+    FAILED_RETRIABLE: 'failed_retriable',
+    NEEDS_ADMIN: 'needs_admin'
+});
+
+async function beginCustomerReset(botId, requestedBy = 'admin', options = {}) {
     const bId = Number(botId);
     const key = String(bId);
     if (!Number.isSafeInteger(bId) || bId <= 0) return { ok: false, error: 'BOT_ID không hợp lệ' };
@@ -17076,15 +21293,19 @@ async function beginCustomerReset(botId, requestedBy = 'admin') {
     const pending = getPendingResets();
     const existing = pending[key];
     const previousPending = existing ? JSON.parse(JSON.stringify(existing)) : null;
-    if (customerResetLocks.has(key) || (existing && existing.status === 'in_progress' && Number(existing.leaseUntil || 0) > Date.now())) {
+    const isRunning = customerResetLocks.has(key) ||
+        (existing && (existing.status === 'running' || existing.status === 'in_progress' || existing.status === 'waiting_worker') && Number(existing.leaseUntil || 0) > Date.now());
+    if (isRunning) {
         return { ok: false, conflict: true, error: 'Đang có một tiến trình reset khác chạy trên bot này.', existing };
     }
     if (existing && existing.status === 'conflict') return { ok: false, conflict: true, error: 'Reset đang ở trạng thái conflict và cần quản trị viên xử lý.', existing };
+    if (existing && existing.status === 'needs_admin') return { ok: false, conflict: true, error: 'Reset đang ở trạng thái needs_admin và cần quản trị viên xử lý.', existing };
     if (existing && existing.status !== 'completed') {
         customerResetLocks.add(key);
-        existing.status = 'in_progress';
+        existing.status = 'running';
         existing.leaseUntil = Date.now() + 10 * 60 * 1000;
         existing.attempts = Number(existing.attempts || 0) + 1;
+        existing.updatedAt = new Date().toISOString();
         if (!(await persistPendingReset(bId, existing))) {
             customerResetLocks.delete(key);
             return { ok: false, error: 'Không lưu được checkpoint để tiếp tục giao dịch reset đang chờ.', existing };
@@ -17111,7 +21332,7 @@ async function beginCustomerReset(botId, requestedBy = 'admin') {
             throw new Error('Không đọc được bot_settings từ Cloud; chưa bắt đầu reset: ' + err.message);
         }
         const cloudPendingId = String(settings?.synced_auth?.pendingCustomerResetId || '');
-        if (cloudPendingId && cloudPendingId !== String(existing?.resetId || '')) {
+        if (cloudPendingId && cloudPendingId !== String(existing?.resetTransactionId || existing?.resetId || '')) {
             throw new Error('Cloud vẫn có giao dịch reset đang chờ xử lý: ' + cloudPendingId);
         }
         const assignmentFlow = /^(?:allocateBotsForUser|resetBotsForAssignment):/.test(String(requestedBy || ''));
@@ -17155,23 +21376,39 @@ async function beginCustomerReset(botId, requestedBy = 'admin') {
                 sessionTokenHashes.add(String(sessionItem.tokenHash || ''));
             }
         }
+        const resetTransactionId = 'reset_' + bId + '_' + now.toString(36) + '_' + Math.random().toString(36).slice(2, 6);
         const context = {
-            resetId: 'reset_' + bId + '_' + now.toString(36),
+            resetId: resetTransactionId,
+            resetTransactionId,
             botId: bId,
             requestedBy: String(requestedBy || 'admin'),
             requestedAt: new Date(now).toISOString(),
+            createdAt: new Date(now).toISOString(),
+            updatedAt: new Date(now).toISOString(),
+            completedAt: null,
+            ownerBefore: {
+                userIds: ownerUserIds,
+                usernames: ownerUsernames,
+                username: ownerUsernames[0] || null
+            },
+            ownerAfter: options.ownerAfter || null,
             ownerUserIds,
             ownerUsernames,
             sessionTokenHashes: [...sessionTokenHashes],
             settingsExisted: !!settings,
             settingsUpdatedAt: String(settings?.updated_at || ''),
             settingsUsername: String(settings?.username || ''),
+            fingerprint: resetSettingsFingerprint(settings, true),
             settingsFingerprint: resetSettingsFingerprint(settings, true),
             settingsFingerprintBefore: resetSettingsFingerprint(settings, false),
+            revision: Number(settings?.synced_auth?.authRevision || 0),
             steps: { users: false, settings: false, sessions: false, botReset: false, authSync: false },
-            status: 'in_progress',
+            currentStep: 'pending',
+            status: 'pending',
             attempts: 0,
+            maxAttempts: 5,
             leaseUntil: now + 10 * 60 * 1000,
+            errorCode: null,
             lastError: ''
         };
         pending[key] = context;
@@ -17200,9 +21437,13 @@ async function executeCustomerReset(botId, options = {}) {
     } catch (err) {
         customerResetLocks.delete(key);
         const context = options.context;
-        context.status = 'failed'; context.lastError = err.message; context.leaseUntil = 0;
+        context.status = 'failed_retriable';
+        context.errorCode = 'LOCK_OR_EXECUTION_FAILED';
+        context.lastError = sanitizeErrorMessage(err.message);
+        context.leaseUntil = 0;
+        context.updatedAt = new Date().toISOString();
         try { await persistPendingReset(bId, context); } catch (_) {}
-        return { ok: false, status: 503, partial: true, resetId: context.resetId, error: err.message };
+        return { ok: false, status: 503, partial: true, resetId: context.resetId, resetTransactionId: context.resetTransactionId, errorCode: context.errorCode, error: err.message };
     }
 }
 
@@ -17213,6 +21454,9 @@ async function executeCustomerResetCore(botId, options = {}) {
     const botConfig = (typeof BOT_CONFIG !== 'undefined' ? BOT_CONFIG : []).find(bot => Number(bot.id) === bId) || null;
     if (!context) return { ok: false, status: 500, error: 'Thiếu reset context.' };
     try {
+        context.status = 'running';
+        context.currentStep = 'revoke_ownership';
+        context.updatedAt = new Date().toISOString();
         if (!(context.steps.users && context.steps.settings && context.steps.sessions)) {
             const revoke = await revokeBotOwnership(bId, { context });
             if (revoke.usersSaved) context.steps.users = true;
@@ -17220,8 +21464,10 @@ async function executeCustomerResetCore(botId, options = {}) {
             if (revoke.sessionsSaved) context.steps.sessions = true;
             if (revoke.conflict) {
                 context.status = 'conflict';
-                context.lastError = revoke.error;
+                context.errorCode = 'REVOKE_CONFLICT';
+                context.lastError = sanitizeErrorMessage(revoke.error);
                 context.leaseUntil = 0;
+                context.updatedAt = new Date().toISOString();
                 await persistPendingResetOrThrow(bId, context);
                 return {
                     ok: false,
@@ -17229,15 +21475,19 @@ async function executeCustomerResetCore(botId, options = {}) {
                     partial: true,
                     conflict: true,
                     resetId: context.resetId,
+                    resetTransactionId: context.resetTransactionId,
+                    errorCode: context.errorCode,
                     error: revoke.error,
                     revoke
                 };
             }
             if (!revoke.ok) {
-                context.status = 'failed';
-                context.lastError = revoke.error || 'REVOKE_FAILED';
                 context.attempts = Number(context.attempts || 0) + 1;
+                context.status = context.attempts >= (context.maxAttempts || 5) ? 'needs_admin' : 'failed_retriable';
+                context.errorCode = 'REVOKE_FAILED';
+                context.lastError = sanitizeErrorMessage(revoke.error || 'REVOKE_FAILED');
                 context.leaseUntil = 0;
+                context.updatedAt = new Date().toISOString();
                 await persistPendingResetOrThrow(bId, context);
                 return {
                     ok: false,
@@ -17245,6 +21495,8 @@ async function executeCustomerResetCore(botId, options = {}) {
                     partial: true,
                     step: 'revoke-before-reset',
                     resetId: context.resetId,
+                    resetTransactionId: context.resetTransactionId,
+                    errorCode: context.errorCode,
                     error: revoke.error || 'REVOKE_FAILED',
                     revoke
                 };
@@ -17261,10 +21513,12 @@ async function executeCustomerResetCore(botId, options = {}) {
                 // customer may have been configured while an earlier step failed.
                 const safety = await assertCustomerResetTargetSafe(bId, context);
                 if (!safety.ok) {
-                    context.status = safety.conflict ? 'conflict' : 'failed';
-                    context.lastError = safety.error;
                     context.attempts = Number(context.attempts || 0) + 1;
+                    context.status = safety.conflict ? 'conflict' : (context.attempts >= (context.maxAttempts || 5) ? 'needs_admin' : 'failed_retriable');
+                    context.errorCode = safety.conflict ? 'SAFETY_CONFLICT' : 'SAFETY_CHECK_FAILED';
+                    context.lastError = sanitizeErrorMessage(safety.error);
                     context.leaseUntil = 0;
+                    context.updatedAt = new Date().toISOString();
                     await persistPendingResetOrThrow(bId, context);
                     return {
                         ok: false,
@@ -17272,11 +21526,18 @@ async function executeCustomerResetCore(botId, options = {}) {
                         partial: true,
                         conflict: !!safety.conflict,
                         resetId: context.resetId,
+                        resetTransactionId: context.resetTransactionId,
+                        errorCode: context.errorCode,
                         error: safety.error,
                         warning: 'Đã dừng trước bước reset bot vì không xác minh được bot vẫn thuộc khách cũ.'
                     };
                 }
-                let botResult = await runChildAction(bId, '/api/bot/reset-customer', { resetTransactionId: context.resetId }, {}, 'POST', { timeoutMs: 45000 });
+                context.status = 'waiting_worker';
+                context.currentStep = 'bot_reset';
+                context.updatedAt = new Date().toISOString();
+                await persistPendingReset(bId, context).catch(() => {});
+
+                let botResult = await runChildAction(bId, '/api/bot/reset-customer', { resetTransactionId: context.resetTransactionId || context.resetId }, {}, 'POST', { timeoutMs: 45000 });
                 if (safety.resetCompleted === true && (!botResult.ok || botResult.data?.ok !== true)) {
                     // Cloud proves the reset committed; retrying the same transaction on Worker only refreshes cleanup status.
                     botResult = { ok: true, status: 200, data: { ok: true, alreadyReset: true, partial: true, resetMarker: safety.resetMarker } };
@@ -17284,17 +21545,20 @@ async function executeCustomerResetCore(botId, options = {}) {
                     // The Worker may have committed Cloud state before the response was lost.
                     try {
                         const committed = await supabaseAdapter.fetchBotSettingsStrict(String(bId));
-                        if (String(committed?.synced_auth?.lastCustomerResetId || '') === String(context.resetId)) {
+                        if (String(committed?.synced_auth?.lastCustomerResetId || '') === String(context.resetTransactionId || context.resetId)) {
                             botResult = { ok: true, status: 200, data: { ok: true, alreadyReset: true, partial: true, resetMarker: committed?.synced_auth?.resetMarker || '' } };
                         }
                     } catch (_) {}
                 }
                 const botResetOk = !!(botResult.ok && botResult.data?.ok === true);
                 if (!botResetOk) {
-                    context.status = 'failed';
-                    context.lastError = botResult.data?.error || 'WORKER_RESET_FAILED';
                     context.attempts = Number(context.attempts || 0) + 1;
+                    const isPermanent = botResult.status === 401 || botResult.status === 403;
+                    context.status = isPermanent ? 'needs_admin' : (context.attempts >= (context.maxAttempts || 5) ? 'needs_admin' : 'failed_retriable');
+                    context.errorCode = isPermanent ? 'WORKER_AUTH_FORBIDDEN' : 'WORKER_RESET_FAILED';
+                    context.lastError = sanitizeErrorMessage(botResult.data?.error || 'WORKER_RESET_FAILED');
                     context.leaseUntil = 0;
+                    context.updatedAt = new Date().toISOString();
                     await persistPendingResetOrThrow(bId, context);
                     return {
                         ok: false,
@@ -17303,6 +21567,8 @@ async function executeCustomerResetCore(botId, options = {}) {
                         ownershipRevoked: true,
                         authSynced: false,
                         resetId: context.resetId,
+                        resetTransactionId: context.resetTransactionId,
+                        errorCode: context.errorCode,
                         error: context.lastError,
                         warning: 'Quyền Cloud của khách cũ đã được thu hồi, nhưng bot chưa reset thành công.',
                         data: botResult.data
@@ -17321,22 +21587,34 @@ async function executeCustomerResetCore(botId, options = {}) {
             if (!botConfig) {
                 context.steps.authSync = true;
             } else {
+                context.status = 'waiting_worker';
+                context.currentStep = 'auth_sync';
+                context.updatedAt = new Date().toISOString();
                 const authSync = await syncAuthToBotAfterOwnershipChange(botConfig, { resetMarker: context.authResetMarker, pendingCustomerResetId: null, distributedAuthLockHeld: true });
                 if (authSync?.ok === true) {
                     context.steps.authSync = true;
                 } else {
-                    context.status = 'failed';
-                    context.lastError = authSync?.error || 'AUTH_SYNC_FAILED';
                     context.attempts = Number(context.attempts || 0) + 1;
+                    const syncCode = lastAuthSyncStatusCodes.get(bId);
+                    const isPermanent = syncCode === 401 || syncCode === 403;
+                    context.status = isPermanent ? 'needs_admin' : (context.attempts >= (context.maxAttempts || 5) ? 'needs_admin' : 'failed_retriable');
+                    context.errorCode = isPermanent ? 'AUTH_SYNC_FORBIDDEN' : 'AUTH_SYNC_FAILED';
+                    context.lastError = sanitizeErrorMessage(authSync?.error || 'AUTH_SYNC_FAILED');
                     context.leaseUntil = 0;
+                    context.updatedAt = new Date().toISOString();
+                    await enqueueOutboxSync(bId, { type: 'auth_sync', committedTransaction: { type: 'CUSTOMER_RESET', target: bId } });
                     await persistPendingResetOrThrow(bId, context);
                     return {
                         ok: true,
                         status: 200,
                         partial: true,
+                        coreCommitted: true,
+                        syncStatus: 'pending_retry',
                         ownershipRevoked: true,
                         authSynced: false,
                         resetId: context.resetId,
+                        resetTransactionId: context.resetTransactionId,
+                        errorCode: context.errorCode,
                         authSyncError: context.lastError,
                         warning: 'Bot đã reset và quyền Cloud đã thu hồi, nhưng worker chưa xác nhận auth-sync. Hệ thống sẽ thử lại định kỳ.'
                     };
@@ -17349,14 +21627,18 @@ async function executeCustomerResetCore(botId, options = {}) {
         if (!cloudSettings) throw new Error('Không đọc được bot_settings để hoàn tất checkpoint reset.');
         const cloudAuth = { ...(cloudSettings.synced_auth || {}) };
         const pendingResetId = String(cloudAuth.pendingCustomerResetId || '');
-        if (pendingResetId && pendingResetId !== String(context.resetId)) throw new Error('Cloud có pending reset ID khác; giữ nguyên checkpoint để tránh ghi đè.');
+        if (pendingResetId && pendingResetId !== String(context.resetTransactionId || context.resetId)) throw new Error('Cloud có pending reset ID khác; giữ nguyên checkpoint để tránh ghi đè.');
         if (pendingResetId) {
             delete cloudAuth.pendingCustomerResetId;
             if (!(await supabaseAdapter.saveBotSettings(String(bId), { ...cloudSettings, syncedAuth: cloudAuth }))) throw new Error('Không xóa được pending reset marker trên Cloud.');
         }
         context.status = 'completed';
+        context.currentStep = 'done';
         context.completedAt = new Date().toISOString();
+        context.updatedAt = new Date().toISOString();
         context.leaseUntil = 0;
+        context.errorCode = null;
+        context.lastError = '';
         const pending = getPendingResets();
         pending[key] = context;
         // Mark completion durably before deleting the record. If the process
@@ -17374,20 +21656,25 @@ async function executeCustomerResetCore(botId, options = {}) {
             ok: true,
             status: 200,
             partial: !!context.partialLogs || !statePersisted,
+            coreCommitted: true,
+            syncStatus: 'synced',
             ownershipRevoked: true,
             authSynced: true,
             resetId: context.resetId,
+            resetTransactionId: context.resetTransactionId,
             statePersisted,
             warning: statePersisted ? undefined : 'Reset đã xong nhưng chưa xác nhận xóa xong trạng thái tạm trên Cloud; sẽ dọn lại khi Manager khởi động.',
             message: 'Đã reset bàn giao bot và thu hồi quyền khách cũ thành công.'
         };
     } catch (err) {
-        context.status = 'failed';
-        context.lastError = err.message;
         context.attempts = Number(context.attempts || 0) + 1;
+        context.status = context.attempts >= (context.maxAttempts || 5) ? 'needs_admin' : 'failed_retriable';
+        context.errorCode = 'CORE_RESET_EXCEPTION';
+        context.lastError = sanitizeErrorMessage(err.message);
         context.leaseUntil = 0;
+        context.updatedAt = new Date().toISOString();
         await persistPendingReset(bId, context).catch(() => false);
-        return { ok: false, status: 502, partial: true, resetId: context.resetId, error: err.message };
+        return { ok: false, status: 502, partial: true, resetId: context.resetId, resetTransactionId: context.resetTransactionId, errorCode: context.errorCode, error: err.message };
     } finally {
         customerResetLocks.delete(key);
     }
@@ -17396,12 +21683,27 @@ async function executeCustomerResetCore(botId, options = {}) {
 async function runCustomerResetTransaction(botId, requestedBy = 'admin') {
     if (!supabaseAdapter?.isEnabled?.() || !supabaseStorageReady) {
         const targetBot = getBotConfig(botId);
-        if (targetBot) {
-            try {
-                void fetchChild(targetBot, '/api/bot/reset-customer', { method: 'POST', body: { offlineLocalReset: true }, timeoutMs: 3000 }).catch(() => {});
-            } catch (_) {}
+        if (!targetBot) {
+            return { begin: { ok: false, error: `Bot #${botId} không tồn tại trong cấu hình.` }, resetResult: { ok: false, error: 'BOT_NOT_FOUND' } };
         }
-        return { begin: { ok: true, context: { botId, offline: true }, skipped: false }, resetResult: { ok: true, offline: true } };
+        try {
+            // Audit v2 §3.5 & NEW-04: Bắt buộc AWAIT worker xác nhận reset thành công.
+            // Tuyệt đối không fire-and-forget hoặc trả giả thành công khi chưa xóa được credential.
+            const res = await fetchChild(targetBot, '/api/bot/reset-customer', {
+                method: 'POST',
+                body: { offlineLocalReset: true, requestedBy, resetId: `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}` },
+                timeoutMs: 4000
+            });
+            if (res && res.ok && res.data && res.data.ok === true) {
+                return { begin: { ok: true, context: { botId, localConfirmed: true, resetId: res.data.resetId }, skipped: false }, resetResult: { ok: true, confirmed: true, data: res.data } };
+            }
+            const errMsg = res?.data?.error || res?.statusText || (res ? `HTTP ${res.status}` : 'Không nhận được phản hồi từ Worker');
+            console.error(`[RESET_LOCAL] Worker Bot #${botId} từ chối reset: ${errMsg}`);
+            return { begin: { ok: false, error: `Worker bot #${botId} từ chối reset: ${errMsg}` }, resetResult: { ok: false, offline: true, error: errMsg } };
+        } catch (err) {
+            console.error(`[RESET_LOCAL] Lỗi kết nối tới Worker Bot #${botId}: ${err.message}`);
+            return { begin: { ok: false, error: `Lỗi kết nối tới Worker bot #${botId}: ${err.message}` }, resetResult: { ok: false, offline: true, error: err.message } };
+        }
     }
     try {
         return await supabaseAdapter.withManagerLock('bot-ownership-mutation', async () => {
@@ -17416,9 +21718,43 @@ async function runCustomerResetTransaction(botId, requestedBy = 'admin') {
     }
 }
 
+// V3-07: Canonical Entitlement Normalizer
+function normalizeEntitlement(user) {
+    if (!user || typeof user !== 'object') {
+        return { isPermanent: false, expiresAt: null, isActive: false, status: 'disabled' };
+    }
+    const status = String(user.status || 'active').trim().toLowerCase();
+    const isPermanent = Boolean(user.isPermanent === true || user.is_permanent === true || (!user.expiresAt && String(user.status || 'active').toLowerCase() === 'active' && (user.role === 'admin' || /vĩnh viễn|permanent|lifetime|vip/i.test(String(user.planName || '')) || user.expiresAt === null)));
+    let expiresAt = null;
+    if (!isPermanent && user.expiresAt) {
+        const parsed = Date.parse(user.expiresAt);
+        if (Number.isFinite(parsed)) {
+            expiresAt = new Date(parsed).toISOString();
+        }
+    }
+    const now = Date.now();
+    let isActive = false;
+    if (status === 'active') {
+        if (user.role === 'admin' || isPermanent) {
+            isActive = true;
+        } else if (expiresAt) {
+            isActive = Date.parse(expiresAt) > now;
+        } else {
+            // Không permanent mà thiếu expiresAt -> KHÔNG active (V3-07)
+            isActive = false;
+        }
+    }
+    return { isPermanent, expiresAt, isActive, status };
+}
+
 function isActiveUserEntitlement(user, now = Date.now()) {
-    if (!user || String(user.status || 'active') !== 'active') return false;
-    if (!user.expiresAt) return true;
+    if (!user) return false;
+    const status = String(user.status || 'active').trim().toLowerCase();
+    if (status !== 'active') return false;
+    if (user.role === 'admin') return true;
+    const isPermanent = Boolean(user.isPermanent === true || user.is_permanent === true || (!user.expiresAt && (user.role === 'admin' || /vĩnh viễn|permanent|lifetime|vip/i.test(String(user.planName || '')) || user.expiresAt === null)));
+    if (isPermanent) return true;
+    if (!user.expiresAt) return false;
     const expiry = Date.parse(user.expiresAt);
     return Number.isFinite(expiry) && expiry > now;
 }
@@ -17470,6 +21806,7 @@ async function resumePendingCustomerResets() {
     if (!supabaseAdapter?.isEnabled?.() || !supabaseStorageReady) return { resumed: 0 };
     const pending = getPendingResets();
     let resumed = 0;
+    let conflictCount = 0;
     for (const [key, context] of Object.entries(pending)) {
         if (!context || typeof context !== 'object') continue;
         if (context.status === 'completed') {
@@ -17478,13 +21815,26 @@ async function resumePendingCustomerResets() {
             if (!cleaned) pending[key] = context;
             continue;
         }
-        if (context.status === 'conflict') continue;
+        if (context.status === 'conflict' || context.status === 'needs_admin') {
+            // BUG-05 (Wave B0 — recheck §7-3): KHÔNG bỏ qua im lặng. Conflict phải được
+            // admin nhìn thấy và xử lý có kiểm soát (route /api/manager/pending-resets).
+            // KHÔNG tự xóa checkpoint. Log rút gọn 10 phút/lần chống spam.
+            const conflictWarnKey = 'reset_conflict_' + key;
+            const nowMs = Date.now();
+            if (!lastPositionWarnLog || nowMs - (lastPositionWarnLog.get(conflictWarnKey) || 0) > 600000) {
+                console.error(`[RESET_CUSTOMER] ⚠ Checkpoint reset bot #${context.botId || key} đang ${String(context.status).toUpperCase()} — cần admin xử lý qua /api/manager/pending-resets (owner: ${context.username || context.ownerBefore?.username || 'N/A'}). Không resume tự động.`);
+                if (lastPositionWarnLog) lastPositionWarnLog.set(conflictWarnKey, nowMs);
+            }
+            conflictCount++;
+            continue;
+        }
         if (customerResetLocks.has(String(key))) continue;
         const bId = Number(context.botId || key);
         if (!Number.isSafeInteger(bId) || bId <= 0) continue;
         customerResetLocks.add(String(key));
-        context.status = 'in_progress';
+        context.status = 'running';
         context.leaseUntil = Date.now() + 10 * 60 * 1000;
+        context.updatedAt = new Date().toISOString();
         try {
             const result = await supabaseAdapter.withManagerLock('bot-ownership-mutation', async () => {
                 if (!(await persistPendingReset(bId, context))) throw new Error('Không lưu được lease/checkpoint resume reset lên Cloud.');
@@ -17501,7 +21851,23 @@ async function resumePendingCustomerResets() {
             console.error('[RESET_CUSTOMER] Lỗi resume reset bot #' + bId + ':', err.message);
         }
     }
-    return { resumed };
+    // BUG-05 (Wave B0): trả về cả số conflict đang treo để giám sát/UI admin polling.
+    return { resumed, conflicts: conflictCount };
+}
+
+// V3-03 & V4-08: Helper xác nhận payload reset worker chặt chẽ cho cả local và cloud
+function isWorkerResetPayloadConfirmed(res, expectedTxId = null) {
+    if (!res || !res.ok) return false;
+    const data = res.data;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+    if (data.ok !== true) return false;
+    // V4-08: Nếu có expectedTxId, BẮT BUỘC payload phải có resetTransactionId và phải khớp
+    if (expectedTxId) {
+        if (!data.resetTransactionId || String(data.resetTransactionId) !== String(expectedTxId)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 async function allocateBotsForUserUnlocked(username, count = 1, preferredBotIds = []) {
@@ -17514,12 +21880,12 @@ async function allocateBotsForUserUnlocked(username, count = 1, preferredBotIds 
         .filter(([, context]) => context && context.status !== 'completed')
         .map(([id]) => Number(id)).filter(Number.isSafeInteger));
 
-    // 1. Tập hợp các bot đang có khách hàng active thuê (role !== 'admin', status === 'active', chưa hết hạn)
+    // 1. V4-07 & V4-15: Tập hợp các bot đang có khách hàng active thuê theo normalizeEntitlement canonical
     const activeOccupiedBotMap = new Map();
     for (const u of users) {
-        if (u.role !== 'admin' && u.status === 'active' && u.username.toLowerCase() !== username.toLowerCase()) {
-            const isExpired = u.expiresAt && Date.parse(u.expiresAt) <= now;
-            if (!isExpired && Array.isArray(u.assignedBotIds)) {
+        if (u.role !== 'admin' && u.username.toLowerCase() !== username.toLowerCase()) {
+            const ent = normalizeEntitlement(u);
+            if (ent.isActive && Array.isArray(u.assignedBotIds)) {
                 for (const bId of u.assignedBotIds) {
                     activeOccupiedBotMap.set(Number(bId), u.username);
                 }
@@ -17574,11 +21940,11 @@ async function allocateBotsForUserUnlocked(username, count = 1, preferredBotIds 
         }
     }
 
-    // Ưu tiên 2: Bot của người dùng đã hết hạn
+    // Ưu tiên 2: V4-07 & V4-15: Bot của người dùng KHÔNG active (hết hạn/disabled theo canonical entitlement)
     for (const u of users) {
         if (u.username.toLowerCase() === username.toLowerCase()) continue;
-        const isExpired = u.status === 'expired' || (u.expiresAt && Date.parse(u.expiresAt) <= now);
-        if (isExpired && Array.isArray(u.assignedBotIds)) {
+        const ent = normalizeEntitlement(u);
+        if (!ent.isActive && Array.isArray(u.assignedBotIds)) {
             for (const bId of u.assignedBotIds) {
                 const numId = Number(bId);
                 const found = rentableConfigs.find(c => Number(c.id) === numId);
@@ -17600,9 +21966,26 @@ async function allocateBotsForUserUnlocked(username, count = 1, preferredBotIds 
         if (allocatedIds.length >= count) break;
         const chosenBotId = Number(botConfig.id);
         if (!supabaseAdapter?.isEnabled?.()) {
+            // NEW-04 (Wave B0 — recheck §5): local/no-Supabase không được coi reset thất bại
+            // là thành công. Chỉ khi worker XÁC NHẬN (HTTP ok + data.ok !== false) bot mới
+            // được đưa vào allocatedIds. Thất bại → partial + bỏ qua bot này.
+            let localResetOk = false;
+            const resetTxId = crypto.randomUUID ? crypto.randomUUID() : `reset-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
             try {
-                await fetchChild(botConfig, '/api/bot/reset-customer', { method: 'POST', body: { botSecretKey: BOT_SECRET } }).catch(() => null);
-            } catch (_) {}
+                const localReset = await fetchChild(botConfig, '/api/bot/reset-customer', {
+                    method: 'POST',
+                    body: {
+                        botSecretKey: botConfig.secretKey || getRegistryBotSecret(chosenBotId) || BOT_SECRET_KEY,
+                        resetTransactionId: resetTxId
+                    }
+                });
+                localResetOk = isWorkerResetPayloadConfirmed(localReset, resetTxId);
+            } catch (_) { localResetOk = false; }
+            if (!localResetOk) {
+                console.warn(`[ALLOCATE] Reset local Bot #${chosenBotId} không được worker xác nhận — KHÔNG cấp bot này cho user (NEW-04 / V3-03).`);
+                partial = true;
+                continue;
+            }
             allocatedIds.push(chosenBotId);
             continue;
         }
@@ -17656,11 +22039,236 @@ async function allocateBotForNewUser(newUsername) {
     return allocateBotsForUser(newUsername, 1);
 }
 
+async function withUniversalManagerLock(lockKey, fn, leaseSeconds = 900) {
+    return await withLocalProcessLock(lockKey, async (localCtx) => {
+        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+            return await supabaseAdapter.withManagerLock(lockKey, fn, leaseSeconds, { _localLockHeld: true });
+        }
+        return await fn(localCtx);
+    });
+}
+
+// V4-14: Local / no-Supabase mode serializes bot allocations via universal queue lock
 async function allocateBotsForUser(username, count = 1, preferredBotIds = []) {
-    if (!supabaseAdapter?.isEnabled?.()) return allocateBotsForUserUnlocked(username, count, preferredBotIds);
-    if (!supabaseStorageReady) return { ok: false, error: 'CLOUD_USERS_READ_FAILED', botIds: [] };
-    try { return await supabaseAdapter.withManagerLock('bot-ownership-mutation', () => allocateBotsForUserUnlocked(username, count, preferredBotIds), 900); }
-    catch (err) { return { ok: false, error: err.message || 'CLOUD_ALLOCATION_LOCK_FAILED', botIds: [] }; }
+    return await withUniversalManagerLock('bot-ownership-mutation', () => allocateBotsForUserUnlocked(username, count, preferredBotIds), 900);
+}
+
+// §3.3 / V3-01 & V3-02: Reconcile entitlement & bot allocation on user reactivation
+async function reconcileUserReactivationAndBotAllocation(username, options = {}) {
+    if (!username) return { ok: false, coreCommitted: true, allocationStatus: 'failed', error: 'MISSING_USERNAME' };
+    const normUser = String(username).trim().toLowerCase();
+
+    const runReconciliation = async (lockContext) => {
+        let users;
+        try { users = await loadUsersFreshOrThrow(); }
+        catch (err) { return { ok: false, coreCommitted: true, allocationStatus: 'failed', error: err.message || 'CANNOT_LOAD_USERS' }; }
+        const user = users.find(u => u.username.toLowerCase() === normUser);
+        if (!user) return { ok: false, coreCommitted: true, allocationStatus: 'failed', error: 'USER_NOT_FOUND' };
+
+        if (!isActiveUserEntitlement(user)) {
+            return { ok: false, coreCommitted: true, allocationStatus: 'not_active', error: 'USER_NOT_ACTIVE', status: user.status };
+        }
+        if (user.role === 'admin') {
+            return { ok: true, coreCommitted: true, allocationStatus: 'allocated', allocated: [], assignedBotIds: user.assignedBotIds || [], missingBotCount: 0, role: 'admin' };
+        }
+
+        const currentBots = Array.isArray(user.assignedBotIds) ? user.assignedBotIds.map(Number).filter(Number.isSafeInteger) : [];
+        const targetBotCount = Math.max(1, parseInt(user.botCount, 10) || (Array.isArray(options.targetBotIds) && options.targetBotIds.length ? options.targetBotIds.length : 1));
+
+        if (currentBots.length >= targetBotCount) {
+            return { ok: true, coreCommitted: true, allocationStatus: 'allocated', allocated: [], assignedBotIds: currentBots, missingBotCount: 0, message: 'USER_ALREADY_HAS_SUFFICIENT_BOTS' };
+        }
+
+        const needed = targetBotCount - currentBots.length;
+        const preferredBotIds = Array.isArray(options.preferredBotIds) ? options.preferredBotIds : (Array.isArray(options.targetBotIds) ? options.targetBotIds : []);
+
+        // §3.3: allocateBotsForUser(user.username, needed, preferredBotIds)
+        const alloc = await allocateBotsForUserUnlocked(user.username, needed, preferredBotIds);
+        if (!alloc.ok || !Array.isArray(alloc.botIds) || alloc.botIds.length === 0) {
+            logAuditEvent({
+                req: options.req || null,
+                action: 'USER_REACTIVATION_BOT_ALLOCATION_PENDING',
+                target: { username: user.username },
+                details: 'Thiếu bot cho ' + user.username + ': ' + (alloc.error || 'NO_AVAILABLE_BOTS'),
+                status: 'WARNING'
+            });
+            // P1-02: Nếu đang chạy trong background retry, KHÔNG tạo job mới (ngăn nhân bản vô hạn)
+            if (options.context === 'background_pending_retry' || options.existingJobId) {
+                return {
+                    ok: false,
+                    coreCommitted: true,
+                    allocationStatus: 'pending_retry',
+                    error: alloc.error || 'NO_AVAILABLE_BOTS',
+                    allocated: [],
+                    assignedBotIds: currentBots,
+                    missingBotCount: needed,
+                    warnings: ['Chưa có bot trống sẵn sàng để cấp lại. Giữ nguyên pending job hiện tại.']
+                };
+            }
+            // V4-09: Lưu durable allocation job vào registry và Supabase SQL (Initial allocation)
+            if (!Array.isArray(registry.pendingAllocations)) registry.pendingAllocations = [];
+            const existingJob = registry.pendingAllocations.find(j => j.username?.toLowerCase() === normUser && j.status === 'pending_retry');
+            const jobId = existingJob ? existingJob.id : ('alloc_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8));
+            registry.pendingAllocations = registry.pendingAllocations.filter(j => j.id !== jobId);
+            const zeroJob = {
+                id: jobId,
+                username: user.username,
+                targetBotCount,
+                currentAssigned: currentBots.length,
+                missingBotCount: needed,
+                preferredBotIds,
+                status: 'pending_retry',
+                attempts: existingJob ? existingJob.attempts : 0,
+                createdAt: existingJob ? existingJob.createdAt : new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                context: options.context || 'reactivation'
+            };
+            registry.pendingAllocations.push(zeroJob);
+            if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+                const saveOk = await supabaseAdapter.savePendingAllocation(zeroJob);
+                if (!saveOk) {
+                    console.warn('[ALLOCATION] Cảnh báo: Không thể lưu zero-bot pending allocation vào Supabase SQL.');
+                }
+            }
+            await saveRegistry();
+            return {
+                ok: false,
+                coreCommitted: true,
+                allocationStatus: 'pending_retry',
+                error: alloc.error || 'NO_AVAILABLE_BOTS',
+                allocated: [],
+                assignedBotIds: currentBots,
+                missingBotCount: needed,
+                warnings: ['Chưa có bot trống sẵn sàng để cấp lại. Hệ thống đã lưu trạng thái pending_retry.']
+            };
+        }
+
+        // Fencing check trước khi commit thay đổi phân bổ
+        if (lockContext && typeof lockContext.assertLockValid === 'function') {
+            lockContext.assertLockValid();
+        }
+        if (supabaseAdapter && supabaseAdapter.isEnabled() && lockContext && lockContext.fencingToken) {
+            const fencingValid = await supabaseAdapter.verifyLockFencing('bot-ownership-mutation', lockContext.owner, lockContext.fencingToken);
+            if (!fencingValid) {
+                throw new Error(`STALE_FENCING_TOKEN: Fencing token T${lockContext.fencingToken} không còn hợp lệ trên PostgreSQL.`);
+            }
+        }
+
+        const newAssigned = [...new Set([...currentBots, ...alloc.botIds])];
+        user.assignedBotIds = newAssigned;
+        assignBotsExclusively(users, user.id || user.username, newAssigned);
+
+        const saved = await saveUsers(users);
+        if (!saved) {
+            return {
+                ok: false,
+                coreCommitted: true,
+                allocationStatus: 'failed_persist',
+                error: 'FAILED_TO_PERSIST_ALLOCATION',
+                allocated: [],
+                assignedBotIds: currentBots,
+                missingBotCount: needed,
+                warnings: ['Không thể lưu phân bổ bot vào cơ sở dữ liệu.']
+            };
+        }
+
+        if (Array.isArray(cachedUsers)) {
+            const cu = cachedUsers.find(x => x.username.toLowerCase() === normUser);
+            if (cu) cu.assignedBotIds = newAssigned;
+        }
+
+        for (const [hash, sess] of activeSessions.entries()) {
+            if (sess.username?.toLowerCase() === normUser) {
+                sess.assignedBotIds = newAssigned;
+                activeSessions.set(hash, sess);
+            }
+        }
+
+        const isPartial = alloc.botIds.length < needed;
+        const missingCount = Math.max(0, needed - alloc.botIds.length);
+        const allocationStatus = isPartial ? 'partial' : 'allocated';
+
+        // P1-01 / V4-09: Nếu cấp một phần nhưng vẫn thiếu bot -> Lưu/cập nhật pending job để background retry tự động
+        if (isPartial && missingCount > 0) {
+            if (!Array.isArray(registry.pendingAllocations)) registry.pendingAllocations = [];
+            // P1-02: Tái sử dụng job ID hiện có (từ options.existingJobId hoặc registry cũ), không tạo mới
+            const existingJob = (options.existingJobId && registry.pendingAllocations.find(j => j.id === options.existingJobId))
+                || registry.pendingAllocations.find(j => j.username?.toLowerCase() === normUser && j.status === 'pending_retry');
+            const jobId = existingJob ? existingJob.id : (options.existingJobId || ('alloc_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8)));
+            registry.pendingAllocations = registry.pendingAllocations.filter(j => j.id !== jobId);
+            const partialJob = {
+                id: jobId,
+                username: user.username,
+                targetBotCount,
+                currentAssigned: newAssigned.length,
+                missingBotCount: missingCount,
+                preferredBotIds,
+                status: 'pending_retry',
+                attempts: existingJob ? existingJob.attempts : (options.attempts || 0),
+                createdAt: existingJob ? existingJob.createdAt : new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                context: options.context || 'partial_reactivation'
+            };
+            registry.pendingAllocations.push(partialJob);
+            if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+                const saveOk = await supabaseAdapter.savePendingAllocation(partialJob);
+                if (!saveOk) {
+                    console.warn('[ALLOCATION] Cảnh báo: Không thể lưu partial pending allocation vào Supabase SQL.');
+                }
+            }
+            await saveRegistry();
+        } else if (!isPartial) {
+            // Đã cấp đủ toàn bộ: hoàn thành mọi pending job cũ của user nếu có
+            if (Array.isArray(registry.pendingAllocations)) {
+                let changed = false;
+                for (const j of registry.pendingAllocations) {
+                    if (j.username?.toLowerCase() === normUser && j.status === 'pending_retry') {
+                        j.status = 'completed';
+                        j.completedAt = new Date().toISOString();
+                        changed = true;
+                        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+                            await supabaseAdapter.completePendingAllocation(j.id, 'completed', MANAGER_WORKER_ID).catch(() => {});
+                        }
+                    }
+                }
+                if (changed) await saveRegistry();
+            }
+        }
+
+        logAuditEvent({
+            req: options.req || null,
+            action: 'USER_REACTIVATION_BOT_REALLOCATED',
+            target: { username: user.username },
+            details: 'Tái cấp ' + alloc.botIds.length + ' bot (#' + alloc.botIds.join(', #') + ') sau kích hoạt lại',
+            status: isPartial ? 'PARTIAL' : 'SUCCESS'
+        });
+
+        return {
+            ok: !isPartial,
+            coreCommitted: true,
+            allocationStatus,
+            allocated: alloc.botIds,
+            assignedBotIds: newAssigned,
+            missingBotCount: missingCount,
+            partial: isPartial,
+            warnings: isPartial ? ['Chỉ cấp được ' + alloc.botIds.length + '/' + targetBotCount + ' bot.'] : []
+        };
+    };
+
+    try {
+        return await withUniversalManagerLock('bot-ownership-mutation', runReconciliation, 900);
+    } catch (err) {
+        return {
+            ok: false,
+            coreCommitted: true,
+            allocationStatus: 'pending_retry',
+            error: err.message || 'ALLOCATION_LOCK_FAILED',
+            allocated: [],
+            assignedBotIds: [],
+            missingBotCount: 1,
+            warnings: ['Không lấy được khóa phân bổ bot phân tán.']
+        };
+    }
 }
 
 // Khách tự đăng ký tài khoản mới (Tự động cấp bot trống hoặc tái sử dụng bot của tài khoản hết hạn)
@@ -17709,6 +22317,7 @@ app.post('/api/auth/register', (req, res) => {
             const trialDays = Math.max(1, Math.min(365, parseInt(registry.systemSettings?.trialDays, 10) || 1));
             let planName = trialDays === 1 ? 'Dùng thử 1 ngày' : `Dùng thử ${trialDays} ngày`;
             let expiresAt = new Date(Date.now() + trialDays * 86400000).toISOString();
+            let isPermanentKey = false;
             let assignedBotIds = [];
             let keyObj = null;
             let registerMessage = `Đăng ký thành công! Chào mừng ${username} đến với KBOT.`;
@@ -17730,9 +22339,10 @@ app.post('/api/auth/register', (req, res) => {
                     recordRegisterAttempt(clientIp, username, false);
                     return res.status(400).json({ ok: false, error: keyCheck.error });
                 }
-                const days = Number(keyObj.days || 30);
-                expiresAt = new Date(Date.now() + days * 86400000).toISOString();
-                planName = keyObj.planName || `Gói ${days} ngày`;
+                isPermanentKey = keyObj.isPermanent === true || keyObj.days === -1;
+                const days = isPermanentKey ? -1 : Number(keyObj.days || 30);
+                expiresAt = isPermanentKey ? null : new Date(Date.now() + days * 86400000).toISOString();
+                planName = keyObj.planName || (isPermanentKey ? 'VIP Vĩnh Viễn' : `Gói ${days} ngày`);
 
                 const requestedBotCount = Number(keyObj.botCount) || (Array.isArray(keyObj.botIds) && keyObj.botIds.length > 0 ? keyObj.botIds.length : 1);
                 const preferredBotIds = Array.isArray(keyObj.botIds) ? keyObj.botIds.map(Number) : [];
@@ -17740,10 +22350,10 @@ app.post('/api/auth/register', (req, res) => {
                 const alloc = await allocateBotsForUser(username, requestedBotCount, preferredBotIds);
                 if (alloc.ok && alloc.botIds.length > 0) {
                     assignedBotIds = alloc.botIds;
-                    registerMessage = `Đăng ký thành công với Mã Key! Gói: ${planName}, Cấp ${assignedBotIds.length} bot (#${assignedBotIds.join(', ')}), Hạn: ${days} ngày.`;
+                    registerMessage = `Đăng ký thành công với Mã Key! Gói: ${planName}, Cấp ${assignedBotIds.length} bot (#${assignedBotIds.join(', ')}), Hạn: ${isPermanentKey ? 'Vĩnh viễn' : days + ' ngày'}.`;
                 } else {
                     assignedBotIds = [];
-                    registerMessage = `Đăng ký thành công với Mã Key! Gói: ${planName}, Hạn: ${days} ngày (Hiện chưa có bot trống trong danh sách cho thuê, vui lòng liên hệ Admin để gán bot).`;
+                    registerMessage = `Đăng ký thành công với Mã Key! Gói: ${planName}, Hạn: ${isPermanentKey ? 'Vĩnh viễn' : days + ' ngày'} (Hiện chưa có bot trống trong danh sách cho thuê, vui lòng liên hệ Admin để gán bot).`;
                 }
             } else {
                 // Đăng ký không có Key -> kiểm tra cài đặt tặng ngày dùng thử của Admin
@@ -17779,6 +22389,7 @@ app.post('/api/auth/register', (req, res) => {
                 status: 'active',
                 planName,
                 expiresAt,
+                isPermanent: isPermanentKey ? true : false,
                 note: providedKey ? `Tự đăng ký với mã Key ${maskLicenseKey(providedKey)}` : (assignedBotIds.length ? `Tự đăng ký (Được cấp Bot #${assignedBotIds.join(', ')})` : 'Tự đăng ký (Chưa có bot)'),
                 allowAccountChange: true,
                 assignedBotIds,
@@ -17810,8 +22421,20 @@ app.post('/api/auth/register', (req, res) => {
             // Ghi nhận đăng ký thành công cho rate limiter
             recordRegisterAttempt(clientIp, username, true);
 
-            if (!(await syncAuthToAllBots(true))) {
-                return res.status(502).json({ ok: false, partial: true, error: 'Tài khoản đã được tạo nhưng chưa đồng bộ auth tới toàn bộ bot; có thể đăng nhập lại sau khi hệ thống đồng bộ.' });
+            // BUG-29: mảng cảnh báo auth-sync sau commit (được gắn vào response cuối).
+            const registerAuthSyncWarnings = [];
+
+            {
+                // BUG-29: tài khoản ĐÃ commit; auth-sync có retry 60s → không trả 502
+                // che mất việc tạo tài khoản + phiên đăng nhập.
+                const authSyncDetailed = await syncAuthToAllBotsDetailed(true);
+                if (!authSyncDetailed?.ok) {
+                    const failedBots = (authSyncDetailed?.results || []).filter(r => !r.ok);
+                    for (const f of failedBots) {
+                        await enqueueOutboxSync(f.botId, { type: 'auth_sync', committedTransaction: { type: 'USER_REGISTER', target: username } });
+                    }
+                    registerAuthSyncWarnings.push('Tài khoản đã được tạo nhưng chưa đồng bộ được auth tới ' + failedBots.length + '/' + (authSyncDetailed?.results || []).length + ' bot' + (failedBots.length ? ' (' + failedBots.map(f => '#' + f.botId).join(', ') + ')' : '') + '. Hệ thống sẽ tự thử đồng bộ lại trong khoảng 60 giây; có thể đăng nhập lại sau khi đồng bộ.');
+                }
             }
 
             logAuditEvent({
@@ -17833,6 +22456,7 @@ app.post('/api/auth/register', (req, res) => {
                 username: newUser.username,
                 role: 'user',
                 assignedBotIds,
+                createdAt: Date.now(),
                 expiresAt: Date.now() + sessionDurationMs,
                 expiresAtRental: newUser.expiresAt,
                 planName: newUser.planName,
@@ -17850,6 +22474,10 @@ app.post('/api/auth/register', (req, res) => {
             res.setHeader('Set-Cookie', serializeCookie('kingmc_mgr_session', token, { maxAge: cookieMaxAge, secure: isHttps(req) }));
             return res.json({
                 ok: true,
+                coreCommitted: true,
+                syncStatus: registerAuthSyncWarnings.length > 0 ? 'pending_retry' : 'synced',
+                partial: registerAuthSyncWarnings.length > 0,
+                warnings: registerAuthSyncWarnings.length ? registerAuthSyncWarnings : undefined,
                 user: {
                     username: newUser.username,
                     role: 'user',
@@ -17940,6 +22568,7 @@ app.post('/api/auth/login', async (req, res) => {
             username: 'admin',
             role: 'admin',
             assignedBotIds: null,
+            createdAt: Date.now(),
             expiresAt
         };
         activeSessions.set(tokenHash, session);
@@ -18019,6 +22648,9 @@ app.post('/api/auth/login', async (req, res) => {
     // tiêu thụ Key không chạy song song trên cùng một process.
     let renewalResetPartial = false;
     let renewalResetPerformed = false;
+    // BUG-29: auth-sync chưa hội tụ sau khi commit Key KHÔNG được làm hỏng đăng nhập
+    // (operation đã commit); gom cảnh báo và trả trong response login.
+    const authSyncPartialWarnings = [];
     if (providedKey !== '') {
         let renewOutcome;
         try {
@@ -18052,12 +22684,25 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(403).json({ ok: false, error: 'Tài khoản của bạn đã bị vô hiệu hóa hoặc khóa bởi Quản trị viên.' });
         }
 
-        const baseTime = (user.expiresAt && Date.parse(user.expiresAt) > Date.now())
-            ? Date.parse(user.expiresAt)
-            : Date.now();
-        user.expiresAt = new Date(baseTime + Number(keyObj.days || 30) * 86400000).toISOString();
+        const ent = normalizeEntitlement(user);
+        if (ent.isPermanent) {
+            recordRenewAttempt(req, user.username, false);
+            return res.status(400).json({ ok: false, error: 'Tài khoản của bạn đã là VIP Vĩnh Viễn, không cần nạp thêm Key!' });
+        }
+
+        const isPermanentKey = keyObj.isPermanent === true || keyObj.days === -1;
+        if (isPermanentKey) {
+            user.expiresAt = null;
+            user.isPermanent = true;
+        } else {
+            const baseTime = (user.expiresAt && Date.parse(user.expiresAt) > Date.now())
+                ? Date.parse(user.expiresAt)
+                : Date.now();
+            user.expiresAt = new Date(baseTime + Number(keyObj.days || 30) * 86400000).toISOString();
+        }
         user.status = 'active';
         if (keyObj.planName) user.planName = keyObj.planName;
+        else if (isPermanentKey) user.planName = 'VIP Vĩnh Viễn';
         const keyBotCount = Number(keyObj.botCount) || (Array.isArray(keyObj.botIds) && keyObj.botIds.length > 0 ? keyObj.botIds.length : 0);
         const currentBots = Array.isArray(user.assignedBotIds) ? user.assignedBotIds.map(Number) : [];
         if (Array.isArray(keyObj.botIds) && keyObj.botIds.length > 0) {
@@ -18070,7 +22715,7 @@ app.post('/api/auth/login', async (req, res) => {
                 }
                 renewalResetPerformed = true;
                 renewalResetPartial = resetRes.partial === true;
-                const preserved = { expiresAt: user.expiresAt, status: user.status, planName: user.planName };
+                const preserved = { expiresAt: user.expiresAt, status: user.status, planName: user.planName, isPermanent: user.isPermanent };
                 users = await loadUsersFreshOrThrow();
                 const freshUser = users.find(u => String(u.id) === String(user.id) || u.username.toLowerCase() === user.username.toLowerCase());
                 if (!freshUser) return res.status(409).json({ ok: false, partial: renewalResetPerformed, error: 'Tài khoản đã thay đổi trong lúc reset bot; vui lòng đăng nhập lại.' });
@@ -18081,6 +22726,7 @@ app.post('/api/auth/login', async (req, res) => {
                 user.expiresAt = preserved.expiresAt;
                 user.status = preserved.status;
                 user.planName = preserved.planName;
+                user.isPermanent = preserved.isPermanent;
             }
             const freshCurrentBots = Array.isArray(user.assignedBotIds) ? user.assignedBotIds.map(Number) : [];
             const merged = [...new Set([...freshCurrentBots, ...keyObj.botIds.map(Number)])];
@@ -18090,7 +22736,7 @@ app.post('/api/auth/login', async (req, res) => {
             const needed = keyBotCount - currentBots.length;
             const alloc = await allocateBotsForUser(user.username, needed);
             if (alloc.ok && alloc.botIds.length > 0) {
-                const preserved = { expiresAt: user.expiresAt, status: user.status, planName: user.planName };
+                const preserved = { expiresAt: user.expiresAt, status: user.status, planName: user.planName, isPermanent: user.isPermanent };
                 users = await loadUsersFreshOrThrow();
                 const freshUser = users.find(u => String(u.id) === String(user.id) || u.username.toLowerCase() === user.username.toLowerCase());
                 if (!freshUser) return res.status(409).json({ ok: false, partial: renewalResetPerformed, error: 'Tài khoản đã thay đổi trong lúc cấp bot; vui lòng đăng nhập lại.' });
@@ -18101,6 +22747,7 @@ app.post('/api/auth/login', async (req, res) => {
                 user.expiresAt = preserved.expiresAt;
                 user.status = preserved.status;
                 user.planName = preserved.planName;
+                user.isPermanent = preserved.isPermanent;
                 const freshUserBots = Array.isArray(user.assignedBotIds) ? user.assignedBotIds.map(Number) : [];
                 user.assignedBotIds = [...new Set([...freshUserBots, ...alloc.botIds])];
                 assignBotsExclusively(users, user.id || user.username, user.assignedBotIds);
@@ -18127,8 +22774,17 @@ app.post('/api/auth/login', async (req, res) => {
             status: renewalResetPartial ? 'PARTIAL' : 'SUCCESS'
         });
 
-        if (!(await syncAuthToAllBots(true))) {
-            return res.status(502).json({ ok: false, partial: true, error: 'Key và hạn thuê đã lưu nhưng chưa đồng bộ auth tới toàn bộ bot.' });
+        {
+            // BUG-29: Key + hạn thuê ĐÃ commit trước đó; auth-sync có retry 60s tự hội tụ.
+            // Trả tiếp luồng đăng nhập thay vì 502 che mất kết quả thành công.
+            const authSyncDetailed = await syncAuthToAllBotsDetailed(true);
+            if (!authSyncDetailed?.ok) {
+                const failedBots = (authSyncDetailed?.results || []).filter(r => !r.ok);
+                for (const f of failedBots) {
+                    await enqueueOutboxSync(f.botId, { type: 'auth_sync', committedTransaction: { type: 'LOGIN_KEY_RENEW', target: user.username } });
+                }
+                authSyncPartialWarnings.push('Key và hạn thuê đã lưu thành công nhưng chưa đồng bộ được auth tới ' + failedBots.length + '/' + (authSyncDetailed?.results || []).length + ' bot' + (failedBots.length ? ' (' + failedBots.map(f => '#' + f.botId).join(', ') + ')' : '') + '. Hệ thống sẽ tự thử đồng bộ lại trong khoảng 60 giây.');
+            }
         }
         return 'RENEW_CONTINUE_LOGIN';
         });
@@ -18154,6 +22810,7 @@ app.post('/api/auth/login', async (req, res) => {
         username: user.username,
         role: 'user',
         assignedBotIds,
+        createdAt: Date.now(),
         expiresAt,
         expiresAtRental: user.expiresAt || null,
         planName: user.planName || 'Gói thường',
@@ -18190,8 +22847,11 @@ app.post('/api/auth/login', async (req, res) => {
     res.setHeader('Set-Cookie', serializeCookie('kingmc_mgr_session', token, { maxAge: cookieMaxAge, secure: isHttps(req) }));
     return res.json({
         ok: true,
-        partial: renewalResetPartial,
+        coreCommitted: true,
+        syncStatus: (renewalResetPartial || authSyncPartialWarnings.length > 0) ? 'pending_retry' : 'synced',
+        partial: renewalResetPartial || authSyncPartialWarnings.length > 0,
         warning: renewalResetPartial ? 'Gia hạn thành công nhưng bot bàn giao chưa xóa hết log Cloud; kiểm tra log worker.' : undefined,
+        warnings: authSyncPartialWarnings.length ? authSyncPartialWarnings : undefined,
         token,
         user: {
             username: user.username,
@@ -18222,6 +22882,7 @@ app.post('/api/auth/logout', async (req, res) => {
         const h = hashSessionToken(headerToken);
         if (activeSessions.has(h)) {
             activeSessions.delete(h);
+            invalidateAuthCache(h);
             modified = true;
             if (supabaseAdapter && supabaseAdapter.isEnabled()) {
                 await supabaseAdapter.deleteSession(h);
@@ -18232,6 +22893,7 @@ app.post('/api/auth/logout', async (req, res) => {
         const h = hashSessionToken(cookieToken);
         if (activeSessions.has(h)) {
             activeSessions.delete(h);
+            invalidateAuthCache(h);
             modified = true;
             if (supabaseAdapter && supabaseAdapter.isEnabled()) {
                 await supabaseAdapter.deleteSession(h);
@@ -18270,7 +22932,9 @@ app.get('/api/auth/me', (req, res) => {
             assignedBotIds: session.assignedBotIds,
             planName: u?.planName || (session.role === 'admin' ? 'Admin VIP' : 'Gói thường'),
             expiresAt: u?.expiresAt || session.expiresAtRental || null,
-            note: u?.note || '',
+            isPermanent: Boolean(u?.isPermanent === true || u?.is_permanent === true || session?.isPermanent === true || (session.role === 'user' && !u?.expiresAt && !session.expiresAtRental)),
+            // BUG-18: ghi chú nội bộ (note) chỉ trả về cho Admin, không lộ cho khách thuê.
+            note: session.role === 'admin' ? (u?.note || '') : '',
             allowAccountChange: u ? u.allowAccountChange !== false : true,
             status: finalStatus,
             lockReason: u?.lockReason || session.lockReason || '',
@@ -18340,9 +23004,18 @@ app.post('/api/auth/change-password', async (req, res) => {
         }
         const sessionResult = await revokeUserSessions(session, { excludeTokenHash: session.tokenHash || '' });
         if (!sessionResult.ok) return res.status(502).json({ ok: false, partial: true, error: 'Mật khẩu đã lưu nhưng chưa xác nhận thu hồi các phiên Admin khác: ' + sessionResult.error });
-        if (!(await syncAuthToAllBots(true))) return res.status(502).json({ ok: false, partial: true, error: 'Mật khẩu đã lưu nhưng chưa đồng bộ auth tới toàn bộ bot.' });
+        // BUG-29: mật khẩu đã commit; auth-sync có retry 60s → trả ok:true + warnings.
+        const adminPassSync = await syncAuthToAllBotsDetailed(true);
+        const adminPassWarnings = [];
+        if (!adminPassSync?.ok) {
+            const failedBots = (adminPassSync?.results || []).filter(r => !r.ok);
+            for (const f of failedBots) {
+                await enqueueOutboxSync(f.botId, { type: 'auth_sync', committedTransaction: { type: 'ADMIN_CHANGE_PASSWORD', target: 'admin' } });
+            }
+            adminPassWarnings.push('Mật khẩu đã lưu thành công nhưng chưa đồng bộ được auth tới ' + failedBots.length + '/' + (adminPassSync?.results || []).length + ' bot' + (failedBots.length ? ' (' + failedBots.map(f => '#' + f.botId).join(', ') + ')' : '') + '. Hệ thống sẽ tự thử đồng bộ lại trong khoảng 60 giây.');
+        }
         logAuditEvent({ req, action: 'AUTH_ADMIN_CHANGE_PASS_SUCCESS', status: 'SUCCESS' });
-        return res.json({ ok: true, message: 'Đổi mật khẩu Quản trị viên (ADMIN) thành công!' });
+        return res.json({ ok: true, coreCommitted: true, syncStatus: adminPassWarnings.length > 0 ? 'pending_retry' : 'synced', partial: adminPassWarnings.length > 0, warnings: adminPassWarnings.length ? adminPassWarnings : undefined, message: 'Đổi mật khẩu Quản trị viên (ADMIN) thành công!' });
     } else {
         const users = await loadUsersFreshOrThrow();
         const userIndex = users.findIndex(u => u.id === session.userId || u.username.toLowerCase() === session.username.toLowerCase());
@@ -18364,9 +23037,18 @@ app.post('/api/auth/change-password', async (req, res) => {
         }
         const sessionResult = await revokeUserSessions(users[userIndex], { excludeTokenHash: session.tokenHash || '' });
         if (!sessionResult.ok) return res.status(502).json({ ok: false, partial: true, error: 'Mật khẩu đã lưu nhưng chưa xác nhận thu hồi các phiên khác: ' + sessionResult.error });
-        if (!(await syncAuthToAllBots(true))) return res.status(502).json({ ok: false, partial: true, error: 'Mật khẩu đã lưu nhưng chưa đồng bộ auth tới toàn bộ bot.' });
+        // BUG-29: mật khẩu đã commit; auth-sync có retry 60s → trả ok:true + warnings.
+        const userPassSync = await syncAuthToAllBotsDetailed(true);
+        const userPassWarnings = [];
+        if (!userPassSync?.ok) {
+            const failedBots = (userPassSync?.results || []).filter(r => !r.ok);
+            for (const f of failedBots) {
+                await enqueueOutboxSync(f.botId, { type: 'auth_sync', committedTransaction: { type: 'USER_CHANGE_PASSWORD', target: session.username } });
+            }
+            userPassWarnings.push('Mật khẩu đã lưu thành công nhưng chưa đồng bộ được auth tới ' + failedBots.length + '/' + (userPassSync?.results || []).length + ' bot' + (failedBots.length ? ' (' + failedBots.map(f => '#' + f.botId).join(', ') + ')' : '') + '. Hệ thống sẽ tự thử đồng bộ lại trong khoảng 60 giây.');
+        }
         logAuditEvent({ req, action: 'AUTH_USER_CHANGE_PASS_SUCCESS', details: `Đổi mật khẩu tài khoản "${session.username}" thành công`, status: 'SUCCESS' });
-        return res.json({ ok: true, message: 'Đổi mật khẩu thành công!' });
+        return res.json({ ok: true, coreCommitted: true, syncStatus: userPassWarnings.length > 0 ? 'pending_retry' : 'synced', partial: userPassWarnings.length > 0, warnings: userPassWarnings.length ? userPassWarnings : undefined, message: 'Đổi mật khẩu thành công!' });
     }
 });
 
@@ -18503,6 +23185,7 @@ app.post('/api/manager/users', async (req, res) => {
         lockReason,
         planName: String(req.body?.planName || 'Gói thường').trim(),
         expiresAt: parsedExp.value,
+        isPermanent: req.body?.isPermanent === true || parsedExp.value === null,
         note: String(req.body?.note || '').trim(),
         allowAccountChange: req.body?.allowAccountChange !== false,
         assignedBotIds,
@@ -18521,12 +23204,21 @@ app.post('/api/manager/users', async (req, res) => {
         });
     }
     await createSystemBackup('post-user-create');
-    const authSyncOk = await syncAuthToAllBots(true);
+    const authSyncDetailed = await syncAuthToAllBotsDetailed(true);
+    const authSyncOk = authSyncDetailed?.ok === true;
+    if (!authSyncOk) {
+        const failedBots = (authSyncDetailed?.results || []).filter(r => !r.ok);
+        for (const f of failedBots) {
+            await enqueueOutboxSync(f.botId, { type: 'auth_sync', committedTransaction: { type: 'USER_CREATE', target: username } });
+        }
+    }
 
     logAuditEvent({ req, action: 'USER_CREATE', target: { userId: newUser.id, username }, status: resetPartial || !authSyncOk ? 'PARTIAL' : 'SUCCESS' });
     const safeNewUser = { ...newUser, password: '' };
     res.json({
         ok: true,
+        coreCommitted: true,
+        syncStatus: (resetPartial || !authSyncOk) ? 'pending_retry' : 'synced',
         partial: resetPartial || !authSyncOk,
         warning: [resetPartial ? 'Bot bàn giao chưa xóa hết log Cloud; kiểm tra log worker.' : '', !authSyncOk ? 'Auth chưa được đồng bộ tới toàn bộ bot.' : ''].filter(Boolean).join(' ') || undefined,
         user: safeNewUser,
@@ -18635,6 +23327,7 @@ const handleUpdateUser = async (req, res) => {
     }
     if (hasExpiresAtUpdate) {
         user.expiresAt = parsedExpiresAt;
+        user.isPermanent = parsedExpiresAt === null ? true : (req.body?.isPermanent === true ? true : false);
     }
     if (req.body?.note !== undefined) {
         user.note = String(req.body.note || '').trim();
@@ -18666,24 +23359,44 @@ const handleUpdateUser = async (req, res) => {
         }
     }
     const lifecycle = await reconcileUserBotLifecycle(userBackup, user, 'admin user update');
-    const authSyncOk = await syncAuthToAllBots(true);
+    let autoAllocationResult = null;
+    if (!isActiveUserEntitlement(userBackup) && isActiveUserEntitlement(user) && (!Array.isArray(user.assignedBotIds) || user.assignedBotIds.length === 0)) {
+        autoAllocationResult = await reconcileUserReactivationAndBotAllocation(user.username, { req, context: 'admin_user_update' });
+        if (autoAllocationResult?.assignedBotIds?.length) {
+            user.assignedBotIds = autoAllocationResult.assignedBotIds;
+        }
+    }
+    // BUG-29: thay đổi user ĐÃ commit; auth-sync có retry 60s → trả ok:true + warnings thay vì 502.
+    const authSyncDetailed = await syncAuthToAllBotsDetailed(true);
+    const authSyncOk = authSyncDetailed?.ok === true;
 
-    if (sessionRevokeError || !lifecycle.ok || !authSyncOk) {
-        const errors = [
-            sessionRevokeError,
-            !lifecycle.ok ? ('Chưa hoàn tất reset bot: ' + lifecycle.error) : null,
-            !authSyncOk ? 'Chưa đồng bộ auth tới toàn bộ bot.' : null
-        ].filter(Boolean).join('; ');
-        logAuditEvent({ req, action: 'USER_UPDATE', target: { userId: user.id, username: user.username }, details: errors, status: 'PARTIAL' });
-        return res.status(502).json({ ok: false, partial: true, user: { ...user, password: '' }, error: 'Đã lưu thay đổi user nhưng có lỗi hoàn tất: ' + errors });
+    const partialWarnings = [];
+    if (sessionRevokeError) partialWarnings.push(sessionRevokeError);
+    if (!lifecycle.ok) partialWarnings.push('Chưa hoàn tất reset bot: ' + lifecycle.error);
+    if (autoAllocationResult?.warnings?.length) partialWarnings.push(...autoAllocationResult.warnings);
+    if (!authSyncOk) {
+        const failedBots = (authSyncDetailed?.results || []).filter(r => !r.ok);
+        for (const f of failedBots) {
+            await enqueueOutboxSync(f.botId, { type: 'auth_sync', committedTransaction: { type: 'USER_UPDATE', target: user.username } });
+        }
+        partialWarnings.push('Chưa đồng bộ auth tới ' + failedBots.length + '/' + (authSyncDetailed?.results || []).length + ' bot' + (failedBots.length ? ' (' + failedBots.map(f => '#' + f.botId).join(', ') + ')' : '') + '. Hệ thống sẽ tự thử đồng bộ lại trong khoảng 60 giây.');
     }
 
-    logAuditEvent({ req, action: 'USER_UPDATE', target: { userId: user.id, username: user.username }, status: resetPartial ? 'PARTIAL' : 'SUCCESS' });
+    logAuditEvent({
+        req,
+        action: 'USER_UPDATE',
+        target: { userId: user.id, username: user.username },
+        details: partialWarnings.join('; ') || undefined,
+        status: partialWarnings.length ? 'PARTIAL' : (resetPartial ? 'PARTIAL' : 'SUCCESS')
+    });
     const safeUser = { ...user, password: '' };
     res.json({
         ok: true,
-        partial: resetPartial,
+        coreCommitted: true,
+        syncStatus: (resetPartial || partialWarnings.length > 0) ? 'pending_retry' : 'synced',
+        partial: resetPartial || partialWarnings.length > 0,
         warning: resetPartial ? 'Người dùng đã được cập nhật nhưng bot bàn giao chưa xóa hết log Cloud; kiểm tra log worker.' : undefined,
+        warnings: partialWarnings.length ? partialWarnings : undefined,
         user: safeUser,
         message: `Đã cập nhật người dùng "${user.username}" thành công!`
     });
@@ -18724,28 +23437,46 @@ app.delete('/api/manager/users/:id', async (req, res) => {
     users = await loadUsersFreshOrThrow();
     const currentIndex = users.findIndex(u => String(u.id) === String(target.id) || u.username.toLowerCase() === target.username.toLowerCase());
     if (currentIndex < 0) {
-        const authSyncOk = await syncAuthToAllBots(true);
-        const hasErr = deleteRevokeError || lifecycleError || !authSyncOk;
-        return res.json({ ok: !hasErr, partial: hasErr, message: `Đã xóa người dùng "${target.username}".` });
+        // BUG-29: user ĐÃ bị vô hiệu hóa trên Cloud; lỗi hoàn tất trả dạng partial warnings.
+        const authSyncDetailedEarly = await syncAuthToAllBotsDetailed(true);
+        const authSyncFailedEarly = !authSyncDetailedEarly?.ok;
+        if (authSyncFailedEarly) {
+            const failedBotsEarly = (authSyncDetailedEarly?.results || []).filter(r => !r.ok);
+            for (const f of failedBotsEarly) {
+                await enqueueOutboxSync(f.botId, { type: 'auth_sync', committedTransaction: { type: 'USER_DELETE', target: target.username } }).catch(() => {});
+            }
+        }
+        const hasErr = deleteRevokeError || lifecycleError || authSyncFailedEarly;
+        if (hasErr) {
+            logAuditEvent({ req, action: 'USER_DELETE', target: { userId: target.id, username: target.username }, details: [deleteRevokeError, lifecycleError, authSyncFailedEarly ? 'Chưa đồng bộ auth tới toàn bộ bot' : null].filter(Boolean).join('; '), status: 'PARTIAL' });
+        }
+        return res.json({ ok: true, partial: hasErr, warnings: hasErr ? [deleteRevokeError, lifecycleError, authSyncFailedEarly ? 'Chưa đồng bộ auth tới toàn bộ bot; hệ thống sẽ tự thử lại trong khoảng 60 giây.' : null].filter(Boolean) : undefined, message: `Đã xóa người dùng "${target.username}".` });
     }
     const updatedUsers = deriveUsersSnapshot(users, users.filter((_, index) => index !== currentIndex));
     if (!(await saveUsers(updatedUsers))) {
         return res.status(502).json({ ok: false, partial: true, error: 'User đã bị vô hiệu hóa và bot/session đã xử lý, nhưng không thể xóa hàng user trên Cloud: ' + (lastUserSaveError || 'Supabase write failed.') });
     }
-    const authSyncOk = await syncAuthToAllBots(true);
-
-    if (deleteRevokeError || lifecycleError || !authSyncOk) {
-        const errors = [
-            deleteRevokeError ? `Chưa xác nhận thu hồi session: ${deleteRevokeError}` : null,
-            lifecycleError ? `Chưa reset sạch bot: ${lifecycleError}` : null,
-            !authSyncOk ? 'Chưa đồng bộ auth tới toàn bộ bot' : null
-        ].filter(Boolean).join('; ');
-        logAuditEvent({ req, action: 'USER_DELETE', target: { userId: target.id, username: target.username }, details: errors, status: 'PARTIAL' });
-        return res.status(502).json({ ok: false, partial: true, error: 'User đã bị xóa nhưng có lỗi hoàn tất: ' + errors });
+    // BUG-29: user ĐÃ xóa trên Cloud; auth-sync có retry 60s → trả ok:true + warnings.
+    const authSyncDetailed = await syncAuthToAllBotsDetailed(true);
+    const authSyncOk = authSyncDetailed?.ok === true;
+    const deleteWarnings = [];
+    if (deleteRevokeError) deleteWarnings.push(`Chưa xác nhận thu hồi session: ${deleteRevokeError}`);
+    if (lifecycleError) deleteWarnings.push(`Chưa reset sạch bot: ${lifecycleError}`);
+    if (!authSyncOk) {
+        const failedBots = (authSyncDetailed?.results || []).filter(r => !r.ok);
+        for (const f of failedBots) {
+            await enqueueOutboxSync(f.botId, { type: 'auth_sync', committedTransaction: { type: 'USER_DELETE', target: target.username } }).catch(() => {});
+        }
+        deleteWarnings.push('Chưa đồng bộ auth tới ' + failedBots.length + '/' + (authSyncDetailed?.results || []).length + ' bot' + (failedBots.length ? ' (' + failedBots.map(f => '#' + f.botId).join(', ') + ')' : '') + '; hệ thống sẽ tự thử lại trong khoảng 60 giây.');
     }
 
-    logAuditEvent({ req, action: 'USER_DELETE', target: { userId: target.id, username: target.username }, status: 'SUCCESS' });
-    res.json({ ok: true, message: `Đã xóa người dùng "${target.username}".` });
+    logAuditEvent({ req, action: 'USER_DELETE', target: { userId: target.id, username: target.username }, details: deleteWarnings.join('; ') || undefined, status: deleteWarnings.length ? 'PARTIAL' : 'SUCCESS' });
+    res.json({
+        ok: true,
+        partial: deleteWarnings.length > 0,
+        warnings: deleteWarnings.length ? deleteWarnings : undefined,
+        message: `Đã xóa người dùng "${target.username}".`
+    });
 });
 
 // Admin: Gia hạn linh hoạt cho người dùng (thêm/bớt ngày, ngày cố định, vĩnh viễn)
@@ -18769,6 +23500,7 @@ app.post('/api/manager/users/:id/renew-days', async (req, res) => {
 
     if (setPermanent) {
         targetUser.expiresAt = null;
+        targetUser.isPermanent = true;
         targetUser.planName = (typeof req.body?.planName === 'string' && req.body.planName.trim()) ? req.body.planName.trim() : 'VIP Vĩnh Viễn';
         targetUser.status = 'active';
     } else if (fixedDate) {
@@ -18777,6 +23509,7 @@ app.post('/api/manager/users/:id/renew-days', async (req, res) => {
             return res.status(400).json({ ok: false, error: 'Ngày cố định không hợp lệ.' });
         }
         targetUser.expiresAt = parsed.toISOString();
+        targetUser.isPermanent = false;
         if (typeof req.body?.planName === 'string' && req.body.planName.trim()) {
             targetUser.planName = req.body.planName.trim();
         } else if (targetUser.planName === 'VIP Vĩnh Viễn') {
@@ -18784,6 +23517,15 @@ app.post('/api/manager/users/:id/renew-days', async (req, res) => {
         }
         targetUser.status = (parsed.getTime() > Date.now()) ? 'active' : 'expired';
     } else if (Number.isFinite(days) && days !== 0) {
+        // V4-07 & BUG-40a: Dùng canonical normalizeEntitlement để xác định VIP Vĩnh Viễn
+        const userEnt = normalizeEntitlement(targetUser);
+        if (userEnt.isPermanent) {
+            return res.json({
+                ok: true,
+                changed: false,
+                message: `"${targetUser.username}" đang là VIP Vĩnh Viễn (không có hạn ngày) nên hệ thống giữ nguyên quyền lợi. Để chuyển sang hạn ngày, hãy dùng "Ngày cố định" hoặc đặt lại rõ ràng.`
+            });
+        }
         const now = Date.now();
         // Nếu người dùng đang là VIP Vĩnh Viễn (expiresAt === null) hoặc đã hết hạn:
         // Luôn tính bắt đầu từ thời điểm hiện tại (now)!
@@ -18815,20 +23557,63 @@ app.post('/api/manager/users/:id/renew-days', async (req, res) => {
         return res.status(500).json({ ok: false, error: 'Không thể lưu thông tin gia hạn người dùng.' });
     }
 
-    if (!(await syncAuthToAllBots(true))) {
-        return res.status(502).json({ ok: false, partial: true, user: { ...targetUser, password: '' }, error: 'Hạn thuê đã lưu nhưng chưa đồng bộ auth tới toàn bộ bot.' });
+    // BUG-30: gia hạn có thể biến user thành 'expired' (trừ ngày / fixedDate trong quá khứ).
+    // Phải chạy đúng lifecycle như Watchdog: thu hồi session + reconcile lifecycle bot.
+    const renewWarnings = [];
+    let renewSessionRevokeError = null;
+    if (targetUser.status !== 'active' || (targetUser.expiresAt && Date.parse(targetUser.expiresAt) <= Date.now())) {
+        const sessionResult = await revokeUserSessions(targetUser);
+        if (!sessionResult.ok) {
+            renewSessionRevokeError = sessionResult.error || 'Chưa xác nhận thu hồi mọi session.';
+        }
+    }
+    const renewLifecycle = await reconcileUserBotLifecycle(userBackup, targetUser, 'admin renew-days');
+
+    // §3.3 & V3-01: Tự động tái cấp bot và đẩy warning nếu chưa cấp đủ
+    let reallocResult = null;
+    if (targetUser.status === 'active' && (!Array.isArray(targetUser.assignedBotIds) || targetUser.assignedBotIds.length === 0)) {
+        try {
+            reallocResult = await reconcileUserReactivationAndBotAllocation(targetUser.username, { req, context: 'admin_renew_days' });
+            if (reallocResult?.ok && Array.isArray(reallocResult.assignedBotIds)) {
+                targetUser.assignedBotIds = reallocResult.assignedBotIds;
+            } else if (reallocResult && (!reallocResult.ok || reallocResult.partial || reallocResult.allocationStatus === 'pending_retry' || reallocResult.allocationStatus === 'partial')) {
+                const allocWarn = (reallocResult.warnings && reallocResult.warnings[0]) || ('Cảnh báo cấp bot: ' + (reallocResult.error || 'Chưa đủ bot trống để cấp lại cho người dùng.'));
+                renewWarnings.push(allocWarn);
+            }
+        } catch (reallocErr) {
+            console.warn('[RENEW-DAYS] Lỗi tái cấp bot tự động:', reallocErr.message);
+            renewWarnings.push('Lỗi tái cấp bot tự động: ' + reallocErr.message);
+        }
+    }
+
+    // BUG-29: hạn thuê ĐÃ commit; auth-sync có retry 60s → trả ok:true + warnings thay vì 502.
+    const renewAuthSyncDetailed = await syncAuthToAllBotsDetailed(true);
+    if (renewSessionRevokeError) renewWarnings.push(renewSessionRevokeError);
+    if (!renewLifecycle.ok) renewWarnings.push('Chưa hoàn tất lifecycle bot: ' + (renewLifecycle.error || 'lý do không xác định.'));
+    if (!renewAuthSyncDetailed?.ok) {
+        const failedBots = (renewAuthSyncDetailed?.results || []).filter(r => !r.ok);
+        for (const f of failedBots) {
+            await enqueueOutboxSync(f.botId, { type: 'auth_sync', committedTransaction: { type: 'ADMIN_RENEW_USER', target: targetUser.username } });
+        }
+        renewWarnings.push('Chưa đồng bộ auth tới ' + failedBots.length + '/' + (renewAuthSyncDetailed?.results || []).length + ' bot' + (failedBots.length ? ' (' + failedBots.map(f => '#' + f.botId).join(', ') + ')' : '') + '. Hệ thống sẽ tự thử đồng bộ lại trong khoảng 60 giây.');
     }
     logAuditEvent({
         req,
         action: 'ADMIN_RENEW_USER',
         target: { userId: targetUser.id, username: targetUser.username },
-        details: `Quản trị viên gia hạn cho ${targetUser.username}: Hạn mới = ${targetUser.expiresAt || 'Vĩnh viễn'} (Gói: ${targetUser.planName})`,
-        status: 'SUCCESS'
+        details: `Quản trị viên gia hạn cho ${targetUser.username}: Hạn mới = ${targetUser.expiresAt || 'Vĩnh viễn'} (Gói: ${targetUser.planName})` + (renewWarnings.length ? ' | ' + renewWarnings.join('; ') : ''),
+        status: renewWarnings.length ? 'PARTIAL' : 'SUCCESS'
     });
 
     const safeTargetUser = { ...targetUser, password: '' };
     return res.json({
         ok: true,
+        coreCommitted: true,
+        syncStatus: renewWarnings.length > 0 ? 'pending_retry' : 'synced',
+        partial: renewWarnings.length > 0,
+        allocationStatus: reallocResult?.allocationStatus || (targetUser.assignedBotIds?.length ? 'allocated' : 'none'),
+        missingBotCount: reallocResult?.missingBotCount || 0,
+        warnings: renewWarnings.length ? renewWarnings : undefined,
         user: safeTargetUser,
         message: `Gia hạn thành công cho "${targetUser.username}"! Hạn mới: ${targetUser.expiresAt ? new Date(targetUser.expiresAt).toLocaleString('vi-VN') : 'Vĩnh viễn'}.`
     });
@@ -18851,7 +23636,7 @@ app.get('/api/manager/audit-logs', async (req, res) => {
         const logType = String(req.query?.logType || '').trim();
 
         if (!supabaseAdapter || !supabaseAdapter.isEnabled()) {
-            const memoryResult = readAuditLogs({ limit, page });
+            const memoryResult = readAuditLogs({ limit, page, logType, category });
             return res.json({
                 ok: true,
                 logs: memoryResult.logs,
@@ -19030,6 +23815,8 @@ function readLegacyJsonFiles(candidates) {
     return documents;
 }
 
+let legacyImportMasterSecret = '';
+
 function readLegacyRows(candidates, property) {
     const rows = [];
     for (const { parsed } of readLegacyJsonFiles(candidates)) {
@@ -19161,12 +23948,13 @@ async function managerSupabaseUpload(req, res) {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên mới có quyền đồng bộ Supabase.' });
     if (!supabaseAdapter.isEnabled()) return res.status(400).json({ ok: false, error: 'Chưa cấu hình Supabase URL và Key.' });
-    if (supabaseSyncLocks.upload) return res.status(409).json({ ok: false, error: 'Đang có yêu cầu Upload chạy; vui lòng chờ hoàn tất.' });
-    supabaseSyncLocks.upload = true;
-    const test = await supabaseAdapter.testConnection();
-    if (!test.ok) { supabaseSyncLocks.upload = false; return res.status(502).json({ ok: false, error: test.error || 'Không thể kết nối Supabase.' }); }
+    if (supabaseSyncInProgress) return res.status(409).json({ ok: false, error: 'Đang có thao tác đồng bộ hoặc khôi phục Supabase đang chạy; vui lòng chờ hoàn tất.' });
+    supabaseSyncInProgress = true;
     try {
-        if (!supabaseStorageReady && !(await initSupabaseCloud())) throw new Error('Không thể tải trạng thái Cloud trước khi Upload.');
+        const uploadTask = async () => {
+            const test = await supabaseAdapter.testConnection();
+            if (!test.ok) return res.status(502).json({ ok: false, error: test.error || 'Không thể kết nối Supabase.' });
+            if (!supabaseStorageReady && !(await initSupabaseCloud())) throw new Error('Không thể tải trạng thái Cloud trước khi Upload.');
         const counts = { users: 0, keys: 0, bots: 0, botSettings: 0, sessions: 0, auditLogs: 0, backups: 0, skipped: 0 };
         const legacyUsers = readLegacyRows(USERS_CANDIDATES, 'users');
         const legacyKeys = readLegacyRows(KEYS_CANDIDATES, 'keys');
@@ -19286,13 +24074,28 @@ async function managerSupabaseUpload(req, res) {
                 const incomingSettings = current.settings && typeof current.settings === 'object' ? current.settings : {};
                 const existingSettings = existing?.settings && typeof existing.settings === 'object' ? existing.settings : {};
                 const hasProxyConfig = current.proxy && typeof current.proxy === 'object' && (current.proxy.enabled === true || String(current.proxy.host || '').trim() !== '');
+                const schedulesData = resetTombstone
+                    ? (Array.isArray(current.bot_schedules) ? current.bot_schedules : (Array.isArray(current.schedules) ? current.schedules : []))
+                    : (Array.isArray(current.bot_schedules) && current.bot_schedules.length
+                        ? current.bot_schedules
+                        : (Array.isArray(current.schedules) && current.schedules.length
+                            ? current.schedules
+                            : (existing?.bot_schedules || existing?.schedules || current.bot_schedules || current.schedules || [])));
                 const uploadPayload = {
                     ...current,
+                    // BUG-32 (Wave B0 — recheck §7): tombstone reset phải RA LỆNH clear credential
+                    // rõ ràng. Nếu chỉ gửi username/password rỗng, adapter GIỮ password cũ trong
+                    // Cloud (saveBotSettings không có cờ clear → password = storedPassword; proxy
+                    // password tương tự) → credential khách cũ bị hồi sinh. clearCredentials=true
+                    // áp cho cả password lẫn proxy password (manager.js:1833-1834,1851).
+                    clearCredentials: resetTombstone === true,
+                    clearProxyCredentials: resetTombstone === true,
                     username: resetTombstone ? '' : (String(current.username || '').trim() || existing?.username || ''),
                     password: resetTombstone ? '' : (String(current.password || '') || existing?.password || ''),
                     settings: resetTombstone ? incomingSettings : (Object.keys(incomingSettings).length ? { ...existingSettings, ...incomingSettings } : existingSettings),
                     proxy: resetTombstone ? (current.proxy || incomingSettings.proxy || {}) : (hasProxyConfig ? current.proxy : (existing?.proxy || current.proxy || {})),
-                    schedules: resetTombstone ? (Array.isArray(current.schedules) ? current.schedules : []) : (Array.isArray(current.schedules) && current.schedules.length ? current.schedules : (existing?.schedules || current.schedules || [])),
+                    schedules: schedulesData,
+                    bot_schedules: schedulesData,
                     auto_chat: resetTombstone ? (Array.isArray(current.auto_chat) ? current.auto_chat : []) : (Array.isArray(current.auto_chat) && current.auto_chat.length ? current.auto_chat : (existing?.auto_chat || current.auto_chat || [])),
                     syncedAuth: {
                         ...existingAuth,
@@ -19325,19 +24128,42 @@ async function managerSupabaseUpload(req, res) {
             supabaseAdapter.fetchUsers(), supabaseAdapter.fetchKeys(), supabaseAdapter.fetchRegistry(), supabaseAdapter.fetchSessions()
         ]);
         if (![confirmedUsers, confirmedKeys, confirmedSessions].every(Array.isArray) || !confirmedRegistry) throw new Error('Dữ liệu đã gửi nhưng không xác minh đọc lại được từ Cloud; Manager chưa cập nhật cache.');
-        setUsersCache(confirmedUsers); setKeysCache(confirmedKeys); setSessionsCache(confirmedSessions);
-        Object.assign(registry, confirmedRegistry);
+        setUsersCache(confirmedUsers); setKeysCache(confirmedKeys); setSessionsCache(confirmedSessions, { preserveYoungLocalSessions: true });
+        const defaultReg = loadRegistry();
+        const nextRegistry = {
+            ...defaultReg,
+            ...confirmedRegistry,
+            systemSettings: {
+                ...defaultReg.systemSettings,
+                ...(confirmedRegistry.systemSettings || {})
+            },
+            webhook: {
+                ...defaultReg.webhook,
+                ...(confirmedRegistry.webhook || {})
+            },
+            announcement: confirmedRegistry.announcement || defaultReg.announcement,
+            botRentalDisabled: normalizeBotRentalDisabled(confirmedRegistry.botRentalDisabled ?? defaultReg.botRentalDisabled)
+        };
+        Object.keys(registry).forEach(key => delete registry[key]);
+        Object.assign(registry, nextRegistry);
         initializeAdminPassword();
         BOT_CONFIG = buildManagerBotConfig();
         registryNeedsSave = false;
+        registryCloudBaseline = JSON.parse(JSON.stringify(nextRegistry));
         logAuditEvent({ req, action: 'SUPABASE_UPLOAD', category: 'SYSTEM', details: 'Upload Supabase thành công: ' + JSON.stringify(counts), status: 'SUCCESS' });
         if (pendingAuditLogs.length) await flushPendingAuditLogs();
         return res.json({ ok: true, message: 'Upload hoàn tất. Giá trị Cloud hiện có được giữ; dữ liệu legacy chỉ bổ sung hàng còn thiếu.', counts });
+        };
+
+        if (supabaseAdapter?.isEnabled?.()) {
+            return await supabaseAdapter.withManagerLock('supabase-full-sync', uploadTask, 900);
+        }
+        return await uploadTask();
     } catch (err) {
         logAuditEvent({ req, action: 'SUPABASE_UPLOAD', category: 'SYSTEM', details: 'Upload Supabase lỗi: ' + err.message, status: 'FAILED' });
         return res.status(502).json({ ok: false, error: 'Upload Supabase thất bại: ' + err.message });
     } finally {
-        supabaseSyncLocks.upload = false;
+        supabaseSyncInProgress = false;
     }
 }
 
@@ -19345,96 +24171,121 @@ async function managerSupabaseSyncDown(req, res) {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên mới có quyền đồng bộ Supabase.' });
     if (!supabaseAdapter.isEnabled()) return res.status(400).json({ ok: false, error: 'Chưa cấu hình Supabase URL và Key.' });
-    if (supabaseSyncLocks.syncDown) return res.status(409).json({ ok: false, error: 'Đang có yêu cầu Sync Down chạy; vui lòng chờ hoàn tất.' });
-    supabaseSyncLocks.syncDown = true;
+    if (supabaseSyncInProgress) return res.status(409).json({ ok: false, error: 'Đang có thao tác đồng bộ hoặc khôi phục Supabase đang chạy; vui lòng chờ hoàn tất.' });
+    supabaseSyncInProgress = true;
     let applySnapshot = null;
     try {
-        const test = await supabaseAdapter.testConnection();
-        if (!test.ok) return res.status(502).json({ ok: false, error: test.error || 'Không thể kết nối Supabase.' });
-        const [cloudUsers, cloudKeys, cloudRegistry, cloudSessions] = await Promise.all([
-            supabaseAdapter.fetchUsers(), supabaseAdapter.fetchKeys(), supabaseAdapter.fetchRegistry(), supabaseAdapter.fetchSessions()
-        ]);
-        if (!Array.isArray(cloudUsers) || !Array.isArray(cloudKeys) || !cloudRegistry || typeof cloudRegistry !== 'object' || !Array.isArray(cloudSessions)) {
-            return res.status(502).json({ ok: false, error: 'Supabase trả về dữ liệu thiếu hoặc không đọc được; không áp dụng thay đổi.' });
-        }
-        // Stage the Cloud registry first so bot ID validation and child reads cannot partially erase RAM state.
-        applySnapshot = {
-            registry: JSON.parse(JSON.stringify(registry)),
-            bots: BOT_CONFIG,
-            users: loadUsers(),
-            keys: loadKeysFile(),
-            sessions: [...activeSessions.values()],
-            storageReady: supabaseStorageReady,
-            registryNeedsSave
-        };
-        Object.assign(registry, cloudRegistry);
-        initializeAdminPassword();
-        const nextBots = buildManagerBotConfig();
-        const rollbackStagedRegistry = () => {
+        const syncDownTask = async () => {
+            const test = await supabaseAdapter.testConnection();
+            if (!test.ok) return res.status(502).json({ ok: false, error: test.error || 'Không thể kết nối Supabase.' });
+            const [cloudUsers, cloudKeys, cloudRegistry, cloudSessions] = await Promise.all([
+                supabaseAdapter.fetchUsers(), supabaseAdapter.fetchKeys(), supabaseAdapter.fetchRegistry(), supabaseAdapter.fetchSessions()
+            ]);
+            if (!Array.isArray(cloudUsers) || !Array.isArray(cloudKeys) || !cloudRegistry || typeof cloudRegistry !== 'object' || !Array.isArray(cloudSessions)) {
+                return res.status(502).json({ ok: false, error: 'Supabase trả về dữ liệu thiếu hoặc không đọc được; không áp dụng thay đổi.' });
+            }
+            // Stage the Cloud registry first so bot ID validation and child reads cannot partially erase RAM state.
+            applySnapshot = {
+                registry: JSON.parse(JSON.stringify(registry)),
+                bots: BOT_CONFIG,
+                users: loadUsers(),
+                keys: loadKeysFile(),
+                sessions: [...activeSessions.values()],
+                storageReady: supabaseStorageReady,
+                registryNeedsSave
+            };
+            const defaultReg = loadRegistry();
+            const nextRegistry = {
+                ...defaultReg,
+                ...cloudRegistry,
+                systemSettings: {
+                    ...defaultReg.systemSettings,
+                    ...(cloudRegistry.systemSettings || {})
+                },
+                webhook: {
+                    ...defaultReg.webhook,
+                    ...(cloudRegistry.webhook || {})
+                },
+                announcement: cloudRegistry.announcement || defaultReg.announcement,
+                botRentalDisabled: normalizeBotRentalDisabled(cloudRegistry.botRentalDisabled ?? defaultReg.botRentalDisabled)
+            };
             Object.keys(registry).forEach(key => delete registry[key]);
-            Object.assign(registry, applySnapshot.registry);
-            BOT_CONFIG = applySnapshot.bots;
-            registryNeedsSave = applySnapshot.registryNeedsSave;
+            Object.assign(registry, nextRegistry);
+            initializeAdminPassword();
+            const nextBots = buildManagerBotConfig();
+            const rollbackStagedRegistry = () => {
+                Object.keys(registry).forEach(key => delete registry[key]);
+                Object.assign(registry, applySnapshot.registry);
+                BOT_CONFIG = applySnapshot.bots;
+                registryNeedsSave = applySnapshot.registryNeedsSave;
+                applySnapshot = null;
+            };
+
+            // Validate identifiers and fetch every bot_settings row before applying any Manager cache.
+            if (cloudUsers.some(u => !u || !String(u.username || '').trim() || !String(u.id || '').trim()) ||
+                cloudKeys.some(k => !k || !String(k.key || k.code || '').trim()) ||
+                (cloudRegistry.dynamicBots || []).some(b => !b || !String(b.url || '').trim())) {
+                rollbackStagedRegistry();
+                return res.status(502).json({ ok: false, error: 'Dữ liệu Cloud có ID hoặc trường bắt buộc không hợp lệ; không áp dụng thay đổi.' });
+            }
+            const ids = new Set();
+            for (const bot of nextBots || []) {
+                const id = String(bot.id || '').trim();
+                if (!/^[1-9][0-9]{0,8}$/.test(id) || ids.has(id)) {
+                    rollbackStagedRegistry();
+                    return res.status(409).json({ ok: false, error: 'Ánh xạ BOT_ID trong Manager bị thiếu hoặc trùng; đã hủy Sync Down.' });
+                }
+                ids.add(id);
+            }
+            const stagedBotSettings = await Promise.all(nextBots.map(bot => supabaseAdapter.fetchBotSettingsStrict(bot.id)));
+
+            // Apply only after all required Cloud reads and identifier validation succeeded.
+            setUsersCache(cloudUsers);
+            setKeysCache(cloudKeys);
+            // BUG-04: giữ lại phiên local vừa tạo chưa kịp persist khi Sync Down.
+            setSessionsCache(cloudSessions, { preserveYoungLocalSessions: true });
+            supabaseStorageReady = true;
+            BOT_CONFIG = nextBots;
+            registryCloudBaseline = JSON.parse(JSON.stringify(nextRegistry));
             applySnapshot = null;
+            // Sync Down chỉ cập nhật cache runtime; không ghi ngược payload vừa tải lên Cloud.
+
+            const workerResults = [];
+            for (let index = 0; index < (BOT_CONFIG || []).length; index++) {
+                const bot = BOT_CONFIG[index];
+                const row = stagedBotSettings[index];
+                if (!row) { workerResults.push({ botId: String(bot.id), skipped: true, reason: 'Chưa có cấu hình Cloud' }); continue; }
+                try {
+                    const result = await fetchChild(bot, '/api/bot/supabase/reload', { method: 'POST', body: {}, timeoutMs: 12000, headers: { 'X-Manager-Role': 'admin' } });
+                    if (!result.ok || !result.data?.ok || String(result.data.botId) !== String(bot.id)) {
+                        workerResults.push({ botId: String(bot.id), ok: false, error: result.data?.error || ('HTTP ' + result.status) });
+                    } else workerResults.push({ botId: String(bot.id), ok: true, restored: result.data.restored === true });
+                } catch (err) {
+                    workerResults.push({ botId: String(bot.id), ok: false, error: err.message || 'Worker chưa kết nối.' });
+                }
+            }
+            const authSync = await syncAuthToAllBotsDetailed(true);
+            const failedWorkers = workerResults.filter(r => r.ok === false);
+            const skippedWorkers = workerResults.filter(r => r.skipped === true);
+            const failedAuth = authSync.results.filter(r => !r.ok);
+            const counts = { users: cloudUsers.length, keys: cloudKeys.length, bots: (BOT_CONFIG || []).length, workersSynced: workerResults.filter(r => r.ok === true).length, workersSkipped: skippedWorkers.length, authWorkersSynced: authSync.results.filter(r => r.ok).length, failed: failedWorkers.length + skippedWorkers.length + failedAuth.length };
+            if (failedWorkers.length || skippedWorkers.length || failedAuth.length) {
+                const failures = [
+                    ...failedWorkers.map(r => '#' + r.botId + ' settings: ' + r.error),
+                    ...skippedWorkers.map(r => '#' + r.botId + ' skipped: ' + (r.reason || 'thiếu cấu hình bắt buộc')),
+                    ...failedAuth.map(r => '#' + r.botId + ' auth: ' + r.error)
+                ];
+                logAuditEvent({ req, action: 'SUPABASE_SYNC_DOWN', category: 'SYSTEM', details: 'Sync Down áp dụng Manager nhưng worker chưa nhận đủ cấu hình/auth: ' + failures.join('; '), status: 'PARTIAL' });
+                return res.json({ ok: true, partial: true, message: 'Dữ liệu Manager đã cập nhật; một số worker chưa nhận đủ cấu hình hoặc dữ liệu auth.', counts, workers: workerResults, authWorkers: authSync.results });
+            }
+            logAuditEvent({ req, action: 'SUPABASE_SYNC_DOWN', category: 'SYSTEM', details: 'Sync Down Supabase thành công: ' + JSON.stringify(counts), status: 'SUCCESS' });
+            return res.json({ ok: true, message: 'Đã đồng bộ dữ liệu Cloud xuống Manager và worker.', counts, workers: workerResults });
         };
 
-        // Validate identifiers and fetch every bot_settings row before applying any Manager cache.
-        if (cloudUsers.some(u => !u || !String(u.username || '').trim() || !String(u.id || '').trim()) ||
-            cloudKeys.some(k => !k || !String(k.key || k.code || '').trim()) ||
-            (cloudRegistry.dynamicBots || []).some(b => !b || !String(b.url || '').trim())) {
-            rollbackStagedRegistry();
-            return res.status(502).json({ ok: false, error: 'Dữ liệu Cloud có ID hoặc trường bắt buộc không hợp lệ; không áp dụng thay đổi.' });
+        if (supabaseAdapter?.isEnabled?.()) {
+            return await supabaseAdapter.withManagerLock('supabase-full-sync', syncDownTask, 900);
         }
-        const ids = new Set();
-        for (const bot of nextBots || []) {
-            const id = String(bot.id || '').trim();
-            if (!/^[1-9][0-9]{0,8}$/.test(id) || ids.has(id)) {
-                rollbackStagedRegistry();
-                return res.status(409).json({ ok: false, error: 'Ánh xạ BOT_ID trong Manager bị thiếu hoặc trùng; đã hủy Sync Down.' });
-            }
-            ids.add(id);
-        }
-        const stagedBotSettings = await Promise.all(nextBots.map(bot => supabaseAdapter.fetchBotSettingsStrict(bot.id)));
-
-        // Apply only after all required Cloud reads and identifier validation succeeded.
-        setUsersCache(cloudUsers);
-        setKeysCache(cloudKeys);
-        setSessionsCache(cloudSessions);
-        supabaseStorageReady = true;
-        BOT_CONFIG = nextBots;
-        applySnapshot = null;
-        // Sync Down chỉ cập nhật cache runtime; không ghi ngược payload vừa tải lên Cloud.
-
-        const workerResults = [];
-        for (let index = 0; index < (BOT_CONFIG || []).length; index++) {
-            const bot = BOT_CONFIG[index];
-            const row = stagedBotSettings[index];
-            if (!row) { workerResults.push({ botId: String(bot.id), skipped: true, reason: 'Chưa có cấu hình Cloud' }); continue; }
-            try {
-                const result = await fetchChild(bot, '/api/bot/supabase/reload', { method: 'POST', body: {}, timeoutMs: 12000, headers: { 'X-Manager-Role': 'admin' } });
-                if (!result.ok || !result.data?.ok || String(result.data.botId) !== String(bot.id)) {
-                    workerResults.push({ botId: String(bot.id), ok: false, error: result.data?.error || ('HTTP ' + result.status) });
-                } else workerResults.push({ botId: String(bot.id), ok: true, restored: result.data.restored === true });
-            } catch (err) {
-                workerResults.push({ botId: String(bot.id), ok: false, error: err.message || 'Worker chưa kết nối.' });
-            }
-        }
-        const authSync = await syncAuthToAllBotsDetailed(true);
-        const failedWorkers = workerResults.filter(r => r.ok === false);
-        const skippedWorkers = workerResults.filter(r => r.skipped === true);
-        const failedAuth = authSync.results.filter(r => !r.ok);
-        const counts = { users: cloudUsers.length, keys: cloudKeys.length, bots: (BOT_CONFIG || []).length, workersSynced: workerResults.filter(r => r.ok === true).length, workersSkipped: skippedWorkers.length, authWorkersSynced: authSync.results.filter(r => r.ok).length, failed: failedWorkers.length + skippedWorkers.length + failedAuth.length };
-        if (failedWorkers.length || skippedWorkers.length || failedAuth.length) {
-            const failures = [
-                ...failedWorkers.map(r => '#' + r.botId + ' settings: ' + r.error),
-                ...skippedWorkers.map(r => '#' + r.botId + ' skipped: ' + (r.reason || 'thiếu cấu hình bắt buộc')),
-                ...failedAuth.map(r => '#' + r.botId + ' auth: ' + r.error)
-            ];
-            logAuditEvent({ req, action: 'SUPABASE_SYNC_DOWN', category: 'SYSTEM', details: 'Sync Down áp dụng Manager nhưng worker chưa nhận đủ cấu hình/auth: ' + failures.join('; '), status: 'PARTIAL' });
-            return res.json({ ok: true, partial: true, message: 'Dữ liệu Manager đã cập nhật; một số worker chưa nhận đủ cấu hình hoặc dữ liệu auth.', counts, workers: workerResults, authWorkers: authSync.results });
-        }
-        logAuditEvent({ req, action: 'SUPABASE_SYNC_DOWN', category: 'SYSTEM', details: 'Sync Down Supabase thành công: ' + JSON.stringify(counts), status: 'SUCCESS' });
-        return res.json({ ok: true, message: 'Đã đồng bộ dữ liệu Cloud xuống Manager và worker.', counts, workers: workerResults });
+        return await syncDownTask();
     } catch (err) {
         if (applySnapshot) {
             Object.keys(registry).forEach(key => delete registry[key]);
@@ -19449,7 +24300,7 @@ async function managerSupabaseSyncDown(req, res) {
         logAuditEvent({ req, action: 'SUPABASE_SYNC_DOWN', category: 'SYSTEM', details: 'Sync Down Supabase lỗi: ' + err.message, status: 'FAILED' });
         return res.status(502).json({ ok: false, error: 'Sync Down Supabase thất bại: ' + err.message });
     } finally {
-        supabaseSyncLocks.syncDown = false;
+        supabaseSyncInProgress = false;
     }
 }
 
@@ -19512,7 +24363,7 @@ let backupRestoreInProgress = false;
 app.post('/api/manager/backups/:filename/restore', async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên mới có quyền khôi phục backup.' });
-    if (backupRestoreInProgress) return res.status(409).json({ ok: false, error: 'Đang có một lần khôi phục backup chạy.' });
+    if (supabaseSyncInProgress || backupRestoreInProgress) return res.status(409).json({ ok: false, error: 'Đang có thao tác đồng bộ hoặc khôi phục Supabase đang chạy; vui lòng chờ hoàn tất.' });
     backupRestoreInProgress = true;
     try {
         const result = await restoreSystemBackup(String(req.params.filename || ''), { allowEmpty: req.body?.allowEmpty === true });
@@ -19661,6 +24512,9 @@ app.post('/api/manager/bots', async (req, res) => {
             }
 
             pendingBotUrls.add(url);
+            let reservedBotId = null;
+            let reservedUrl = url;
+            let previousLastBotId = registry.lastBotId;
 
             try {
                 // Re-check after acquiring the reservation so concurrent requests cannot
@@ -19670,13 +24524,15 @@ app.post('/api/manager/bots', async (req, res) => {
                 }
 
                 const id = nextBotId();
+                reservedBotId = id;
                 const config = {
                     id,
                     label: requestedLabel || `bot${id}`,
                     url,
                     source: 'dynamic',
                     sourceUrl: url,
-                    legacyNumber: null
+                    legacyNumber: null,
+                    secretKey: req.body?.secretKey ? String(req.body.secretKey).trim() : undefined
                 };
 
                 let remote = null;
@@ -19701,7 +24557,15 @@ app.post('/api/manager/bots', async (req, res) => {
                     return res.status(409).json({ error: 'Bot URL này đã tồn tại.' });
                 }
 
-                await createSystemBackup('pre-bot-add');
+                // V4-03: Kiểm tra backup.ok === true trước khi mutation
+                const backup = await createSystemBackup('pre-bot-add');
+                if (!backup || backup.ok !== true) {
+                    return res.status(500).json({
+                        ok: false,
+                        error: 'Không thể tạo bản sao lưu hệ thống trước khi thêm bot: ' + (backup?.error || 'BACKUP_FAILED')
+                    });
+                }
+
                 if (!registry.botIdMap) registry.botIdMap = {};
                 registry.botIdMap[url] = config.id;
                 registry.lastBotId = config.id;
@@ -19712,7 +24576,9 @@ app.post('/api/manager/bots', async (req, res) => {
                 const saved = await saveRegistry();
                 if (!saved) {
                     delete registry.botIdMap[url];
-                    BOT_CONFIG.pop();
+                    const bIdx = BOT_CONFIG.findIndex(b => b.id === config.id);
+                    if (bIdx !== -1) BOT_CONFIG.splice(bIdx, 1);
+                    registry.lastBotId = previousLastBotId;
                     return res.status(500).json({
                         error: 'Không thể lưu registry; bot chưa được thêm.'
                     });
@@ -19736,14 +24602,11 @@ app.post('/api/manager/bots', async (req, res) => {
                         ? `${config.label} đã được thêm, nhưng chưa kết nối được lúc kiểm tra.`
                         : `${config.label} đã được thêm.`,
                     warning: checkWarning,
-                    bot: {
-                        ...config,
-                        connected: !!remote
-                    }
+                    bot: toAdminBotSummary(config, remote)
                 });
             } finally {
-                pendingBotUrls.delete(url);
-                activeBotIdReservations.clear();
+                if (reservedUrl) pendingBotUrls.delete(reservedUrl);
+                if (reservedBotId !== null) activeBotIdReservations.delete(reservedBotId);
             }
         }
 
@@ -19793,9 +24656,12 @@ app.post('/api/manager/bots', async (req, res) => {
             pendingBotUrls.add(u);
         }
 
-        try {
-            const addedBots = [];
+        // V4-01: Khai báo ở outer scope để finally truy cập an toàn
+        const addedBots = [];
+        const reservedIds = [];
+        let previousLastBotId = registry.lastBotId;
 
+        try {
             // Pre-allocate configs with sequential IDs
             for (const url of validUrls) {
                 if (BOT_CONFIG.some(b => b.url === url)) {
@@ -19804,6 +24670,7 @@ app.post('/api/manager/bots', async (req, res) => {
                 }
 
                 const id = nextBotId();
+                reservedIds.push(id);
                 const config = {
                     id,
                     label: requestedLabel ? `${requestedLabel} ${id}` : `bot${id}`,
@@ -19839,7 +24706,17 @@ app.post('/api/manager/bots', async (req, res) => {
             });
             await Promise.allSettled(probePromises);
 
-            await createSystemBackup('pre-bulk-bot-add');
+            // V4-03: Kiểm tra kết quả backup trước khi mutation
+            const backup = await createSystemBackup('pre-bulk-bot-add');
+            if (!backup || backup.ok !== true) {
+                for (const id of reservedIds) activeBotIdReservations.delete(id);
+                registry.lastBotId = previousLastBotId;
+                return res.status(500).json({
+                    ok: false,
+                    error: 'Không thể tạo bản sao lưu hệ thống trước khi thêm bot: ' + (backup?.error || 'BACKUP_FAILED')
+                });
+            }
+
             if (!registry.botIdMap) registry.botIdMap = {};
 
             for (const item of addedBots) {
@@ -19858,6 +24735,7 @@ app.post('/api/manager/bots', async (req, res) => {
                     const idx = BOT_CONFIG.findIndex(b => b.id === item.config.id);
                     if (idx !== -1) BOT_CONFIG.splice(idx, 1);
                 }
+                registry.lastBotId = previousLastBotId;
                 return res.status(500).json({
                     error: 'Không thể lưu registry; các bot chưa được thêm.'
                 });
@@ -19887,20 +24765,242 @@ app.post('/api/manager/bots', async (req, res) => {
                 message: responseMsg,
                 addedCount: addedBots.length,
                 skippedCount: skipped.length,
-                bots: addedBots.map(b => ({
-                    ...b.config,
-                    connected: !!b.remote
-                })),
+                bots: addedBots.map(b => toAdminBotSummary(b.config, b.remote)),
                 skipped
             });
         } finally {
             for (const u of validUrls) {
                 pendingBotUrls.delete(u);
             }
-            activeBotIdReservations.clear();
+            for (const id of reservedIds) {
+                activeBotIdReservations.delete(id);
+            }
         }
     } catch (err) {
         return res.status(400).json({ error: err.message || 'Dữ liệu không hợp lệ.' });
+    }
+});
+
+// BUG-39 / §5.1: Batch Import Endpoint cho Admin (atomic batch import với deduplication và preflight)
+// V4-09: Admin endpoints quản lý và tái cấp bot (Pending Allocations)
+app.get('/api/manager/allocations/pending', async (req, res) => {
+    const session = getSessionUser(req);
+    if (!session || session.role !== 'admin') {
+        return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên mới có quyền xem danh sách chờ cấp bot.' });
+    }
+    let pendingList = [];
+    if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        const dbList = await supabaseAdapter.fetchPendingAllocations('pending_retry');
+        if (Array.isArray(dbList) && dbList.length > 0) {
+            pendingList = dbList;
+        } else {
+            pendingList = Array.isArray(registry.pendingAllocations) ? registry.pendingAllocations : [];
+        }
+    } else {
+        pendingList = Array.isArray(registry.pendingAllocations) ? registry.pendingAllocations : [];
+    }
+    return res.json({
+        ok: true,
+        pendingAllocations: pendingList
+    });
+});
+
+app.post('/api/manager/allocations/retry', async (req, res) => {
+    const session = getSessionUser(req);
+    if (!session || session.role !== 'admin') {
+        return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên mới có quyền tái cấp bot.' });
+    }
+    const username = String(req.body?.username || '').trim().toLowerCase();
+    if (!username) {
+        return res.status(400).json({ ok: false, error: 'Thiếu username cần tái cấp bot.' });
+    }
+    try {
+        const result = await reconcileUserReactivationAndBotAllocation(username, { req, context: 'admin_manual_retry' });
+        return res.json({
+            ok: result.ok,
+            coreCommitted: result.coreCommitted,
+            allocationStatus: result.allocationStatus,
+            assignedBotIds: result.assignedBotIds || [],
+            missingBotCount: result.missingBotCount || 0,
+            warnings: result.warnings
+        });
+    } catch (err) {
+        return res.status(500).json({ ok: false, error: err.message || 'Lỗi khi tái cấp bot cho người dùng.' });
+    }
+});
+
+app.post('/api/manager/bots/batch-import', async (req, res) => {
+    const session = getSessionUser(req);
+    if (!session || session.role !== 'admin') {
+        return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên mới có quyền nhập danh sách bot hàng loạt.' });
+    }
+
+    try {
+        let items = [];
+        if (Array.isArray(req.body?.bots)) {
+            items = req.body.bots;
+        } else if (Array.isArray(req.body?.urls)) {
+            items = req.body.urls.map(u => ({ url: u }));
+        } else if (Array.isArray(req.body)) {
+            items = req.body;
+        }
+
+        if (!items.length) {
+            return res.status(400).json({ ok: false, error: 'Danh sách bot nhập vào không được để trống.' });
+        }
+        if (items.length > 50) {
+            return res.status(400).json({ ok: false, error: 'Số lượng bot nhập mỗi đợt tối đa là 50 bot.' });
+        }
+
+        const validItems = [];
+        const skipped = [];
+        const seenUrls = new Set();
+
+        for (const raw of items) {
+            const rawUrl = typeof raw === 'string' ? raw : (raw?.url || raw?.endpoint || raw?.sourceUrl || '');
+            let normUrl = '';
+            try {
+                normUrl = await validateSafeBotUrl(rawUrl);
+            } catch (err) {
+                skipped.push({ url: rawUrl, reason: err.message || 'URL vi phạm bảo mật / SSRF' });
+                continue;
+            }
+            if (!normUrl) {
+                skipped.push({ url: rawUrl, reason: 'URL không hợp lệ' });
+                continue;
+            }
+            if (seenUrls.has(normUrl)) {
+                skipped.push({ url: normUrl, reason: 'Trùng lặp trong danh sách tải lên' });
+                continue;
+            }
+            seenUrls.add(normUrl);
+
+            if (BOT_CONFIG.some(b => b.url === normUrl) || pendingBotUrls.has(normUrl)) {
+                skipped.push({ url: normUrl, reason: 'Bot URL này đã tồn tại hoặc đang được thêm' });
+                continue;
+            }
+
+            validItems.push({
+                url: normUrl,
+                label: typeof raw?.label === 'string' ? raw.label.trim() : (typeof raw?.name === 'string' ? raw.name.trim() : ''),
+                secretKey: typeof raw?.secretKey === 'string' ? raw.secretKey.trim() : undefined
+            });
+        }
+
+        if (!validItems.length) {
+            return res.status(400).json({
+                ok: false,
+                error: 'Không có bot nào hợp lệ để nhập vào hệ thống.',
+                skipped
+            });
+        }
+
+        for (const it of validItems) pendingBotUrls.add(it.url);
+
+        // V4-01: Khai báo ở outer scope để finally truy cập an toàn
+        const addedBots = [];
+        const reservedIds = [];
+        let previousLastBotId = registry.lastBotId;
+
+        try {
+            for (const it of validItems) {
+                if (BOT_CONFIG.some(b => b.url === it.url)) {
+                    skipped.push({ url: it.url, reason: 'Bot URL này đã tồn tại' });
+                    continue;
+                }
+                const id = nextBotId();
+                reservedIds.push(id);
+                const config = {
+                    id,
+                    label: it.label || `bot${id}`,
+                    url: it.url,
+                    source: 'dynamic',
+                    sourceUrl: it.url,
+                    legacyNumber: null,
+                    secretKey: it.secretKey || undefined
+                };
+                addedBots.push({ config, url: it.url, remote: null });
+            }
+
+            if (!addedBots.length) {
+                return res.status(400).json({ ok: false, error: 'Không có bot nào được thêm sau khi lọc trùng lặp.', skipped });
+            }
+
+            // Probing
+            const probePromises = addedBots.map(async (item) => {
+                try {
+                    const result = await fetchChild(item.config, '/api/bot');
+                    if (result.ok && result.data) {
+                        item.remote = result.data;
+                        if (!item.config.label && result.data.label) {
+                            item.config.label = String(result.data.label);
+                        }
+                    }
+                } catch (_) {}
+            });
+            await Promise.allSettled(probePromises);
+
+            // V3-06 & V4-03: Xác thực backup thành công trước khi áp dụng batch import
+            const backup = await createSystemBackup('pre-batch-import');
+            if (!backup || backup.ok !== true) {
+                for (const id of reservedIds) activeBotIdReservations.delete(id);
+                registry.lastBotId = previousLastBotId;
+                return res.status(500).json({
+                    ok: false,
+                    error: 'Không thể tạo bản sao lưu hệ thống trước khi nhập hàng loạt: ' + (backup?.error || 'BACKUP_FAILED')
+                });
+            }
+            if (!registry.botIdMap) registry.botIdMap = {};
+
+            for (const item of addedBots) {
+                registry.botIdMap[item.url] = item.config.id;
+                registry.lastBotId = item.config.id;
+                BOT_CONFIG.push(item.config);
+                summaryCache.delete(item.config.id);
+                summaryRefreshInFlight.delete(item.config.id);
+            }
+
+            const saved = await saveRegistry();
+            if (!saved) {
+                for (const item of addedBots) {
+                    delete registry.botIdMap[item.url];
+                    const idx = BOT_CONFIG.findIndex(b => b.id === item.config.id);
+                    if (idx !== -1) BOT_CONFIG.splice(idx, 1);
+                }
+                registry.lastBotId = previousLastBotId;
+                return res.status(500).json({ ok: false, error: 'Không thể lưu registry; các bot chưa được nhập.' });
+            }
+
+            for (const item of addedBots) {
+                void refreshSummary(item.config, true);
+                void syncAuthToBot(item.config, true);
+            }
+            void syncAuthToAllBots(false);
+
+            logAuditEvent({
+                req,
+                action: 'BOT_BATCH_IMPORT',
+                details: `Nhập hàng loạt thành công ${addedBots.length} bot (IDs: ${addedBots.map(b => b.config.id).join(', ')})`,
+                status: 'SUCCESS'
+            });
+
+            // V3-06 & V3-12: Trả dữ liệu qua allowlist serializer, không bao giờ spread raw config
+            return res.status(201).json({
+                ok: true,
+                message: `Đã nhập thành công ${addedBots.length} bot mới!` + (skipped.length ? ` (Bỏ qua ${skipped.length} bot không hợp lệ hoặc trùng lặp)` : ''),
+                addedCount: addedBots.length,
+                skippedCount: skipped.length,
+                bots: addedBots.map(b => toAdminBotSummary(b.config, b.remote)),
+                skipped
+            });
+        } finally {
+            for (const it of validItems) pendingBotUrls.delete(it.url);
+            for (const id of reservedIds) {
+                activeBotIdReservations.delete(id);
+            }
+        }
+    } catch (err) {
+        return res.status(400).json({ ok: false, error: err.message || 'Lỗi dữ liệu khi nhập danh sách bot.' });
     }
 });
 
@@ -19935,10 +25035,23 @@ app.patch('/api/manager/bot/:id', async (req, res) => {
         const previousOverrides = registry.overrides.map(item => ({ ...item }));
         const previousBotIdMap = { ...(registry.botIdMap || {}) };
         const previousBotTags = { ...(registry.botTags || {}) };
+        const previousBotSecrets = { ...(registry.botSecrets || {}) };
         registry.botRentalDisabled = normalizeBotRentalDisabled(registry.botRentalDisabled);
         const previousBotRentalDisabled = [...registry.botRentalDisabled];
 
         bot.label = nextLabel || bot.label || `Bot ${id}`;
+
+        if (req.body?.secretKey !== undefined) {
+            const rawSecret = String(req.body.secretKey || '').trim();
+            if (!registry.botSecrets) registry.botSecrets = {};
+            if (rawSecret) {
+                registry.botSecrets[id] = rawSecret;
+                bot.secretKey = rawSecret;
+            } else {
+                delete registry.botSecrets[id];
+                delete bot.secretKey;
+            }
+        }
 
         if (req.body?.rentable !== undefined) {
             registry.botRentalDisabled = normalizeBotRentalDisabled(registry.botRentalDisabled);
@@ -20019,6 +25132,7 @@ app.patch('/api/manager/bot/:id', async (req, res) => {
             registry.botIdMap = previousBotIdMap;
             registry.botTags = previousBotTags;
             registry.botRentalDisabled = previousBotRentalDisabled;
+            registry.botSecrets = previousBotSecrets;
             return res.status(500).json({
                 error: 'Không thể lưu registry; thay đổi đã được rollback.'
             });
@@ -20035,12 +25149,12 @@ app.patch('/api/manager/bot/:id', async (req, res) => {
             status: 'SUCCESS'
         });
 
-        const resultBot = {
-            ...bot,
-            tags: (registry.botTags && registry.botTags[id]) || [],
-            rentable: bot.rentable !== false
-        };
-        res.json({ ok: true, message: `${bot.label} đã được cập nhật.`, bot: resultBot });
+        // V4-04: Luôn serialize qua toAdminBotSummary allowlist, KHÔNG bao giờ trả raw secretKey
+        const summary = toAdminBotSummary(bot, getBotRemote(bot));
+        if (summary) {
+            summary.tags = (registry.botTags && registry.botTags[id]) || [];
+        }
+        res.json({ ok: true, message: `${bot.label} đã được cập nhật.`, bot: summary });
     } catch (err) {
         res.status(400).json({ error: err.message || 'Không thể sửa bot.' });
     }
@@ -20291,7 +25405,202 @@ app.post('/api/manager/admin/credentials', async (req, res) => {
 
     res.json({ ok: true, bots: results });
 });
-app.delete('/api/manager/bot/:id', async (req, res) => {
+// -----------------------------------------------------------------------------
+// API: quản trị checkpoint pendingResets (BUG-05 — recheck §7-3, RESET-E2E-02)
+// Admin XEM checkpoint (kể cả conflict) và xử lý CÓ KIỂM SOÁT:
+//   - 'resume'  : chạy lại state machine reset bền vững cho bot đó (giống resume loop).
+//   - 'discard' : xóa checkpoint — BẮT BUỘC confirmOwnerCheck=true (admin đã tự xác minh
+//                 owner trên registry/bot_settings); không phải thao tác xóa mù.
+// -----------------------------------------------------------------------------
+app.get('/api/manager/pending-resets', async (req, res) => {
+    const session = getSessionUser(req);
+    if (!session || session.role !== 'admin') {
+        return res.status(403).json({ error: 'Chỉ Quản trị viên (Admin) mới có quyền xem checkpoint reset.' });
+    }
+    const pending = getPendingResets();
+    const items = Object.entries(pending).map(([key, context]) => ({
+        key: String(key),
+        botId: Number(context?.botId || key) || 0,
+        status: String(context?.status || ''),
+        owner: context?.username || context?.ownerBefore?.username || (context?.ownerUsernames && context.ownerUsernames[0]) || null,
+        ownerBefore: context?.ownerBefore || null,
+        ownerAfter: context?.ownerAfter || null,
+        resetId: context?.resetId || context?.resetTransactionId || context?.transactionId || null,
+        resetTransactionId: context?.resetTransactionId || context?.resetId || null,
+        fingerprint: context?.fingerprint || context?.settingsFingerprint || null,
+        revision: context?.revision ?? null,
+        steps: context?.steps || null,
+        currentStep: context?.currentStep || null,
+        attempts: Number(context?.attempts || 0),
+        maxAttempts: Number(context?.maxAttempts || 5),
+        errorCode: context?.errorCode || null,
+        lastError: context?.lastError || null,
+        createdAt: context?.createdAt || context?.requestedAt || null,
+        updatedAt: context?.updatedAt || null,
+        leaseUntil: context?.leaseUntil || null,
+        lockedInMemory: customerResetLocks.has(String(key)),
+        sagaTransactionId: context?.sagaTransactionId || null,
+        batchBotIds: context?.batchBotIds || null
+    }));
+    return res.json({
+        ok: true,
+        pendingResets: items,
+        conflicts: items.filter(item => item.status === 'conflict' || item.status === 'needs_admin').length
+    });
+});
+
+app.post('/api/manager/pending-resets/:id/resolve', async (req, res) => {
+    const session = getSessionUser(req);
+    if (!session || session.role !== 'admin') {
+        logAuditEvent({
+            req,
+            action: 'ADMIN_RESOLVE_PENDING_RESET_DENIED',
+            target: { botId: Number(req.params.id) || null },
+            details: `Từ chối quyền truy cập resolve checkpoint reset: người dùng không phải Quản trị viên (${session?.username || 'khách lạ'}, role: ${session?.role || 'none'}).`,
+            status: 'DENIED'
+        });
+        return res.status(403).json({ error: 'Chỉ Quản trị viên (Admin) mới có quyền xử lý checkpoint reset.' });
+    }
+    const botId = Number(req.params.id);
+    if (!Number.isSafeInteger(botId) || botId <= 0) {
+        return res.status(400).json({ ok: false, error: 'Bot ID không hợp lệ.' });
+    }
+    const action = String(req.body?.action || '').toLowerCase();
+    if (action !== 'resume' && action !== 'discard') {
+        return res.status(400).json({ ok: false, error: 'Action phải là "resume" hoặc "discard".' });
+    }
+
+    const key = String(botId);
+    const pending = getPendingResets();
+    const context = pending[key];
+    if (!context) {
+        return res.status(404).json({ ok: false, error: 'Checkpoint không tồn tại cho bot #' + botId + '.' });
+    }
+    if (customerResetLocks.has(key)) {
+        return res.status(409).json({ ok: false, error: 'Checkpoint đang được xử lý bởi tiến trình khác; thử lại sau.' });
+    }
+
+    if (action === 'discard') {
+        // Không xóa mù (recheck §7-3): admin phải xác nhận đã đối chiếu owner/snapshot.
+        if (req.body?.confirmOwnerCheck !== true) {
+            return res.status(400).json({ ok: false, error: 'discard yêu cầu confirmOwnerCheck=true — Admin phải xác minh owner trên registry và bot_settings trước khi xóa checkpoint.' });
+        }
+        const previousCheckpoint = JSON.parse(JSON.stringify(context));
+        delete pending[key];
+        const saved = await saveRegistry();
+        if (!saved) {
+            pending[key] = previousCheckpoint;
+            return res.status(502).json({ ok: false, error: 'Không lưu được registry lên Cloud; checkpoint được giữ nguyên.' });
+        }
+        logAuditEvent({
+            req,
+            action: 'ADMIN_RESOLVE_PENDING_RESET',
+            target: { botId, transactionId: previousCheckpoint.resetTransactionId || previousCheckpoint.resetId },
+            details: `Admin ${session.username} DISCARD checkpoint reset bot #${botId} (status: ${previousCheckpoint.status || 'N/A'}, owner: ${previousCheckpoint.ownerBefore?.username || previousCheckpoint.username || 'N/A'}, sagaTransactionId: ${previousCheckpoint.sagaTransactionId || 'N/A'}) sau owner-check.`,
+            status: 'SUCCESS'
+        });
+        return res.json({ ok: true, message: `Đã xóa checkpoint reset cho bot #${botId}.` });
+    }
+
+    // action === 'resume': chạy lại state machine bền vững (mirror resume loop).
+    const botConfig = BOT_CONFIG.find(c => Number(c.id) === botId);
+    if (!botConfig) {
+        return res.status(409).json({ ok: false, error: 'Bot không còn tồn tại trong cấu hình. Nếu bot đã bị xóa, hãy dùng action "discard".' });
+    }
+    customerResetLocks.add(key);
+    try {
+        context.status = 'running';
+        context.leaseUntil = Date.now() + 10 * 60 * 1000;
+        context.updatedAt = new Date().toISOString();
+        const result = await supabaseAdapter.withManagerLock('bot-ownership-mutation', async () => {
+            if (!(await persistPendingReset(botId, context))) throw new Error('Không lưu được lease/checkpoint resume reset lên Cloud.');
+            return await executeCustomerReset(botId, { context, resume: true });
+        }, 900);
+        const settled = result.ok && result.conflict !== true;
+        logAuditEvent({
+            req,
+            action: 'ADMIN_RESOLVE_PENDING_RESET',
+            target: { botId, transactionId: context.resetTransactionId || context.resetId },
+            details: `Admin ${session.username} RESUME checkpoint reset bot #${botId} → ${settled ? 'hoàn tất' : 'vẫn dang dở (sẽ tự resume định kỳ)'}`,
+            status: settled ? 'SUCCESS' : 'PARTIAL'
+        });
+        return res.json({
+            ok: true,
+            partial: !settled || result.partial === true,
+            message: settled
+                ? `Đã xử lý xong checkpoint reset bot #${botId}.`
+                : `Checkpoint bot #${botId} vẫn dang dở (${result.error || result.warning || 'PARTIAL'}); hệ thống sẽ tự resume định kỳ.`,
+            result: { ok: !!result.ok, conflict: !!result.conflict, error: result.error || null }
+        });
+    } catch (err) {
+        customerResetLocks.delete(key);
+        logAuditEvent({
+            req,
+            action: 'ADMIN_RESOLVE_PENDING_RESET',
+            target: { botId, transactionId: context.resetTransactionId || context.resetId },
+            details: `Admin ${session.username} RESUME checkpoint reset bot #${botId} thất bại: ${err.message}`,
+            status: 'FAILED'
+        });
+        return res.status(502).json({ ok: false, error: 'Resume checkpoint thất bại: ' + err.message });
+    }
+});
+
+app.get('/api/manager/outbox-queue', async (req, res) => {
+    const session = getSessionUser(req);
+    if (!session || session.role !== 'admin') {
+        return res.status(403).json({ error: 'Chỉ Quản trị viên (Admin) mới có quyền xem outbox queue.' });
+    }
+    let queue = getOutboxQueue();
+    if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        const sqlQueue = await supabaseAdapter.fetchOutboxQueue(100).catch(() => []);
+        if (Array.isArray(sqlQueue) && sqlQueue.length > 0) {
+            queue = [...sqlQueue, ...queue];
+        }
+    }
+    return res.json({
+        ok: true,
+        queue,
+        pending: queue.filter(i => i && i.status === 'pending').length,
+        failedPermanent: queue.filter(i => i && (i.status === 'failed_permanent' || i.status === 'dead_letter')).length
+    });
+});
+
+app.post('/api/manager/outbox-queue/retry', async (req, res) => {
+    const session = getSessionUser(req);
+    if (!session || session.role !== 'admin') {
+        return res.status(403).json({ error: 'Chỉ Quản trị viên (Admin) mới có quyền thử lại outbox queue.' });
+    }
+    const queue = getOutboxQueue();
+    let resetCount = 0;
+    for (const item of queue) {
+        if (item && (item.status === 'failed_permanent' || item.status === 'dead_letter' || item.status === 'pending')) {
+            item.status = 'pending';
+            item.nextRetryAt = Date.now();
+            item.attempts = 0;
+            item.errorCode = null;
+            item.updatedAt = new Date().toISOString();
+            resetCount++;
+        }
+    }
+    let sqlResetCount = 0;
+    if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        sqlResetCount = await supabaseAdapter.retryFailedOutboxItems().catch(() => 0);
+    }
+    if (resetCount > 0) {
+        await saveRegistry().catch(() => {});
+    }
+    void processOutboxQueue().catch(() => {});
+    const totalReset = resetCount + (typeof sqlResetCount === 'number' ? sqlResetCount : (sqlResetCount ? 1 : 0));
+    logAuditEvent({
+        req,
+        action: 'ADMIN_RETRY_OUTBOX_QUEUE',
+        details: `Admin ${session.username} yêu cầu retry lại ${totalReset} mục trong outbox queue.`,
+        status: 'SUCCESS'
+    });
+    return res.json({ ok: true, resetCount: totalReset, message: `Đã kích hoạt retry cho ${totalReset} mục outbox.` });
+});
+
+app.delete(['/api/manager/bot/:id', '/api/manager/bots/:id'], async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') {
         return res.status(403).json({ error: 'Chỉ Quản trị viên (Admin) mới có quyền xóa bot.' });
@@ -20360,6 +25669,16 @@ app.delete('/api/manager/bot/:id', async (req, res) => {
         delete registry.botTags[id];
     }
     registry.botRentalDisabled = normalizeBotRentalDisabled(registry.botRentalDisabled).filter(bId => Number(bId) !== id);
+    if (registry.botSecrets) {
+        delete registry.botSecrets[id];
+    }
+    // BUG-05/RESET-E2E-03 (Wave B0): xóa bot phải dọn cả checkpoint pendingResets —
+    // nếu không, checkpoint mồ côi sẽ KHÓA NHẦM bot ID khi ID được tái sử dụng
+    // (allocate lọc bỏ bot đang có pending reset). Đây không phải xóa conflict mù:
+    // bot đã bị admin xóa có chủ đích sau khi backup (23111).
+    if (registry.pendingResets && typeof registry.pendingResets === 'object' && !Array.isArray(registry.pendingResets)) {
+        delete registry.pendingResets[String(id)];
+    }
 
     const remainingIds = BOT_CONFIG.map(b => Number(b.id)).filter(n => Number.isInteger(n) && n > 0);
     registry.lastBotId = remainingIds.length ? Math.max(...remainingIds) : 0;
@@ -20460,6 +25779,8 @@ app.delete('/api/manager/bot/:id', async (req, res) => {
         removedId: removed.id
     });
 });
+
+
 
 app.get('/api/manager/bots', (req, res) => {
     lastClientApiAccessAt = Date.now();
@@ -20691,8 +26012,12 @@ for (const [name, childPath] of Object.entries(detailGetRoutes)) {
                 ? `${childPath}?${query.toString()}`
                 : childPath;
             const extraHeaders = {
-                'X-Manager-Role': String(perm.user?.role || 'user')
+                'X-Manager-Role': String(perm.user?.role || 'user'),
+                // BLOCKER-10 (Wave A): worker cần biết caller có quyền đổi account để mask
+                // spawnCommands/commands nhất quán ngay tại nguồn (publicBotState/publicBotSchedulesState).
+                'X-Manager-Allow-Account-Change': (perm.user?.role === 'admin' || (perm.user && perm.user.allowAccountChange !== false)) ? '1' : '0'
             };
+            const canChangeAccountForWorker = extraHeaders['X-Manager-Allow-Account-Change'] === '1';
             const result = await fetchChild(config, path, { headers: extraHeaders });
             let status = result.status;
             if (status === 401 || status === 403) status = 502;
@@ -20717,6 +26042,28 @@ for (const [name, childPath] of Object.entries(detailGetRoutes)) {
                 if (result.data.proxy) {
                     result.data.proxy = { enabled: result.data.proxy.enabled === true };
                 }
+                // BLOCKER-10 (SEC-06/BUG-17, Wave A): redact command nhạy cảm ở MỌI response
+                // chi tiết cho caller không đủ quyền (defense-in-depth tại lớp Manager,
+                // không phụ thuộc vào một serializer duy nhất).
+                if (!canChangeAccountForWorker) {
+                    if (result.data.settings && typeof result.data.settings === 'object' && typeof result.data.settings.spawnCommands === 'string') {
+                        result.data.settings = { ...result.data.settings, spawnCommands: result.data.settings.spawnCommands ? '********' : '' };
+                    }
+                    if (result.data.bot && result.data.bot.settings && typeof result.data.bot.settings === 'object' && typeof result.data.bot.settings.spawnCommands === 'string') {
+                        result.data.bot.settings = { ...result.data.bot.settings, spawnCommands: result.data.bot.settings.spawnCommands ? '********' : '' };
+                    }
+                    if (Array.isArray(result.data.botSchedules)) {
+                        result.data.botSchedules = result.data.botSchedules.map(sch => (sch && Array.isArray(sch.items))
+                            ? { ...sch, items: sch.items.map(item => {
+                                if (item && typeof item === 'object' && item.command !== undefined) {
+                                    const { command, ...rest } = item;
+                                    return rest;
+                                }
+                                return item;
+                            }) }
+                            : sch);
+                    }
+                }
             }
             return res.status(status).json(result.data || {});
         } catch (err) {
@@ -20736,6 +26083,634 @@ app.get('/api/public/system-info', (req, res) => {
     });
 });
 
+
+// --- LINK4M STATUS API ---
+// L4M-SEC-01: nonce/token nằm trong query string của callback/return URL — không cho
+// trình duyệt gửi referrer chứa token ra ngoài (third-party assets, redirect trung gian).
+app.use('/api/rewards/link4m', (req, res, next) => {
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    next();
+});
+
+app.get('/api/rewards/link4m/status', async (req, res) => {
+    const session = getSessionUser(req);
+    if (!session) return res.status(401).json({ ok: false, error: 'Chưa đăng nhập.' });
+    if (session.role === 'admin') {
+        return res.json({
+            ok: true,
+            isAdmin: true,
+            enabled: registry.systemSettings?.link4mRewardEnabled === true,
+            message: 'Tài khoản Quản trị viên toàn quyền không cần vượt link nhận thời gian.'
+        });
+    }
+
+    const username = String(session.username || '').toLowerCase();
+    const todayVn = getVietnamDateString();
+    const nextResetAt = getNextVietnamMidnight().toISOString();
+
+    const enabled = registry.systemSettings?.link4mRewardEnabled === true;
+    const dailyLimit = Math.max(1, Math.min(10, Number(registry.systemSettings?.link4mDailyLimit) || 2));
+    const rewardHours = Math.max(1, Math.min(48, Number(registry.systemSettings?.link4mRewardHours) || 12));
+    const secretKey = String(registry.systemSettings?.link4mSecretKey || process.env.LINK4M_SECRET_KEY || '').trim();
+    const hasSecretKey = Boolean(secretKey);
+
+    let todayCount = 0;
+    if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        const usageRes = await supabaseAdapter.fetchLink4mDailyUsage(username, todayVn);
+        todayCount = usageRes.count || 0;
+    } else {
+        todayCount = Array.from(localLink4mAttempts.values()).filter(a =>
+            a.username.toLowerCase() === username &&
+            a.vietnamDate === todayVn &&
+            ['pending', 'verified', 'rewarded', 'expired'].includes(a.status)
+        ).length;
+    }
+
+    let activeAttempt = null;
+    if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        const actRes = await supabaseAdapter.fetchLink4mActiveAttempt(username);
+        if (actRes.attempt) {
+            activeAttempt = {
+                attemptId: actRes.attempt.attempt_id,
+                expiresAt: actRes.attempt.expires_at,
+                // NEW-01 (Wave B1): chỉ trả URL rút gọn provider — không trả provider_reference
+                // (callback/return URL của Manager, vô dụng cho người dùng khi retry).
+                providerUrl: String(actRes.attempt.provider_short_url || '')
+            };
+        }
+    } else {
+        const now = Date.now();
+        const found = Array.from(localLink4mAttempts.values()).find(a =>
+            a.username.toLowerCase() === username &&
+            a.status === 'pending' &&
+            Date.parse(a.expiresAt) > now
+        );
+        if (found) {
+            activeAttempt = {
+                attemptId: found.attemptId,
+                expiresAt: found.expiresAt,
+                providerUrl: String(found.providerShortUrl || '')
+            };
+        }
+    }
+
+    const remainingAttempts = Math.max(0, dailyLimit - todayCount);
+    const isPermanent = session.expiresAtRental === null || session.expiresAtRental === undefined || session.expiresAtRental === '';
+    // Require configured secretKey so unverified automatic claiming is strictly blocked
+    const canClaim = enabled && hasSecretKey && remainingAttempts > 0 && session.status !== 'disabled';
+
+    return res.json({
+        ok: true,
+        enabled,
+        dailyLimit,
+        rewardHours,
+        todayCount,
+        remainingAttempts,
+        canClaim,
+        isPermanent,
+        isExpired: Boolean(session.isExpired),
+        hasSecretKey,
+        activeAttempt,
+        nextResetAt
+    });
+});
+
+// --- LINK4M START API ---
+app.post('/api/rewards/link4m/start', async (req, res) => {
+    let session = getSessionUser(req);
+    let username = '';
+    let isPermanent = false;
+
+    if (!session) {
+        // §3.1: Hỗ trợ user hết hạn (bị watchdog thu hồi session) phục hồi bằng username và mật khẩu
+        const reqUser = String(req.body?.username || '').trim().toLowerCase();
+        const reqPass = String(req.body?.password ?? '');
+        if (reqUser && reqPass) {
+            let users;
+            try {
+                users = await loadUsersFreshOrThrow();
+            } catch (err) {
+                return res.status(503).json({ ok: false, error: 'Không thể tải danh sách tài khoản từ Supabase.' });
+            }
+            const u = users.find(x => x.username.toLowerCase() === reqUser);
+            if (!u || !verifyUserPassword(reqPass, u.password)) {
+                return res.status(401).json({ ok: false, error: 'Tên đăng nhập hoặc mật khẩu không chính xác.' });
+            }
+            if (u.role === 'admin') {
+                return res.status(403).json({ ok: false, error: 'Tài khoản Quản trị viên không nhận thưởng vượt link.' });
+            }
+            if (u.status === 'disabled') {
+                return res.status(403).json({ ok: false, error: 'Tài khoản của bạn đã bị vô hiệu hóa hoặc tạm khóa.' });
+            }
+            username = u.username.toLowerCase();
+            isPermanent = Boolean(u.isPermanent === true || u.is_permanent === true);
+        } else {
+            return res.status(401).json({ ok: false, error: 'Chưa đăng nhập. Vui lòng đăng nhập lại hoặc cung cấp tài khoản/mật khẩu để bắt đầu vượt link.' });
+        }
+    } else {
+        if (session.role === 'admin') {
+            return res.status(403).json({ ok: false, error: 'Tài khoản Quản trị viên không nhận thưởng vượt link.' });
+        }
+        if (session.status === 'disabled') {
+            return res.status(403).json({ ok: false, error: 'Tài khoản của bạn đã bị vô hiệu hóa hoặc tạm khóa.' });
+        }
+        username = String(session.username || '').toLowerCase();
+        isPermanent = Boolean(session.isPermanent === true);
+    }
+
+    // V3-10: Sử dụng getClientIp(req) tin cậy từ trust proxy thay vì split raw x-forwarded-for
+    const clientIp = getClientIp(req);
+
+    const limitCheck = link4mStartLimiter.check(clientIp, username);
+    if (!limitCheck.allowed) {
+        return res.status(429).json({ ok: false, error: limitCheck.message });
+    }
+
+    const enabled = registry.systemSettings?.link4mRewardEnabled === true;
+    if (!enabled) {
+        link4mStartLimiter.record(clientIp, username, false);
+        return res.status(400).json({ ok: false, error: 'Tính năng vượt link nhận giờ đang tạm đóng bởi Quản trị viên.' });
+    }
+
+    const secretKey = String(registry.systemSettings?.link4mSecretKey || process.env.LINK4M_SECRET_KEY || '').trim();
+    if (!secretKey) {
+        link4mStartLimiter.record(clientIp, username, false);
+        return res.status(503).json({
+            ok: false,
+            error: 'Hệ thống chưa cấu hình Khóa bí mật Webhook/Postback từ Link4M để xác thực hoàn thành. Vui lòng liên hệ Quản trị viên để cấu hình trước khi mở tính năng này (Chống gian lận).'
+        });
+    }
+
+    const dailyLimit = Math.max(1, Math.min(10, Number(registry.systemSettings?.link4mDailyLimit) || 2));
+    const rewardHours = Math.max(1, Math.min(48, Number(registry.systemSettings?.link4mRewardHours) || 12));
+    const todayVn = getVietnamDateString();
+    const nextMidnight = getNextVietnamMidnight();
+
+    if (isPermanent) {
+        return res.status(400).json({ ok: false, error: 'Tài khoản của bạn là VIP Vĩnh viễn, không cần vượt link nhận thêm thời gian.' });
+    }
+
+    const attemptId = 'l4m_' + crypto.randomBytes(12).toString('hex');
+    const nonceToken = crypto.randomBytes(24).toString('base64url');
+    const tokenHash = crypto.createHash('sha256').update(nonceToken).digest('hex');
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
+    // L4M-URL-01: baseUrl từ cấu hình tin cậy (PUBLIC_BASE_URL/RENDER_EXTERNAL_URL),
+    // không tin forwarded headers do caller kiểm soát. Production thiếu cấu hình → fail-closed.
+    const publicBase = getPublicBaseUrl(req);
+    if (!publicBase.ok) {
+        link4mStartLimiter.record(clientIp, username, false);
+        return res.status(503).json({ ok: false, error: publicBase.message });
+    }
+    if (publicBase.warning) {
+        console.warn('[LINK4M] baseUrl fallback từ request host (chỉ dùng ngoài production): ' + publicBase.baseUrl);
+    }
+    const baseUrl = publicBase.baseUrl;
+    const returnUrl = `${baseUrl}/api/rewards/link4m/return?attempt=${attemptId}&token=${nonceToken}`;
+
+    const mode = registry.systemSettings?.link4mMode || 'custom_url';
+    const apiToken = String(registry.systemSettings?.link4mApiToken || process.env.LINK4M_API_KEY || '').trim();
+    const customUrl = String(registry.systemSettings?.link4mUrl || process.env.LINK4M_CUSTOM_URL || '').trim();
+
+    // BUG-08: định nghĩa adapter trong scope và validate cấu hình TRƯỚC khi ghi attempt.
+    // Trước đây `adapter` không tồn tại trong scope này → adapter.createRewardLink gây
+    // ReferenceError sau khi attempt đã ghi → luôn rollback + 502 dù cấu hình hoàn toàn hợp lệ.
+    // Fail-fast tại đây không tiêu hao hạn mức vượt link của user.
+    const adapter = getLink4mAdapter();
+    const adapterConfigError = adapter.mode === 'api'
+        ? (adapter.apiToken ? '' : 'Chưa cấu hình API Token cho Link4M trong hệ thống.')
+        : (adapter.customUrl ? '' : 'Chưa cấu hình đường dẫn Link rút gọn cố định.');
+    if (adapterConfigError) {
+        link4mStartLimiter.record(clientIp, username, false);
+        return res.status(503).json({
+            ok: false,
+            error: adapterConfigError + ' Vui lòng liên hệ Quản trị viên để cấu hình Link4M.'
+        });
+    }
+
+    // Execute atomic attempt creation & quota check
+    let startResult = null;
+    if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        startResult = await supabaseAdapter.startLink4mAttempt(
+            attemptId, tokenHash, username, todayVn, dailyLimit, rewardHours, clientIp, returnUrl
+        );
+    } else {
+        // Serialized execution using user start mutex for local memory mode
+        startResult = await acquireUserStartLock(username, async () => {
+            const now = Date.now();
+            const active = Array.from(localLink4mAttempts.values()).find(a =>
+                a.username.toLowerCase() === username &&
+                a.status === 'pending' &&
+                Date.parse(a.expiresAt) > now
+            );
+            if (active) {
+                return {
+                    ok: true,
+                    reused: true,
+                    attemptId: active.attemptId,
+                    expiresAt: active.expiresAt,
+                    // NEW-01 (Wave B1): reuse trả short URL đã persist, không phải returnUrl.
+                    providerUrl: String(active.providerShortUrl || '')
+                };
+            }
+
+            const todayCount = Array.from(localLink4mAttempts.values()).filter(a =>
+                a.username.toLowerCase() === username &&
+                a.vietnamDate === todayVn &&
+                ['pending', 'verified', 'rewarded', 'expired'].includes(a.status)
+            ).length;
+
+            if (todayCount >= dailyLimit) {
+                return {
+                    ok: false,
+                    error: 'DAILY_LIMIT_REACHED',
+                    count: todayCount,
+                    message: `Bạn đã dùng hết ${dailyLimit}/${dailyLimit} lượt vượt link hôm nay. Lượt mới sẽ được làm mới lúc 00:00 (Giờ Việt Nam).`
+                };
+            }
+
+            const attemptRecord = {
+                attemptId,
+                username,
+                tokenHash,
+                status: 'pending',
+                vietnamDate: todayVn,
+                createdAt: new Date().toISOString(),
+                expiresAt: expiresAt.toISOString(),
+                rewardHours,
+                ipAddress: clientIp,
+                providerReference: returnUrl,
+                // NEW-01 (Wave B1): short URL của provider — điền SAU khi createRewardLink thành công.
+                providerShortUrl: '',
+                failureReason: '',
+                syncStatus: 'synced'
+            };
+            localLink4mAttempts.set(attemptId, attemptRecord);
+            return {
+                ok: true,
+                reused: false,
+                attemptId,
+                todayCount: todayCount + 1,
+                expiresAt: expiresAt.toISOString()
+            };
+        });
+    }
+
+    if (!startResult || !startResult.ok) {
+        link4mStartLimiter.record(clientIp, username, false);
+        const errMsg = startResult?.message || startResult?.error || 'Không thể khởi tạo phiên vượt link.';
+        const status = startResult?.error === 'DAILY_LIMIT_REACHED' ? 429 : 400;
+        return res.status(status).json({ ok: false, error: errMsg, nextResetAt: nextMidnight.toISOString() });
+    }
+
+    if (startResult.reused) {
+        // NEW-01 (Wave B1): reuse chỉ trả về khi đã có URL rút gọn provider được persist.
+        if (startResult.providerUrl) {
+            link4mStartLimiter.record(clientIp, username, true);
+            return res.json({
+                ok: true,
+                reused: true,
+                attemptId: startResult.attemptId,
+                expiresAt: startResult.expiresAt,
+                redirectUrl: startResult.providerUrl,
+                message: 'Đang mở lại phiên vượt link còn hiệu lực.'
+            });
+        }
+        // Không tái sinh link với nonce mới: return route xác minh sha256(nonce) ===
+        // token_hash cố định tại lúc tạo attempt (manager.js ~24064) — link nonce mới
+        // sẽ chết ở bước integrity. Trả 409 trung thực: attempt còn nguyên (postback
+        // vẫn reward được), lượt chưa mất, đợi hết hạn (≤15 phút) là vượt lại được.
+        link4mStartLimiter.record(clientIp, username, true);
+        return res.status(409).json({
+            ok: false,
+            error: 'Đang có phiên vượt link chưa hoàn tất nhưng chưa có link rút gọn hợp lệ. Vui lòng đợi phiên hết hạn (tối đa 15 phút) rồi thử lại — lượt của bạn không bị trừ thêm.'
+        });
+    }
+
+    const effectiveAttemptId = startResult.attemptId || attemptId;
+    let redirectUrl = '';
+
+    try {
+        redirectUrl = await adapter.createRewardLink(returnUrl, effectiveAttemptId, nonceToken);
+    } catch (err) {
+        console.error('[LINK4M SHORTLINK ERROR]', err.message);
+        // Rollback attempt reservation so no daily quota slot is consumed on provider failure!
+        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+            await supabaseAdapter.rollbackLink4mAttempt(effectiveAttemptId);
+        } else {
+            localLink4mAttempts.delete(effectiveAttemptId);
+        }
+        return res.status(502).json({
+            ok: false,
+            error: err.message + '. Lượt của bạn chưa bị trừ, vui lòng thử lại sau.'
+        });
+    }
+
+    // NEW-01 (Wave B1): persist URL rút gọn SAU khi tạo thành công (fail mềm —
+    // reuse lần sau sẽ báo 409 trung thực thay vì trả sai URL). Không log URL.
+    if (redirectUrl) {
+        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+            try {
+                const saveUrlRes = await supabaseAdapter.setLink4mShortUrl(effectiveAttemptId, redirectUrl);
+                if (saveUrlRes !== true && !saveUrlRes?.ok) {
+                    console.warn(`[LINK4M] setLink4mShortUrl không thành công cho #${effectiveAttemptId}: ${saveUrlRes?.error || 'Lỗi không xác định'}`);
+                }
+            } catch (err) {
+                console.warn(`[LINK4M] setLink4mShortUrl lỗi kết nối Cloud cho #${effectiveAttemptId}: ${err.message}`);
+            }
+        } else {
+            const localRecord = localLink4mAttempts.get(effectiveAttemptId);
+            if (localRecord) localRecord.providerShortUrl = redirectUrl;
+        }
+    }
+
+    link4mStartLimiter.record(clientIp, username, true);
+    logAuditEvent({
+        req,
+        action: 'LINK4M_START',
+        details: `Tài khoản "${username}" bắt đầu phiên vượt link #${effectiveAttemptId} (Thưởng +${rewardHours}h, Hạn mức ${dailyLimit}/ngày)`,
+        status: 'SUCCESS'
+    });
+
+    return res.json({
+        ok: true,
+        attemptId: effectiveAttemptId,
+        expiresAt: expiresAt.toISOString(),
+        redirectUrl,
+        rewardHours,
+        dailyLimit
+    });
+});
+
+// --- LINK4M RETURN URL (MANDATORY PROVIDER VERIFICATION: DOES NOT GRANT AUTOMATICALLY) ---
+app.get('/api/rewards/link4m/return', async (req, res) => {
+    const attemptId = String(req.query.attempt || req.query.attempt_id || '').trim();
+    const nonceToken = String(req.query.token || '').trim();
+
+    if (!attemptId) {
+        return res.redirect('/?reward=error&message=' + encodeURIComponent('Yêu cầu thiếu mã phiên vượt link.'));
+    }
+
+    let attempt = null;
+    if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        try {
+            const params = new URLSearchParams({ attempt_id: `eq.${attemptId}`, limit: '1' });
+            const r = await fetch(`${supabaseAdapter.url}/rest/v1/manager_link4m_attempts?${params.toString()}`, {
+                headers: supabaseAdapter.getHeaders(),
+                signal: AbortSignal.timeout(6000)
+            });
+            if (r.ok) {
+                const rows = await r.json();
+                if (Array.isArray(rows) && rows.length > 0) attempt = rows[0];
+            }
+        } catch (_) {}
+    }
+    if (!attempt) attempt = localLink4mAttempts.get(attemptId);
+    if (!attempt) {
+        return res.redirect('/?reward=error&message=' + encodeURIComponent('Không tìm thấy phiên vượt link hợp lệ trên hệ thống.'));
+    }
+
+    // If nonceToken was supplied, verify hash integrity
+    if (nonceToken) {
+        const tokenHash = crypto.createHash('sha256').update(nonceToken).digest('hex');
+        const expectedHash = attempt.token_hash || attempt.tokenHash;
+        if (expectedHash !== tokenHash) {
+            return res.redirect('/?reward=error&message=' + encodeURIComponent('Mã bảo mật phiên vượt link không khớp hoặc có dấu hiệu can thiệp.'));
+        }
+    }
+
+    const status = attempt.status;
+
+    // Check actual completion:
+    // Only if server-to-server webhook/postback verified completion and transitioned status to 'rewarded'
+    if (status === 'rewarded') {
+        const returnUser = attempt.username;
+        let realloc = null;
+        if (returnUser) {
+            try {
+                realloc = await reconcileUserReactivationAndBotAllocation(returnUser, { req, context: 'link4m_return' });
+            } catch (err) {
+                console.warn('[LINK4M] Return realloc error:', err.message);
+            }
+        }
+        const hours = (attempt.reward_hours || attempt.rewardHours || 12);
+        let redirectUrl = '/?reward=success&added=' + hours + 'h';
+        if (realloc && (realloc.allocationStatus === 'partial' || realloc.allocationStatus === 'pending_retry')) {
+            redirectUrl += '&allocation=' + encodeURIComponent(realloc.allocationStatus) + '&missing=' + (realloc.missingBotCount || 0);
+        }
+        return res.redirect(redirectUrl);
+    }
+
+    const expiresAt = Date.parse(attempt.expires_at || attempt.expiresAt);
+    if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) {
+        return res.redirect('/?reward=error&message=' + encodeURIComponent('Phiên vượt link đã quá hạn 15 phút.'));
+    }
+
+    // MANDATORY BYPASS PROTECTION:
+    // Visiting return URL without verified server-to-server callback DOES NOT grant reward!
+    return res.redirect('/?reward=pending&attempt=' + encodeURIComponent(attemptId) + '&message=' + encodeURIComponent('Hệ thống đang chờ máy chủ Link4M gửi xác nhận hoàn tất (Postback). Vui lòng đợi trong giây lát...'));
+});
+
+// --- LINK4M STATUS POLLING API (READ ONLY - NEVER GRANTS REWARD) ---
+app.post('/api/rewards/link4m/verify', async (req, res) => {
+    const attemptId = String(req.body?.attemptId || req.body?.attempt_id || '').trim();
+    if (!attemptId) {
+        return res.status(400).json({ ok: false, error: 'Thiếu attemptId.' });
+    }
+
+    let attempt = null;
+    if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        try {
+            const params = new URLSearchParams({ attempt_id: `eq.${attemptId}`, limit: '1' });
+            const r = await fetch(`${supabaseAdapter.url}/rest/v1/manager_link4m_attempts?${params.toString()}`, {
+                headers: supabaseAdapter.getHeaders(),
+                signal: AbortSignal.timeout(6000)
+            });
+            if (r.ok) {
+                const rows = await r.json();
+                if (Array.isArray(rows) && rows.length > 0) attempt = rows[0];
+            }
+        } catch (_) {}
+    }
+    if (!attempt) attempt = localLink4mAttempts.get(attemptId);
+    if (!attempt) return res.status(404).json({ ok: false, error: 'Không tìm thấy attempt.' });
+
+    // Pure status inquiry - no reward granting here!
+    return res.json({
+        ok: true,
+        attemptId,
+        status: attempt.status,
+        isRewarded: attempt.status === 'rewarded',
+        rewardHours: attempt.reward_hours || attempt.rewardHours || 12,
+        syncStatus: attempt.sync_status || attempt.syncStatus || 'synced'
+    });
+});
+
+// --- LINK4M AUTHENTICATED SERVER-TO-SERVER WEBHOOK / POSTBACK ---
+app.all(['/api/rewards/link4m/webhook', '/api/rewards/link4m/postback'], async (req, res) => {
+    const secretKey = String(registry.systemSettings?.link4mSecretKey || process.env.LINK4M_SECRET_KEY || '').trim();
+    
+    const adapter = getLink4mAdapter();
+    const attemptId = String(req.query.attempt || req.query.attempt_id || req.body?.attempt || req.body?.attemptId || req.body?.attempt_id || '').trim();
+    if (!attemptId) {
+        return res.status(400).json({ ok: false, error: 'Thiếu attemptId trong webhook payload.' });
+    }
+
+    let attempt = null;
+    if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        try {
+            const params = new URLSearchParams({ attempt_id: `eq.${attemptId}`, limit: '1' });
+            const r = await fetch(`${supabaseAdapter.url}/rest/v1/manager_link4m_attempts?${params.toString()}`, {
+                headers: supabaseAdapter.getHeaders(),
+                signal: AbortSignal.timeout(6000)
+            });
+            if (r.ok) {
+                const rows = await r.json();
+                if (Array.isArray(rows) && rows.length > 0) attempt = rows[0];
+            }
+        } catch (_) {}
+    }
+    if (!attempt) attempt = localLink4mAttempts.get(attemptId);
+    if (!attempt) return res.status(404).json({ ok: false, error: 'Không tìm thấy attempt hợp lệ.' });
+
+    // Enforce strict adapter verification (Requires secret AND valid completion token/signature)
+    const verifyResult = adapter.verifyCompletion(req, attempt);
+    if (!verifyResult.ok) {
+        return res.status(verifyResult.status || 403).json({
+            ok: false,
+            error: verifyResult.error,
+            message: verifyResult.message
+        });
+    }
+
+    const username = (attempt.username || '').toLowerCase();
+    const tokenHash = attempt.token_hash || attempt.tokenHash;
+
+    if (attempt.status === 'rewarded') {
+        return res.json({ ok: true, replayed: true, message: 'Phiên này đã được nhận thưởng trước đó.' });
+    }
+
+    const rewardHours = parseInt(attempt.reward_hours || attempt.rewardHours || registry.systemSettings?.link4mRewardHours || 12, 10);
+    let newExpiresAtIso = '';
+
+    if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        const claimRes = await supabaseAdapter.claimLink4mReward(attemptId, tokenHash, username, rewardHours, 'provider_postback');
+        if (!claimRes.ok) return res.status(500).json({ ok: false, error: claimRes.error, message: claimRes.message });
+        newExpiresAtIso = claimRes.expiresAt ? new Date(claimRes.expiresAt).toISOString() : '';
+    } else {
+        const user = Array.isArray(cachedUsers) ? cachedUsers.find(u => u.username.toLowerCase() === username) : null;
+        if (user && user.expiresAt !== null) {
+            const curExp = user.expiresAt ? Date.parse(user.expiresAt) : NaN;
+            const now = Date.now();
+            const base = (Number.isFinite(curExp) && curExp > now) ? curExp : now;
+            newExpiresAtIso = new Date(base + rewardHours * 3600 * 1000).toISOString();
+            user.expiresAt = newExpiresAtIso;
+            user.status = 'active';
+            attempt.status = 'rewarded';
+            attempt.rewardedAt = new Date().toISOString();
+            attempt.syncStatus = 'synced';
+            await saveUsers(cachedUsers);
+        }
+    }
+
+    invalidateAuthCacheForUser(username);
+    if (Array.isArray(cachedUsers)) {
+        const u = cachedUsers.find(x => x.username.toLowerCase() === username);
+        if (u) {
+            u.expiresAt = newExpiresAtIso;
+            u.status = 'active';
+        }
+    }
+    for (const [hash, sess] of activeSessions.entries()) {
+        if (sess.username?.toLowerCase() === username) {
+            sess.expiresAtRental = newExpiresAtIso;
+            sess.isExpired = false;
+            sess.status = 'active';
+            activeSessions.set(hash, sess);
+        }
+    }
+
+    // §3.3 & V3-01: Tự động tái cấp bot và theo dõi trạng thái allocation
+    let reallocResult = null;
+    try {
+        reallocResult = await reconcileUserReactivationAndBotAllocation(username, { req, context: 'link4m_postback' });
+    } catch (reallocErr) {
+        console.warn(`[LINK4M] Bot reallocation warning for ${username}:`, reallocErr.message);
+    }
+
+    // Synchronize to bots and track sync status
+    let syncSuccess = false;
+    try {
+        syncSuccess = await syncAuthToAllBots(true);
+    } catch (_) {
+        syncSuccess = false;
+    }
+
+    if (!syncSuccess) {
+        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+            await supabaseAdapter.updateLink4mSyncStatus(attemptId, 'pending_sync');
+        } else {
+            attempt.syncStatus = 'pending_sync';
+        }
+    }
+
+    logAuditEvent({
+        req,
+        action: 'LINK4M_REWARDED_VIA_POSTBACK',
+        details: `Webhook nhà cung cấp xác thực hoàn tất phiên #${attemptId} cho "${username}", cộng +${rewardHours}h${syncSuccess ? '' : ' [Bot sync pending retry]'}`,
+        status: 'SUCCESS'
+    });
+
+    return res.json({
+        ok: true,
+        coreCommitted: true,
+        rewarded: true,
+        attemptId,
+        username,
+        addedHours: rewardHours,
+        syncStatus: syncSuccess ? 'synced' : 'pending_sync',
+        expiresAt: newExpiresAtIso,
+        allocationStatus: reallocResult ? (reallocResult.allocationStatus || (reallocResult.ok ? 'allocated' : 'partial')) : 'unknown',
+        assignedBotIds: reallocResult?.assignedBotIds || [],
+        missingBotCount: reallocResult?.missingBotCount || 0,
+        warnings: (reallocResult?.warnings && reallocResult.warnings.length) ? reallocResult.warnings : undefined
+    });
+});
+
+// Periodic background watchdog to retry pending bot syncs without ever duplicating rewards
+setInterval(async () => {
+    try {
+        let hasPending = false;
+        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+            const params = new URLSearchParams({ sync_status: 'eq.pending_sync', limit: '10' });
+            const r = await fetch(`${supabaseAdapter.url}/rest/v1/manager_link4m_attempts?${params.toString()}`, {
+                headers: supabaseAdapter.getHeaders(),
+                signal: AbortSignal.timeout(5000)
+            });
+            if (r.ok) {
+                const rows = await r.json();
+                if (Array.isArray(rows) && rows.length > 0) {
+                    hasPending = true;
+                    const synced = await syncAuthToAllBots(true);
+                    if (synced) {
+                        for (const row of rows) {
+                            await supabaseAdapter.updateLink4mSyncStatus(row.attempt_id, 'synced');
+                        }
+                    }
+                }
+            }
+        } else {
+            const pendingAttempts = Array.from(localLink4mAttempts.values()).filter(a => a.syncStatus === 'pending_sync');
+            if (pendingAttempts.length > 0) {
+                const synced = await syncAuthToAllBots(true);
+                if (synced) {
+                    pendingAttempts.forEach(a => { a.syncStatus = 'synced'; });
+                }
+            }
+        }
+    } catch (_) {}
+}, 30000);
+
 // System Settings API (Quản trị viên bật/tắt tặng ngày dùng thử, chỉnh số ngày, v.v.)
 app.get('/api/manager/settings/system', (req, res) => {
     const session = getSessionUser(req);
@@ -20745,7 +26720,16 @@ app.get('/api/manager/settings/system', (req, res) => {
         ok: true,
         settings: {
             trialGiftEnabled: registry.systemSettings.trialGiftEnabled !== false,
-            trialDays: Math.max(1, Math.min(365, parseInt(registry.systemSettings.trialDays, 10) || 1))
+            trialDays: Math.max(1, Math.min(365, parseInt(registry.systemSettings.trialDays, 10) || 1)),
+            link4mRewardEnabled: registry.systemSettings.link4mRewardEnabled === true,
+            link4mRewardHours: Number(registry.systemSettings.link4mRewardHours) || 12,
+            link4mDailyLimit: Number(registry.systemSettings.link4mDailyLimit) || 2,
+            link4mMode: registry.systemSettings.link4mMode || 'custom_url',
+            link4mUrl: registry.systemSettings.link4mUrl || '',
+            link4mApiToken: registry.systemSettings.link4mApiToken ? '********' : '',
+            hasApiToken: Boolean(registry.systemSettings.link4mApiToken || process.env.LINK4M_API_KEY),
+            link4mSecretKey: registry.systemSettings.link4mSecretKey ? '********' : '',
+            hasSecretKey: Boolean(registry.systemSettings.link4mSecretKey || process.env.LINK4M_SECRET_KEY)
         }
     });
 });
@@ -20766,6 +26750,29 @@ app.post('/api/manager/settings/system', async (req, res) => {
             registry.systemSettings.trialDays = td;
         }
     }
+    if (req.body?.link4mRewardEnabled !== undefined) {
+        registry.systemSettings.link4mRewardEnabled = req.body.link4mRewardEnabled === true;
+    }
+    if (req.body?.link4mRewardHours !== undefined) {
+        const rh = parseInt(req.body.link4mRewardHours, 10);
+        if (Number.isInteger(rh) && rh >= 1 && rh <= 48) registry.systemSettings.link4mRewardHours = rh;
+    }
+    if (req.body?.link4mDailyLimit !== undefined) {
+        const dl = parseInt(req.body.link4mDailyLimit, 10);
+        if (Number.isInteger(dl) && dl >= 1 && dl <= 10) registry.systemSettings.link4mDailyLimit = dl;
+    }
+    if (req.body?.link4mMode !== undefined) {
+        registry.systemSettings.link4mMode = req.body.link4mMode === 'api' ? 'api' : 'custom_url';
+    }
+    if (req.body?.link4mUrl !== undefined) {
+        registry.systemSettings.link4mUrl = String(req.body.link4mUrl || '').trim();
+    }
+    if (req.body?.link4mApiToken !== undefined && req.body.link4mApiToken !== '********') {
+        registry.systemSettings.link4mApiToken = String(req.body.link4mApiToken || '').trim();
+    }
+    if (req.body?.link4mSecretKey !== undefined && req.body.link4mSecretKey !== '********') {
+        registry.systemSettings.link4mSecretKey = String(req.body.link4mSecretKey || '').trim();
+    }
     const saved = await saveRegistry();
     if (!saved) {
         registry.systemSettings = previousSystemSettings;
@@ -20773,18 +26780,28 @@ app.post('/api/manager/settings/system', async (req, res) => {
     }
     const trialDays = Math.max(1, Math.min(365, parseInt(registry.systemSettings.trialDays, 10) || 1));
     const statusText = registry.systemSettings.trialGiftEnabled ? `BẬT (${trialDays} ngày)` : 'TẮT';
+    const link4mStatusText = registry.systemSettings.link4mRewardEnabled ? `BẬT (${registry.systemSettings.link4mMode || 'custom_url'})` : 'TẮT';
     logAuditEvent({
         req,
         action: 'SYSTEM_SETTINGS_UPDATE',
-        details: `Cập nhật chế độ tặng dùng thử cho tài khoản mới: ${statusText}`,
+        details: `Cập nhật cài đặt hệ thống: Dùng thử ${statusText}, Link4M ${link4mStatusText}`,
         status: 'SUCCESS'
     });
     return res.json({
         ok: true,
-        message: 'Đã ' + (registry.systemSettings.trialGiftEnabled ? `BẬT chế độ tặng ${trialDays} ngày dùng thử.` : 'TẮT chế độ tặng dùng thử.'),
+        message: 'Đã lưu cấu hình hệ thống lên Supabase thành công.',
         settings: {
-            trialGiftEnabled: registry.systemSettings.trialGiftEnabled,
-            trialDays
+            trialGiftEnabled: registry.systemSettings.trialGiftEnabled !== false,
+            trialDays,
+            link4mRewardEnabled: registry.systemSettings.link4mRewardEnabled === true,
+            link4mRewardHours: Number(registry.systemSettings.link4mRewardHours) || 12,
+            link4mDailyLimit: Number(registry.systemSettings.link4mDailyLimit) || 2,
+            link4mMode: registry.systemSettings.link4mMode || 'custom_url',
+            link4mUrl: registry.systemSettings.link4mUrl || '',
+            link4mApiToken: registry.systemSettings.link4mApiToken ? '********' : '',
+            hasApiToken: Boolean(registry.systemSettings.link4mApiToken || process.env.LINK4M_API_KEY),
+            link4mSecretKey: registry.systemSettings.link4mSecretKey ? '********' : '',
+            hasSecretKey: Boolean(registry.systemSettings.link4mSecretKey || process.env.LINK4M_SECRET_KEY)
         }
     });
 });
@@ -20854,6 +26871,19 @@ for (const [managerSuffix, childPath] of Object.entries(managerPostPathMap)) {
             }
             if (managerSuffix === '/auto-chat' && hasRestrictedMinecraftAccountCommand(req.body?.autoChatSchedules)) {
                 return res.status(403).json({ error: 'Tài khoản của bạn không được phép lên lịch lệnh thay đổi tài khoản Minecraft.' });
+            }
+            // BUG-31: enforce thêm trên spawnCommands (settings) và lịch Bot có action 'command'.
+            if (managerSuffix === '/settings') {
+                const incomingSettings = (req.body?.settings && typeof req.body.settings === 'object')
+                    ? req.body.settings
+                    : req.body;
+                const incomingSpawn = typeof incomingSettings?.spawnCommands === 'string' ? incomingSettings.spawnCommands : '';
+                if (hasRestrictedMinecraftAccountCommandInSpawnCommands(incomingSpawn)) {
+                    return res.status(403).json({ error: 'Tài khoản của bạn không được phép cấu hình lệnh thay đổi tài khoản Minecraft trong Spawn Commands.' });
+                }
+            }
+            if (managerSuffix === '/bot-schedules' && hasRestrictedMinecraftAccountCommandInBotSchedules(req.body)) {
+                return res.status(403).json({ error: 'Bạn không được phép lên lịch lệnh thay đổi tài khoản Minecraft.' });
             }
         }
         if (managerSuffix === '/logs/clear' || managerSuffix === '/chat-logs/clear') {
@@ -21300,8 +27330,9 @@ app.post('/api/manager/keys', async (req, res) => {
         return res.status(403).json({ error: 'Chỉ Quản trị viên mới có quyền tạo Key.' });
     }
     const rawDays = Number(req.body?.days);
-    const days = Number.isFinite(rawDays) && rawDays >= 1 ? Math.min(Math.floor(rawDays), 36500) : 7;
-    const planName = (req.body?.planName || `Gói ${days} Ngày`).trim();
+    const isPermanent = req.body?.isPermanent === true || req.body?.setPermanent === true || rawDays === -1;
+    const days = isPermanent ? -1 : (Number.isFinite(rawDays) && rawDays >= 1 ? Math.min(Math.floor(rawDays), 36500) : 7);
+    const planName = (req.body?.planName || (isPermanent ? 'VIP Vĩnh Viễn' : `Gói ${days} Ngày`)).trim();
     const botIds = Array.isArray(req.body?.botIds) ? req.body.botIds.map(Number).filter(Number.isFinite) : [];
     const rawBotCount = Number(req.body?.botCount);
     const botCount = Number.isFinite(rawBotCount) && rawBotCount >= 1 ? Math.min(Math.floor(rawBotCount), 50) : (botIds.length || 1);
@@ -21340,12 +27371,13 @@ app.post('/api/manager/keys', async (req, res) => {
             }
         } else {
             const rand = crypto.randomBytes(6).toString('hex').toUpperCase();
-            keyStr = customKey ? `${customKey}-${rand.slice(0, 4)}` : `KINGMC-${days}D-${rand}`;
+            keyStr = customKey ? `${customKey}-${rand.slice(0, 4)}` : (isPermanent ? `KINGMC-LIFE-${rand}` : `KINGMC-${days}D-${rand}`);
         }
 
         const keyItem = {
             key: keyStr,
             days,
+            isPermanent: isPermanent ? true : false,
             planName,
             botIds,
             botCount,           // Số lượng bot cấp cho tài khoản khi kích hoạt
@@ -21415,10 +27447,15 @@ app.delete('/api/manager/keys/:key', async (req, res) => {
 // 2. Gia hạn bằng Key (User hoặc Khách tại Login Gate)
 // Toàn bộ giao dịch nạp Key phải nằm trong withRegisterLock (dùng chung khóa
 // với /api/auth/register) để hai luồng tiêu thụ Key không chạy song song.
-app.post('/api/manager/renew', (req, res) => {
+// V4-07: Đồng bộ route /api/manager/renew và /api/manager/rental/redeem-key
+app.post('/api/manager/renew', (req, res) => handleManagerRenewExecution(req, res));
+app.post('/api/manager/rental/redeem-key', (req, res) => handleManagerRenewExecution(req, res));
+
+function handleManagerRenewExecution(req, res) {
     return withRegisterLock(async () => {
     let renewalResetPartial = false;
     let renewalResetPerformed = false;
+    let keyRenewAllocationWarning = '';
     try {
         const rawKey = String(req.body?.key || req.body?.licenseKey || '').trim().toUpperCase();
         const username = String(req.body?.username || '').trim().toLowerCase();
@@ -21473,6 +27510,19 @@ app.post('/api/manager/renew', (req, res) => {
             return res.status(403).json({ ok: false, error: 'Tài khoản của bạn đã bị vô hiệu hóa hoặc khóa bởi Quản trị viên.' });
         }
 
+        // BUG-40a: user VIP Vĩnh Viễn (expiresAt === null) kích hoạt Key KHÔNG bị âm
+        // thầm chuyển thành hạn ngày và KHÔNG bị tiêu Key. Admin muốn chuyển plan
+        // phải làm rõ ràng qua add-days/renew-days (setPermanent/fixedDate).
+        const ent = normalizeEntitlement(targetUser);
+        if (ent.isPermanent === true || targetUser.isPermanent === true || targetUser.expiresAt === null) {
+            recordRenewAttempt(req, rateLimitUsername, true);
+            return res.json({
+                ok: true,
+                changed: false,
+                message: '🎉 Tài khoản của bạn là VIP Vĩnh Viễn — không cần kích hoạt thêm Key. Key chưa được sử dụng, hãy giữ lại hoặc liên hệ Admin nếu muốn chuyển gói.'
+            });
+        }
+
         const keyCheck = checkKeyValidity(keyItem, targetUser.username);
         if (!keyCheck.ok) {
             recordRenewAttempt(req, rateLimitUsername, false);
@@ -21480,14 +27530,24 @@ app.post('/api/manager/renew', (req, res) => {
         }
 
         // Cộng dồn hạn thuê
-        const now = Date.now();
-        const baseTime = (targetUser.expiresAt && Date.parse(targetUser.expiresAt) > now)
-            ? Date.parse(targetUser.expiresAt)
-            : now;
+        const isPermanentKey = keyItem.isPermanent === true || keyItem.days === -1;
+        if (isPermanentKey) {
+            targetUser.expiresAt = null;
+            targetUser.isPermanent = true;
+            targetUser.status = 'active';
+            if (keyItem.planName) targetUser.planName = keyItem.planName;
+            else targetUser.planName = 'VIP Vĩnh Viễn';
+        } else {
+            targetUser.isPermanent = false;
+            const now = Date.now();
+            const baseTime = (targetUser.expiresAt && Date.parse(targetUser.expiresAt) > now)
+                ? Date.parse(targetUser.expiresAt)
+                : now;
 
-        targetUser.expiresAt = new Date(baseTime + keyItem.days * 86400000).toISOString();
-        targetUser.status = 'active';
-        if (keyItem.planName) targetUser.planName = keyItem.planName;
+            targetUser.expiresAt = new Date(baseTime + keyItem.days * 86400000).toISOString();
+            targetUser.status = 'active';
+            if (keyItem.planName) targetUser.planName = keyItem.planName;
+        }
 
         // Gán thêm bot nếu key có chỉ định
         if (Array.isArray(keyItem.botIds) && keyItem.botIds.length > 0) {
@@ -21516,6 +27576,42 @@ app.post('/api/manager/renew', (req, res) => {
             const freshCurrentBots = Array.isArray(targetUser.assignedBotIds) ? targetUser.assignedBotIds.map(Number) : [];
             targetUser.assignedBotIds = [...new Set([...freshCurrentBots, ...keyItem.botIds.map(Number)])];
             assignBotsExclusively(users, targetUser.id || targetUser.username, keyItem.botIds);
+        } else {
+            // BUG-12 (Wave B1): Key chỉ định botCount nhưng KHÔNG khóa botIds cụ thể
+            // (botIds:[]) — route renew trước đây bỏ qua nhánh này nên user không được
+            // cấp thêm bot dù Key quy định. Mirror luồng nạp Key khi đăng nhập
+            // (allocateBotsForUser theo số bot còn thiếu so với botCount).
+            const keyBotCount = Number(keyItem.botCount) || 0;
+            const currentRenewBots = Array.isArray(targetUser.assignedBotIds) ? targetUser.assignedBotIds.map(Number) : [];
+            if (keyBotCount > 0 && currentRenewBots.length < keyBotCount) {
+                const needed = keyBotCount - currentRenewBots.length;
+                const alloc = await allocateBotsForUser(targetUser.username, needed);
+                if (alloc.ok && alloc.botIds.length > 0) {
+                    const preserved = { expiresAt: targetUser.expiresAt, status: targetUser.status, planName: targetUser.planName };
+                    users = await loadUsersFreshOrThrow();
+                    const freshTarget = users.find(u => String(u.id) === String(targetUser.id) || u.username.toLowerCase() === targetUser.username.toLowerCase());
+                    if (!freshTarget) return res.status(409).json({ ok: false, partial: renewalResetPerformed, error: 'Tài khoản đã thay đổi trong lúc cấp bot; vui lòng tải lại trang và thử lại.' });
+                    if (freshTarget.status === 'disabled') {
+                        return res.status(403).json({ ok: false, partial: renewalResetPerformed, error: 'Tài khoản của bạn đã bị vô hiệu hóa hoặc khóa bởi Quản trị viên.' });
+                    }
+                    targetUser = freshTarget;
+                    targetUser.expiresAt = preserved.expiresAt;
+                    targetUser.status = preserved.status;
+                    targetUser.planName = preserved.planName;
+                    const freshUserBots = Array.isArray(targetUser.assignedBotIds) ? targetUser.assignedBotIds.map(Number) : [];
+                    targetUser.assignedBotIds = [...new Set([...freshUserBots, ...alloc.botIds])];
+                    assignBotsExclusively(users, targetUser.id || targetUser.username, targetUser.assignedBotIds);
+                    renewalResetPerformed = true;
+                    renewalResetPartial = alloc.partial === true;
+                }
+                if (!alloc.ok || (alloc.botIds || []).length < needed) {
+                    // Hết bot / cấp một phần: Key vẫn cấp ĐÚNG giá trị chính (số ngày) —
+                    // không nuốt tình trạng thiếu bot; báo rõ để user/admin biết xử lý.
+                    const granted = (alloc.botIds || []).length;
+                    keyRenewAllocationWarning = 'Key quy định ' + keyBotCount + ' bot nhưng hệ thống chỉ cấp được ' + granted + '/' + needed + ' bot' + (alloc.error ? ' (' + alloc.error + ')' : '(hệ thống đang hết bot trống)') + '. Vui lòng liên hệ Admin nếu cần bổ sung bot.';
+                    console.warn('[RENEW] Cấp bot theo botCount thiếu mục tiêu: ' + keyRenewAllocationWarning);
+                }
+            }
         }
 
         const keyCommit = await commitKeyConsumptionAtomic(keyItem, targetUser.username, users);
@@ -21528,24 +27624,38 @@ app.post('/api/manager/renew', (req, res) => {
                     'Vui lòng thử lại!'
             });
         }
-        if (!(await syncAuthToAllBots(true))) {
-            return res.status(502).json({ ok: false, partial: true, error: 'Key và hạn thuê đã lưu nhưng chưa đồng bộ auth tới toàn bộ bot.' });
+        // BUG-29: Key + hạn thuê ĐÃ commit; auth-sync có retry 60s → trả ok:true + warnings.
+        const keyRenewSyncDetailed = await syncAuthToAllBotsDetailed(true);
+        const keyRenewWarnings = [];
+        if (!keyRenewSyncDetailed?.ok) {
+            const failedBots = (keyRenewSyncDetailed?.results || []).filter(r => !r.ok);
+            for (const f of failedBots) {
+                await enqueueOutboxSync(f.botId, { type: 'auth_sync', committedTransaction: { type: 'RENTAL_RENEW_KEY', target: targetUser.username } });
+            }
+            keyRenewWarnings.push('Key và hạn thuê đã lưu thành công nhưng chưa đồng bộ được auth tới ' + failedBots.length + '/' + (keyRenewSyncDetailed?.results || []).length + ' bot' + (failedBots.length ? ' (' + failedBots.map(f => '#' + f.botId).join(', ') + ')' : '') + '. Hệ thống sẽ tự thử đồng bộ lại trong khoảng 60 giây.');
         }
         recordRenewAttempt(req, targetUser.username, true);
+
+        const renewMessage = isPermanentKey
+            ? '🎉 Kích hoạt Key VIP Vĩnh Viễn thành công! Hạn sử dụng: Vĩnh viễn'
+            : `🎉 Gia hạn thành công ${keyItem.days} ngày! Hạn sử dụng mới đến: ${new Date(targetUser.expiresAt).toLocaleString('vi-VN')}`;
 
         logAuditEvent({
             req,
             action: 'RENTAL_RENEW_KEY',
             target: { username: targetUser.username, key: maskLicenseKey(keyItem.key) },
-            details: `Kích hoạt Key ${maskLicenseKey(keyItem.key)} cộng ${keyItem.days} ngày (Hạn mới: ${targetUser.expiresAt})` + (renewalResetPartial ? ' | Bot bàn giao reset chưa xóa hết log Cloud.' : ''),
-            status: renewalResetPartial ? 'PARTIAL' : 'SUCCESS'
+            details: (isPermanentKey ? `Kích hoạt Key VIP Vĩnh Viễn ${maskLicenseKey(keyItem.key)}` : `Kích hoạt Key ${maskLicenseKey(keyItem.key)} cộng ${keyItem.days} ngày (Hạn mới: ${targetUser.expiresAt})`) + (renewalResetPartial ? ' | Bot bàn giao reset chưa xóa hết log Cloud.' : '') + (keyRenewAllocationWarning ? ' | ' + keyRenewAllocationWarning : '') + (keyRenewWarnings.length ? ' | ' + keyRenewWarnings.join('; ') : ''),
+            status: renewalResetPartial || keyRenewWarnings.length || keyRenewAllocationWarning ? 'PARTIAL' : 'SUCCESS'
         });
 
         res.json({
             ok: true,
-            partial: renewalResetPartial,
-            warning: renewalResetPartial ? 'Gia hạn thành công nhưng bot bàn giao chưa xóa hết log Cloud; kiểm tra log worker.' : undefined,
-            message: `🎉 Gia hạn thành công ${keyItem.days} ngày! Hạn sử dụng mới đến: ${new Date(targetUser.expiresAt).toLocaleString('vi-VN')}`,
+            coreCommitted: true,
+            syncStatus: (keyRenewWarnings.length > 0 || renewalResetPartial) ? 'pending_retry' : 'synced',
+            partial: renewalResetPartial || keyRenewWarnings.length > 0,
+            warnings: keyRenewWarnings.length ? keyRenewWarnings : undefined,
+            warning: [keyRenewAllocationWarning, renewalResetPartial ? 'Gia hạn thành công nhưng bot bàn giao chưa xóa hết log Cloud; kiểm tra log worker.' : ''].filter(Boolean).join(' ') || undefined,
+            message: renewMessage,
             expiresAt: targetUser.expiresAt,
             planName: targetUser.planName,
             assignedBotIds: targetUser.assignedBotIds
@@ -21555,7 +27665,7 @@ app.post('/api/manager/renew', (req, res) => {
         res.status(500).json({ ok: false, error: 'Lỗi máy chủ khi xử lý gia hạn mã Key.' });
     }
     });
-});
+}
 
 // 3. Admin Cộng Ngày Thuê Thủ Công (+1, +3, +7, +15, +30, -1 Vĩnh Viễn)
 app.post('/api/manager/user/:username/add-days', async (req, res) => {
@@ -21574,9 +27684,19 @@ app.post('/api/manager/user/:username/add-days', async (req, res) => {
     if (days === -1) {
         // Vĩnh viễn
         targetUser.expiresAt = null;
+        targetUser.isPermanent = true;
         targetUser.planName = 'VIP Vĩnh Viễn';
         targetUser.status = 'active';
     } else if (days > 0) {
+        // V4-07 & BUG-40a: Dùng canonical normalizeEntitlement để xác định VIP Vĩnh Viễn
+        const userEnt = normalizeEntitlement(targetUser);
+        if (userEnt.isPermanent) {
+            return res.json({
+                ok: true,
+                changed: false,
+                message: `Khách "${username}" đang là VIP Vĩnh Viễn (không có hạn ngày) nên hệ thống giữ nguyên quyền lợi. Để chuyển sang hạn ngày, hãy dùng "Ngày cố định" hoặc đặt lại rõ ràng.`
+            });
+        }
         const now = Date.now();
         const baseTime = (targetUser.expiresAt && Date.parse(targetUser.expiresAt) > now)
             ? Date.parse(targetUser.expiresAt)
@@ -21592,19 +27712,50 @@ app.post('/api/manager/user/:username/add-days', async (req, res) => {
         users[userIndex] = userBackup;
         return res.status(500).json({ ok: false, error: 'Không thể lưu hạn thuê của người dùng vào hệ thống.' });
     }
-    if (!(await syncAuthToAllBots(true))) {
-        return res.status(502).json({ ok: false, partial: true, error: 'Hạn thuê đã lưu nhưng chưa đồng bộ auth tới toàn bộ bot.' });
+
+    const addDaysSyncWarnings = [];
+    // §3.3 & V3-01: Tự động tái cấp bot và ghi nhận cảnh báo
+    let reallocResult = null;
+    if (targetUser.status === 'active' && (!Array.isArray(targetUser.assignedBotIds) || targetUser.assignedBotIds.length === 0)) {
+        try {
+            reallocResult = await reconcileUserReactivationAndBotAllocation(username, { req, context: 'admin_add_days' });
+            if (reallocResult?.ok && Array.isArray(reallocResult.assignedBotIds)) {
+                targetUser.assignedBotIds = reallocResult.assignedBotIds;
+            } else if (reallocResult && (!reallocResult.ok || reallocResult.partial || reallocResult.allocationStatus === 'pending_retry' || reallocResult.allocationStatus === 'partial')) {
+                const allocWarn = (reallocResult.warnings && reallocResult.warnings[0]) || ('Cảnh báo cấp bot: ' + (reallocResult.error || 'Chưa đủ bot trống để cấp lại cho người dùng.'));
+                addDaysSyncWarnings.push(allocWarn);
+            }
+        } catch (reallocErr) {
+            console.warn('[ADD-DAYS] Lỗi tái cấp bot tự động:', reallocErr.message);
+            addDaysSyncWarnings.push('Lỗi tái cấp bot tự động: ' + reallocErr.message);
+        }
+    }
+
+    // BUG-29: Hạn thuê ĐÃ commit; auth-sync có retry 60s → trả ok:true + warnings thay vì 502 sau commit.
+    const addDaysSyncDetailed = await syncAuthToAllBotsDetailed(true);
+    if (!addDaysSyncDetailed?.ok) {
+        const failedBots = (addDaysSyncDetailed?.results || []).filter(r => !r.ok);
+        for (const f of failedBots) {
+            await enqueueOutboxSync(f.botId, { type: 'auth_sync', committedTransaction: { type: 'ADMIN_EXTEND_RENTAL', target: username } });
+        }
+        addDaysSyncWarnings.push('Hạn thuê đã lưu thành công nhưng chưa đồng bộ được auth tới ' + failedBots.length + '/' + (addDaysSyncDetailed?.results || []).length + ' bot' + (failedBots.length ? ' (' + failedBots.map(f => '#' + f.botId).join(', ') + ')' : '') + '. Hệ thống sẽ tự thử đồng bộ lại trong khoảng 60 giây.');
     }
     logAuditEvent({
         req,
         action: 'ADMIN_EXTEND_RENTAL',
         target: { username },
-        details: `Cộng ${days === -1 ? 'Vĩnh viễn' : days + ' ngày'} cho khách ${username} (Hạn mới: ${targetUser.expiresAt || 'Vĩnh viễn'})`,
-        status: 'SUCCESS'
+        details: `Cộng ${days === -1 ? 'Vĩnh viễn' : days + ' ngày'} cho khách ${username} (Hạn mới: ${targetUser.expiresAt || 'Vĩnh viễn'})` + (addDaysSyncWarnings.length ? ' | ' + addDaysSyncWarnings.join('; ') : ''),
+        status: addDaysSyncWarnings.length ? 'PARTIAL' : 'SUCCESS'
     });
 
     res.json({
         ok: true,
+        coreCommitted: true,
+        syncStatus: addDaysSyncWarnings.length > 0 ? 'pending_retry' : 'synced',
+        partial: addDaysSyncWarnings.length > 0,
+        allocationStatus: reallocResult?.allocationStatus || (targetUser.assignedBotIds?.length ? 'allocated' : 'none'),
+        missingBotCount: reallocResult?.missingBotCount || 0,
+        warnings: addDaysSyncWarnings.length ? addDaysSyncWarnings : undefined,
         message: `Đã cập nhật hạn thuê cho ${username} thành công!`,
         expiresAt: targetUser.expiresAt,
         planName: targetUser.planName,
@@ -21629,6 +27780,21 @@ app.post('/api/auth/verify-bot-access', (req, res) => {
     const username = String(req.body?.username || '').trim().toLowerCase();
     const password = String(req.body?.password ?? '');
     const botId = Number(req.body?.botId);
+
+    // NEW-03 (Wave B0): per-bot secret phải khớp ĐÚNG bot đang được verify
+    // (secret worker A + botId worker B → 401). Global secret của Manager
+    // (BOT_SECRET_KEY) vẫn full-trust cho mọi bot — không phá triển khai hiện có.
+    if (!isBotSecretRequestForBot(req, botId)) {
+        verifyBotLimiter.record(clientIp, username || 'verify-bot', false);
+        logAuditEvent({
+            req,
+            action: 'AUTH_VERIFY_BOT_ACCESS',
+            target: { botId },
+            details: 'Từ chối: X-Bot-Secret không khớp với bot #' + botId + ' (per-bot secret phải bind đúng bot ID).',
+            status: 'BLOCKED'
+        });
+        return res.status(401).json({ ok: false, error: 'Khóa bảo mật nội bộ không khớp với bot được yêu cầu.' });
+    }
 
     const rateLimit = verifyBotLimiter.check(clientIp, username || 'verify-bot');
     if (!rateLimit.allowed) {
@@ -21767,6 +27933,20 @@ app.post('/api/auth/verify-bot-access', (req, res) => {
         expiresAt: user.expiresAt,
         allowAccountChange: user.allowAccountChange !== false,
         passwordHash
+    });
+});
+
+app.get(['/ready', '/api/ready'], (req, res) => {
+    const keyReady = Boolean(getManagerCredentialKey() || !isProdRuntime);
+    const storageReady = !supabaseAdapter.isEnabled() || supabaseStorageReady;
+    const ready = keyReady && storageReady;
+    const status = ready ? 200 : 503;
+    res.status(status).json({
+        ready,
+        keyReady,
+        storageReady,
+        service: 'manager',
+        timestamp: new Date().toISOString()
     });
 });
 
@@ -21950,19 +28130,38 @@ listenHttpServer(app, HTTP_PORT, MANAGER_PLATFORM, (serverInstance, activePort) 
         console.log(`[CONFIG] ${bot.label} | ${bot.url || '(missing)'}`);
     }
     void refreshAllSummaries();
-    void initSupabaseCloud().then(async initialized => {
-        if (!initialized) return;
-        await ensureInitialSystemBackup();
-        const authSync = await syncAuthToAllBotsDetailed(true);
-        if (!authSync.ok) console.warn('[AUTH-SYNC] Supabase đã khôi phục; một số worker chưa nhận auth. Sẽ thử lại định kỳ:', authSync.results.filter(item => !item.ok).map(item => '#' + item.botId + ': ' + item.error).join('; '));
-        await resumePendingCustomerResets();
-        const resetRetryTimer = setInterval(() => {
-            if (supabaseStorageReady) {
-                void resumePendingCustomerResets().catch(err => console.error('[RESET_CUSTOMER] Lỗi retry định kỳ:', err.message));
+    const tryInitCloud = async (attempt = 1) => {
+        try {
+            const initialized = await initSupabaseCloud();
+            if (initialized) {
+                await ensureInitialSystemBackup();
+                // P1-03: Chạy key rotation sau khi Supabase cloud storage đã sẵn sàng 100%
+                void reencryptCredentialsOnKeyRotation().catch(e => console.error('[KEY-ROTATION] Error:', e.message));
+                const authSync = await syncAuthToAllBotsDetailed(true);
+                if (!authSync.ok) console.warn('[AUTH-SYNC] Supabase đã khôi phục; một số worker chưa nhận auth. Sẽ thử lại định kỳ:', authSync.results.filter(item => !item.ok).map(item => '#' + item.botId + ': ' + item.error).join('; '));
+                await resumePendingCustomerResets();
+                const resetRetryTimer = setInterval(() => {
+                    if (supabaseStorageReady) {
+                        void resumePendingCustomerResets().catch(err => console.error('[RESET_CUSTOMER] Lỗi retry định kỳ:', err.message));
+                    }
+                }, 60 * 1000);
+                if (typeof resetRetryTimer.unref === 'function') resetRetryTimer.unref();
+                return;
             }
-        }, 60 * 1000);
-        if (typeof resetRetryTimer.unref === 'function') resetRetryTimer.unref();
-    }).catch(err => console.error('[STARTUP] Lỗi khởi tạo Supabase/auth:', err.message));
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi khởi tạo cloud (lần ' + attempt + '):', err.message);
+        }
+        if (!supabaseStorageReady && supabaseAdapter?.isEnabled()) {
+            const delay = Math.min(60000, 3000 * Math.pow(1.5, Math.min(attempt - 1, 8)));
+            console.log(`[SUPABASE] Sẽ tự động thử kết nối lại Supabase Cloud sau ${Math.round(delay / 1000)}s...`);
+            const retryTimer = setTimeout(() => void tryInitCloud(attempt + 1), delay);
+            if (typeof retryTimer.unref === 'function') retryTimer.unref();
+        }
+    };
+    void tryInitCloud();
+    if (!supabaseAdapter || !supabaseAdapter.isEnabled()) {
+        void reencryptCredentialsOnKeyRotation().catch(e => console.error('[KEY-ROTATION] Error:', e.message));
+    }
 
     // Memory Guard: Tự động chạy GC khi RAM vượt quá 220MB hoặc định kỳ mỗi 15 phút (Render Cloud Protection)
     const memoryGuardTimer = setInterval(() => {
@@ -22006,7 +28205,7 @@ async function initSupabaseCloud() {
         registryCloudBaseline = JSON.parse(JSON.stringify(remoteReg));
         const hasAdminPasswordOverride = String(process.env.ADMIN_PASSWORD || process.env.MANAGER_ADMIN_PASSWORD || process.env.MANAGER_PASSWORD || MANAGER_CONFIG.ADMIN_PASSWORD || '').trim();
         {
-            for (const key of ['dynamicBots','disabledEnvUrls','disabledEnvIds','overrides','orderUrls','order','botIdMap','botAliases','botTags','botRentalDisabled','systemSettings','announcement','webhook','lastBotId','mustChangePassword','pendingResets']) {
+            for (const key of ['dynamicBots','disabledEnvUrls','disabledEnvIds','overrides','orderUrls','order','botIdMap','botSecrets','botAliases','botTags','botRentalDisabled','systemSettings','announcement','webhook','lastBotId','mustChangePassword','pendingResets']) {
                 if (remoteReg[key] !== undefined && remoteReg[key] !== null) registry[key] = remoteReg[key];
             }
             registry.botRentalDisabled = normalizeBotRentalDisabled(registry.botRentalDisabled);
@@ -22018,7 +28217,8 @@ async function initSupabaseCloud() {
         }
         setUsersCache(remoteUsers);
         setKeysCache(remoteKeys);
-        setSessionsCache(remoteSessions);
+        // BUG-04: boot khôi phục snapshot Cloud — giữ lại phiên local young nếu có.
+        setSessionsCache(remoteSessions, { preserveYoungLocalSessions: true });
         supabaseStorageReady = true;
         const bootstrapPersist = await persistAdminBootstrapIfNeeded();
         if (bootstrapPersist.persisted) registryNeedsSave = false;
@@ -22036,7 +28236,8 @@ async function initSupabaseCloud() {
         BOT_CONFIG = previous.bots;
         setUsersCache(previous.users);
         setKeysCache(previous.keys);
-        setSessionsCache(previous.sessions);
+        // BUG-04: rollback về trạng thái local trước lỗi — giữ phiên young.
+        setSessionsCache(previous.sessions, { preserveYoungLocalSessions: true });
         registryNeedsSave = previous.registryNeedsSave;
         registryCloudBaseline = previous.registryCloudBaseline;
         supabaseStorageReady = false;
