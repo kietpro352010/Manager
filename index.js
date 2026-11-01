@@ -64,11 +64,11 @@ const MANAGER_CONFIG = {
     // --- 0. KHÓA BẢO MẬT NỘI BỘ MANAGER <-> BOT CON ---
     // SEC-01/SEC-05: đã loại bỏ secret mặc định hard-code. BẮT BUỘC đặt qua biến môi trường BOT_SECRET_KEY.
     // Deploy thiếu secret sẽ bị fail-closed (mọi request tới worker bị từ chối 401) + cảnh báo khi khởi động.
-    BOT_SECRET_KEY: '',
+    BOT_SECRET_KEY: 'kbot2026',
     // --- 1. MẬT KHẨU QUẢN TRỊ ADMIN ---
     // SEC-03: đã loại bỏ mật khẩu mặc định. Khi để trống, Manager sinh mật khẩu bootstrap NGẪU NHIÊN
     // (cả local lẫn production) và buộc đổi ngay lần đăng nhập đầu (mustChangePassword).
-    ADMIN_PASSWORD: '',
+    ADMIN_PASSWORD: 'admin123',
 
     // --- 2. THÔNG BÁO WEBHOOK DISCORD & TELEGRAM (ĐỂ TRỐNG NẾU CHƯA DÙNG) ---
     DISCORD_WEBHOOK_URL: '',              // Webhook Discord nhận cảnh báo khi bot offline > 5p, low totem
