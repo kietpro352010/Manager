@@ -5915,7 +5915,11 @@ function parseSafeIsoDate(value) {
     if (value === null || value === undefined || value === '') {
         return { valid: true, value: null };
     }
-    const ms = Date.parse(value);
+    let str = String(value).trim();
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(str)) {
+        str += '+07:00';
+    }
+    const ms = Date.parse(str);
     if (!Number.isFinite(ms)) {
         return { valid: false, error: 'Ngày hết hạn expiresAt không hợp lệ.' };
     }
@@ -8619,8 +8623,8 @@ async function loadPublicSystemInfo() {
     if (!badge || !data || !data.ok) return;
     if (data.trialGiftEnabled === false) {
       badge.style.display = 'none';
-      if (keyHint) keyHint.textContent = '(Cần nhập Key để kích hoạt)';
-      if (keyInput) keyInput.placeholder = 'Nhập mã Key kích hoạt gói thuê (Bắt buộc)...';
+      if (keyHint) keyHint.textContent = '(Tùy chọn - Nhập nếu có mã Key)';
+      if (keyInput) keyInput.placeholder = 'Nhập mã Key (Tùy chọn, để trống nếu chưa có)...';
     } else {
       badge.style.display = 'flex';
       const days = data.trialDays || 1;
@@ -8637,42 +8641,42 @@ window.togglePublicPass = togglePublicPass;
 (function initPublicGalaxyEngine() {
   var canvas = document.getElementById('publicStarfieldCanvas');
   var video = document.getElementById('publicGalaxyVideo');
-  if (video) { video.playbackRate = 0.85; video.play().catch(function() {}); }
+  if (video) {
+    video.playbackRate = 0.85;
+    video.play().catch(function() {});
+    video.style.transform = 'translate3d(' + (0).toFixed(1) + 'px,' + (0).toFixed(1) + 'px,0) scale(1.02)';
+  }
   if (!canvas) return;
   var ctx = canvas.getContext('2d');
-  var w = 0, h = 0, mouseX = 0, mouseY = 0, targetX = 0, targetY = 0;
+  var w = 0, h = 0;
   var stars = [], shootingStars = [];
+  var isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (window.innerWidth <= 768);
   function resize() { w = canvas.width = window.innerWidth; h = canvas.height = window.innerHeight; }
   window.addEventListener('resize', resize, { passive: true });
   resize();
-  window.addEventListener('mousemove', function(e) {
-    targetX = (e.clientX / w - 0.5) * 26;
-    targetY = (e.clientY / h - 0.5) * 26;
-    if (video) video.style.transform = 'translate3d(' + (-targetX * 0.4).toFixed(1) + 'px,' + (-targetY * 0.4).toFixed(1) + 'px,0) scale(1.05)';
-  }, { passive: true });
-  for (var i = 0; i < 145; i++) {
+  var starCount = isMobile ? 35 : 75;
+  for (var i = 0; i < starCount; i++) {
     stars.push({
       x: Math.random() * w, y: Math.random() * h, z: Math.random() * 2.2 + 0.4,
-      r: Math.random() * 2.0 + 0.8, a: Math.random() * 0.6 + 0.35,
+      r: Math.random() * 1.8 + 0.6, a: Math.random() * 0.6 + 0.35,
       da: (Math.random() * 0.016 + 0.005) * (Math.random() < 0.5 ? 1 : -1),
       rgb: Math.random() < 0.35 ? '255,255,255' : (Math.random() < 0.65 ? '224,242,254' : (Math.random() < 0.85 ? '233,213,255' : '254,240,138'))
     });
   }
   function tick() {
     if (document.hidden) { setTimeout(function() { requestAnimationFrame(tick); }, 500); return; }
-    mouseX += (targetX - mouseX) * 0.06; mouseY += (targetY - mouseY) * 0.06;
     ctx.clearRect(0, 0, w, h);
     for (var i = 0; i < stars.length; i++) {
       var s = stars[i];
       s.y -= 0.14 * s.z; s.a += s.da;
       if (s.a > 1.0 || s.a < 0.25) s.da = -s.da;
       if (s.y < -12) { s.y = h + 12; s.x = Math.random() * w; }
-      var sx = s.x + mouseX * s.z * 0.6;
-      var sy = s.y + mouseY * s.z * 0.6;
+      var sx = s.x;
+      var sy = s.y;
       var rad = s.r * s.z * 0.85;
       var alpha = Math.max(0.2, Math.min(1.0, s.a));
-      // Outer glow & diamond sparkle for bright twinkling stars
-      if (rad > 2.0 && alpha > 0.55) {
+      // Outer glow & diamond sparkle for bright twinkling stars (desktop only for performance)
+      if (!isMobile && rad > 2.0 && alpha > 0.55) {
         ctx.beginPath();
         ctx.arc(sx, sy, rad * 2.0, 0, Math.PI * 2);
         ctx.fillStyle = 'rgba(' + s.rgb + ',' + (alpha * 0.22).toFixed(2) + ')';
@@ -11556,7 +11560,7 @@ input:focus, select:focus, textarea:focus {
 
 @media (max-width: 480px) {
   .fleet-resource-bar {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, 1fr);
   }
   .toast {
     left: 12px !important;
@@ -12395,9 +12399,16 @@ input:focus, select:focus, textarea:focus {
 }
 
 @media (max-width: 768px) {
+  /* Layout & Viewport Ergonomics */
+  .app {
+    width: 100% !important;
+    max-width: 100% !important;
+    padding: 6px 8px 60px !important;
+    box-sizing: border-box !important;
+  }
   .global-header {
     flex-wrap: wrap;
-    padding: 8px 12px;
+    padding: 8px 10px;
     gap: 8px;
   }
   .global-header-left {
@@ -12436,11 +12447,125 @@ input:focus, select:focus, textarea:focus {
     gap: 4px;
   }
   .full-page-section {
-    padding: 12px 10px;
+    padding: 10px 8px;
   }
   .mgmt-filter-bar {
     flex-direction: column;
     align-items: stretch;
+    gap: 8px;
+  }
+
+  /* GPU Fill-rate & Mobile Lag Elimination */
+  .bot-card, .fleet-resource-bar, .user-table-wrap, .panel, .full-page-card, .modal-card, .kpi-card, .kbot-portal-wrapper {
+    backdrop-filter: blur(4px) !important;
+    -webkit-backdrop-filter: blur(4px) !important;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45) !important;
+    contain: content;
+  }
+  .app-cosmic-video, .cosmic-bg-video {
+    opacity: 0.12 !important;
+  }
+
+  /* Bento KPI Grid & Fleet Resources */
+  .fleet-resource-bar {
+    display: grid !important;
+    grid-template-columns: repeat(2, 1fr) !important;
+    gap: 8px !important;
+    padding: 8px !important;
+  }
+  .fleet-res-item {
+    padding: 6px 8px !important;
+  }
+  .kpi-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, 1fr) !important;
+    gap: 8px !important;
+    margin-bottom: 12px !important;
+  }
+  .kpi-card {
+    padding: 10px 12px !important;
+  }
+  .kpi-title {
+    font-size: 11px !important;
+  }
+  .kpi-value {
+    font-size: 19px !important;
+  }
+
+  /* Bot Cards & Control Buttons */
+  .bot-grid {
+    grid-template-columns: 1fr !important;
+    gap: 10px !important;
+  }
+  .bot-card {
+    padding: 14px 12px !important;
+    border-radius: 14px !important;
+  }
+  .bot-head {
+    flex-wrap: wrap !important;
+    gap: 6px !important;
+  }
+  .controls {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 6px !important;
+    margin-top: 10px !important;
+    padding-top: 10px !important;
+  }
+  .controls button {
+    flex: 1 1 calc(50% - 6px) !important;
+    min-width: 0 !important;
+    min-height: 40px !important;
+    padding: 8px 10px !important;
+    font-size: 12px !important;
+  }
+
+  /* Minecraft GUI & Inventory Slot Grid */
+  #detailRemoteGuiCard {
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+  }
+  #detailRemoteGuiSlots {
+    min-width: 440px !important;
+  }
+  .slot-grid {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    display: grid;
+    grid-template-columns: repeat(9, minmax(42px, 1fr));
+    padding-bottom: 8px;
+  }
+  .inventory-slot {
+    min-height: 56px;
+    min-width: 42px;
+  }
+
+  /* Tables & Responsive Scrolling */
+  .user-table-wrap {
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    margin: 10px 0 !important;
+    border-radius: 12px !important;
+  }
+  .user-table th, .user-table td {
+    padding: 8px 10px !important;
+    font-size: 12px !important;
+    white-space: nowrap !important;
+  }
+
+  /* Modals & Inputs */
+  .modal {
+    padding: 8px !important;
+  }
+  .modal-card {
+    width: 100% !important;
+    max-width: 100% !important;
+    padding: 16px 14px !important;
+    border-radius: 16px !important;
+    max-height: 90vh !important;
+  }
+  input, select, textarea {
+    font-size: 16px !important; /* Prevents auto-zoom on mobile */
   }
 
   /* Ergonomic Touch Targets & Responsive Polish */
@@ -12477,22 +12602,23 @@ input:focus, select:focus, textarea:focus {
     align-items: center;
     justify-content: center;
   }
-  .slot-grid {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    display: grid;
-    grid-template-columns: repeat(9, minmax(42px, 1fr));
-    padding-bottom: 8px;
-  }
-  .inventory-slot {
-    min-height: 56px;
-    min-width: 42px;
-  }
   .log, .chat-log {
     height: min(320px, 42vh);
   }
   .slot-index, .slot-name, .equip-label, .vital-label, .summary-label {
     font-size: 11px;
+  }
+}
+
+@media (max-width: 480px) {
+  /* Ultra-lightweight Mobile Mode */
+  .bot-card, .fleet-resource-bar, .user-table-wrap, .panel, .full-page-card, .modal-card, .kpi-card {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    background: rgba(9, 15, 28, 0.95) !important;
+  }
+  .app-cosmic-video, .cosmic-bg-video {
+    display: none !important;
   }
 }
 
@@ -15711,74 +15837,21 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
   var ctx = canvas.getContext('2d');
   var w = 0, h = 0;
   var animTime = 0;
-
-  // Mouse tracking with lerp & interactive particle queue
-  var mouseX = 0, mouseY = 0, targetMouseX = 0, targetMouseY = 0;
-  var prevMouseX = 0, prevMouseY = 0, mouseSpeed = 0;
-  var interactiveParticles = [];
-  var waterRipples = [];
+  var isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (window.innerWidth <= 768);
 
   function resize() {
     w = canvas.width = window.innerWidth;
     h = canvas.height = window.innerHeight;
-    mouseX = targetMouseX = prevMouseX = w / 2;
-    mouseY = targetMouseY = prevMouseY = h / 2;
+    isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (window.innerWidth <= 768);
   }
   window.addEventListener('resize', resize, { passive: true });
   resize();
 
-  window.addEventListener('mousemove', function(e) {
-    targetMouseX = e.clientX;
-    targetMouseY = e.clientY;
-    var speed = Math.hypot(targetMouseX - prevMouseX, targetMouseY - prevMouseY);
-    var curTheme = localStorage.getItem('kbot_dashboard_theme') || 'galaxy';
-
-    // Spawn interactive particles based on active theme
-    if (curTheme === 'galaxy' && speed > 6 && interactiveParticles.length < 35) {
-      interactiveParticles.push({
-        x: targetMouseX + (Math.random() - 0.5) * 14,
-        y: targetMouseY + (Math.random() - 0.5) * 14,
-        vx: (Math.random() - 0.5) * 1.5,
-        vy: (Math.random() - 0.5) * 1.5 - 0.5,
-        r: Math.random() * 2.2 + 0.8,
-        a: 0.85,
-        color: Math.random() < 0.6 ? '56,189,248' : '168,85,247'
-      });
-    } else if (curTheme === 'sunset' && targetMouseY > h * 0.56 && waterRipples.length < 18) {
-      waterRipples.push({
-        x: targetMouseX,
-        y: targetMouseY,
-        r: 3,
-        maxR: 35 + Math.random() * 30,
-        a: 0.75
-      });
-    } else if (curTheme === 'sunset' && speed > 5 && interactiveParticles.length < 30) {
-      interactiveParticles.push({
-        x: targetMouseX + (Math.random() - 0.5) * 12,
-        y: targetMouseY + (Math.random() - 0.5) * 12,
-        vx: (Math.random() - 0.5) * 1.2,
-        vy: -Math.random() * 1.8 - 0.4,
-        r: Math.random() * 2.5 + 1.0,
-        a: 0.8,
-        color: '254,215,170'
-      });
-    } else if (curTheme === 'morning' && speed > 5 && interactiveParticles.length < 30) {
-      interactiveParticles.push({
-        x: targetMouseX + (Math.random() - 0.5) * 14,
-        y: targetMouseY + (Math.random() - 0.5) * 14,
-        vx: (Math.random() - 0.5) * 2.0 + 1.2,
-        vy: (Math.random() - 0.5) * 1.5 + 0.6,
-        r: Math.random() * 3.0 + 1.2,
-        a: 0.75,
-        color: Math.random() < 0.5 ? '254,240,138' : '56,189,248'
-      });
-    }
-  }, { passive: true });
-
-  // 1. GALAXY ASSETS
+  // 1. GALAXY ASSETS (Optimized particle budget for mobile and desktop)
   var stars = [];
   var shootingStars = [];
-  for (var i = 0; i < 115; i++) {
+  var starCount = isMobile ? 35 : 85;
+  for (var i = 0; i < starCount; i++) {
     stars.push({
       x: Math.random() * w, y: Math.random() * h, z: Math.random() * 2.0 + 0.4,
       r: Math.random() * 1.8 + 0.7, a: Math.random() * 0.6 + 0.3,
@@ -15787,9 +15860,10 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
     });
   }
 
-  // 2. SUNSET ASSETS
+  // 2. SUNSET ASSETS (Optimized particle budget)
   var sunsetEmbers = [];
-  for (var se = 0; se < 35; se++) {
+  var emberCount = isMobile ? 12 : 28;
+  for (var se = 0; se < emberCount; se++) {
     sunsetEmbers.push({
       x: Math.random() * w,
       y: Math.random() * h * 0.75 + h * 0.25,
@@ -15807,7 +15881,11 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
     { x: w * 0.68, y: h * 0.22, scale: 1.35, speed: 0.28 },
     { x: w * 0.92, y: h * 0.13, scale: 0.95, speed: 0.19 }
   ];
-  var morningBirds = [
+  var morningBirds = isMobile ? [
+    { x: -50, y: h * 0.28, speedX: 2.3, speedY: -0.22, scale: 0.9, flapSpeed: 8.5, offset: 0 },
+    { x: -110, y: h * 0.32, speedX: 2.4, speedY: -0.25, scale: 0.8, flapSpeed: 9.0, offset: 1.5 },
+    { x: -170, y: h * 0.29, speedX: 2.2, speedY: -0.20, scale: 0.75, flapSpeed: 8.7, offset: 3.0 }
+  ] : [
     { x: -50, y: h * 0.28, speedX: 2.4, speedY: -0.25, scale: 1.0, flapSpeed: 8.5, offset: 0 },
     { x: -90, y: h * 0.31, speedX: 2.3, speedY: -0.22, scale: 0.85, flapSpeed: 9.0, offset: 1.2 },
     { x: -130, y: h * 0.27, speedX: 2.5, speedY: -0.26, scale: 0.95, flapSpeed: 8.2, offset: 2.1 },
@@ -15815,7 +15893,8 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
     { x: -210, y: h * 0.30, speedX: 2.4, speedY: -0.24, scale: 0.90, flapSpeed: 8.7, offset: 4.5 }
   ];
   var morningLeaves = [];
-  for (var ml = 0; ml < 26; ml++) {
+  var leafCount = isMobile ? 8 : 20;
+  for (var ml = 0; ml < leafCount; ml++) {
     morningLeaves.push({
       x: Math.random() * w,
       y: Math.random() * h,
@@ -15838,9 +15917,7 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
   function renderGalaxy(t) {
     var v = document.getElementById('appGalaxyVideo');
     if (v) {
-      var pX = (mouseX / w - 0.5) * -16;
-      var pY = (mouseY / h - 0.5) * -16;
-      v.style.transform = 'translate3d(' + pX.toFixed(1) + 'px,' + pY.toFixed(1) + 'px,0) scale(1.04)';
+      v.style.transform = 'translate3d(0px,0px,0) scale(1.02)';
     }
     for (var i = 0; i < stars.length; i++) {
       var s = stars[i];
@@ -15855,13 +15932,13 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
         ctx.arc(s.x, s.y, rad * 1.9, 0, Math.PI * 2);
         ctx.fillStyle = 'rgba(' + s.rgb + ',' + (alpha * 0.2).toFixed(2) + ')';
         ctx.fill();
-        if (alpha > 0.85) {
+        if (!isMobile && alpha > 0.85) {
           ctx.strokeStyle = 'rgba(255,255,255,' + (alpha * 0.7).toFixed(2) + ')';
           ctx.lineWidth = 1.0;
           var spLen = rad * 2.5;
           ctx.beginPath();
           ctx.moveTo(s.x - spLen, s.y); ctx.lineTo(s.x + spLen, s.y);
-          ctx.moveTo(s.x, s.y - spLen); ctx.lineTo(s.x, s.y + spLen);
+          ctx.moveTo(s.x, s.y - spLen); ctx.lineTo(s.x + spLen, s.y);
           ctx.stroke();
         }
       }
@@ -15899,10 +15976,8 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
 
   function renderSunsetCoast(t) {
     var horizonY = h * 0.58;
-    var parallaxSunX = (mouseX / w - 0.5) * 45;
-    var parallaxSunY = (mouseY / h - 0.5) * 15;
-    var sunX = w * 0.5 + parallaxSunX;
-    var sunY = horizonY - 14 + parallaxSunY;
+    var sunX = w * 0.5;
+    var sunY = horizonY - 14;
 
     // 1. Crepuscular dusk sunbeams
     ctx.save();
@@ -15952,7 +16027,7 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
     ctx.closePath();
     ctx.fill();
 
-    // 4. Multi-layered Ocean Waves (Sóng biển êm ái)
+    // 4. Multi-layered Ocean Waves
     var waveBands = [
       { y0: horizonY, h: 45, speed: 0.7, amp: 3.5, color: 'rgba(36, 12, 48, 0.82)' },
       { y0: horizonY + 35, h: 65, speed: 0.55, amp: 5.0, color: 'rgba(26, 9, 36, 0.88)' },
@@ -15974,7 +16049,7 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
       ctx.fill();
     }
 
-    // 5. Sun Reflection Shimmer on Water (Vệt nắng hoàng hôn)
+    // 5. Sun Reflection Shimmer on Water
     for (var wy = horizonY + 4; wy < h; wy += 8) {
       var prog = (wy - horizonY) / (h - horizonY);
       var colSpread = 30 + prog * 260;
@@ -15991,20 +16066,7 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
       }
     }
 
-    // 6. Interactive Water Ripples from Mouse
-    for (var wr = waterRipples.length - 1; wr >= 0; wr--) {
-      var rp = waterRipples[wr];
-      rp.r += 0.8;
-      rp.a -= 0.018;
-      if (rp.a <= 0 || rp.r >= rp.maxR) { waterRipples.splice(wr, 1); continue; }
-      ctx.strokeStyle = 'rgba(254, 215, 170, ' + rp.a.toFixed(2) + ')';
-      ctx.lineWidth = 1.6;
-      ctx.beginPath();
-      ctx.ellipse(rp.x, rp.y, rp.r * 2.4, rp.r * 0.65, 0, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-
-    // 7. Floating Sunset Embers / Fireflies
+    // 6. Floating Sunset Embers
     for (var se = 0; se < sunsetEmbers.length; se++) {
       var em = sunsetEmbers[se];
       em.y -= em.speedY;
@@ -16018,12 +16080,10 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
   }
 
   function renderMorningNature(t) {
-    var pSunX = (mouseX / w - 0.5) * 35;
-    var pSunY = (mouseY / h - 0.5) * 18;
-    var sunX = w * 0.82 + pSunX;
-    var sunY = h * 0.18 + pSunY;
+    var sunX = w * 0.82;
+    var sunY = h * 0.18;
 
-    // 1. Radiant Morning Sunbeams (God Rays)
+    // 1. Radiant Morning Sunbeams
     ctx.save();
     for (var gr = 0; gr < 10; gr++) {
       var bAngle = (gr / 10) * Math.PI * 2 + t * 0.025;
@@ -16060,8 +16120,8 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
       var cd = morningClouds[c];
       cd.x += cd.speed * 1.2;
       if (cd.x > w + 160) cd.x = -160;
-      var cX = cd.x + (mouseX / w - 0.5) * 20 * cd.scale;
-      var cY = cd.y + (mouseY / h - 0.5) * 10 * cd.scale;
+      var cX = cd.x;
+      var cY = cd.y;
       ctx.fillStyle = 'rgba(255, 255, 255, 0.40)';
       ctx.beginPath();
       ctx.arc(cX, cY, 35 * cd.scale, 0, Math.PI * 2);
@@ -16071,7 +16131,7 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
       ctx.fill();
     }
 
-    // 4. Flock of Flying Birds (Đàn chim bay lượn với cánh vỗ nhịp nhàng)
+    // 4. Flock of Flying Birds (Đàn chim bay tự nhiên)
     for (var b = 0; b < morningBirds.length; b++) {
       var bd = morningBirds[b];
       bd.x += bd.speedX;
@@ -16079,16 +16139,6 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
       if (bd.x > w + 60) {
         bd.x = -60 - Math.random() * 80;
         bd.y = h * 0.20 + Math.random() * h * 0.25;
-      }
-      // Mouse interaction: birds dodge cursor if close
-      var dX = mouseX - bd.x;
-      var dY = mouseY - bd.y;
-      var dist = Math.hypot(dX, dY);
-      if (dist < 110) {
-        bd.y -= 1.8;
-        bd.flapSpeed = 16.0;
-      } else {
-        bd.flapSpeed = 8.5;
       }
       var wing = Math.sin(t * bd.flapSpeed + bd.offset) * 10 * bd.scale;
       var span = 14 * bd.scale;
@@ -16102,7 +16152,7 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
       ctx.stroke();
     }
 
-    // 5. Swaying Forest Canopy & Pine Trees (Cây cối thiên nhiên)
+    // 5. Swaying Forest Canopy
     ctx.fillStyle = 'rgba(4, 28, 20, 0.94)';
     ctx.beginPath();
     ctx.moveTo(0, h);
@@ -16115,7 +16165,7 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
     ctx.closePath();
     ctx.fill();
 
-    // 6. Floating Wind Leaves & Petals (Lá cây & cánh hoa bay trong gió)
+    // 6. Floating Wind Leaves
     for (var l = 0; l < morningLeaves.length; l++) {
       var lf = morningLeaves[l];
       lf.x += lf.vx + Math.sin(t + l) * 0.5;
@@ -16124,15 +16174,6 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
       if (lf.x > w + 20 || lf.y > h + 20) {
         lf.x = -20;
         lf.y = Math.random() * h * 0.8;
-      }
-      // Mouse wind push
-      var ldx = mouseX - lf.x;
-      var ldy = mouseY - lf.y;
-      var lDist = Math.hypot(ldx, ldy);
-      if (lDist < 85) {
-        lf.x -= (ldx / lDist) * 2.8;
-        lf.y -= (ldy / lDist) * 2.8;
-        lf.angle += 0.12;
       }
       ctx.save();
       ctx.translate(lf.x, lf.y);
@@ -16155,12 +16196,6 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
     ctx.clearRect(0, 0, w, h);
     animTime += 0.02;
 
-    // Smooth mouse lerp
-    mouseX += (targetMouseX - mouseX) * 0.08;
-    mouseY += (targetMouseY - mouseY) * 0.08;
-    prevMouseX = targetMouseX;
-    prevMouseY = targetMouseY;
-
     var curTheme = localStorage.getItem('kbot_dashboard_theme') || 'galaxy';
 
     if (curTheme === 'sunset') {
@@ -16169,19 +16204,6 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
       renderMorningNature(animTime);
     } else {
       renderGalaxy(animTime);
-    }
-
-    // Render interactive particles (stardust / embers / sparkles)
-    for (var p = interactiveParticles.length - 1; p >= 0; p--) {
-      var pt = interactiveParticles[p];
-      pt.x += pt.vx;
-      pt.y += pt.vy;
-      pt.a -= 0.022;
-      if (pt.a <= 0) { interactiveParticles.splice(p, 1); continue; }
-      ctx.fillStyle = 'rgba(' + pt.color + ',' + pt.a.toFixed(2) + ')';
-      ctx.beginPath();
-      ctx.arc(pt.x, pt.y, pt.r, 0, Math.PI * 2);
-      ctx.fill();
     }
 
     requestAnimationFrame(render);
@@ -17480,6 +17502,20 @@ function openCustomRenewModal(userId, username) {
   if (planInput) {
     planInput.value = u?.planName || '';
   }
+  const dateInput = document.getElementById('customRenewDateInput');
+  if (dateInput) {
+    if (u && u.expiresAt) {
+      const d = new Date(u.expiresAt);
+      if (!isNaN(d.getTime())) {
+        const pad = function(n) { return String(n).padStart(2, '0'); };
+        dateInput.value = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+      } else {
+        dateInput.value = '';
+      }
+    } else {
+      dateInput.value = '';
+    }
+  }
   document.getElementById('customRenewModal')?.classList.remove('hidden');
 }
 window.openCustomRenewModal = openCustomRenewModal;
@@ -17524,7 +17560,9 @@ async function submitCustomRenew() {
     payload.setPermanent = true;
   } else if (mode === 'set_date') {
     if (!dateVal) { showToast('Vui lòng chọn ngày giờ hết hạn!'); return; }
-    payload.fixedDate = dateVal;
+    const parsedDate = new Date(dateVal);
+    if (isNaN(parsedDate.getTime())) { showToast('Ngày giờ không hợp lệ!'); return; }
+    payload.fixedDate = parsedDate.toISOString();
   } else if (mode === 'add_days') {
     if (isNaN(daysVal) || daysVal <= 0) { showToast('Số ngày không hợp lệ!'); return; }
     payload.days = daysVal;
@@ -23523,12 +23561,12 @@ app.post('/api/auth/register', (req, res) => {
                         registerMessage = `Đăng ký thành công! Hiện tại toàn bộ bot cho thuê đều đang có người sử dụng. Tài khoản của bạn đã được tạo kèm ${trialDays} ngày dùng thử, vui lòng liên hệ Admin để được cấp bot.`;
                     }
                 } else {
-                    // Admin đã TẮT chế độ tặng dùng thử -> Chặn đăng ký không có Key
-                    recordRegisterAttempt(clientIp, username, false);
-                    return res.status(400).json({
-                        ok: false,
-                        error: 'Chế độ tặng ngày dùng thử hiện đang tạm dừng. Vui lòng nhập Mã Key kích hoạt gói thuê để đăng ký tài khoản!'
-                    });
+                    // Admin đã TẮT chế độ tặng dùng thử -> Cho phép đăng ký tự do không có bot và chưa kích hoạt thời hạn
+                    assignedBotIds = [];
+                    planName = 'Chưa kích hoạt';
+                    // Đặt expiresAt trong quá khứ để hệ thống nhận diện đúng trạng thái hết hạn, không nhầm thành VIP Vĩnh Viễn (expiresAt === null)
+                    expiresAt = new Date(Date.now() - 1000).toISOString();
+                    registerMessage = `Đăng ký tài khoản thành công! Chào mừng ${username}. Tài khoản của bạn hiện chưa kích hoạt gói thuê và chưa có bot. Hãy nạp mã Key hoặc vượt Link4M để kích hoạt sử dụng bot.`;
                 }
             }
 
@@ -23537,11 +23575,11 @@ app.post('/api/auth/register', (req, res) => {
                 username,
                 password,
                 role: 'user',
-                status: 'active',
+                status: (providedKey === '' && !trialGiftEnabled) ? 'expired' : 'active',
                 planName,
                 expiresAt,
                 isPermanent: isPermanentKey ? true : false,
-                note: providedKey ? `Tự đăng ký với mã Key ${maskLicenseKey(providedKey)}` : (assignedBotIds.length ? `Tự đăng ký (Được cấp Bot #${assignedBotIds.join(', ')})` : 'Tự đăng ký (Chưa có bot)'),
+                note: providedKey ? `Tự đăng ký với mã Key ${maskLicenseKey(providedKey)}` : (assignedBotIds.length ? `Tự đăng ký (Được cấp Bot #${assignedBotIds.join(', ')})` : (!trialGiftEnabled ? 'Tự đăng ký tự do (Chưa kích hoạt)' : 'Tự đăng ký (Chờ cấp bot)')),
                 allowAccountChange: true,
                 assignedBotIds,
                 botCount: Math.max(1, keyObj ? (Number(keyObj.botCount) || (Array.isArray(keyObj.botIds) && keyObj.botIds.length ? keyObj.botIds.length : 1)) : 1, assignedBotIds.length),
@@ -23619,7 +23657,7 @@ app.post('/api/auth/register', (req, res) => {
                 expiresAtRental: newUser.expiresAt,
                 planName: newUser.planName,
                 allowAccountChange: true,
-                status: 'active'
+                status: newUser.status || 'active'
             };
             const sessionCommit = await supabaseAdapter.createManagerUserSession(session, userSnapshotRevisions.get(users));
             if (!sessionCommit.ok) {
@@ -23643,7 +23681,7 @@ app.post('/api/auth/register', (req, res) => {
                     planName: newUser.planName,
                     expiresAt: newUser.expiresAt,
                     allowAccountChange: true,
-                    status: 'active'
+                    status: newUser.status || 'active'
                 },
                 message: registerMessage
             });
@@ -24695,7 +24733,11 @@ app.post('/api/manager/users/:id/renew-days', async (req, res) => {
         targetUser.planName = (typeof req.body?.planName === 'string' && req.body.planName.trim()) ? req.body.planName.trim() : 'VIP Vĩnh Viễn';
         targetUser.status = 'active';
     } else if (fixedDate) {
-        const parsed = new Date(fixedDate);
+        let normalizedDateStr = fixedDate;
+        if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(fixedDate)) {
+            normalizedDateStr = fixedDate + '+07:00';
+        }
+        const parsed = new Date(normalizedDateStr);
         if (isNaN(parsed.getTime())) {
             return res.status(400).json({ ok: false, error: 'Ngày cố định không hợp lệ.' });
         }
@@ -29373,8 +29415,8 @@ app.get('/', (req, res) => {
         if (!trialGiftEnabled) {
             loginHtml = loginHtml
                 .replace('id="publicTrialCalloutBadge"', 'id="publicTrialCalloutBadge" style="display:none;"')
-                .replace('(Để trống nếu dùng thử)', '(Cần nhập Key để kích hoạt)')
-                .replace('placeholder="Để trống để nhận 1 ngày dùng thử miễn phí..."', 'placeholder="Nhập mã Key kích hoạt gói thuê (Bắt buộc)..."');
+                .replace('(Để trống nếu dùng thử)', '(Tùy chọn - Nhập nếu có mã Key)')
+                .replace('placeholder="Để trống để nhận 1 ngày dùng thử miễn phí..."', 'placeholder="Nhập mã Key (Tùy chọn, để trống nếu chưa có)..."');
         } else if (trialDays !== 1) {
             loginHtml = loginHtml
                 .replace('1 NGÀY DÙNG THỬ MIỄN PHÍ', `${trialDays} NGÀY DÙNG THỬ MIỄN PHÍ`)
