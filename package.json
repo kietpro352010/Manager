@@ -1,7 +1,7 @@
 {
   "name": "kbot-manager",
   "version": "1.0.0",
-  "main": "manager.js",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
