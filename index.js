@@ -64,7 +64,7 @@ const MANAGER_CONFIG = {
     // --- 0. KHÓA BẢO MẬT NỘI BỘ MANAGER <-> BOT CON ---
     // SEC-01/SEC-05: đã loại bỏ secret mặc định hard-code. BẮT BUỘC đặt qua biến môi trường BOT_SECRET_KEY.
     // Deploy thiếu secret sẽ bị fail-closed (mọi request tới worker bị từ chối 401) + cảnh báo khi khởi động.
-    BOT_SECRET_KEY: 'kbot2026',
+    BOT_SECRET_KEY: '',
     // --- 1. MẬT KHẨU QUẢN TRỊ ADMIN ---
     // SEC-03: đã loại bỏ mật khẩu mặc định. Khi để trống, Manager sinh mật khẩu bootstrap NGẪU NHIÊN
     // (cả local lẫn production) và buộc đổi ngay lần đăng nhập đầu (mustChangePassword).
@@ -14160,8 +14160,8 @@ body.theme-morning .cosmic-toggle-pill {
         <input id="editBotSecretKey" type="password" placeholder="Khóa kết nối Service-to-Service nội bộ..." autocomplete="off" style="width:100%;box-sizing:border-box;padding-right:60px;">
         <button type="button" class="small" onclick="toggleEditSecretKeyVisibility()" style="position:absolute;right:4px;padding:3px 8px;font-size:11px;">Hiện</button>
       </div>
-      <div style="font-size:11px;color:var(--muted);margin-top:3px;">
-        Cần khớp với <code>BOT_SECRET_KEY</code> của worker trên Render để khắc phục lỗi lệch key (409).
+      <div style="font-size:11px;color:#38bdf8;margin-top:3px;">
+        ⚡ <strong>Direct Connection:</strong> Không bắt buộc! Chỉ cần nhập URL là Manager tự kết nối trực tiếp với Worker.
       </div>
     </div>
     <div class="form-row" style="margin-bottom:12px;">
@@ -14943,6 +14943,7 @@ body.theme-morning .cosmic-toggle-pill {
       <button type="button" class="secondary" id="supabaseTestBtn" onclick="testSupabaseConnection()">🧪 Kiểm tra kết nối</button>
       <button type="button" class="secondary" id="supabaseSyncBtn" onclick="syncAllToSupabase()">⬆ Tải lên Supabase Cloud</button>
       <button type="button" class="secondary" id="supabaseSyncDownBtn" onclick="syncDownFromSupabase()">⬇ Đồng bộ xuống</button>
+      <button type="button" class="secondary" id="resolveAllResetsBtn" onclick="resolveAllPendingResets()" style="color:#f59e0b;border-color:rgba(245,158,11,0.4);" title="Dọn dẹp và gỡ bỏ tất cả xung đột / checkpoint reset đang treo">🧹 Dọn dẹp Reset Treo</button>
       <button type="button" class="primary" id="supabaseSaveBtn" onclick="saveSupabaseConfig()">💾 Lưu cấu hình</button>
     </div>
   </div>
@@ -21416,6 +21417,33 @@ async function syncAllToSupabase() {
 async function syncDownFromSupabase() {
   return runSupabaseSyncAction('supabaseSyncDownBtn', '/api/manager/supabase/sync-down', '⏳ Đang tải xuống...', '⬇ ');
 }
+async function resolveAllPendingResets() {
+  if (!confirm('Bạn có chắc chắn muốn dọn dẹp và hoàn tất tất cả các tiến trình reset / xung đột đang treo trên các bot?')) return;
+  const btn = document.getElementById('resolveAllResetsBtn');
+  if (btn) btn.disabled = true;
+  try {
+    showToast('⏳ Đang xử lý hoàn tất các reset treo...', 'info', 5000);
+    await requestJson('/api/manager/pending-resets/all/resolve', {
+      method: 'POST',
+      body: { action: 'resume' }
+    });
+    const checkRes = await requestJson('/api/manager/pending-resets');
+    if (checkRes.ok && checkRes.data && checkRes.data.conflicts > 0) {
+      await requestJson('/api/manager/pending-resets/all/resolve', {
+        method: 'POST',
+        body: { action: 'discard', confirmOwnerCheck: true }
+      });
+    }
+    showToast('✅ Đã dọn dẹp và gỡ bỏ xung đột reset thành công!', 'success', 5000);
+    await Promise.allSettled([refreshHome(), refreshUserManagementPage()]);
+  } catch (err) {
+    showToast('⚠️ Lỗi khi dọn dẹp reset: ' + (err.message || 'Thất bại'), 'error', 6000);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+window.resolveAllPendingResets = resolveAllPendingResets;
 
 window.handleRenameClick = handleRenameClick;
 window.renameBotAlias = renameBotAlias;
@@ -22401,7 +22429,22 @@ async function beginCustomerReset(botId, requestedBy = 'admin', options = {}) {
         return { ok: false, conflict: true, error: 'Đang có một tiến trình reset khác chạy trên bot này.', existing };
     }
     if (existing && existing.status === 'conflict') return { ok: false, conflict: true, error: 'Reset đang ở trạng thái conflict và cần quản trị viên xử lý.', existing };
-    if (existing && existing.status === 'needs_admin') return { ok: false, conflict: true, error: 'Reset đang ở trạng thái needs_admin và cần quản trị viên xử lý.', existing };
+    if (existing && existing.status === 'needs_admin') {
+        // Tự động phục hồi nếu khách cũ đã thu hồi sạch quyền (owner === null)
+        if (existing.owner === null && existing.steps?.users === true && existing.steps?.settings === true) {
+            existing.status = 'running';
+            existing.attempts = 1;
+            existing.leaseUntil = Date.now() + 10 * 60 * 1000;
+            existing.updatedAt = new Date().toISOString();
+            customerResetLocks.add(key);
+            if (!(await persistPendingReset(bId, existing))) {
+                customerResetLocks.delete(key);
+                return { ok: false, error: 'Không lưu được checkpoint để thử lại reset bot.', existing };
+            }
+            return { ok: true, context: existing, resumed: true };
+        }
+        return { ok: false, conflict: true, error: 'Reset đang ở trạng thái needs_admin và cần quản trị viên xử lý.', existing };
+    }
     if (existing && existing.status !== 'completed') {
         customerResetLocks.add(key);
         existing.status = 'running';
@@ -25210,15 +25253,24 @@ async function managerSupabaseUpload(req, res) {
             if (!/^[1-9][0-9]{0,8}$/.test(botId)) { groups.push(['bot_settings #' + (bot.label || 'unknown'), false, 0, 'BOT_ID thiếu hoặc không hợp lệ']); continue; }
             try {
                 const resetState = getPendingResets()[botId];
-                if (resetState && resetState.status !== 'completed') throw new Error('Sync Up bị chặn khi giao dịch Reset Customer chưa hoàn tất.');
-                const result = await fetchChild(bot, '/api/bot/supabase/export-settings', { timeoutMs: 10000 });
-                if (!result.ok || !result.data?.ok || String(result.data.botId) !== botId) throw new Error(result.data?.error || 'Worker không xác nhận BOT_ID.');
-                const existing = await supabaseAdapter.fetchBotSettingsStrict(botId);
-                const current = result.data;
+                const hasRevokedOwnership = resetState && resetState.owner === null && resetState.steps?.users === true && resetState.steps?.settings === true;
+                if (resetState && resetState.status !== 'completed' && !hasRevokedOwnership) {
+                    throw new Error('Sync Up bị chặn khi giao dịch Reset Customer chưa hoàn tất.');
+                }
+                let result = null;
+                try {
+                    result = await fetchChild(bot, '/api/bot/supabase/export-settings', { timeoutMs: 10000 });
+                } catch (fetchErr) {
+                    console.warn(`[SUPABASE UPLOAD] Worker Bot #${botId} phản hồi chậm/ngủ (${fetchErr.message}); tiếp tục đồng bộ từ cấu hình Cloud/Local hiện tại.`);
+                }
+                const existing = await supabaseAdapter.fetchBotSettingsStrict(botId).catch(() => null);
+                const current = (result && result.ok && result.data?.ok && String(result.data.botId) === botId)
+                    ? result.data
+                    : (existing || {});
                 const existingAuth = existing?.synced_auth && typeof existing.synced_auth === 'object' ? existing.synced_auth : {};
                 const pendingResetId = String(current.pendingCustomerResetId || existingAuth.pendingCustomerResetId || '');
-                if (pendingResetId) throw new Error('Sync Up bị chặn khi Cloud còn pending reset ID: ' + pendingResetId);
-                const resetTombstone = !!(current.credentialsResetAt || current.lastCustomerResetId || existingAuth.credentialsResetAt || existingAuth.lastCustomerResetId);
+                if (pendingResetId && !hasRevokedOwnership) throw new Error('Sync Up bị chặn khi Cloud còn pending reset ID: ' + pendingResetId);
+                const resetTombstone = hasRevokedOwnership || !!(current.credentialsResetAt || current.lastCustomerResetId || existingAuth.credentialsResetAt || existingAuth.lastCustomerResetId);
                 const incomingSettings = current.settings && typeof current.settings === 'object' ? current.settings : {};
                 const existingSettings = existing?.settings && typeof existing.settings === 'object' ? existing.settings : {};
                 const hasProxyConfig = current.proxy && typeof current.proxy === 'object' && (current.proxy.enabled === true || String(current.proxy.host || '').trim() !== '');
@@ -26609,8 +26661,9 @@ app.post('/api/manager/pending-resets/:id/resolve', async (req, res) => {
         });
         return res.status(403).json({ error: 'Chỉ Quản trị viên (Admin) mới có quyền xử lý checkpoint reset.' });
     }
-    const botId = Number(req.params.id);
-    if (!Number.isSafeInteger(botId) || botId <= 0) {
+    const isAll = String(req.params.id || '').trim().toLowerCase() === 'all';
+    const botId = isAll ? null : Number(req.params.id);
+    if (!isAll && (!Number.isSafeInteger(botId) || botId <= 0)) {
         return res.status(400).json({ ok: false, error: 'Bot ID không hợp lệ.' });
     }
     const action = String(req.body?.action || '').toLowerCase();
@@ -26618,8 +26671,69 @@ app.post('/api/manager/pending-resets/:id/resolve', async (req, res) => {
         return res.status(400).json({ ok: false, error: 'Action phải là "resume" hoặc "discard".' });
     }
 
-    const key = String(botId);
     const pending = getPendingResets();
+
+    if (isAll) {
+        const keys = Object.keys(pending);
+        if (!keys.length) {
+            return res.json({ ok: true, message: 'Không có checkpoint reset nào cần xử lý.', count: 0, clearedBotIds: [] });
+        }
+        if (action === 'discard') {
+            if (req.body?.confirmOwnerCheck !== true) {
+                return res.status(400).json({ ok: false, error: 'discard yêu cầu confirmOwnerCheck=true — Admin phải xác minh owner trên registry và bot_settings trước khi xóa checkpoint.' });
+            }
+            const previousPending = JSON.parse(JSON.stringify(pending));
+            const clearedBotIds = [];
+            for (const key of keys) {
+                if (customerResetLocks.has(key)) continue;
+                delete pending[key];
+                clearedBotIds.push(Number(key));
+            }
+            const saved = await saveRegistry();
+            if (!saved) {
+                for (const key of keys) pending[key] = previousPending[key];
+                return res.status(502).json({ ok: false, error: 'Không lưu được registry lên Cloud; checkpoint được giữ nguyên.' });
+            }
+            logAuditEvent({
+                req,
+                action: 'ADMIN_RESOLVE_PENDING_RESET',
+                details: `Admin ${session.username} BATCH DISCARD ${clearedBotIds.length} checkpoint reset(s): [${clearedBotIds.join(', ')}] sau owner-check.`,
+                status: 'SUCCESS'
+            });
+            return res.json({ ok: true, message: `Đã xóa thành công ${clearedBotIds.length} checkpoint reset.`, count: clearedBotIds.length, clearedBotIds });
+        }
+        const results = [];
+        for (const key of keys) {
+            if (customerResetLocks.has(key)) continue;
+            const bId = Number(key);
+            const context = pending[key];
+            if (!context) continue;
+            const botConfig = BOT_CONFIG.find(c => Number(c.id) === bId);
+            if (!botConfig) {
+                results.push({ botId: bId, ok: false, error: 'Bot không tồn tại' });
+                continue;
+            }
+            customerResetLocks.add(key);
+            try {
+                context.status = 'running';
+                context.leaseUntil = Date.now() + 10 * 60 * 1000;
+                context.updatedAt = new Date().toISOString();
+                const result = await supabaseAdapter.withManagerLock('bot-ownership-mutation', async () => {
+                    if (!(await persistPendingReset(bId, context))) throw new Error('Không lưu được lease/checkpoint resume reset lên Cloud.');
+                    return await executeCustomerReset(bId, { context, resume: true });
+                }, 900);
+                const settled = result.ok && result.conflict !== true;
+                results.push({ botId: bId, ok: settled });
+            } catch (err) {
+                results.push({ botId: bId, ok: false, error: err.message });
+            } finally {
+                customerResetLocks.delete(key);
+            }
+        }
+        return res.json({ ok: true, message: `Đã xử lý hàng đợi resume cho ${results.length} bot.`, results });
+    }
+
+    const key = String(botId);
     const context = pending[key];
     if (!context) {
         return res.status(404).json({ ok: false, error: 'Checkpoint không tồn tại cho bot #' + botId + '.' });
