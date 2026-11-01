@@ -1,13 +1,11 @@
 {
-  "name": "kingmc-afk-bot",
+  "name": "kbot-manager",
   "version": "1.0.0",
-  "description": "Minimal KingMC AFK bot",
-  "main": "index.js",
+  "main": "manager.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node manager.js"
   },
   "dependencies": {
-    "mineflayer": "4.37.1",
-    "express": "4.21.2"
+    "express": "^4.21.2"
   }
 }
