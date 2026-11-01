@@ -7185,7 +7185,18 @@ function dispatchPinnedRequest(urlStr, options = {}) {
             });
             res.on('error', reject);
             res.on('end', () => {
-                const body = Buffer.concat(chunks).toString('utf8');
+                let buf = Buffer.concat(chunks);
+                const enc = String(res.headers['content-encoding'] || '').toLowerCase();
+                try {
+                    if (enc.includes('gzip')) {
+                        buf = zlib.gunzipSync(buf);
+                    } else if (enc.includes('deflate')) {
+                        buf = zlib.inflateSync(buf);
+                    }
+                } catch (_) {
+                    // Fallback to raw buffer if decompression fails
+                }
+                const body = buf.toString('utf8');
                 resolve({
                     status: res.statusCode,
                     statusText: res.statusMessage,
@@ -7261,6 +7272,7 @@ async function fetchChild(botConfig, path, options = {}) {
         for (let hop = 0; hop <= 5; hop++) {
             const requestHeaders = {
                 'Accept': 'application/json',
+                'Accept-Encoding': 'gzip, deflate',
                 ...(options.headers || {}),
                 ...botIdHeaders,
                 ...secretHeaders,
@@ -20133,6 +20145,8 @@ window.formatFullDateTime = formatFullDateTime;
 window.formatRentalCountdown = formatRentalCountdown;
 window.updateUserHeaderCountdown = updateUserHeaderCountdown;
 
+let detailLastRevMap = new Map();
+
 async function refreshDetail(force=false) {
   if(selectedBotId===null) return;
   if(detailRequestInFlight){
@@ -20149,8 +20163,22 @@ async function refreshDetail(force=false) {
     requestBotId === selectedBotId;
 
   try {
-    const snapshot=await detailGet('/snapshot');
+    const lastRev = detailLastRevMap.get(requestBotId);
+    const snapshotPath = (!force && lastRev)
+      ? ('/snapshot?rev=' + encodeURIComponent(lastRev))
+      : '/snapshot';
+    const snapshot=await detailGet(snapshotPath);
     if(!isCurrentRequest()) return;
+
+    if(snapshot && snapshot.unchanged){
+      uptimeSyncAt=Date.now();
+      updateDetailUptime();
+      return;
+    }
+
+    if(snapshot && snapshot.rev){
+      detailLastRevMap.set(requestBotId, snapshot.rev);
+    }
 
     if(snapshot && snapshot.bot){
       detailBot=snapshot.bot;
