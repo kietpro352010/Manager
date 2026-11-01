@@ -4662,7 +4662,7 @@ function loadRegistry() {
         // và serializer persist không phụ thuộc vào thứ tự restore Cloud.
         botSecrets: {},
         systemSettings: {
-            trialGiftEnabled: true,
+            trialGiftEnabled: false,
             trialDays: 1,
             link4mRewardEnabled: false,
             link4mRewardHours: 12,
@@ -4921,7 +4921,7 @@ async function saveRegistryUnlocked() {
             botSecrets: serializeBotSecretsForCloud(registry.botSecrets),
             systemSettings: {
                 ...(registry.systemSettings || {}),
-                trialGiftEnabled: registry.systemSettings?.trialGiftEnabled !== false,
+                trialGiftEnabled: registry.systemSettings?.trialGiftEnabled === true,
                 trialDays: Math.max(1, Math.min(365, parseInt(registry.systemSettings?.trialDays, 10) || 1)),
                 link4mRewardEnabled: registry.systemSettings?.link4mRewardEnabled === true,
                 link4mRewardHours: Math.max(1, Math.min(48, Number(registry.systemSettings?.link4mRewardHours) || 12)),
@@ -5664,11 +5664,25 @@ class Link4MProviderAdapter {
                     res = await fetch(`${this.legacyApiEndpoint}?api=${encodeURIComponent(this.apiToken)}&url=${encodeURIComponent(returnUrl)}`, { signal: AbortSignal.timeout(8000) });
                 }
                 if (!res.ok) throw new Error(`Link4M trả về lỗi HTTP ${res.status}`);
-                const data = await res.json();
-                if (data?.status === 'success' && data?.shortenedUrl) {
-                    return data.shortenedUrl;
+                let text = '';
+                try {
+                    text = await res.text();
+                } catch (readErr) {
+                    throw new Error('Không thể đọc phản hồi từ máy chủ Link4M (' + readErr.message + ')');
                 }
-                throw new Error(data?.message || 'Link4M không trả về shortenedUrl hợp lệ.');
+                let data = null;
+                try {
+                    data = JSON.parse(text);
+                } catch (_) {
+                    if (text && /^https?:\/\//i.test(text.trim())) {
+                        return text.trim();
+                    }
+                    throw new Error(text ? ('Máy chủ Link4M phản hồi: ' + text.slice(0, 100)) : 'Link4M không trả về dữ liệu hợp lệ.');
+                }
+                if (data?.status === 'success' && (data?.shortenedUrl || data?.url || data?.shortUrl)) {
+                    return data.shortenedUrl || data.url || data.shortUrl;
+                }
+                throw new Error(data?.message || data?.error || 'Link4M không trả về shortenedUrl hợp lệ.');
             } catch (err) {
                 throw new Error(`Không thể kết nối đến máy chủ Link4M (${err.message})`);
             }
@@ -5786,11 +5800,19 @@ function getVietnamDateString(date = new Date()) {
 }
 
 function getLink4mAdapter() {
+    const apiToken = String(registry.systemSettings?.link4mApiToken || process.env.LINK4M_API_KEY || '').trim();
+    const customUrl = String(registry.systemSettings?.link4mUrl || process.env.LINK4M_CUSTOM_URL || '').trim();
+    let mode = registry.systemSettings?.link4mMode;
+    if (!mode) {
+        mode = apiToken ? 'api' : 'custom_url';
+    } else if (mode === 'custom_url' && !customUrl && apiToken) {
+        mode = 'api';
+    }
     return new Link4MProviderAdapter({
-        apiToken: registry.systemSettings?.link4mApiToken || process.env.LINK4M_API_KEY || '',
+        apiToken,
         secretKey: registry.systemSettings?.link4mSecretKey || process.env.LINK4M_SECRET_KEY || '',
-        mode: registry.systemSettings?.link4mMode || 'api',
-        customUrl: registry.systemSettings?.link4mUrl || process.env.LINK4M_CUSTOM_URL || ''
+        mode,
+        customUrl
     });
 }
 
@@ -5800,7 +5822,7 @@ function getLink4mAdapter() {
 // Production: chỉ chấp nhận HTTPS; thiếu cấu hình → fail-closed 503.
 // Dev/local: fallback request host (kèm warning) vì chưa có domain công khai.
 function getPublicBaseUrl(req) {
-    const configured = String(process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '');
+    const configured = String((typeof registry !== 'undefined' && registry?.systemSettings?.publicBaseUrl) || process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '');
     // NEW-02 (Wave A recheck §5): dùng helper production THỐNG NHẤT (NODE_ENV hoặc
     // tín hiệu Render) — không chỉ NODE_ENV. Trong production: KHÔNG tin request host,
     // chỉ chấp nhận canonical HTTPS URL từ cấu hình.
@@ -6246,57 +6268,105 @@ setInterval(async () => {
             console.error('[AUTO-EXPIRY] Không đọc được snapshot users từ Supabase; đã bỏ qua lượt quét này.');
             return;
         }
-        const expiredUsers = [];
+        const RENTAL_GRACE_PERIOD_MS = 2 * 3600 * 1000; // 2 giờ ân hạn trước khi dừng bot
+        const newlyExpiredUsers = [];
+        const graceElapsedUsers = [];
 
         for (const user of users) {
             if (user.role === 'admin' || user.isPermanent === true || user.is_permanent === true) continue;
             const ent = normalizeEntitlement(user);
             if (ent.isPermanent) continue;
+
+            // 1. Chuyển trạng thái sang expired ngay khi đến hạn (thu hồi session web, bắt đầu 2h ân hạn)
             if (user.status === 'active' && user.expiresAt) {
                 const expTime = Date.parse(user.expiresAt);
                 if (Number.isFinite(expTime) && now >= expTime) {
                     const previous = { ...user, assignedBotIds: Array.isArray(user.assignedBotIds) ? [...user.assignedBotIds] : [] };
                     user.status = 'expired';
                     user.updatedAt = new Date(now).toISOString();
-                    expiredUsers.push({ previous, user });
+                    newlyExpiredUsers.push({ previous, user, expTime });
+                }
+            }
+
+            // 2. Kiểm tra nếu đã hết hạn QUÁ 2 GIỜ mà không gia hạn -> Dừng worker bot và thu hồi bot
+            if (user.status === 'expired' && user.expiresAt && Array.isArray(user.assignedBotIds) && user.assignedBotIds.length > 0) {
+                const expTime = Date.parse(user.expiresAt);
+                if (Number.isFinite(expTime) && now >= (expTime + RENTAL_GRACE_PERIOD_MS)) {
+                    graceElapsedUsers.push({ user, previousBotIds: [...user.assignedBotIds], expTime });
                 }
             }
         }
 
-        if (expiredUsers.length) {
+        if (newlyExpiredUsers.length) {
             if (!(await saveUsers(users))) {
                 console.error('[AUTO-EXPIRY] Không lưu được trạng thái hết hạn theo revision hiện tại:', lastUserSaveError);
                 return;
             }
-            let partial = false;
-            for (const { previous, user } of expiredUsers) {
+            for (const { previous, user, expTime } of newlyExpiredUsers) {
                 const sessionResult = await revokeUserSessions(user);
                 if (!sessionResult.ok) {
-                    partial = true;
                     console.error('[AUTO-EXPIRY] Không thu hồi đầy đủ session của ' + user.username + ': ' + sessionResult.error);
                 }
-                const lifecycle = await reconcileUserBotLifecycle(previous, user, 'rental expiry');
-                if (!lifecycle.ok) {
-                    partial = true;
-                    console.error('[AUTO-EXPIRY] Không hoàn tất thu hồi bot của ' + user.username + ': ' + lifecycle.error);
-                }
+                const graceUntil = new Date(expTime + RENTAL_GRACE_PERIOD_MS).toLocaleTimeString('vi-VN');
                 logAuditEvent({
                     action: 'USER_RENTAL_EXPIRED',
                     target: { username: user.username, assignedBots: previous.assignedBotIds },
-                    details: `Gói thuê [${user.planName || 'Thuê bot'}] của khách đã hết hạn.`,
-                    status: partial ? 'PARTIAL' : 'SUCCESS'
+                    details: `Gói thuê [${user.planName || 'Thuê bot'}] của khách đã hết hạn. Bắt đầu thời gian ân hạn 2 giờ (bot sẽ dừng lúc ${graceUntil} nếu không gia hạn).`,
+                    status: 'SUCCESS'
                 });
 
                 if (registry.webhook?.enabled) {
                     dispatchManagerWebhookAlert({
                         type: 'rental_expired',
                         bot: { label: `Khách: ${user.username}`, username: user.username, status: 'EXPIRED' },
-                        message: `⏳ Gói thuê của khách **${user.username}** (${user.planName || 'Gói thường'}) đã hết hạn lúc ${new Date().toLocaleString('vi-VN')}.`
+                        message: `⏳ Gói thuê của khách **${user.username}** (${user.planName || 'Gói thường'}) đã hết hạn lúc ${new Date(expTime).toLocaleTimeString('vi-VN')}. Bot sẽ tiếp tục chạy 2 giờ ân hạn và tự động dừng lúc ${graceUntil} nếu không gia hạn.`
                     });
                 }
             }
             if (!(await syncAuthToAllBots(true))) {
                 console.error('[AUTO-EXPIRY] Đã hết hạn user nhưng chưa đồng bộ auth tới toàn bộ bot.');
+            }
+        }
+
+        if (graceElapsedUsers.length) {
+            let usersMutated = false;
+            for (const { user, previousBotIds } of graceElapsedUsers) {
+                // Gửi lệnh dừng khẩn cấp tới từng bot worker
+                for (const bId of previousBotIds) {
+                    const targetBot = getBotConfig(bId);
+                    if (targetBot) {
+                        try {
+                            await fetchChild(targetBot, '/api/bot/stop', {
+                                method: 'POST',
+                                body: { reason: 'Gói thuê đã hết hạn quá 2 giờ (chưa gia hạn)' },
+                                timeoutMs: 4000
+                            });
+                        } catch (_) {}
+                    }
+                    await runCustomerResetTransaction(bId, 'user-lifecycle: rental expiry 2h grace elapsed').catch(() => {});
+                }
+                user.assignedBotIds = [];
+                user.updatedAt = new Date(now).toISOString();
+                usersMutated = true;
+
+                logAuditEvent({
+                    action: 'USER_RENTAL_GRACE_EXPIRED_BOTS_STOPPED',
+                    target: { username: user.username, assignedBots: previousBotIds },
+                    details: `Khách [${user.username}] hết hạn quá 2 giờ không gia hạn. Đã tự động dừng và thu hồi toàn bộ bot (#${previousBotIds.join(', ')}).`,
+                    status: 'SUCCESS'
+                });
+
+                if (registry.webhook?.enabled) {
+                    dispatchManagerWebhookAlert({
+                        type: 'rental_grace_expired',
+                        bot: { label: `Khách: ${user.username}`, username: user.username, status: 'STOPPED' },
+                        message: `⛔ Toàn bộ bot của khách **${user.username}** đã tự động dừng và thu hồi do hết hạn thuê quá 2 giờ không gia hạn.`
+                    });
+                }
+            }
+            if (usersMutated) {
+                await saveUsers(users);
+                await syncAuthToAllBots(true).catch(() => {});
             }
         }
     } catch (e) {
@@ -20770,7 +20840,7 @@ async function loadTrialGiftSetting() {
   try {
     const res = await requestJson('/api/manager/settings/system');
     if (res.ok && res.data?.settings) {
-      const isEnabled = res.data.settings.trialGiftEnabled !== false;
+      const isEnabled = res.data.settings.trialGiftEnabled === true;
       const trialDays = Number(res.data.settings.trialDays) || 1;
       const badge = document.getElementById('trialGiftStatusBadge');
       if (badge) {
@@ -23502,7 +23572,7 @@ app.post('/api/auth/register', (req, res) => {
                 return res.status(400).json({ ok: false, error: `Tên người dùng "${username}" đã tồn tại. Vui lòng chọn tên khác!` });
             }
 
-            const trialGiftEnabled = registry.systemSettings?.trialGiftEnabled !== false;
+            const trialGiftEnabled = registry.systemSettings?.trialGiftEnabled === true;
             const trialDays = Math.max(1, Math.min(365, parseInt(registry.systemSettings?.trialDays, 10) || 1));
             let planName = trialDays === 1 ? 'Dùng thử 1 ngày' : `Dùng thử ${trialDays} ngày`;
             let expiresAt = new Date(Date.now() + trialDays * 86400000).toISOString();
@@ -27376,10 +27446,10 @@ for (const [name, childPath] of Object.entries(detailGetRoutes)) {
 
 // Public System Info (công khai cho trang đăng nhập/đăng ký biết trạng thái ưu đãi dùng thử)
 app.get('/api/public/system-info', (req, res) => {
-    registry.systemSettings = registry.systemSettings || { trialGiftEnabled: true, trialDays: 1 };
+    registry.systemSettings = registry.systemSettings || { trialGiftEnabled: false, trialDays: 1 };
     return res.json({
         ok: true,
-        trialGiftEnabled: registry.systemSettings.trialGiftEnabled !== false,
+        trialGiftEnabled: registry.systemSettings.trialGiftEnabled === true,
         trialDays: Math.max(1, Math.min(365, parseInt(registry.systemSettings.trialDays, 10) || 1))
     });
 });
@@ -27456,8 +27526,8 @@ app.get('/api/rewards/link4m/status', async (req, res) => {
 
     const remainingAttempts = Math.max(0, dailyLimit - todayCount);
     const isPermanent = session.expiresAtRental === null || session.expiresAtRental === undefined || session.expiresAtRental === '';
-    // Require configured secretKey so unverified automatic claiming is strictly blocked
-    const canClaim = enabled && hasSecretKey && remainingAttempts > 0 && session.status !== 'disabled';
+    const hasProviderConfig = Boolean(registry.systemSettings?.link4mApiToken || process.env.LINK4M_API_KEY || registry.systemSettings?.link4mUrl || process.env.LINK4M_CUSTOM_URL);
+    const canClaim = enabled && (hasSecretKey || hasProviderConfig) && remainingAttempts > 0 && session.status !== 'disabled';
 
     return res.json({
         ok: true,
@@ -27533,13 +27603,7 @@ app.post('/api/rewards/link4m/start', async (req, res) => {
     }
 
     const secretKey = String(registry.systemSettings?.link4mSecretKey || process.env.LINK4M_SECRET_KEY || '').trim();
-    if (!secretKey) {
-        link4mStartLimiter.record(clientIp, username, false);
-        return res.status(503).json({
-            ok: false,
-            error: 'Hệ thống chưa cấu hình Khóa bí mật Webhook/Postback từ Link4M để xác thực hoàn thành. Vui lòng liên hệ Quản trị viên để cấu hình trước khi mở tính năng này (Chống gian lận).'
-        });
-    }
+    // secretKey chỉ dùng cho Webhook Server-to-Server; luồng Return URL tiêu chuẩn sử dụng nonceToken bảo mật (24-byte crypto sha256) và minSolveMs >= 12s.
 
     const dailyLimit = Math.max(1, Math.min(10, Number(registry.systemSettings?.link4mDailyLimit) || 2));
     const rewardHours = Math.max(1, Math.min(48, Number(registry.systemSettings?.link4mRewardHours) || 12));
@@ -28077,11 +28141,11 @@ setInterval(async () => {
 app.get('/api/manager/settings/system', (req, res) => {
     const session = getSessionUser(req);
     if (!session) return res.status(401).json({ ok: false, error: 'Chưa đăng nhập.' });
-    registry.systemSettings = registry.systemSettings || { trialGiftEnabled: true, trialDays: 1 };
+    registry.systemSettings = registry.systemSettings || { trialGiftEnabled: false, trialDays: 1 };
     return res.json({
         ok: true,
         settings: {
-            trialGiftEnabled: registry.systemSettings.trialGiftEnabled !== false,
+            trialGiftEnabled: registry.systemSettings.trialGiftEnabled === true,
             trialDays: Math.max(1, Math.min(365, parseInt(registry.systemSettings.trialDays, 10) || 1)),
             link4mRewardEnabled: registry.systemSettings.link4mRewardEnabled === true,
             link4mRewardHours: Number(registry.systemSettings.link4mRewardHours) || 12,
@@ -28101,7 +28165,7 @@ app.post('/api/manager/settings/system', async (req, res) => {
     if (!session || session.role !== 'admin') {
         return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên mới có quyền đổi cài đặt hệ thống.' });
     }
-    const previousSystemSettings = { ...(registry.systemSettings || { trialGiftEnabled: true, trialDays: 1 }) };
+    const previousSystemSettings = { ...(registry.systemSettings || { trialGiftEnabled: false, trialDays: 1 }) };
     registry.systemSettings = registry.systemSettings || { trialGiftEnabled: true, trialDays: 1 };
     if (req.body?.trialGiftEnabled !== undefined) {
         registry.systemSettings.trialGiftEnabled = req.body.trialGiftEnabled === true;
@@ -28153,7 +28217,7 @@ app.post('/api/manager/settings/system', async (req, res) => {
         ok: true,
         message: 'Đã lưu cấu hình hệ thống lên Supabase thành công.',
         settings: {
-            trialGiftEnabled: registry.systemSettings.trialGiftEnabled !== false,
+            trialGiftEnabled: registry.systemSettings.trialGiftEnabled === true,
             trialDays,
             link4mRewardEnabled: registry.systemSettings.link4mRewardEnabled === true,
             link4mRewardHours: Number(registry.systemSettings.link4mRewardHours) || 12,
@@ -29409,7 +29473,7 @@ app.get('/', (req, res) => {
 
     const session = getSessionUser(req);
     if (!session) {
-        const trialGiftEnabled = registry.systemSettings?.trialGiftEnabled !== false;
+        const trialGiftEnabled = registry.systemSettings?.trialGiftEnabled === true;
         const trialDays = Math.max(1, Math.min(365, parseInt(registry.systemSettings?.trialDays, 10) || 1));
         let loginHtml = PUBLIC_LOGIN_HTML;
         if (!trialGiftEnabled) {
