@@ -1150,81 +1150,104 @@ class SupabaseAdapter {
             return { ok: false, error };
         }
         try {
-            const checks = await Promise.all(SUPABASE_REQUIRED_TABLES.map(async table => {
-                const res = await this.fetchWithRetry(`${this.url}/rest/v1/${table}?select=*&limit=1`, {
+            // Bước 1: Đọc nhanh OpenAPI spec qua 1 HTTP request duy nhất để xác minh toàn bộ bảng và RPC (<600ms)
+            let spec = null;
+            let rpcSpecVerified = false;
+            let rpcProbeError = '';
+            let missingRpcs = [];
+            let missingTables = [];
+
+            try {
+                const specRes = await this.fetchWithRetry(`${this.url}/rest/v1/`, {
                     headers: this.getHeaders()
-                }, { timeoutMs: 6000, maxRetries: 2 });
-                return { table, ok: res.ok, status: res.status, text: res.ok ? '' : await res.text().catch(() => '') };
-            }));
-            const failed = checks.filter(item => !item.ok);
-            const missingTables = failed
-                .filter(item => item.status === 404 || /relation|schema cache|does not exist/i.test(item.text))
-                .map(item => item.table);
-            this.lastMissingTables = missingTables;
-            if (failed.length === 0) {
-                let rpcAvailable = false;
-                let rpcSpecVerified = false;
-                let rpcProbeError = '';
-                let missingRpcs = [];
-                try {
-                    const specRes = await this.fetchWithRetry(`${this.url}/rest/v1/`, {
-                        headers: this.getHeaders()
-                    }, { timeoutMs: 6000, maxRetries: 2 });
-                    if (!specRes.ok) throw new Error('HTTP ' + specRes.status);
-                    const spec = await specRes.json().catch(() => null);
-                    if (!spec || typeof spec !== 'object' || !spec.paths || typeof spec.paths !== 'object') {
-                        throw new Error('OpenAPI spec không có danh sách paths hợp lệ.');
-                    }
-                    rpcSpecVerified = true;
-                    const paths = Object.keys(spec.paths);
-                    const normalizedPaths = paths.map(pathName => String(pathName).replace(/\/+$/, ''));
-                    const requiredRpcs = [
-                        '/rpc/record_bot_position_change', '/rpc/consume_manager_key_usage',
-                        '/rpc/acquire_manager_lock', '/rpc/release_manager_lock', '/rpc/renew_manager_lock', '/rpc/verify_manager_lock_fencing',
-                        '/rpc/read_manager_users_snapshot', '/rpc/save_manager_users_snapshot',
-                        '/rpc/insert_manager_users_if_absent', '/rpc/redeem_manager_key_and_save_users',
-                        '/rpc/read_manager_session', '/rpc/read_manager_authorization', '/rpc/create_manager_user_session', '/rpc/revoke_manager_session',
-                        '/rpc/claim_manager_link4m_reward', '/rpc/start_manager_link4m_attempt',
-                        '/rpc/patch_manager_registry', '/rpc/set_bot_log_clear_cutoff',
-                        '/rpc/rollback_manager_link4m_attempt', '/rpc/update_manager_link4m_sync_status',
-                        '/rpc/set_manager_link4m_short_url', '/rpc/claim_manager_outbox_batch', '/rpc/claim_manager_pending_allocations',
-                        '/rpc/prune_manager_historical_data'
-                    ];
-                    missingRpcs = requiredRpcs.filter(r => !normalizedPaths.includes(r));
-                    rpcAvailable = missingRpcs.length === 0;
-                } catch (err) {
-                    rpcProbeError = err.message || String(err);
+                }, { timeoutMs: 8000, maxRetries: 2 });
+                if (specRes.ok) {
+                    spec = await specRes.json().catch(() => null);
+                } else {
+                    rpcProbeError = 'HTTP ' + specRes.status;
                 }
-                if (!rpcAvailable) {
-                    this.lastPingOk = false;
-                    if (!rpcSpecVerified) {
-                        const error = `Chưa xác minh được RPC record_bot_position_change trên Supabase: ${rpcProbeError || 'không đọc được OpenAPI spec'}. Chưa thể kết luận RPC bị thiếu.`;
-                        this.lastPingError = error;
-                        return { ok: false, error, missingRpc: false, rpcVerified: false, rpcProbeError: rpcProbeError || 'OpenAPI spec không đọc được.' };
-                    }
-                    const error = 'Thiếu một hoặc nhiều RPC bắt buộc trên Supabase (' + missingRpcs.join(', ') + '). Hãy chạy các migration Supabase theo thứ tự trước khi bật Manager.';
-                    this.lastPingError = error;
-                    return { ok: false, error, missingRpc: true, rpcVerified: true, missingRpcs };
-                }
-                const userColumns = await this.fetchWithRetry(`${this.url}/rest/v1/manager_users?select=id,username,allow_account_change,lock_reason,note&limit=0`, {
-                    headers: this.getHeaders()
-                }, { timeoutMs: 6000, maxRetries: 2 });
-                if (!userColumns.ok) {
-                    const error = 'Thiếu cột user allow_account_change/lock_reason/note. Hãy chạy migration 20261023_manager_user_transactions.sql.';
-                    this.lastPingOk = false;
-                    this.lastPingError = error;
-                    return { ok: false, error, missingColumns: true };
-                }
-                this.lastPingOk = true;
-                this.lastPingError = '';
-                return { ok: true, message: 'Kết nối Supabase Cloud thành công!', rpcVerified: true };
+            } catch (err) {
+                rpcProbeError = err.message || String(err);
             }
-            this.lastPingOk = false;
-            const error = missingTables.length
-                ? `Thiếu bảng Supabase: ${missingTables.join(', ')}. Hãy chạy SQL schema trong mục Supabase Cloud.`
-                : `Supabase từ chối truy cập bảng ${failed[0].table} (HTTP ${failed[0].status}). Kiểm tra Service Role Key và RLS.`;
-            this.lastPingError = error;
-            return { ok: false, error, missingTables };
+
+            if (spec && typeof spec === 'object' && spec.paths && typeof spec.paths === 'object') {
+                rpcSpecVerified = true;
+                const paths = Object.keys(spec.paths);
+                const normalizedPaths = paths.map(pathName => String(pathName).replace(/\/+$/, ''));
+                const defs = new Set(Object.keys(spec.definitions || {}));
+                const pathSet = new Set(normalizedPaths);
+
+                // Kiểm tra 21 bảng bắt buộc qua definitions / paths trong spec
+                missingTables = SUPABASE_REQUIRED_TABLES.filter(t => !defs.has(t) && !pathSet.has('/' + t));
+
+                const requiredRpcs = [
+                    '/rpc/record_bot_position_change', '/rpc/consume_manager_key_usage',
+                    '/rpc/acquire_manager_lock', '/rpc/release_manager_lock', '/rpc/renew_manager_lock', '/rpc/verify_manager_lock_fencing',
+                    '/rpc/read_manager_users_snapshot', '/rpc/save_manager_users_snapshot',
+                    '/rpc/insert_manager_users_if_absent', '/rpc/redeem_manager_key_and_save_users',
+                    '/rpc/read_manager_session', '/rpc/read_manager_authorization', '/rpc/create_manager_user_session', '/rpc/revoke_manager_session',
+                    '/rpc/claim_manager_link4m_reward', '/rpc/start_manager_link4m_attempt',
+                    '/rpc/patch_manager_registry', '/rpc/set_bot_log_clear_cutoff',
+                    '/rpc/rollback_manager_link4m_attempt', '/rpc/update_manager_link4m_sync_status',
+                    '/rpc/set_manager_link4m_short_url', '/rpc/claim_manager_outbox_batch', '/rpc/claim_manager_pending_allocations',
+                    '/rpc/prune_manager_historical_data'
+                ];
+                missingRpcs = requiredRpcs.filter(r => !normalizedPaths.includes(r));
+            } else {
+                // Fallback: Khi không đọc được spec OpenAPI, kiểm tra bảng qua từng batch nhỏ 4 bảng (chống nghẽn socket/timeout)
+                const batchSize = 4;
+                const checks = [];
+                for (let i = 0; i < SUPABASE_REQUIRED_TABLES.length; i += batchSize) {
+                    const batch = SUPABASE_REQUIRED_TABLES.slice(i, i + batchSize);
+                    const batchResults = await Promise.all(batch.map(async table => {
+                        const res = await this.fetchWithRetry(`${this.url}/rest/v1/${table}?select=*&limit=1`, {
+                            headers: this.getHeaders()
+                        }, { timeoutMs: 6000, maxRetries: 2 });
+                        return { table, ok: res.ok, status: res.status, text: res.ok ? '' : await res.text().catch(() => '') };
+                    }));
+                    checks.push(...batchResults);
+                }
+                const failed = checks.filter(item => !item.ok);
+                missingTables = failed
+                    .filter(item => item.status === 404 || /relation|schema cache|does not exist/i.test(item.text))
+                    .map(item => item.table);
+            }
+
+            this.lastMissingTables = missingTables;
+
+            if (missingTables.length > 0) {
+                this.lastPingOk = false;
+                const error = `Thiếu bảng Supabase: ${missingTables.join(', ')}. Hãy chạy SQL schema trong mục Supabase Cloud.`;
+                this.lastPingError = error;
+                return { ok: false, error, missingTables };
+            }
+
+            if (rpcSpecVerified && missingRpcs.length > 0) {
+                this.lastPingOk = false;
+                const error = 'Thiếu một hoặc nhiều RPC bắt buộc trên Supabase (' + missingRpcs.join(', ') + '). Hãy chạy các migration Supabase theo thứ tự trước khi bật Manager.';
+                this.lastPingError = error;
+                return { ok: false, error, missingRpc: true, rpcVerified: true, missingRpcs };
+            } else if (!rpcSpecVerified) {
+                this.lastPingOk = false;
+                const error = `Chưa xác minh được RPC record_bot_position_change trên Supabase: ${rpcProbeError || 'không đọc được OpenAPI spec'}. Chưa thể kết luận RPC bị thiếu.`;
+                this.lastPingError = error;
+                return { ok: false, error, missingRpc: false, rpcVerified: false, rpcProbeError: rpcProbeError || 'OpenAPI spec không đọc được.' };
+            }
+
+            // Bước 2: Kiểm tra quyền đọc dữ liệu thực tế và schema cột trên manager_users
+            const userColumns = await this.fetchWithRetry(`${this.url}/rest/v1/manager_users?select=id,username,allow_account_change,lock_reason,note&limit=0`, {
+                headers: this.getHeaders()
+            }, { timeoutMs: 6000, maxRetries: 2 });
+            if (!userColumns.ok) {
+                const error = 'Thiếu cột user allow_account_change/lock_reason/note. Hãy chạy migration 20261023_manager_user_transactions.sql.';
+                this.lastPingOk = false;
+                this.lastPingError = error;
+                return { ok: false, error, missingColumns: true };
+            }
+
+            this.lastPingOk = true;
+            this.lastPingError = '';
+            return { ok: true, message: 'Kết nối Supabase Cloud thành công!', rpcVerified: true };
         } catch (err) {
             this.lastPingOk = false;
             this.lastMissingTables = [];
@@ -1767,10 +1790,9 @@ class SupabaseAdapter {
     async fetchRegistry() {
         if (!this.isEnabled()) return null;
         try {
-            const res = await fetch(`${this.url}/rest/v1/bot_registry?id=eq.default&select=*`, {
-                headers: this.getHeaders(),
-                signal: AbortSignal.timeout(8000)
-            });
+            const res = await this.fetchWithRetry(`${this.url}/rest/v1/bot_registry?id=eq.default&select=*`, {
+                headers: this.getHeaders()
+            }, { timeoutMs: 12000, maxRetries: 3 });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
             if (Array.isArray(data) && data.length > 0) {
@@ -1953,14 +1975,14 @@ class SupabaseAdapter {
                     if (safePatch.webhook[field]) safePatch.webhook[field] = encryptUserPassword(String(safePatch.webhook[field]));
                 }
             }
-            const res = await fetch(`${this.url}/rest/v1/rpc/patch_manager_registry`, {
+            const res = await this.fetchWithRetry(`${this.url}/rest/v1/rpc/patch_manager_registry`, {
                 method: 'POST', headers: this.getHeaders(),
                 body: JSON.stringify({
                     p_patch: safePatch,
                     p_pending_reset_patch: pendingResetPatch,
                     p_pending_reset_deletes: pendingResetDeletes
-                }), signal: AbortSignal.timeout(10000)
-            });
+                })
+            }, { timeoutMs: 12000, maxRetries: 3 });
             if (!res.ok) {
                 console.error('[SUPABASE] Lỗi cập nhật registry theo patch:', 'HTTP ' + res.status + ': ' + await res.text().catch(() => ''));
                 return false;
@@ -2013,7 +2035,7 @@ class SupabaseAdapter {
         try {
             const data = await this.callRpc('create_manager_user_session', {
                 p_expected_revision: Number(expectedUserRevision), p_session: row
-            }, 6000);
+            }, 12000);
             const result = Array.isArray(data) ? data[0] : data;
             return result && typeof result === 'object' ? result : { ok: false, error: 'INVALID_SESSION_RESPONSE' };
         } catch (err) {
@@ -2044,12 +2066,11 @@ class SupabaseAdapter {
                 }
             }
             if (rows.length === 0) return true;
-            const res = await fetch(`${this.url}/rest/v1/manager_sessions`, {
+            const res = await this.fetchWithRetry(`${this.url}/rest/v1/manager_sessions`, {
                 method: 'POST',
                 headers: this.getHeaders({ 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
-                body: JSON.stringify(rows),
-                signal: AbortSignal.timeout(8000)
-            });
+                body: JSON.stringify(rows)
+            }, { timeoutMs: 12000, maxRetries: 3 });
             return res.ok;
         } catch (err) {
             console.error('[SUPABASE] Lỗi đồng bộ sessions:', err.message);
@@ -3812,7 +3833,14 @@ function resolveUsersFile() {
 }
 
 function loadUsers(forceReload = false) {
-    return Array.isArray(cachedUsers) ? JSON.parse(JSON.stringify(cachedUsers)) : [];
+    const list = Array.isArray(cachedUsers) ? JSON.parse(JSON.stringify(cachedUsers)) : [];
+    if (typeof cachedUsers !== 'undefined' && Array.isArray(cachedUsers)) {
+        const rev = userSnapshotRevisions.get(cachedUsers);
+        if (Number.isSafeInteger(rev) && rev > 0) {
+            userSnapshotRevisions.set(list, rev);
+        }
+    }
+    return list;
 }
 
 // Load a versioned Cloud snapshot for every read-modify-write or permission flow.
@@ -3849,6 +3877,12 @@ function deriveUsersSnapshot(sourceUsers, derivedUsers) {
 function setUsersCache(users) {
     cachedUsers = Array.isArray(users) ? users.map(user => ({ ...user })) : [];
     cachedUsersTime = Date.now();
+    if (Array.isArray(users) && typeof userSnapshotRevisions !== 'undefined') {
+        const rev = userSnapshotRevisions.get(users);
+        if (Number.isSafeInteger(rev) && rev > 0) {
+            userSnapshotRevisions.set(cachedUsers, rev);
+        }
+    }
     return cachedUsers;
 }
 
@@ -3863,7 +3897,20 @@ async function saveUsers(users) {
         return true;
     }
     if (!supabaseStorageReady) return false;
-    const expectedRevision = userSnapshotRevisions.get(users);
+    let expectedRevision = userSnapshotRevisions.get(users);
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+        if (typeof cachedUsers !== 'undefined' && Array.isArray(cachedUsers)) {
+            expectedRevision = userSnapshotRevisions.get(cachedUsers);
+        }
+    }
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+        try {
+            const freshSnapshot = await supabaseAdapter.fetchUsersSnapshot();
+            if (freshSnapshot && Number.isSafeInteger(freshSnapshot.revision) && freshSnapshot.revision > 0) {
+                expectedRevision = freshSnapshot.revision;
+            }
+        } catch (_) {}
+    }
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
         lastUserSaveError = 'Không có revision Cloud gắn với snapshot users; hãy tải lại từ Supabase trước khi sửa.';
         return false;
@@ -3989,7 +4036,9 @@ async function saveSessions() {
     if (!supabaseAdapter || !supabaseAdapter.isEnabled() || !supabaseStorageReady) return false;
     const currentHashes = new Set(activeSessions.keys());
     for (const tokenHash of persistedSessionHashes) {
-        if (!currentHashes.has(tokenHash) && !(await supabaseAdapter.deleteSession(tokenHash))) return false;
+        if (!currentHashes.has(tokenHash)) {
+            await supabaseAdapter.deleteSession(tokenHash).catch(() => false);
+        }
     }
     if (!(await supabaseAdapter.syncAllSessions(activeSessions))) return false;
     persistedSessionHashes = currentHashes;
@@ -4080,7 +4129,7 @@ async function ensureInitialSystemBackup() {
 // Tự động tạo bản sao lưu an toàn và dọn dẹp dữ liệu lịch sử mỗi 6 giờ
 setInterval(() => {
     void (async () => {
-        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        if (supabaseAdapter && supabaseAdapter.isEnabled() && supabaseStorageReady) {
             try {
                 await supabaseAdapter.withManagerLock('scheduled_maintenance_6h', { waitTimeoutMs: 0, leaseSeconds: 600 }, async () => {
                     await createSystemBackup('scheduled-interval-6h').catch(e => {
@@ -5231,6 +5280,9 @@ function sanitizeBotForSession(botData, session) {
     copy.url = '';
     delete copy.sourceUrl;
     delete copy.registryFile;
+    // Bỏ hiển thị địa chỉ IP và host đối với khách thuê (user role)
+    copy.ipAddress = '';
+    copy.host = '';
     // BLOCKER-10 (SEC-06/BUG-17, Wave A): DTO theo role áp cho TOÀN BỘ dữ liệu bot trả
     // về cho session — không chỉ proxy. spawnCommands và lệnh trong botSchedules có thể
     // chứa lệnh đổi tài Minecraft/credential → user không đủ quyền đổi account bị mask/strip.
@@ -5975,9 +6027,10 @@ function assignBotsExclusively(users, currentUserId, assignedBotIds) {
     if (!Array.isArray(users) || !Array.isArray(assignedBotIds)) return;
     const botIdSet = new Set(assignedBotIds.map(Number).filter(Number.isFinite));
     if (botIdSet.size === 0) return;
+    const normCurrent = String(currentUserId || '').trim().toLowerCase();
     for (const u of users) {
         if (!u || !Array.isArray(u.assignedBotIds)) continue;
-        if (currentUserId && (u.id === currentUserId || u.username === currentUserId)) continue;
+        if (normCurrent && (String(u.id || '').trim().toLowerCase() === normCurrent || String(u.username || '').trim().toLowerCase() === normCurrent)) continue;
         u.assignedBotIds = u.assignedBotIds.filter(id => !botIdSet.has(Number(id)));
     }
 }
@@ -6275,7 +6328,7 @@ setInterval(async () => {
 // Auto-Expiry Watchdog (Quét hạn thuê tài khoản thông minh & tối ưu CPU/Network)
 let expiryWatchdogInFlight = false;
 setInterval(async () => {
-    if (expiryWatchdogInFlight) return;
+    if (expiryWatchdogInFlight || (supabaseAdapter?.isEnabled?.() && !supabaseStorageReady)) return;
     expiryWatchdogInFlight = true;
     try {
         const now = Date.now();
@@ -6451,9 +6504,11 @@ function nextAuthSyncRevision(minimumExclusive = 0) {
 
 async function buildBotAuthSyncPayload(botConfig, options = {}) {
     const botId = Number(botConfig.id);
-    const users = await loadUsersFresh();
+    const users = (Array.isArray(options.preloadedUsers)) ? options.preloadedUsers : await loadUsersFresh();
     if (!Array.isArray(users)) throw new Error('Không đọc được users đã xác nhận từ Supabase; dừng auth-sync để tránh cấp quyền bằng cache cũ.');
-    const botSettings = supabaseAdapter?.isEnabled?.() ? (await supabaseAdapter.fetchBotSettingsStrict(String(botId))) : null;
+    const botSettings = options.preloadedSettingsMap
+        ? (options.preloadedSettingsMap.get(String(botId)) || null)
+        : (supabaseAdapter?.isEnabled?.() ? (await supabaseAdapter.fetchBotSettingsStrict(String(botId))) : null);
     const syncedAuth = botSettings?.synced_auth || {};
     const syncedUsers = [];
     for (const u of users) {
@@ -6594,22 +6649,56 @@ async function syncAuthToBot(botConfig, force = false, options = {}) {
     }
 }
 
-async function syncAuthToAllBots(force = false) {
+async function syncAuthToAllBots(force = false, options = {}) {
     const bots = Array.isArray(BOT_CONFIG) ? BOT_CONFIG : [];
-    const promises = bots.map(b => syncAuthToBot(b, force).catch(() => false));
-    return (await Promise.all(promises)).every(Boolean);
+    if (!bots.length) return true;
+    const users = (Array.isArray(options.preloadedUsers)) ? options.preloadedUsers : await loadUsersFresh().catch(() => null);
+    let settingsMap = options.preloadedSettingsMap;
+    if (!settingsMap && supabaseAdapter && supabaseAdapter.isEnabled()) {
+        const allSettings = await supabaseAdapter.fetchAllBotSettings().catch(() => null);
+        if (Array.isArray(allSettings)) {
+            settingsMap = new Map();
+            for (const s of allSettings) if (s && s.bot_id) settingsMap.set(String(s.bot_id), s);
+        }
+    }
+    const syncOptions = { ...options, preloadedUsers: users, preloadedSettingsMap: settingsMap };
+    let allOk = true;
+    const BATCH_SIZE = 5;
+    for (let i = 0; i < bots.length; i += BATCH_SIZE) {
+        const batch = bots.slice(i, i + BATCH_SIZE);
+        const results = await Promise.all(batch.map(b => syncAuthToBot(b, force, syncOptions).catch(() => false)));
+        if (!results.every(Boolean)) allOk = false;
+    }
+    return allOk;
 }
 
-async function syncAuthToAllBotsDetailed(force = false) {
+async function syncAuthToAllBotsDetailed(force = false, options = {}) {
     const bots = Array.isArray(BOT_CONFIG) ? BOT_CONFIG : [];
-    const results = await Promise.all(bots.map(async bot => {
-        const botId = String(bot.id || '');
-        const ok = await syncAuthToBot(bot, force).catch(err => {
-            lastAuthSyncErrors.set(Number(botId), err.message || 'Lỗi auth-sync không xác định.');
-            return false;
-        });
-        return { botId, ok, error: ok ? '' : (lastAuthSyncErrors.get(Number(botId)) || 'Worker chưa xác nhận dữ liệu auth.') };
-    }));
+    if (!bots.length) return { ok: true, results: [] };
+    const users = (Array.isArray(options.preloadedUsers)) ? options.preloadedUsers : await loadUsersFresh().catch(() => null);
+    let settingsMap = options.preloadedSettingsMap;
+    if (!settingsMap && supabaseAdapter && supabaseAdapter.isEnabled()) {
+        const allSettings = await supabaseAdapter.fetchAllBotSettings().catch(() => null);
+        if (Array.isArray(allSettings)) {
+            settingsMap = new Map();
+            for (const s of allSettings) if (s && s.bot_id) settingsMap.set(String(s.bot_id), s);
+        }
+    }
+    const syncOptions = { ...options, preloadedUsers: users, preloadedSettingsMap: settingsMap };
+    const results = [];
+    const BATCH_SIZE = 5;
+    for (let i = 0; i < bots.length; i += BATCH_SIZE) {
+        const batch = bots.slice(i, i + BATCH_SIZE);
+        const batchRes = await Promise.all(batch.map(async bot => {
+            const botId = String(bot.id || '');
+            const ok = await syncAuthToBot(bot, force, syncOptions).catch(err => {
+                lastAuthSyncErrors.set(Number(botId), err.message || 'Lỗi auth-sync không xác định.');
+                return false;
+            });
+            return { botId, ok, error: ok ? '' : (lastAuthSyncErrors.get(Number(botId)) || 'Worker chưa xác nhận dữ liệu auth.') };
+        }));
+        results.push(...batchRes);
+    }
     return { ok: results.every(result => result.ok), results };
 }
 
@@ -6664,7 +6753,7 @@ async function enqueueOutboxSync(botId, details = {}) {
         existing.updatedAt = new Date(now).toISOString();
         if (details.committedTransaction) existing.committedTransaction = details.committedTransaction;
         existing.nextRetryAt = Math.min(Number(existing.nextRetryAt) || now, now);
-        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        if (supabaseAdapter && supabaseAdapter.isEnabled() && supabaseStorageReady) {
             try {
                 const sqlSaved = await supabaseAdapter.saveOutboxItem(existing);
                 if (sqlSaved) {
@@ -6723,7 +6812,7 @@ async function processOutboxQueue() {
     try {
         const now = Date.now();
         // P1-02 & V4-10: Distributed atomic claim qua PostgreSQL SELECT ... FOR UPDATE SKIP LOCKED khi Supabase bật
-        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        if (supabaseAdapter && supabaseAdapter.isEnabled() && supabaseStorageReady) {
             // Rescue / flush các item pending trong memory queue sang SQL nếu có
             const memQueue = getOutboxQueue();
             let memQueueChanged = false;
@@ -6940,7 +7029,7 @@ async function processPendingAllocations() {
     pendingAllocationsProcessorInFlight = true;
     try {
         const now = Date.now();
-        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        if (supabaseAdapter && supabaseAdapter.isEnabled() && supabaseStorageReady) {
             const claimedJobs = await supabaseAdapter.claimPendingAllocations(MANAGER_WORKER_ID, 10, 60);
             if (Array.isArray(claimedJobs) && claimedJobs.length > 0) {
                 for (const job of claimedJobs) {
@@ -13808,7 +13897,7 @@ body.theme-morning .cosmic-toggle-pill {
           <div class="info-item"><div class="info-label">LƯU LƯỢNG MẠNG 📶</div><div id="detailHostNet" class="info-value" style="color:var(--yellow);font-weight:700;">-</div></div>
           <div class="info-item copyable" onclick="copyToClipboard(document.getElementById('detailPosition')?.innerText, 'Tọa độ')" title="Click để copy Tọa độ"><div class="info-label">COORDINATES 📋</div><div id="detailPosition" class="info-value position-value">-</div></div>
           <div class="info-item"><div class="info-label">DIMENSION / LOCATION</div><div id="detailDimension" class="info-value">-</div></div>
-          <div class="info-item copyable" onclick="copyToClipboard(document.getElementById('detailIp')?.innerText, 'IP')" title="Click để copy IP"><div class="info-label">BOT IP 📋</div><div id="detailIp" class="info-value">-</div></div>
+          <div id="detailIpItem" class="info-item copyable admin-only" onclick="copyToClipboard(document.getElementById('detailIp')?.innerText, 'IP')" title="Click để copy IP"><div class="info-label">BOT IP 📋</div><div id="detailIp" class="info-value">-</div></div>
           <div class="info-item"><div class="info-label">RAM BOT CON 🤖</div><div id="detailRam" class="info-value" style="color:#38bdf8;font-weight:700;">-</div></div>
           <div class="info-item"><div class="info-label">UPTIME ⏱</div><div id="detailUptime" class="info-value" style="color:#38bdf8;font-weight:700;">-</div></div>
           <div class="info-item"><div class="info-label">RECONNECTS 🔄</div><div id="detailReconnects" class="info-value">-</div></div>
@@ -14484,7 +14573,7 @@ body.theme-morning .cosmic-toggle-pill {
       <input id="addBotLabel" autocomplete="off" placeholder="Ví dụ: Bot (Để trống sẽ tự động lấy tên bot hoặc Bot #ID)">
     </div>
     <div class="note" style="line-height:1.5;">
-      💡 <strong>Thêm hàng loạt:</strong> Bạn có thể dán 10+ link cùng lúc (ngăn cách bằng <strong>xuống dòng</strong> hoặc <strong>dấu cách</strong>). Hệ thống sẽ tự động lọc, kiểm tra tính hợp lệ và thêm tất cả các bot hợp lệ vào Manager.
+      💡 <strong>Thêm hàng loạt & Tự động nhận diện 3-in-1:</strong> Bạn có thể dán nhiều link cùng lúc (ngăn cách bằng <strong>xuống dòng</strong> hoặc <strong>dấu cách</strong>). Hệ thống sẽ tự động kiểm tra, phát hiện cụm Worker 3-in-1 để tự bung 3 bot độc lập (Slot 1, 2, 3) cho từng link!
     </div>
     <div class="modal-actions" style="margin-top:16px;">
       <button onclick="closeAddBotModal()">Hủy</button>
@@ -14507,7 +14596,7 @@ body.theme-morning .cosmic-toggle-pill {
       <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">Web URL bot con</label>
       <input id="editBotUrl" placeholder="https://kbot-instance.onrender.com" autocomplete="off" style="width:100%;box-sizing:border-box;">
     </div>
-    <div class="form-row admin-only" style="margin-bottom:10px;">
+    <div class="form-row admin-only" style="margin-bottom:10px;display:none;">
       <label style="display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">
         <span>Khóa bảo mật Worker (Secret Key)</span>
         <small style="color:var(--muted);font-weight:normal;">Bỏ trống để dùng mặc định</small>
@@ -14524,6 +14613,7 @@ body.theme-morning .cosmic-toggle-pill {
       <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">🏷️ Nhóm Tags (ngăn cách bởi dấu phẩy)</label>
       <input id="editBotTags" placeholder="farm, afk, lobby, vip..." autocomplete="off" oninput="renderEditBotTagPreviews(this.value)" style="width:100%;box-sizing:border-box;">
       <div id="editBotTagsPreview" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;min-height:24px;"></div>
+      <div id="editBotTagSuggestions" style="display:flex;flex-wrap:wrap;gap:5px;margin-top:8px;"></div>
     </div>
     <div class="form-row admin-only" style="margin-bottom:12px;background:rgba(255,255,255,0.03);padding:10px 12px;border-radius:8px;border:1px solid var(--border);">
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0;font-size:13px;font-weight:600;color:var(--text);">
@@ -14533,6 +14623,7 @@ body.theme-morning .cosmic-toggle-pill {
       <div style="font-size:11.5px;color:var(--muted);margin-top:4px;line-height:1.4;">
         Nếu bỏ chọn, bot này sẽ không bao giờ được cấp tự động khi khách đăng ký mới hoặc nạp Giftcode.
       </div>
+      <div id="editBotRentalStatus" style="font-size:12px;margin-top:6px;"></div>
     </div>
     <div class="modal-actions" style="margin-top:16px;">
       <button onclick="closeEditBotModal()">Hủy</button>
@@ -15619,17 +15710,17 @@ function botCardHtml(bot) {
   const isLoopback = rawIp === '127.0.0.1' || rawIp === 'localhost' || rawIp === '0.0.0.0' || rawIp === '::1';
   const ipDisplay = (!isLoopback && rawIp) ? rawIp : (bot.host ? bot.host : '--');
 
-  // Ownership badge
+  // Ownership badge (Hỗ trợ click để lọc theo tag trạng thái thuê)
   let ownerBadgeHtml = '';
   if (bot.rentable === false) {
-    ownerBadgeHtml = '<span class="bot-owner-pill blocked" title="Bot này không nằm trong danh sách cho thuê tự động" style="background:rgba(148,163,184,0.15);color:var(--muted);border:1px solid rgba(148,163,184,0.3);font-size:11px;padding:2px 8px;border-radius:12px;">🚫 Không Cho Thuê</span>';
+    ownerBadgeHtml = '<span class="bot-owner-pill blocked" onclick="event.stopPropagation(); filterByTag(\'sys:not-rentable\')" title="Bấm để lọc các bot Không Cho Thuê" style="background:rgba(148,163,184,0.15);color:var(--muted);border:1px solid rgba(148,163,184,0.3);font-size:11px;padding:2px 8px;border-radius:12px;cursor:pointer;">🚫 Không Cho Thuê</span>';
   } else if (bot.assignedUsername) {
-    ownerBadgeHtml = '<span class="bot-owner-pill rented" title="Bot được thuê bởi ' + escapeHtml(bot.assignedUsername) + '">' +
+    ownerBadgeHtml = '<span class="bot-owner-pill rented" onclick="event.stopPropagation(); filterByTag(\'sys:rented\')" title="Bấm để lọc các bot Đang Được Thuê (Thuộc: ' + escapeHtml(bot.assignedUsername) + ')" style="cursor:pointer;">' +
       '👤 Thuộc: <strong>' + escapeHtml(bot.assignedUsername) + '</strong>' +
       (bot.assignedPlan ? ' <small>(' + escapeHtml(bot.assignedPlan) + ')</small>' : '') +
       '</span>';
   } else {
-    ownerBadgeHtml = '<span class="bot-owner-pill free" title="Bot đang trống, sẵn sàng cho thuê">' +
+    ownerBadgeHtml = '<span class="bot-owner-pill free" onclick="event.stopPropagation(); filterByTag(\'sys:rentable\')" title="Bấm để lọc các bot Sẵn Sàng Cho Thuê" style="cursor:pointer;">' +
       '✨ Sẵn Sàng Cho Thuê' +
       '</span>';
   }
@@ -15713,10 +15804,10 @@ function botCardHtml(bot) {
         '<span class="ingame-icon">🎮</span>' +
         '<span class="ingame-name">' + escapeHtml(username) + '</span>' +
       '</div>' +
-      '<div class="bot-ip-pill btn-copy-bot-ip" data-ip="' + escapeHtml(ipDisplay) + '" title="Click để copy IP Bot: ' + escapeHtml(ipDisplay) + '" style="cursor:pointer;">' +
+      (isAdmin ? ('<div class="bot-ip-pill btn-copy-bot-ip" data-ip="' + escapeHtml(ipDisplay) + '" title="Click để copy IP Bot: ' + escapeHtml(ipDisplay) + '" style="cursor:pointer;">' +
         '<span>🌐 ' + escapeHtml(ipDisplay) + '</span>' +
         (ipDisplay !== '--' ? '<button type="button" class="btn-copy-bot-ip bot-mini-btn" data-ip="' + escapeHtml(ipDisplay) + '" title="Copy IP bot" style="padding:1px 4px;font-size:10px;margin-left:4px;cursor:pointer;">📋</button>' : '') +
-      '</div>' +
+      '</div>') : '') +
     '</div>' +
 
     '<div class="bot-vitals-matrix">' +
@@ -15804,15 +15895,71 @@ async function dropBot(event,targetId){
   }catch(err){showToast(err.message||'Không thể sắp xếp bot.');}
 }
 
+function renderEditBotTagSuggestions() {
+  const container = document.getElementById('editBotTagSuggestions');
+  if (!container) return;
+  const currentTags = String(document.getElementById('editBotTags')?.value || '')
+    .split(/[,;\s]+/)
+    .map(t => t.trim().toLowerCase().replace(/^#/, ''))
+    .filter(Boolean);
+  const currentTagSet = new Set(currentTags);
+
+  const allTags = new Set();
+  (bots || []).forEach(b => {
+    if (Array.isArray(b.tags)) {
+      b.tags.forEach(t => {
+        const clean = String(t || '').trim().toLowerCase().replace(/^#/, '');
+        if (clean) allTags.add(clean);
+      });
+    }
+  });
+
+  if (allTags.size === 0) {
+    container.innerHTML = '<span style="font-size:11px;color:var(--muted);font-style:italic;">Chưa có tag riêng nào trong hệ thống. Gõ tag vào ô trên để thêm mới.</span>';
+    return;
+  }
+
+  let html = '<div style="font-size:11px;color:var(--muted);margin-bottom:4px;width:100%;">💡 <strong>Bấm chọn nhanh tag riêng đã có:</strong></div>';
+  Array.from(allTags).sort().forEach(tag => {
+    const isSelected = currentTagSet.has(tag);
+    html += '<button type="button" onclick="toggleEditBotTag(\'' + escapeHtml(tag) + '\')" style="padding:2px 8px;font-size:11px;border-radius:12px;cursor:pointer;transition:all 0.15s;font-weight:600;' +
+      (isSelected
+        ? 'background:rgba(56,189,248,0.25);color:#38bdf8;border:1px solid #38bdf8;'
+        : 'background:rgba(255,255,255,0.05);color:var(--muted);border:1px solid var(--border);') +
+      '">' + (isSelected ? '✓ ' : '＋ ') + '#' + escapeHtml(tag) + '</button>';
+  });
+  container.innerHTML = html;
+}
+window.renderEditBotTagSuggestions = renderEditBotTagSuggestions;
+
+function toggleEditBotTag(tag) {
+  const input = document.getElementById('editBotTags');
+  if (!input) return;
+  const cleanTag = String(tag || '').trim().toLowerCase().replace(/^#/, '');
+  if (!cleanTag) return;
+
+  const currentTags = input.value.split(/[,;\s]+/).map(t => t.trim().toLowerCase().replace(/^#/, '')).filter(Boolean);
+  const idx = currentTags.indexOf(cleanTag);
+  if (idx >= 0) {
+    currentTags.splice(idx, 1);
+  } else {
+    currentTags.push(cleanTag);
+  }
+  input.value = currentTags.join(', ');
+  renderEditBotTagPreviews(input.value);
+}
+window.toggleEditBotTag = toggleEditBotTag;
+
 function renderEditBotTagPreviews(raw) {
   const box = document.getElementById('editBotTagsPreview');
   if (!box) return;
   const tags = String(raw || '').split(/[,;\s]+/).map(t => t.trim().toLowerCase().replace(/^#/, '')).filter(Boolean);
   if (!tags.length) {
     box.innerHTML = '<span style="font-size:11px;color:var(--muted);font-style:italic;">Chưa có tag nào</span>';
-    return;
+  } else {
+    box.innerHTML = tags.map(t => '<span style="font-size:11px;padding:2px 8px;border-radius:12px;background:rgba(56,189,248,0.15);color:#38bdf8;border:1px solid rgba(56,189,248,0.3);font-weight:600;">#' + escapeHtml(t) + '</span>').join('');
   }
-  box.innerHTML = tags.map(t => '<span style="font-size:11px;padding:2px 8px;border-radius:12px;background:rgba(56,189,248,0.15);color:#38bdf8;border:1px solid rgba(56,189,248,0.3);font-weight:600;">#' + escapeHtml(t) + '</span>').join('');
+  renderEditBotTagSuggestions();
 }
 window.renderEditBotTagPreviews = renderEditBotTagPreviews;
 
@@ -15834,6 +15981,16 @@ function editBot(event,id){
   renderEditBotTagPreviews(tagsVal);
   const rentChk = document.getElementById('editBotRentable');
   if (rentChk) rentChk.checked = bot.rentable !== false;
+  const rentStatusEl = document.getElementById('editBotRentalStatus');
+  if (rentStatusEl) {
+    if (bot.assignedUsername) {
+      rentStatusEl.innerHTML = '<span style="color:#d8b4fe;font-weight:600;">👤 Đang được thuê bởi: <strong>' + escapeHtml(bot.assignedUsername) + '</strong></span>';
+    } else if (bot.rentable === false) {
+      rentStatusEl.innerHTML = '<span style="color:var(--muted);font-weight:600;">🚫 Đang khóa cho thuê (Dùng nội bộ / riêng)</span>';
+    } else {
+      rentStatusEl.innerHTML = '<span style="color:#7dd3fc;font-weight:600;">✨ Đang sẵn sàng cho thuê (Chưa có người thuê)</span>';
+    }
+  }
   document.getElementById('editBotModal').classList.remove('hidden');
 }
 function closeEditBotModal(){document.getElementById('editBotModal').classList.add('hidden');}
@@ -16037,6 +16194,7 @@ function applyDashboardCosmicMode(mode) {
   if (v) {
     if (effective === 'galaxy' && !document.body.classList.contains('cosmic-mode-off')) {
       v.style.display = 'block';
+      v.style.transform = 'translate3d(0px,0px,0) scale(1.02)';
       v.playbackRate = 0.85;
       v.play().catch(function() {});
     } else {
@@ -16153,10 +16311,6 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
   });
 
   function renderGalaxy(t) {
-    var v = document.getElementById('appGalaxyVideo');
-    if (v) {
-      v.style.transform = 'translate3d(0px,0px,0) scale(1.02)';
-    }
     for (var i = 0; i < stars.length; i++) {
       var s = stars[i];
       s.y -= 0.12 * s.z;
@@ -17281,7 +17435,7 @@ window.switchLoginGateTab = switchLoginGateTab;
 
 // Xử lý tự đăng ký tài khoản mới trên In-App Login Gate
 async function handleInAppRegisterSubmit(event) {
-  event.preventDefault();
+  if (event) event.preventDefault();
   const alertEl = document.getElementById('loginAlert');
   const submitBtn = document.getElementById('regSubmitBtn');
   const username = String(document.getElementById('regUsername')?.value || '').trim();
@@ -17313,16 +17467,34 @@ async function handleInAppRegisterSubmit(event) {
       throw new Error(res.data?.error || 'Đăng ký tài khoản thất bại.');
     }
 
-    showToast('🎉 ' + (res.data?.message || 'Đăng ký thành công! Đang vào hệ thống...'));
-    hideLoginGate();
-    setTimeout(() => { window.location.reload(); }, 600);
+    const data = res.data || {};
+    currentUser = data.user || null;
+    if (data.token) {
+      try { localStorage.setItem('kingmc_session', data.token); } catch (_) {}
+    }
+
+    if (alertEl) {
+      alertEl.textContent = '🎉 ' + (data.message || 'Đăng ký thành công! Đang vào hệ thống...');
+      alertEl.className = 'login-alert success';
+      alertEl.classList.remove('hidden');
+    }
+    showToast('🎉 ' + (data.message || 'Đăng ký thành công! Chào mừng ' + username + '.'));
+
+    // Chuyển cảnh mượt mà tức thì không reload trang, loại bỏ triệt để hiện tượng đơ Chrome do reload khi prompt lưu mật khẩu
+    setTimeout(async () => {
+      hideLoginGate();
+      applyUserRoleUI();
+      await refreshHome();
+      scheduleNextManagerPoll();
+      checkAndShowAnnouncement();
+      if (typeof checkRewardQueryParams === 'function') checkRewardQueryParams();
+    }, 350);
   } catch (err) {
     if (alertEl) {
       alertEl.className = 'login-alert error';
       alertEl.textContent = '⚠️ ' + err.message;
       alertEl.classList.remove('hidden');
     }
-  } finally {
     if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '📝 TẠO TÀI KHOẢN & VÀO HỆ THỐNG'; }
   }
 }
@@ -18313,7 +18485,7 @@ function updateKpis() {
   const total = bots.length;
   const afk = bots.filter(b => b.available && b.status === 'afk').length;
   const online = bots.filter(b => b.available && ['online','connecting','authenticating','entering'].includes(b.status)).length;
-  const offline = bots.filter(b => b.available && (b.status === 'offline' || b.status === 'kicked')).length;
+  const offline = bots.filter(b => !b.available || b.status === 'offline' || b.status === 'kicked').length;
   const unreachable = bots.filter(b => !b.available).length;
 
   const tEl = document.getElementById('kpiTotal'); if(tEl) tEl.textContent = String(total);
@@ -18402,7 +18574,13 @@ function updateKpis() {
 
 let activeTagFilter = '';
 function filterByTag(tag) {
-  activeTagFilter = String(tag || '').trim().toLowerCase();
+  const normalized = String(tag || '').trim().toLowerCase();
+  // Nếu bấm lại vào tag đang chọn -> tự động bỏ lọc (quay về Tất cả)
+  if (activeTagFilter === normalized) {
+    activeTagFilter = '';
+  } else {
+    activeTagFilter = normalized;
+  }
   updateTagPills();
   filterBots();
 }
@@ -18411,16 +18589,73 @@ window.filterByTag = filterByTag;
 function updateTagPills() {
   const container = document.getElementById('tagPillsContainer');
   if (!container) return;
-  const tagSet = new Set();
-  bots.forEach(b => {
-    if (Array.isArray(b.tags)) b.tags.forEach(t => tagSet.add(t));
+
+  const totalCount = (bots || []).length;
+  // Đếm 3 nhóm trạng thái thuê:
+  // 1. Cho thuê (Sẵn sàng / Trống): rentable !== false && không có người thuê
+  const countRentable = (bots || []).filter(b => b.rentable !== false && !b.assignedUsername).length;
+  // 2. Đang được thuê: có người thuê
+  const countRented = (bots || []).filter(b => Boolean(b.assignedUsername)).length;
+  // 3. Không cho thuê: rentable === false
+  const countNotRentable = (bots || []).filter(b => b.rentable === false).length;
+
+  // Thu thập danh sách tag riêng tự tạo từ b.tags
+  const tagMap = new Map();
+  (bots || []).forEach(b => {
+    if (Array.isArray(b.tags)) {
+      b.tags.forEach(t => {
+        const clean = String(t || '').trim().replace(/^#/, '');
+        if (!clean) return;
+        const lower = clean.toLowerCase();
+        if (!tagMap.has(lower)) {
+          tagMap.set(lower, { display: clean, count: 0 });
+        }
+        tagMap.get(lower).count++;
+      });
+    }
   });
-  const tags = Array.from(tagSet).sort();
-  let html = '<button type="button" class="tab-btn ' + (!activeTagFilter ? 'active' : '') + '" onclick="filterByTag(\'\')" style="padding:3px 9px;font-size:11px;border-radius:6px;">Tất cả</button>';
-  tags.forEach(t => {
-    const isAct = activeTagFilter === t;
-    html += '<button type="button" class="tab-btn ' + (isAct ? 'active' : '') + '" onclick="filterByTag(\'' + escapeHtml(t) + '\')" style="padding:3px 9px;font-size:11px;border-radius:6px;">#' + escapeHtml(t) + '</button>';
+
+  let html = '';
+
+  // 1. Nút Tất cả
+  const isAllAct = !activeTagFilter;
+  html += '<button type="button" class="tab-btn ' + (isAllAct ? 'active' : '') + '" onclick="filterByTag(\'\')" style="padding:3px 10px;font-size:11px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;" title="Xem toàn bộ bot">';
+  html += '<span>🌐 Tất cả</span> <span style="opacity:0.75;font-size:10px;">(' + totalCount + ')</span>';
+  html += '</button>';
+
+  // 2. Nhóm trạng thái thuê:
+  // Cho thuê
+  const isRentableAct = activeTagFilter === 'sys:rentable' || activeTagFilter === 'rentable' || activeTagFilter === 'cho-thue';
+  html += '<button type="button" class="tab-btn ' + (isRentableAct ? 'active' : '') + '" onclick="filterByTag(\'sys:rentable\')" style="padding:3px 10px;font-size:11px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;' + (isRentableAct ? 'border-color:#38bdf8;' : '') + '" title="Lọc bot sẵn sàng cho thuê (chưa ai thuê)">';
+  html += '<span>✨ Cho thuê</span> <span style="opacity:0.85;font-size:10px;color:' + (isRentableAct ? '#7dd3fc' : 'var(--green)') + ';">(' + countRentable + ')</span>';
+  html += '</button>';
+
+  // Đang được thuê
+  const isRentedAct = activeTagFilter === 'sys:rented' || activeTagFilter === 'rented' || activeTagFilter === 'dang-thue';
+  html += '<button type="button" class="tab-btn ' + (isRentedAct ? 'active' : '') + '" onclick="filterByTag(\'sys:rented\')" style="padding:3px 10px;font-size:11px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;' + (isRentedAct ? 'border-color:#a855f7;' : '') + '" title="Lọc bot hiện đang được khách thuê">';
+  html += '<span>👤 Đang thuê</span> <span style="opacity:0.85;font-size:10px;color:' + (isRentedAct ? '#d8b4fe' : '#c084fc') + ';">(' + countRented + ')</span>';
+  html += '</button>';
+
+  // Không cho thuê
+  const isNotRentableAct = activeTagFilter === 'sys:not-rentable' || activeTagFilter === 'not-rentable' || activeTagFilter === 'khong-cho-thue';
+  html += '<button type="button" class="tab-btn ' + (isNotRentableAct ? 'active' : '') + '" onclick="filterByTag(\'sys:not-rentable\')" style="padding:3px 10px;font-size:11px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;' + (isNotRentableAct ? 'border-color:#f59e0b;' : '') + '" title="Lọc bot không cho thuê (dùng riêng / nội bộ)">';
+  html += '<span>🚫 Không cho thuê</span> <span style="opacity:0.85;font-size:10px;color:' + (isNotRentableAct ? '#fde047' : 'var(--muted)') + ';">(' + countNotRentable + ')</span>';
+  html += '</button>';
+
+  // Vạch phân cách nếu có tag riêng tự tạo
+  if (tagMap.size > 0) {
+    html += '<span style="color:var(--border);margin:0 2px;user-select:none;font-size:13px;align-self:center;">|</span>';
+  }
+
+  // 3. Danh sách tag riêng tự tạo
+  const sortedTags = Array.from(tagMap.values()).sort((a, b) => a.display.localeCompare(b.display));
+  sortedTags.forEach(t => {
+    const isAct = activeTagFilter === t.display.toLowerCase();
+    html += '<button type="button" class="tab-btn ' + (isAct ? 'active' : '') + '" onclick="filterByTag(\'' + escapeHtml(t.display) + '\')" style="padding:3px 9px;font-size:11px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;' + (isAct ? 'border-color:#ec4899;' : '') + '" title="Lọc theo tag #' + escapeHtml(t.display) + '">';
+    html += '<span>#' + escapeHtml(t.display) + '</span> <span style="opacity:0.75;font-size:10px;">(' + t.count + ')</span>';
+    html += '</button>';
   });
+
   container.innerHTML = html;
 }
 window.updateTagPills = updateTagPills;
@@ -18445,22 +18680,36 @@ function filterBots() {
     // 1. Lọc theo Tab trạng thái
     if (activeStatusFilter === 'afk' && b.status !== 'afk') return false;
     if (activeStatusFilter === 'online' && !['online','connecting','authenticating','entering'].includes(b.status)) return false;
-    if (activeStatusFilter === 'offline' && (!b.available || (b.status !== 'offline' && b.status !== 'kicked'))) return false;
+    if (activeStatusFilter === 'offline' && b.available && b.status !== 'offline' && b.status !== 'kicked') return false;
     if (activeStatusFilter === 'unreachable' && b.available) return false;
 
-    // 2. Lọc theo Tag phân loại
+    // 2. Lọc theo Tag phân loại & Trạng thái thuê
     if (activeTagFilter) {
-      const bTags = Array.isArray(b.tags) ? b.tags : [];
-      if (!bTags.includes(activeTagFilter)) return false;
+      if (activeTagFilter === 'sys:rentable' || activeTagFilter === 'rentable' || activeTagFilter === 'cho-thue') {
+        if (b.rentable === false || b.assignedUsername) return false;
+      } else if (activeTagFilter === 'sys:rented' || activeTagFilter === 'rented' || activeTagFilter === 'dang-thue') {
+        if (!b.assignedUsername) return false;
+      } else if (activeTagFilter === 'sys:not-rentable' || activeTagFilter === 'not-rentable' || activeTagFilter === 'khong-cho-thue') {
+        if (b.rentable !== false) return false;
+      } else {
+        const bTags = Array.isArray(b.tags) ? b.tags.map(t => String(t).toLowerCase().replace(/^#/, '')) : [];
+        if (!bTags.includes(activeTagFilter)) return false;
+      }
     }
 
     // 3. Lọc theo Từ khóa tìm kiếm
     if(!query) return true;
     return (b.label && b.label.toLowerCase().includes(query)) ||
       (b.username && b.username.toLowerCase().includes(query)) ||
-      (b.ipAddress && b.ipAddress.toLowerCase().includes(query)) ||
+      (isAdmin && b.ipAddress && b.ipAddress.toLowerCase().includes(query)) ||
       (b.status && b.status.toLowerCase().includes(query));
   });
+
+  // Tự động hồi phục tab Tất cả cho khách thuê nếu tab hiện tại không khớp bot nào nhưng hạm đội có bot
+  if (currentUser && currentUser.role === 'user' && bots.length > 0 && filtered.length === 0 && !query && !activeTagFilter && activeStatusFilter !== 'all') {
+    setStatusFilter('all');
+    return;
+  }
 
   // 3. Sắp xếp theo chế độ được chọn
   if (currentSortMode === 'status') {
@@ -18725,16 +18974,37 @@ function openBatchSettingsModal() {
   const tagSelect = document.getElementById('batchTargetTag');
   if (tagSelect) {
     const existingTags = new Set();
+    let countRentable = 0;
+    let countRented = 0;
+    let countNotRentable = 0;
     (bots || []).forEach(b => {
-      if (Array.isArray(b.tags)) b.tags.forEach(t => existingTags.add(String(t).toLowerCase()));
+      if (b.rentable === false) countNotRentable++;
+      else if (b.assignedUsername) countRented++;
+      else countRentable++;
+
+      if (Array.isArray(b.tags)) b.tags.forEach(t => {
+        const clean = String(t || '').trim().toLowerCase().replace(/^#/, '');
+        if (clean) existingTags.add(clean);
+      });
     });
+
     let html = '<option value="">🌐 Toàn bộ bot trong danh sách (' + (bots || []).length + ' bot)</option>';
-    Array.from(existingTags).sort().forEach(tag => {
-      const count = (bots || []).filter(b => Array.isArray(b.tags) && b.tags.map(x => String(x).toLowerCase()).includes(tag)).length;
-      html += '<option value="' + escapeHtml(tag) + '">🏷️ Nhóm tag #' + escapeHtml(tag) + ' (' + count + ' bot)</option>';
-    });
+    html += '<optgroup label="📋 Nhóm Trạng Thái Thuê">';
+    html += '<option value="sys:rentable">✨ Cho thuê (sẵn sàng) (' + countRentable + ' bot)</option>';
+    html += '<option value="sys:rented">👤 Đang được thuê (' + countRented + ' bot)</option>';
+    html += '<option value="sys:not-rentable">🚫 Không cho thuê (' + countNotRentable + ' bot)</option>';
+    html += '</optgroup>';
+
+    if (existingTags.size > 0) {
+      html += '<optgroup label="🏷️ Tag riêng tự tạo">';
+      Array.from(existingTags).sort().forEach(tag => {
+        const count = (bots || []).filter(b => Array.isArray(b.tags) && b.tags.map(x => String(x).toLowerCase().replace(/^#/, '')).includes(tag)).length;
+        html += '<option value="' + escapeHtml(tag) + '">🏷️ #' + escapeHtml(tag) + ' (' + count + ' bot)</option>';
+      });
+      html += '</optgroup>';
+    }
     tagSelect.innerHTML = html;
-    if (activeTagFilter && existingTags.has(activeTagFilter.toLowerCase())) {
+    if (activeTagFilter) {
       tagSelect.value = activeTagFilter.toLowerCase();
     }
   }
@@ -19488,7 +19758,10 @@ function detailStatusHtml() {
   }
   const rawDetailIp = String(detailBot.ipAddress || '').trim();
   const isDetailLoopback = rawDetailIp === '127.0.0.1' || rawDetailIp === 'localhost' || rawDetailIp === '0.0.0.0' || rawDetailIp === '::1';
-  document.getElementById('detailIp').textContent = (!isDetailLoopback && rawDetailIp) ? rawDetailIp : (detailBot.host || '-');
+  const detailIpEl = document.getElementById('detailIp');
+  if (detailIpEl) {
+    detailIpEl.textContent = (isAdmin && !isDetailLoopback && rawDetailIp) ? rawDetailIp : (isAdmin && detailBot.host ? detailBot.host : '-');
+  }
 
   const hw = detailBot.hostHardware;
   const botRamMb = Number(hw?.botRssMb || detailBot.ramRss || detailBot.rssMb || detailBot.memory?.rssMb || 0);
@@ -19590,16 +19863,37 @@ function openBroadcastModal() {
   const tagSelect = document.getElementById('broadcastTargetTag');
   if (tagSelect) {
     const existingTags = new Set();
+    let countRentable = 0;
+    let countRented = 0;
+    let countNotRentable = 0;
     (bots || []).forEach(b => {
-      if (Array.isArray(b.tags)) b.tags.forEach(t => existingTags.add(String(t).toLowerCase()));
+      if (b.rentable === false) countNotRentable++;
+      else if (b.assignedUsername) countRented++;
+      else countRentable++;
+
+      if (Array.isArray(b.tags)) b.tags.forEach(t => {
+        const clean = String(t || '').trim().toLowerCase().replace(/^#/, '');
+        if (clean) existingTags.add(clean);
+      });
     });
+
     let html = '<option value="">🌐 Toàn bộ bot trong danh sách (' + (bots || []).length + ' bot)</option>';
-    Array.from(existingTags).sort().forEach(tag => {
-      const count = (bots || []).filter(b => Array.isArray(b.tags) && b.tags.map(x => String(x).toLowerCase()).includes(tag)).length;
-      html += '<option value="' + escapeHtml(tag) + '">🏷️ Nhóm tag #' + escapeHtml(tag) + ' (' + count + ' bot)</option>';
-    });
+    html += '<optgroup label="📋 Nhóm Trạng Thái Thuê">';
+    html += '<option value="sys:rentable">✨ Cho thuê (sẵn sàng) (' + countRentable + ' bot)</option>';
+    html += '<option value="sys:rented">👤 Đang được thuê (' + countRented + ' bot)</option>';
+    html += '<option value="sys:not-rentable">🚫 Không cho thuê (' + countNotRentable + ' bot)</option>';
+    html += '</optgroup>';
+
+    if (existingTags.size > 0) {
+      html += '<optgroup label="🏷️ Tag riêng tự tạo">';
+      Array.from(existingTags).sort().forEach(tag => {
+        const count = (bots || []).filter(b => Array.isArray(b.tags) && b.tags.map(x => String(x).toLowerCase().replace(/^#/, '')).includes(tag)).length;
+        html += '<option value="' + escapeHtml(tag) + '">🏷️ #' + escapeHtml(tag) + ' (' + count + ' bot)</option>';
+      });
+      html += '</optgroup>';
+    }
     tagSelect.innerHTML = html;
-    if (activeTagFilter && existingTags.has(activeTagFilter.toLowerCase())) {
+    if (activeTagFilter) {
       tagSelect.value = activeTagFilter.toLowerCase();
     }
   }
@@ -22224,7 +22518,7 @@ setInterval(updateUserHeaderCountdown, 5000);
 let registerLock = Promise.resolve();
 function withRegisterLock(fn) {
     const run = () => supabaseAdapter?.isEnabled?.()
-        ? supabaseAdapter.withManagerLock('customer-registration', fn, 900)
+        ? supabaseAdapter.withManagerLock('customer-registration', fn, 30, { waitTimeoutMs: 6000 })
         : fn();
     const next = registerLock.then(run, run);
     registerLock = next.catch(() => {});
@@ -22248,7 +22542,11 @@ async function resetBotsForAssignmentUnlocked(botIds, reason = 'reassignment') {
             continue;
         }
         const pending = getPendingResets()[String(bId)];
-        if (pending && pending.status !== 'completed') {
+        const isPendingActive = pending && pending.status !== 'completed' && (
+            customerResetLocks.has(String(bId)) ||
+            Number(pending.leaseUntil || 0) > Date.now()
+        );
+        if (isPendingActive) {
             preflightFailures.push({ botId: bId, error: 'RESET_PENDING_IN_PROGRESS', resetStatus: String(pending.status || '') });
         }
     }
@@ -22531,7 +22829,8 @@ function resetContextConflict(context, existingSettings) {
     const ownerChanged = !!expectedUsername && !!currentUsername && currentUsername !== expectedUsername;
     const appearedAfterBegin = !expectedExisted && !!existingSettings && currentHasCustomerData;
     const updatedChanged = !!expectedUpdatedAt && !!existingSettings?.updated_at && String(existingSettings.updated_at) !== expectedUpdatedAt;
-    if (ownerChanged || appearedAfterBegin || updatedChanged) {
+    const conflictNewOwner = ownerChanged || appearedAfterBegin || (updatedChanged && currentHasCustomerData && (ownerChanged || (!expectedUsername && !!currentUsername)));
+    if (conflictNewOwner) {
         return 'CONFLICT_NEW_OWNER: bot_settings đã thay đổi hoặc thuộc khách mới; không xóa dữ liệu mới.';
     }
     return null;
@@ -22872,7 +23171,13 @@ async function beginCustomerReset(botId, requestedBy = 'admin', options = {}) {
         }
         const cloudPendingId = String(settings?.synced_auth?.pendingCustomerResetId || '');
         if (cloudPendingId && cloudPendingId !== String(existing?.resetTransactionId || existing?.resetId || '')) {
-            throw new Error('Cloud vẫn có giao dịch reset đang chờ xử lý: ' + cloudPendingId);
+            const isLocalResetActive = existing &&
+                (existing.status === 'running' || existing.status === 'in_progress' || existing.status === 'waiting_worker') &&
+                Number(existing.leaseUntil || 0) > Date.now();
+            if (isLocalResetActive) {
+                throw new Error('Cloud vẫn có giao dịch reset đang chờ xử lý: ' + cloudPendingId);
+            }
+            console.warn(`[RESET_ASSIGN] Phát hiện pendingCustomerResetId mồ côi trên Cloud (${cloudPendingId}) của bot #${bId}. Cho phép reset mới tiếp quản.`);
         }
         const assignmentFlow = /^(?:allocateBotsForUser|resetBotsForAssignment):/.test(String(requestedBy || ''));
         if (assignmentFlow) {
@@ -23580,7 +23885,7 @@ async function allocateBotForNewUser(newUsername) {
 
 async function withUniversalManagerLock(lockKey, fn, leaseSeconds = 900) {
     return await withLocalProcessLock(lockKey, async (localCtx) => {
-        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        if (supabaseAdapter && supabaseAdapter.isEnabled() && supabaseStorageReady) {
             return await supabaseAdapter.withManagerLock(lockKey, fn, leaseSeconds, { _localLockHeld: true });
         }
         return await fn(localCtx);
@@ -23668,7 +23973,7 @@ async function reconcileUserReactivationAndBotAllocation(username, options = {})
                 context: options.context || 'reactivation'
             };
             registry.pendingAllocations.push(zeroJob);
-            if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+            if (supabaseAdapter && supabaseAdapter.isEnabled() && supabaseStorageReady) {
                 const saveOk = await supabaseAdapter.savePendingAllocation(zeroJob);
                 if (!saveOk) {
                     console.warn('[ALLOCATION] Cảnh báo: Không thể lưu zero-bot pending allocation vào Supabase SQL.');
@@ -23755,7 +24060,7 @@ async function reconcileUserReactivationAndBotAllocation(username, options = {})
                 context: options.context || 'partial_reactivation'
             };
             registry.pendingAllocations.push(partialJob);
-            if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+            if (supabaseAdapter && supabaseAdapter.isEnabled() && supabaseStorageReady) {
                 const saveOk = await supabaseAdapter.savePendingAllocation(partialJob);
                 if (!saveOk) {
                     console.warn('[ALLOCATION] Cảnh báo: Không thể lưu partial pending allocation vào Supabase SQL.');
@@ -23771,7 +24076,7 @@ async function reconcileUserReactivationAndBotAllocation(username, options = {})
                         j.status = 'completed';
                         j.completedAt = new Date().toISOString();
                         changed = true;
-                        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+                        if (supabaseAdapter && supabaseAdapter.isEnabled() && supabaseStorageReady) {
                             await supabaseAdapter.completePendingAllocation(j.id, 'completed', MANAGER_WORKER_ID).catch(() => {});
                         }
                     }
@@ -23976,9 +24281,8 @@ app.post('/api/auth/register', (req, res) => {
             // BUG-29: mảng cảnh báo auth-sync sau commit (được gắn vào response cuối).
             const registerAuthSyncWarnings = [];
 
-            {
-                // BUG-29: tài khoản ĐÃ commit; auth-sync có retry 60s → không trả 502
-                // che mất việc tạo tài khoản + phiên đăng nhập.
+            if (assignedBotIds.length > 0) {
+                // Tài khoản có bot được cấp phát: đồng bộ ngay tới các worker
                 const authSyncDetailed = await syncAuthToAllBotsDetailed(true);
                 if (!authSyncDetailed?.ok) {
                     const failedBots = (authSyncDetailed?.results || []).filter(r => !r.ok);
@@ -23987,6 +24291,9 @@ app.post('/api/auth/register', (req, res) => {
                     }
                     registerAuthSyncWarnings.push('Tài khoản đã được tạo nhưng chưa đồng bộ được auth tới ' + failedBots.length + '/' + (authSyncDetailed?.results || []).length + ' bot' + (failedBots.length ? ' (' + failedBots.map(f => '#' + f.botId).join(', ') + ')' : '') + '. Hệ thống sẽ tự thử đồng bộ lại trong khoảng 60 giây; có thể đăng nhập lại sau khi đồng bộ.');
                 }
+            } else {
+                // Đăng ký dùng thử hoặc chưa nạp key (chưa có bot): kích hoạt đồng bộ nền không chặn để phản hồi đăng ký cho client siêu tốc!
+                void syncAuthToAllBotsDetailed(false).catch(() => {});
             }
 
             logAuditEvent({
@@ -24023,9 +24330,28 @@ app.post('/api/auth/register', (req, res) => {
             activeSessions.set(tokenHash, session);
             persistedSessionHashes.add(tokenHash);
 
+            // Pre-warm RAM Auth Cache: Loại bỏ hoàn toàn độ trễ gọi lại Supabase Cloud khi client truy cập trang Dashboard ngay sau đăng ký
+            setCachedAuth(tokenHash, {
+                ok: true,
+                session,
+                user: {
+                    id: newUser.id,
+                    username: newUser.username,
+                    role: 'user',
+                    status: newUser.status || 'active',
+                    assignedBotIds,
+                    expiresAt: newUser.expiresAt,
+                    isPermanent: Boolean(newUser.isPermanent),
+                    planName: newUser.planName,
+                    allowAccountChange: true,
+                    lockReason: ''
+                }
+            });
+
             res.setHeader('Set-Cookie', serializeCookie('kingmc_mgr_session', token, { maxAge: cookieMaxAge, secure: isHttps(req) }));
             return res.json({
                 ok: true,
+                token,
                 coreCommitted: true,
                 syncStatus: registerAuthSyncWarnings.length > 0 ? 'pending_retry' : 'synced',
                 partial: registerAuthSyncWarnings.length > 0,
@@ -24128,6 +24454,7 @@ app.post('/api/auth/login', async (req, res) => {
             activeSessions.delete(tokenHash);
             return res.status(502).json({ ok: false, error: 'Không thể lưu phiên đăng nhập Admin lên Supabase.' });
         }
+        setCachedAuth(tokenHash, { ok: true, session, user: { id: 'admin', username: 'admin', role: 'admin' } });
         logAuditEvent({
             req,
             action: 'AUTH_ADMIN_LOGIN_SUCCESS',
@@ -24388,6 +24715,22 @@ app.post('/api/auth/login', async (req, res) => {
     }
     activeSessions.set(tokenHash, session);
     persistedSessionHashes.add(tokenHash);
+    setCachedAuth(tokenHash, {
+        ok: true,
+        session,
+        user: {
+            id: user.id,
+            username: user.username,
+            role: 'user',
+            status: finalStatus,
+            assignedBotIds,
+            expiresAt: user.expiresAt,
+            isPermanent: Boolean(user.isPermanent),
+            planName: user.planName,
+            allowAccountChange: user.allowAccountChange !== false,
+            lockReason: user.lockReason || ''
+        }
+    });
 
     logAuditEvent({
         req,
@@ -24441,7 +24784,7 @@ app.post('/api/auth/logout', async (req, res) => {
             activeSessions.delete(h);
             invalidateAuthCache(h);
             modified = true;
-            if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+            if (supabaseAdapter && supabaseAdapter.isEnabled() && supabaseStorageReady) {
                 await supabaseAdapter.deleteSession(h);
             }
         }
@@ -24452,7 +24795,7 @@ app.post('/api/auth/logout', async (req, res) => {
             activeSessions.delete(h);
             invalidateAuthCache(h);
             modified = true;
-            if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+            if (supabaseAdapter && supabaseAdapter.isEnabled() && supabaseStorageReady) {
                 await supabaseAdapter.deleteSession(h);
             }
         }
@@ -26089,6 +26432,18 @@ async function detectMultiBotWorker(candidate, secretKey) {
     return null;
 }
 
+async function expandMultiBotTokens(tokens, secretKey) {
+    if (!Array.isArray(tokens) || !tokens.length) return { tokens: [], isMulti: false };
+    let isMulti = false;
+    const expanded = [];
+    const results = await Promise.all(tokens.map(async (t) => ({ t, m: await detectMultiBotWorker(t, secretKey) })));
+    for (const r of results) {
+        if (r.m && r.m.length) { expanded.push(...r.m); isMulti = true; }
+        else expanded.push(r.t);
+    }
+    return { tokens: expanded, isMulti };
+}
+
 app.post('/api/manager/bots', async (req, res) => {
     const session = getSessionUser(req);
     if (!session || session.role !== 'admin') {
@@ -26112,11 +26467,9 @@ app.post('/api/manager/bots', async (req, res) => {
             ? req.body.label.trim()
             : '';
 
-        let isMultiBotExpansion = false;
-        if (rawTokens.length === 1) {
-            const multi = await detectMultiBotWorker(rawTokens[0], req.body?.secretKey);
-            if (multi) { rawTokens = multi; isMultiBotExpansion = true; }
-        }
+        const expansion = await expandMultiBotTokens(rawTokens, req.body?.secretKey);
+        rawTokens = expansion.tokens;
+        let isMultiBotExpansion = expansion.isMulti;
 
         // If exactly 1 token, preserve 100% backward compatibility with single-bot flow
         if (rawTokens.length === 1) {
@@ -26293,7 +26646,9 @@ app.post('/api/manager/bots', async (req, res) => {
                 if (isMultiBotExpansion) {
                     const slotMatch = url.match(/\/(?:b|slot|bot\/)(\d)$/i);
                     const slotNum = slotMatch ? slotMatch[1] : (addedBots.length + 1);
-                    botLabel = requestedLabel ? `${requestedLabel} (Slot ${slotNum})` : `Bot ${id} (Slot ${slotNum})`;
+                    botLabel = requestedLabel
+                        ? (validUrls.length > 3 ? `${requestedLabel} #${id} (Slot ${slotNum})` : `${requestedLabel} (Slot ${slotNum})`)
+                        : `Bot ${id} (Slot ${slotNum})`;
                 }
                 const config = {
                     id,
@@ -26389,7 +26744,9 @@ app.post('/api/manager/bots', async (req, res) => {
                 ok: true,
                 multiBot: isMultiBotExpansion,
                 message: isMultiBotExpansion
-                    ? `Đã phát hiện Worker 3-in-1 và tự động thêm 3 bot độc lập (Slot 1, 2, 3)!`
+                    ? (addedBots.length > 3
+                        ? `Đã phát hiện các cụm Worker 3-in-1 và tự động thêm ${addedBots.length} bot độc lập!`
+                        : `Đã phát hiện Worker 3-in-1 và tự động thêm 3 bot độc lập (Slot 1, 2, 3)!`)
                     : responseMsg,
                 addedCount: addedBots.length,
                 skippedCount: skipped.length,
@@ -27501,7 +27858,10 @@ app.get('/api/manager/bots', async (req, res) => {
     const allUsers = loadUsers();
     if (session && session.role === 'user') {
         currentUserObj = allUsers.find(u => u.username.toLowerCase() === session.username.toLowerCase());
-        const userAssigned = (Array.isArray(currentUserObj?.assignedBotIds) ? currentUserObj.assignedBotIds : (session.assignedBotIds || [])).map(Number);
+        const userAssigned = Array.from(new Set([
+            ...(Array.isArray(currentUserObj?.assignedBotIds) ? currentUserObj.assignedBotIds : []),
+            ...(Array.isArray(session?.assignedBotIds) ? session.assignedBotIds : [])
+        ])).map(Number).filter(Number.isFinite);
         configs = BOT_CONFIG.filter(config => userAssigned.includes(Number(config.id)));
     }
 
@@ -28157,7 +28517,7 @@ app.post('/api/rewards/link4m/start', async (req, res) => {
     } catch (err) {
         console.error('[LINK4M SHORTLINK ERROR]', err.message);
         // Rollback attempt reservation so no daily quota slot is consumed on provider failure!
-        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        if (supabaseAdapter && supabaseAdapter.isEnabled() && supabaseStorageReady) {
             await supabaseAdapter.rollbackLink4mAttempt(effectiveAttemptId);
         } else {
             localLink4mAttempts.delete(effectiveAttemptId);
@@ -28171,7 +28531,7 @@ app.post('/api/rewards/link4m/start', async (req, res) => {
     // NEW-01 (Wave B1): persist URL rút gọn SAU khi tạo thành công (fail mềm —
     // reuse lần sau sẽ báo 409 trung thực thay vì trả sai URL). Không log URL.
     if (redirectUrl) {
-        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        if (supabaseAdapter && supabaseAdapter.isEnabled() && supabaseStorageReady) {
             try {
                 const saveUrlRes = await supabaseAdapter.setLink4mShortUrl(effectiveAttemptId, redirectUrl);
                 if (saveUrlRes !== true && !saveUrlRes?.ok) {
@@ -28260,7 +28620,7 @@ app.get('/api/rewards/link4m/return', async (req, res) => {
         const rewardHours = parseInt(attempt.reward_hours || attempt.rewardHours || registry.systemSettings?.link4mRewardHours || 12, 10);
         let newExpiresAtIso = '';
 
-        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        if (supabaseAdapter && supabaseAdapter.isEnabled() && supabaseStorageReady) {
             const claimRes = await supabaseAdapter.claimLink4mReward(attemptId, expectedHash, returnUsername, rewardHours, 'return_verified_nonce');
             if (!claimRes.ok && !claimRes.replayed) {
                 return res.redirect('/?reward=error&message=' + encodeURIComponent(claimRes.message || claimRes.error || 'Không thể cộng giờ thưởng.'));
@@ -28471,7 +28831,7 @@ app.all(['/api/rewards/link4m/webhook', '/api/rewards/link4m/postback'], async (
     }
 
     if (!syncSuccess) {
-        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        if (supabaseAdapter && supabaseAdapter.isEnabled() && supabaseStorageReady) {
             await supabaseAdapter.updateLink4mSyncStatus(attemptId, 'pending_sync');
         } else {
             attempt.syncStatus = 'pending_sync';
@@ -28505,7 +28865,7 @@ app.all(['/api/rewards/link4m/webhook', '/api/rewards/link4m/postback'], async (
 setInterval(async () => {
     try {
         let hasPending = false;
-        if (supabaseAdapter && supabaseAdapter.isEnabled()) {
+        if (supabaseAdapter && supabaseAdapter.isEnabled() && supabaseStorageReady) {
             const params = new URLSearchParams({ sync_status: 'eq.pending_sync', limit: '10' });
             const r = await fetch(`${supabaseAdapter.url}/rest/v1/manager_link4m_attempts?${params.toString()}`, {
                 headers: supabaseAdapter.getHeaders(),
@@ -28789,6 +29149,8 @@ for (const [managerSuffix, childPath] of Object.entries(managerPostPathMap)) {
                     ownershipRevoked: resetResult.ownershipRevoked === true,
                     authSynced: resetResult.authSynced === true,
                     resetId: resetResult.resetId,
+                    resetTransactionId: resetResult.resetTransactionId || resetResult.resetId,
+                    txId: resetResult.resetTransactionId || resetResult.resetId,
                     ...(resetResult.error ? { error: resetResult.error } : {}),
                     ...(resetResult.warning ? { warning: resetResult.warning } : {}),
                     ...(resetResult.authSyncError ? { authSyncError: resetResult.authSyncError } : {}),
@@ -28800,23 +29162,29 @@ for (const [managerSuffix, childPath] of Object.entries(managerPostPathMap)) {
                 'X-Manager-Allow-Account-Change': canChangeMinecraftAccount(perm.user) ? '1' : '0',
                 'X-Manager-Role': String(perm.user?.role || 'user')
             };
+            const actionTimeout = (managerSuffix === '/account' || managerSuffix === '/reset-customer') ? 20000 : undefined;
             result = await runChildAction(
                 req.params.id,
                 childPath,
                 forwardBody,
                 extraHeaders,
                 'POST',
-                {}
+                actionTimeout ? { timeoutMs: actionTimeout } : {}
             );
         }
 
         const stateChangeSuffixes = ['/start', '/stop', '/restart', '/account', '/settings', '/auto-chat', '/bot-schedules', '/reset-customer', '/proxy'];
         if (stateChangeSuffixes.includes(managerSuffix)) {
-            summaryCache.delete(botId);
-            if (targetBot) {
-                try { await refreshSummary(targetBot, true); } catch (_) {}
+            if (result.ok) {
+                summaryCache.delete(botId);
+                if (targetBot) {
+                    try { await refreshSummary(targetBot, true); } catch (_) {}
+                }
+            } else {
+                if (targetBot) {
+                    void refreshSummary(targetBot, false).catch(() => {});
+                }
             }
-
         }
 
         const auditedActions = {
@@ -29050,13 +29418,42 @@ app.post('/api/manager/all/send', async (req, res) => {
     }
     const filterTag = req.body?.tag ? String(req.body.tag).trim().toLowerCase().replace(/^#/, '') : null;
     if (filterTag) {
+        const allUsers = loadUsers();
+        const rentedBotIdSet = new Set();
+        allUsers.forEach(u => {
+            if (Array.isArray(u.assignedBotIds)) {
+                u.assignedBotIds.forEach(id => {
+                    const num = Number(id);
+                    if (Number.isFinite(num)) rentedBotIdSet.add(num);
+                });
+            }
+        });
+        const rentalDisabledSet = new Set((registry.botRentalDisabled || []).map(Number));
+
         targetBots = targetBots.filter(b => {
+            const bId = Number(b.id);
+            const isRented = rentedBotIdSet.has(bId);
+            const isRentable = !rentalDisabledSet.has(bId) && b.rentable !== false;
+
+            if (filterTag === 'sys:rentable' || filterTag === 'rentable' || filterTag === 'cho-thue') {
+                return isRentable && !isRented;
+            }
+            if (filterTag === 'sys:rented' || filterTag === 'rented' || filterTag === 'dang-thue') {
+                return isRented;
+            }
+            if (filterTag === 'sys:not-rentable' || filterTag === 'not-rentable' || filterTag === 'khong-cho-thue') {
+                return !isRentable;
+            }
             const bTags = (registry.botTags && registry.botTags[b.id]) || [];
-            return bTags.includes(filterTag);
+            return bTags.map(t => String(t).toLowerCase().replace(/^#/, '')).includes(filterTag);
         });
     }
     if (targetBots.length === 0) {
-        return res.status(400).json({ error: filterTag ? `Không tìm thấy bot nào mang tag #${filterTag}.` : 'Không có bot nào trong danh sách.' });
+        let tagMsg = `tag #${filterTag}`;
+        if (filterTag === 'sys:rentable' || filterTag === 'rentable' || filterTag === 'cho-thue') tagMsg = 'nhóm "Cho thuê" (trống)';
+        else if (filterTag === 'sys:rented' || filterTag === 'rented' || filterTag === 'dang-thue') tagMsg = 'nhóm "Đang được thuê"';
+        else if (filterTag === 'sys:not-rentable' || filterTag === 'not-rentable' || filterTag === 'khong-cho-thue') tagMsg = 'nhóm "Không cho thuê"';
+        return res.status(400).json({ error: filterTag ? `Không tìm thấy bot nào thuộc ${tagMsg}.` : 'Không có bot nào trong danh sách.' });
     }
 
     const results = await Promise.all(targetBots.map(async bot => {
@@ -29089,13 +29486,42 @@ app.post('/api/manager/all/settings', async (req, res) => {
     let targetBots = BOT_CONFIG;
     const filterTag = req.body?.tag ? String(req.body.tag).trim().toLowerCase().replace(/^#/, '') : null;
     if (filterTag) {
+        const allUsers = loadUsers();
+        const rentedBotIdSet = new Set();
+        allUsers.forEach(u => {
+            if (Array.isArray(u.assignedBotIds)) {
+                u.assignedBotIds.forEach(id => {
+                    const num = Number(id);
+                    if (Number.isFinite(num)) rentedBotIdSet.add(num);
+                });
+            }
+        });
+        const rentalDisabledSet = new Set((registry.botRentalDisabled || []).map(Number));
+
         targetBots = targetBots.filter(b => {
+            const bId = Number(b.id);
+            const isRented = rentedBotIdSet.has(bId);
+            const isRentable = !rentalDisabledSet.has(bId) && b.rentable !== false;
+
+            if (filterTag === 'sys:rentable' || filterTag === 'rentable' || filterTag === 'cho-thue') {
+                return isRentable && !isRented;
+            }
+            if (filterTag === 'sys:rented' || filterTag === 'rented' || filterTag === 'dang-thue') {
+                return isRented;
+            }
+            if (filterTag === 'sys:not-rentable' || filterTag === 'not-rentable' || filterTag === 'khong-cho-thue') {
+                return !isRentable;
+            }
             const bTags = (registry.botTags && registry.botTags[b.id]) || [];
-            return bTags.includes(filterTag);
+            return bTags.map(t => String(t).toLowerCase().replace(/^#/, '')).includes(filterTag);
         });
     }
     if (targetBots.length === 0) {
-        return res.status(400).json({ error: filterTag ? `Không tìm thấy bot nào mang tag #${filterTag}.` : 'Không có bot nào trong danh sách.' });
+        let tagMsg = `tag #${filterTag}`;
+        if (filterTag === 'sys:rentable' || filterTag === 'rentable' || filterTag === 'cho-thue') tagMsg = 'nhóm "Cho thuê" (trống)';
+        else if (filterTag === 'sys:rented' || filterTag === 'rented' || filterTag === 'dang-thue') tagMsg = 'nhóm "Đang được thuê"';
+        else if (filterTag === 'sys:not-rentable' || filterTag === 'not-rentable' || filterTag === 'khong-cho-thue') tagMsg = 'nhóm "Không cho thuê"';
+        return res.status(400).json({ error: filterTag ? `Không tìm thấy bot nào thuộc ${tagMsg}.` : 'Không có bot nào trong danh sách.' });
     }
 
     const results = await Promise.all(targetBots.map(async bot => {
@@ -29455,6 +29881,18 @@ function handleManagerRenewExecution(req, res) {
                     (keyCommit.conflict ? 'mã Key vừa được sử dụng bởi một giao dịch khác. ' : 'không ghi được lượt dùng Key. ') +
                     'Vui lòng thử lại!'
             });
+        }
+        // Cập nhật ngay auth cache và activeSessions để khách thuê thấy bot ngay lập tức không cần đăng nhập lại
+        invalidateAuthCacheForUser(targetUser.username);
+        for (const [hash, sess] of activeSessions.entries()) {
+            if (sess.username?.toLowerCase() === targetUser.username.toLowerCase()) {
+                sess.assignedBotIds = targetUser.assignedBotIds;
+                sess.expiresAtRental = targetUser.expiresAt;
+                sess.isExpired = false;
+                sess.status = 'active';
+                sess.planName = targetUser.planName;
+                activeSessions.set(hash, sess);
+            }
         }
         // BUG-29: Key + hạn thuê ĐÃ commit; auth-sync có retry 60s → trả ok:true + warnings.
         const keyRenewSyncDetailed = await syncAuthToAllBotsDetailed(true);
