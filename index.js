@@ -19,6 +19,7 @@ try {
 
 function runGarbageCollection() {
     try {
+        if (typeof pruneStaleManagerMemory === 'function') pruneStaleManagerMemory();
         if (typeof global.gc === 'function') {
             global.gc();
             return true;
@@ -6334,7 +6335,7 @@ setInterval(async () => {
             if (!bot.url) continue;
             const summary = await getBotSummary(bot, { force: false }).catch(() => null);
             // Tự động phục hồi Bot bị Offline / Kicked (Đã tắt theo cấu hình FLEET_AUTO_HEAL: false)
-            if (MANAGER_CONFIG.FLEET_AUTO_HEAL === true && summary.available && (summary.status === 'offline' || summary.status === 'kicked')) {
+            if (MANAGER_CONFIG.FLEET_AUTO_HEAL === true && summary && summary.available && (summary.status === 'offline' || summary.status === 'kicked')) {
                 if (summary.manuallyStopped) continue;
                 const state = botWebhookState.get(bot.id || bot.url) || {};
                 const lastRecovery = state.lastAutoRecoveryAt || 0;
@@ -7393,7 +7394,7 @@ async function fetchChild(botConfig, path, options = {}) {
         try { currentOrigin = new URL(cleanBaseUrl).origin; } catch (_) { currentOrigin = ''; }
         const secretAllowed = (nextUrl) => nextUrl.origin === currentOrigin;
         let method = options.method || 'GET';
-        let payloadBody = options.body !== undefined ? JSON.stringify(options.body) : undefined;
+        let payloadBody = options.body !== undefined ? (typeof options.body === 'string' ? options.body : JSON.stringify(options.body)) : undefined;
         let response = null;
 
         let currentSafety = (typeof safety !== 'undefined') ? safety : null;
@@ -7641,6 +7642,7 @@ async function fetchBotSummary(botConfig) {
     }
 
     try {
+        const cached = summaryCache.get(botConfig.id)?.data;
         const lastRev = botLastRevMap.get(botConfig.id);
         const snapshotPath = lastRev ? `/api/snapshot?rev=${encodeURIComponent(lastRev)}` : '/api/snapshot';
         const snapshotRes = await fetchChild(botConfig, snapshotPath, {
@@ -7648,7 +7650,6 @@ async function fetchBotSummary(botConfig) {
             headers: lastRev ? { 'If-None-Match': `"${lastRev}"` } : {}
         }).catch(() => null);
         if (snapshotRes && snapshotRes.ok && snapshotRes.data?.unchanged) {
-            const cached = summaryCache.get(botConfig.id)?.data;
             if (cached) return cached;
         }
         if (snapshotRes && snapshotRes.ok && snapshotRes.data?.rev) {
@@ -7782,6 +7783,7 @@ async function fetchBotSummary(botConfig) {
                         settings: null,
                         totemCount: 0,
                         foodCount: 0,
+                        manuallyStopped: Boolean(cached?.manuallyStopped ?? (hData.botStatus === 'offline' || hData.online === 0 || true)),
                         memory: null,
                         rssMb: 0,
                         heapMb: 0,
@@ -15709,6 +15711,7 @@ function botCardHtml(bot) {
   if (!bot) return '';
   const [color, label, errorType] = statusMeta(bot.status, bot.available, !!bot.manuallyStopped, bot);
   const username = bot.username || 'Chưa đặt';
+  const isOffline = !bot.available || ['offline', 'kicked', 'error', 'disconnected', 'stopped'].includes(String(bot.status || '').toLowerCase());
   const pingRaw = bot.ping;
 
   const pingVal =
@@ -15721,7 +15724,7 @@ function botCardHtml(bot) {
   const ping =
       Number.isFinite(pingVal) && pingVal >= 0
           ? pingVal + ' ms'
-          : '--';
+          : (isOffline ? '-- ms (Tắt)' : '--');
 
   const tpsRaw = bot.tps ?? bot.serverTps;
 
@@ -15736,7 +15739,7 @@ function botCardHtml(bot) {
 
   const tpsText = hasTps
       ? tpsVal.toFixed(1) + ' TPS'
-      : '-- TPS';
+      : (isOffline ? '-- TPS (Tắt)' : '-- TPS');
 
   const tpsColor = !hasTps
       ? 'var(--muted)'
@@ -15769,14 +15772,13 @@ function botCardHtml(bot) {
 
   const pingSpark = generateSparklineSvg(bot.history?.ping, '#38bdf8');
   const ramSpark = generateSparklineSvg(bot.history?.ram, ramColor);
-  const isOffline = !bot.available || ['offline', 'kicked', 'error', 'disconnected', 'stopped'].includes(String(bot.status || '').toLowerCase());
   const isAdmin = Boolean(currentUser && currentUser.role === 'admin');
   const sec = Number(bot.uptimeSeconds || 0);
   const uptimeText = sec > 0 ? (Math.floor(sec / 3600) + 'h ' + Math.floor((sec % 3600) / 60) + 'm') : '--';
 
   // HP Calculation & Bar
   const hpVal = Number.isFinite(Number(bot.health)) ? Number(bot.health) : null;
-  const hpText = hpVal !== null ? (Math.round(hpVal) + ' / 20 HP') : '--';
+  const hpText = hpVal !== null ? (Math.round(hpVal) + ' / 20 HP') : (isOffline ? '-- HP (Tắt)' : '--');
   const hpPercent = hpVal !== null ? Math.max(0, Math.min(100, Math.round((hpVal / 20) * 100))) : 0;
   const hpColor = hpVal === null ? '#94a3b8' : (hpVal <= 6 ? 'var(--red)' : hpVal <= 14 ? 'var(--yellow)' : 'var(--green)');
 
@@ -15816,7 +15818,9 @@ function botCardHtml(bot) {
 
   let errorBannerHtml = '';
   if (!bot.available) {
-    if (errorType === 'secret_mismatch') {
+    if (errorType === 'stopped') {
+      errorBannerHtml = '';
+    } else if (errorType === 'secret_mismatch') {
       errorBannerHtml = '<div class="bot-error-action-banner warning">' +
         '<div class="bot-error-text">⚠️ <strong>Lệch Secret Key (409):</strong> Worker từ chối lệnh do khóa bí mật không khớp với Manager.</div>' +
         (isAdmin ? '<button type="button" class="bot-action-chip warning" onclick="event.stopPropagation(); openEditSecretModal(' + id + ')" title="Cập nhật Secret Key cho Bot #' + idStr + '">🔑 Sửa Secret Key</button>' : '') +
@@ -18849,8 +18853,13 @@ function filterBots() {
           const temp = document.createElement('div');
           temp.innerHTML = newHtml;
           const fresh = temp.firstElementChild;
-          if (fresh && card.innerHTML !== fresh.innerHTML) {
-            card.innerHTML = fresh.innerHTML;
+          if (fresh) {
+            if (card.innerHTML !== fresh.innerHTML) {
+              card.innerHTML = fresh.innerHTML;
+            }
+            if (card.className !== fresh.className) {
+              card.className = fresh.className;
+            }
           }
         } catch(e){}
       }
@@ -19790,7 +19799,7 @@ function detailStatusHtml() {
       pingEl.textContent =
           Number.isFinite(pingVal) && pingVal >= 0
               ? pingVal + ' ms'
-              : '--';
+              : ((!detailBot.available || detailBot.status === 'offline') ? '-- ms (Bot đang tắt)' : '--');
   }
 
   const tpsEl = document.getElementById('detailTps');
@@ -19809,7 +19818,7 @@ function detailStatusHtml() {
 
       tpsEl.textContent = hasTps
           ? tpsVal.toFixed(1)
-          : '--';
+          : ((!detailBot.available || detailBot.status === 'offline') ? '-- (Bot đang tắt)' : '--');
 
       tpsEl.style.color = !hasTps
           ? 'var(--muted)'
@@ -20573,6 +20582,9 @@ async function refreshDetail(force=false) {
     if(snapshot && snapshot.unchanged){
       uptimeSyncAt=Date.now();
       updateDetailUptime();
+      await loadDetailLogs(force, requestGeneration, requestBotId);
+      if(!isCurrentRequest()) return;
+      await loadDetailChat(force, requestGeneration, requestBotId);
       return;
     }
 
@@ -20609,6 +20621,7 @@ async function refreshDetail(force=false) {
       const bIdx = bots.findIndex(b => Number(b.id) === Number(requestBotId));
       if (bIdx !== -1) {
         bots[bIdx] = { ...bots[bIdx], ...detailBot };
+        if (typeof renderHome === 'function') renderHome();
       }
     }
     uptimeSyncAt=Date.now();
@@ -20646,7 +20659,10 @@ function nearBottom(box){return box.scrollHeight-box.scrollTop-box.clientHeight<
 
 async function loadDetailLogs(force=false, expectedGeneration=detailRefreshGeneration, expectedBotId=selectedBotId) {
   if(eventLoading) return;
-  if(!force && detailBot && lastEventRevision===Number(detailBot.logRevision)) return;
+  const currentBotRev = (detailBot && detailBot.logRevision !== undefined && detailBot.logRevision !== null)
+    ? Number(detailBot.logRevision)
+    : null;
+  if(!force && currentBotRev !== null && Number.isFinite(currentBotRev) && lastEventRevision === currentBotRev) return;
   eventLoading=true;
   try {
     const data=await detailGet('/logs');
@@ -20688,14 +20704,19 @@ async function loadDetailLogs(force=false, expectedGeneration=detailRefreshGener
     if (box && box.innerHTML !== newHtml) {
       box.innerHTML = newHtml;
     }
-    lastEventRevision=Number(data.revision||0);
+    lastEventRevision = (currentBotRev !== null && Number.isFinite(currentBotRev))
+      ? currentBotRev
+      : Number(data.revision || 0);
     if(keep && box) box.scrollTop=box.scrollHeight;
   } finally {eventLoading=false;}
 }
 
 async function loadDetailChat(force=false, expectedGeneration=detailRefreshGeneration, expectedBotId=selectedBotId) {
   if(chatLoading) return;
-  if(!force && lastChatRevision>=0 && detailBot && lastChatRevision===Number(detailBot.chatLogRevision)) return;
+  const currentChatRev = (detailBot && detailBot.chatLogRevision !== undefined && detailBot.chatLogRevision !== null)
+    ? Number(detailBot.chatLogRevision)
+    : null;
+  if(!force && currentChatRev !== null && Number.isFinite(currentChatRev) && lastChatRevision >= 0 && lastChatRevision === currentChatRev) return;
   chatLoading=true;
   try {
     const data=await detailGet('/chat-logs');
@@ -20762,7 +20783,9 @@ async function loadDetailChat(force=false, expectedGeneration=detailRefreshGener
     if (box && box.innerHTML !== newHtml) {
       box.innerHTML = newHtml;
     }
-    lastChatRevision=Number(data.revision||0);
+    lastChatRevision = (currentChatRev !== null && Number.isFinite(currentChatRev))
+      ? currentChatRev
+      : Number(data.revision || 0);
     if(keep && box) box.scrollTop=box.scrollHeight;
   } finally {chatLoading=false;}
 }
@@ -20771,6 +20794,7 @@ async function loadDetailPositionHistory(force=false, expectedGeneration=detailR
   const box=document.getElementById('detailPositionHistory');
   if(!box) return;
   if(!force && Date.now()-lastPositionHistoryFetchedAt<15000) return;
+  lastPositionHistoryFetchedAt=Date.now();
   try {
     const data=await detailGet('/position-logs?limit=10');
     if(!currentUser || (expectedGeneration!==null && (expectedGeneration!==detailRefreshGeneration || expectedBotId!==selectedBotId))) return;
@@ -28155,6 +28179,19 @@ app.delete(['/api/manager/bot/:id', '/api/manager/bots/:id'], async (req, res) =
 
     summaryCache.delete(id);
     summaryRefreshInFlight.delete(id);
+    summaryRequestSeq.delete(id);
+    summaryLastAppliedSeq.delete(id);
+    botLastRevMap.delete(id);
+    botMetricsHistory.delete(id);
+    botWebhookState.delete(id);
+    if (removed && removed.url) botWebhookState.delete(removed.url);
+    lastRecordedBotPositions.delete(id);
+    lastPositionWarnLog.delete(id);
+    lastAuthSyncSignatures.delete(id);
+    lastAuthConfirmedAt.delete(id);
+    lastAuthSyncErrors.delete(id);
+    lastAuthSyncStatusCodes.delete(id);
+    lastSecretNegotiationAt.delete(String(id));
 
     if (registry.botIdMap) {
         if (removed.url) delete registry.botIdMap[removed.url];
@@ -28538,15 +28575,20 @@ for (const [name, childPath] of Object.entries(detailGetRoutes)) {
             if (result.ok && name === 'snapshot' && result.data) {
                 try {
                     const botId = Number(config.id);
-                    const seq = (summaryRequestSeq.get(botId) || 0) + 1;
-                    summaryRequestSeq.set(botId, seq);
-                    const summary = normalizeSnapshotToSummary(config, result.data);
-                    const lastApplied = summaryLastAppliedSeq.get(botId) || 0;
-                    if (seq >= lastApplied) {
-                        summaryLastAppliedSeq.set(botId, seq);
-                        summaryCache.set(botId, { at: Date.now(), data: summary });
+                    if (result.data.unchanged) {
+                        const existingCached = summaryCache.get(botId);
+                        if (existingCached) existingCached.at = Date.now();
+                    } else if (result.data.bot) {
+                        const seq = (summaryRequestSeq.get(botId) || 0) + 1;
+                        summaryRequestSeq.set(botId, seq);
+                        const summary = normalizeSnapshotToSummary(config, result.data);
+                        const lastApplied = summaryLastAppliedSeq.get(botId) || 0;
+                        if (seq >= lastApplied) {
+                            summaryLastAppliedSeq.set(botId, seq);
+                            summaryCache.set(botId, { at: Date.now(), data: summary });
+                        }
+                        recordBotMetrics(botId, summary);
                     }
-                    recordBotMetrics(botId, summary);
                 } catch (_) {}
             }
             if (result.data && perm.user?.role !== 'admin') {
@@ -29308,7 +29350,10 @@ app.all(['/api/rewards/link4m/webhook', '/api/rewards/link4m/postback'], async (
 });
 
 // Periodic background watchdog to retry pending bot syncs without ever duplicating rewards
+let link4mSyncWatchdogInFlight = false;
 setInterval(async () => {
+    if (link4mSyncWatchdogInFlight) return;
+    link4mSyncWatchdogInFlight = true;
     try {
         let hasPending = false;
         if (supabaseAdapter && supabaseAdapter.isEnabled() && supabaseStorageReady) {
@@ -29339,6 +29384,9 @@ setInterval(async () => {
             }
         }
     } catch (_) {}
+    finally {
+        link4mSyncWatchdogInFlight = false;
+    }
 }, 60000);
 
 // System Settings API (Quản trị viên bật/tắt tặng ngày dùng thử, chỉnh số ngày, v.v.)
@@ -30946,9 +30994,35 @@ listenHttpServer(app, HTTP_PORT, MANAGER_PLATFORM, (serverInstance, activePort) 
         void reencryptCredentialsOnKeyRotation().catch(e => console.error('[KEY-ROTATION] Error:', e.message));
     }
 
-    // Memory Guard: Tự động chạy GC khi RAM vượt quá 220MB hoặc định kỳ mỗi 15 phút (Render Cloud Protection)
+function pruneStaleManagerMemory() {
+    try {
+        const now = Date.now();
+        // 1. Dọn dẹp cache DNS đã hết hạn (TTL 30s)
+        if (typeof safeHostDnsCache !== 'undefined' && safeHostDnsCache.size > 0) {
+            for (const [k, v] of safeHostDnsCache.entries()) {
+                if (now - (v.timestamp || 0) >= 30000) safeHostDnsCache.delete(k);
+            }
+        }
+        // 2. Dọn dẹp cache xác thực phiên hết hạn
+        if (typeof authVerificationCache !== 'undefined' && authVerificationCache.size > 0) {
+            for (const [k, v] of authVerificationCache.entries()) {
+                if (now > (v.expiresAt || 0)) authVerificationCache.delete(k);
+            }
+        }
+        // 3. Dọn dẹp metrics history của bot không còn tồn tại
+        if (typeof botMetricsHistory !== 'undefined' && typeof BOT_CONFIG !== 'undefined' && Array.isArray(BOT_CONFIG)) {
+            const activeIds = new Set(BOT_CONFIG.map(b => b.id));
+            for (const id of botMetricsHistory.keys()) {
+                if (!activeIds.has(id)) botMetricsHistory.delete(id);
+            }
+        }
+    } catch (_) {}
+}
+
+    // Memory Guard: Tự động dọn dẹp bộ nhớ đệm và chạy GC khi RAM vượt quá 220MB (Render Cloud Protection)
     const memoryGuardTimer = setInterval(() => {
         try {
+            pruneStaleManagerMemory();
             const mem = process.memoryUsage();
             const rssMb = Math.round(mem.rss / (1024 * 1024));
             if (rssMb > 220) {
