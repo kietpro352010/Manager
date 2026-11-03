@@ -159,7 +159,7 @@ function getAdminPassword() {
     }
     const envPass = process.env.ADMIN_PASSWORD || process.env.MANAGER_ADMIN_PASSWORD || process.env.MANAGER_PASSWORD || MANAGER_CONFIG.ADMIN_PASSWORD;
     if (envPass) return String(envPass).trim();
-    return '';
+    return 'admin123';
 }
 
 function normalizeManagerRole(role) {
@@ -855,7 +855,7 @@ const SUPABASE_REQUIRED_TABLES = Object.freeze([
     'manager_outbox_queue', 'manager_pending_allocations', 'manager_migration_entitlement_undo'
 ]);
 
-const SUPABASE_SCHEMA_SQL = "-- KingMC Bot Manager storage contract, aligned with manager.js and bot.js.\n-- Safe to run more than once. Keeps legacy columns/rows and adds the current API schema.\n--\n-- SCHEMA VERSION: 2026-10-30-v11.9 (Audit V4 Master Directive)\n--   - Link4M RPC chỉ chặn user 'disabled'; user 'expired' ĐƯỢC vượt link để hồi sinh.\n--   - claim_manager_link4m_reward revive 'expired' -> 'active' ATOMIC (cùng UPDATE với\n--     expires_at), chỉ chạy sau khi attempt đã được xác minh (token/status/expiry).\n--   - Không tự mở khóa 'disabled' (chỉ admin mới có quyền).\n-- ROLLBACK: toàn bộ hàm dùng CREATE OR REPLACE — chạy lại nguyên văn bản schema NGAY TRƯỚC\n--   (phiên bản 2026-10-28) là quay về hành vi cũ, không mất dữ liệu. Nếu chỉ muốn rollback\n--   riêng BUG-09: khôi phục guard chặn trạng thái khác active ở cả hai RPC và bỏ dòng\n--   `status = CASE WHEN v_user.status = 'expired' ...` trong UPDATE manager_users của claim.\n--\nBEGIN;\n\nCREATE TABLE IF NOT EXISTS public.manager_users (\n  id text,\n  username text PRIMARY KEY,\n  password text,\n  password_hash text,\n  role text NOT NULL DEFAULT 'user',\n  status text NOT NULL DEFAULT 'active',\n  assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  expires_at timestamptz,\n  plan_name text NOT NULL DEFAULT 'Gói mặc định',\n  bot_aliases jsonb NOT NULL DEFAULT '{}'::jsonb,\n  allow_account_change boolean NOT NULL DEFAULT true,\n  lock_reason text NOT NULL DEFAULT '',\n  note text NOT NULL DEFAULT '',\n  bot_count integer NOT NULL DEFAULT 1,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS username text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS password text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS password_hash text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS expires_at timestamptz;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS plan_name text NOT NULL DEFAULT 'Gói mặc định';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS bot_aliases jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS allow_account_change boolean NOT NULL DEFAULT true;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS lock_reason text NOT NULL DEFAULT '';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS note text NOT NULL DEFAULT '';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS is_permanent boolean NOT NULL DEFAULT false;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS bot_count integer NOT NULL DEFAULT 1;\nUPDATE public.manager_users SET bot_count = GREATEST(bot_count, jsonb_array_length(assigned_bot_ids)) WHERE jsonb_typeof(assigned_bot_ids) = 'array' AND jsonb_array_length(assigned_bot_ids) > bot_count;\nCREATE TABLE IF NOT EXISTS public.manager_migration_entitlement_undo (\n  migration_id text NOT NULL,\n  entity_type text NOT NULL CHECK (entity_type IN ('user', 'key')),\n  entity_key text NOT NULL,\n  old_is_permanent boolean NOT NULL,\n  new_is_permanent boolean NOT NULL,\n  captured_at timestamptz NOT NULL DEFAULT now(),\n  rolled_back_at timestamptz,\n  PRIMARY KEY (migration_id, entity_type, entity_key)\n);\nALTER TABLE public.manager_migration_entitlement_undo ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_migration_entitlement_undo FROM PUBLIC, anon, authenticated;\nGRANT ALL ON TABLE public.manager_migration_entitlement_undo TO service_role;\nINSERT INTO public.manager_migration_entitlement_undo (migration_id, entity_type, entity_key, old_is_permanent, new_is_permanent) SELECT '2026-10-30-v11.9', 'user', username, is_permanent, true FROM public.manager_users WHERE is_permanent = false AND expires_at IS NULL AND (plan_name ILIKE '%vĩnh viễn%' OR plan_name ILIKE '%permanent%' OR plan_name ILIKE '%lifetime%') AND status = 'active' AND role <> 'admin' ON CONFLICT (migration_id, entity_type, entity_key) DO UPDATE SET old_is_permanent = EXCLUDED.old_is_permanent, new_is_permanent = EXCLUDED.new_is_permanent, captured_at = now();\nUPDATE public.manager_users SET is_permanent = true, updated_at = now() WHERE is_permanent = false AND expires_at IS NULL AND (plan_name ILIKE '%vĩnh viễn%' OR plan_name ILIKE '%permanent%' OR plan_name ILIKE '%lifetime%') AND status = 'active' AND role <> 'admin';\nALTER TABLE public.manager_users ALTER COLUMN password_hash DROP NOT NULL;\nUPDATE public.manager_users SET id = 'usr_' || username WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.manager_users SET password = password_hash WHERE (password IS NULL OR password = '') AND password_hash IS NOT NULL;\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_users_id_unique ON public.manager_users(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_users_username_unique ON public.manager_users(username);\n\nCREATE TABLE IF NOT EXISTS public.manager_keys (\n  id text PRIMARY KEY,\n  code text,\n  key_code text,\n  days integer NOT NULL DEFAULT 1,\n  duration_days integer NOT NULL DEFAULT 0,\n  duration_ms bigint NOT NULL DEFAULT 0,\n  plan_name text NOT NULL DEFAULT 'Gói mặc định',\n  bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  bot_count integer NOT NULL DEFAULT 1,\n  used boolean NOT NULL DEFAULT false,\n  status text NOT NULL DEFAULT 'unused',\n  allow_account_change boolean NOT NULL DEFAULT true,\n  used_by text,\n  used_at timestamptz,\n  max_uses integer NOT NULL DEFAULT 1,\n  used_count integer NOT NULL DEFAULT 0,\n  used_users jsonb NOT NULL DEFAULT '[]'::jsonb,\n  expires_at timestamptz,\n  note text,\n  created_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS code text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS key_code text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS days integer NOT NULL DEFAULT 1;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS duration_days integer NOT NULL DEFAULT 0;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS duration_ms bigint NOT NULL DEFAULT 0;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS role text DEFAULT 'user';\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS plan_name text NOT NULL DEFAULT 'Gói mặc định';\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS bot_count integer NOT NULL DEFAULT 1;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used boolean NOT NULL DEFAULT false;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'unused';\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS allow_account_change boolean NOT NULL DEFAULT true;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_by text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_at timestamptz;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS max_uses integer NOT NULL DEFAULT 1;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_count integer NOT NULL DEFAULT 0;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_users jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS expires_at timestamptz;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS note text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS is_permanent boolean NOT NULL DEFAULT false;\nUPDATE public.manager_keys SET is_permanent = true WHERE days = -1 OR duration_days = -1;\nUPDATE public.manager_keys SET code = key_code WHERE code IS NULL OR code = '';\nUPDATE public.manager_keys SET key_code = code WHERE key_code IS NULL OR key_code = '';\nUPDATE public.manager_keys SET id = 'key_' || code WHERE (id IS NULL OR id = '') AND code IS NOT NULL;\nUPDATE public.manager_keys SET days = duration_days WHERE duration_days > 0 AND (days IS NULL OR days = 1);\nUPDATE public.manager_keys SET bot_ids = assigned_bot_ids WHERE bot_ids = '[]'::jsonb AND assigned_bot_ids <> '[]'::jsonb;\nUPDATE public.manager_keys SET used = (lower(status) IN ('used','active','redeemed')) WHERE status IS NOT NULL AND used = false;\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_keys_code_unique ON public.manager_keys(code);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_keys_id_unique ON public.manager_keys(id);\n\nCREATE TABLE IF NOT EXISTS public.bot_registry (\n  id text PRIMARY KEY,\n  data jsonb NOT NULL DEFAULT '{}'::jsonb,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\n-- Earlier versions stored one bot per row with numeric ids. Convert the id type\n-- without removing those rows, then create the singleton registry document.\nDO $$\nBEGIN\n  IF EXISTS (\n    SELECT 1 FROM information_schema.columns\n    WHERE table_schema='public' AND table_name='bot_registry'\n      AND column_name='id' AND data_type <> 'text'\n  ) THEN\n    ALTER TABLE public.bot_registry ALTER COLUMN id TYPE text USING id::text;\n  END IF;\nEND $$;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS data jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS url text;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS label text DEFAULT '';\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS sort_order integer DEFAULT 0;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS admin_password text DEFAULT '';\nDO $$\nDECLARE\n  legacy_bots jsonb;\n  legacy_id_map jsonb;\n  legacy_order jsonb;\n  legacy_admin text;\nBEGIN\n  IF NOT EXISTS (SELECT 1 FROM public.bot_registry WHERE id='default') THEN\n    SELECT COALESCE(jsonb_agg(jsonb_build_object('label', COALESCE(label,''), 'url', url) ORDER BY sort_order, id), '[]'::jsonb),\n           COALESCE(jsonb_object_agg(url, id), '{}'::jsonb),\n           COALESCE(jsonb_agg(url ORDER BY sort_order, id), '[]'::jsonb),\n           COALESCE(max(admin_password), '')\n      INTO legacy_bots, legacy_id_map, legacy_order, legacy_admin\n      FROM public.bot_registry\n      WHERE id <> 'default' AND url IS NOT NULL AND btrim(url) <> '';\n    INSERT INTO public.bot_registry(id, data, updated_at, url, label, sort_order, admin_password)\n      VALUES ('default', jsonb_build_object(\n        'dynamicBots', legacy_bots, 'botIdMap', legacy_id_map,\n        'orderUrls', legacy_order, 'adminPassword', legacy_admin,\n        'disabledEnvUrls', '[]'::jsonb, 'disabledEnvIds', '[]'::jsonb,\n        'overrides', '[]'::jsonb, 'order', '[]'::jsonb,\n        'botAliases', '{}'::jsonb, 'botTags', '{}'::jsonb,\n        'systemSettings', '{}'::jsonb, 'lastBotId', 0\n      ), now(), '', 'KingMC Registry', -1, legacy_admin) ON CONFLICT (id) DO NOTHING;\n  END IF;\nEND $$;\n\nCREATE TABLE IF NOT EXISTS public.manager_sessions (\n  token_hash text PRIMARY KEY,\n  user_id text NOT NULL DEFAULT '',\n  username text NOT NULL,\n  role text NOT NULL DEFAULT 'user',\n  assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  expires_at bigint NOT NULL DEFAULT 0,\n  plan_name text NOT NULL DEFAULT 'Gói thường',\n  allow_account_change boolean NOT NULL DEFAULT true,\n  status text NOT NULL DEFAULT 'active',\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS user_id text NOT NULL DEFAULT '';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS token_hash text;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS username text;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS expires_at bigint NOT NULL DEFAULT 0;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS plan_name text NOT NULL DEFAULT 'Gói thường';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS allow_account_change boolean NOT NULL DEFAULT true;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nUPDATE public.manager_sessions SET user_id = username WHERE user_id IS NULL OR user_id = '';\n\nCREATE TABLE IF NOT EXISTS public.bot_settings (\n  bot_id text PRIMARY KEY,\n  username text NOT NULL DEFAULT '',\n  password text NOT NULL DEFAULT '',\n  settings jsonb NOT NULL DEFAULT '{}'::jsonb,\n  proxy jsonb NOT NULL DEFAULT '{}'::jsonb,\n  schedules jsonb NOT NULL DEFAULT '[]'::jsonb,\n  bot_schedules jsonb NOT NULL DEFAULT '[]'::jsonb,\n  auto_chat jsonb NOT NULL DEFAULT '[]'::jsonb,\n  manually_stopped boolean NOT NULL DEFAULT false,\n  synced_auth jsonb NOT NULL DEFAULT '{}'::jsonb,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS username text NOT NULL DEFAULT '';\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS password text NOT NULL DEFAULT '';\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS settings jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS proxy jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS schedules jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS bot_schedules jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS auto_chat jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS manually_stopped boolean NOT NULL DEFAULT false;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS synced_auth jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\n\nCREATE OR REPLACE FUNCTION public.sync_bot_schedules_column()\nRETURNS trigger\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nBEGIN\n  IF NEW.schedules IS NOT NULL AND (NEW.bot_schedules IS NULL OR NEW.bot_schedules = '[]'::jsonb) AND NEW.schedules <> '[]'::jsonb THEN\n    NEW.bot_schedules := NEW.schedules;\n  ELSIF NEW.bot_schedules IS NOT NULL AND (NEW.schedules IS NULL OR NEW.schedules = '[]'::jsonb) AND NEW.bot_schedules <> '[]'::jsonb THEN\n    NEW.schedules := NEW.bot_schedules;\n  ELSIF NEW.schedules IS NOT NULL AND NEW.bot_schedules IS NULL THEN\n    NEW.bot_schedules := NEW.schedules;\n  ELSIF NEW.bot_schedules IS NOT NULL AND NEW.schedules IS NULL THEN\n    NEW.schedules := NEW.bot_schedules;\n  END IF;\n  RETURN NEW;\nEND;\n$$;\n\nDROP TRIGGER IF EXISTS trg_sync_bot_schedules ON public.bot_settings;\nCREATE TRIGGER trg_sync_bot_schedules\nBEFORE INSERT OR UPDATE ON public.bot_settings\nFOR EACH ROW EXECUTE FUNCTION public.sync_bot_schedules_column();\n\nCREATE TABLE IF NOT EXISTS public.audit_logs (\n  id text PRIMARY KEY,\n  bot_id text,\n  log_type text NOT NULL DEFAULT 'SYSTEM',\n  category text NOT NULL DEFAULT 'SYSTEM',\n  action text NOT NULL DEFAULT '',\n  action_label text NOT NULL DEFAULT '',\n  actor_username text NOT NULL DEFAULT 'system',\n  actor_role text NOT NULL DEFAULT 'system',\n  actor_ip text NOT NULL DEFAULT '',\n  target jsonb NOT NULL DEFAULT '{}'::jsonb,\n  details text NOT NULL DEFAULT '',\n  status text NOT NULL DEFAULT 'SUCCESS',\n  timestamp timestamptz NOT NULL DEFAULT now(),\n  actor jsonb NOT NULL DEFAULT '{}'::jsonb,\n  ip text NOT NULL DEFAULT ''\n);\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS log_type text NOT NULL DEFAULT 'SYSTEM';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS category text NOT NULL DEFAULT 'SYSTEM';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS action text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS action_label text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_username text NOT NULL DEFAULT 'system';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_role text NOT NULL DEFAULT 'system';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_ip text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS target jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS details text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'SUCCESS';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS timestamp timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS ip text NOT NULL DEFAULT '';\nUPDATE public.audit_logs SET\n  actor_username = COALESCE(NULLIF(actor_username, 'system'), actor->>'username', 'system'),\n  actor_role = COALESCE(NULLIF(actor_role, 'system'), actor->>'role', 'system'),\n  actor_ip = COALESCE(NULLIF(actor_ip, ''), ip, ''),\n  bot_id = COALESCE(NULLIF(bot_id, ''), NULLIF(target->>'botId',''), NULLIF(target->>'bot_id',''))\nWHERE actor IS NOT NULL OR ip <> '' OR bot_id IS NULL;\n\nCREATE TABLE IF NOT EXISTS public.bot_chat_logs (\n  id text PRIMARY KEY,\n  bot_id text NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  sender text NOT NULL DEFAULT 'SERVER',\n  event_type text NOT NULL DEFAULT 'CHAT',\n  message text NOT NULL DEFAULT '',\n  metadata jsonb NOT NULL DEFAULT '{}'::jsonb\n);\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS sender text NOT NULL DEFAULT 'SERVER';\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS event_type text NOT NULL DEFAULT 'CHAT';\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS message text NOT NULL DEFAULT '';\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb;\nCREATE TABLE IF NOT EXISTS public.bot_event_logs (\n  id text PRIMARY KEY,\n  bot_id text NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  level text NOT NULL DEFAULT 'INFO',\n  event_type text NOT NULL DEFAULT 'SYSTEM',\n  message text NOT NULL DEFAULT '',\n  metadata jsonb NOT NULL DEFAULT '{}'::jsonb\n);\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS level text NOT NULL DEFAULT 'INFO';\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS event_type text NOT NULL DEFAULT 'SYSTEM';\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS message text NOT NULL DEFAULT '';\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb;\nCREATE TABLE IF NOT EXISTS public.bot_position_state (\n  bot_id text PRIMARY KEY,\n  position jsonb NOT NULL DEFAULT '{}'::jsonb,\n  dimension text NOT NULL DEFAULT 'unknown',\n  location_state text NOT NULL DEFAULT 'Unknown',\n  last_event_key text,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS position jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS dimension text NOT NULL DEFAULT 'unknown';\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS location_state text NOT NULL DEFAULT 'Unknown';\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS last_event_key text;\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nCREATE TABLE IF NOT EXISTS public.bot_position_logs (\n  id text PRIMARY KEY,\n  bot_id text NOT NULL,\n  changed_at timestamptz NOT NULL DEFAULT now(),\n  from_position jsonb,\n  to_position jsonb NOT NULL,\n  from_dimension text,\n  to_dimension text NOT NULL DEFAULT 'unknown',\n  location_state text NOT NULL DEFAULT 'Unknown',\n  reason text NOT NULL DEFAULT 'MOVE',\n  event_key text NOT NULL UNIQUE\n);\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS changed_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS from_position jsonb;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS to_position jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS from_dimension text;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS to_dimension text NOT NULL DEFAULT 'unknown';\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS location_state text NOT NULL DEFAULT 'Unknown';\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS reason text NOT NULL DEFAULT 'MOVE';\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS event_key text;\nCREATE TABLE IF NOT EXISTS public.manager_backups (\n  name text PRIMARY KEY,\n  bot_id text,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  size_bytes integer NOT NULL DEFAULT 0,\n  payload jsonb NOT NULL DEFAULT '{}'::jsonb\n);\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS name text;\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS size_bytes integer NOT NULL DEFAULT 0;\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS payload jsonb NOT NULL DEFAULT '{}'::jsonb;\n\n-- Repair nullable legacy identifiers without deleting or merging existing rows.\nUPDATE public.audit_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_chat_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_event_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_position_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_position_logs SET event_key = 'legacy:' || id WHERE event_key IS NULL OR btrim(event_key) = '';\n\nCREATE INDEX IF NOT EXISTS idx_manager_users_role_status ON public.manager_users(role, status);\nCREATE INDEX IF NOT EXISTS idx_manager_keys_used_created ON public.manager_keys(used, created_at DESC);\nCREATE INDEX IF NOT EXISTS idx_manager_sessions_username ON public.manager_sessions(username);\nCREATE INDEX IF NOT EXISTS idx_manager_sessions_expires_at ON public.manager_sessions(expires_at);\nCREATE INDEX IF NOT EXISTS idx_audit_logs_bot_time ON public.audit_logs(bot_id, timestamp DESC);\nCREATE INDEX IF NOT EXISTS idx_audit_logs_user_time ON public.audit_logs(actor_username, timestamp DESC);\nCREATE INDEX IF NOT EXISTS idx_bot_chat_logs_bot_time ON public.bot_chat_logs(bot_id, created_at DESC);\nCREATE INDEX IF NOT EXISTS idx_bot_event_logs_bot_time ON public.bot_event_logs(bot_id, created_at DESC);\nCREATE INDEX IF NOT EXISTS idx_bot_position_logs_bot_time ON public.bot_position_logs(bot_id, changed_at DESC);\nCREATE INDEX IF NOT EXISTS idx_manager_backups_bot_time ON public.manager_backups(bot_id, created_at DESC);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_sessions_token_hash_unique ON public.manager_sessions(token_hash);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_settings_bot_id_unique ON public.bot_settings(bot_id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_audit_logs_id_unique ON public.audit_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_chat_logs_id_unique ON public.bot_chat_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_event_logs_id_unique ON public.bot_event_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_position_state_bot_id_unique ON public.bot_position_state(bot_id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_position_logs_id_unique ON public.bot_position_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_position_logs_event_key_unique ON public.bot_position_logs(event_key);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_backups_name_unique ON public.manager_backups(name);\n\nALTER TABLE public.manager_users ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_keys ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_registry ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_sessions ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_settings ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_chat_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_event_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_position_state ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_position_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_backups ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON public.manager_users, public.manager_keys, public.bot_registry,\n  public.manager_sessions, public.bot_settings, public.audit_logs,\n  public.bot_chat_logs, public.bot_event_logs, public.bot_position_state,\n  public.bot_position_logs, public.manager_backups FROM anon, authenticated;\nGRANT ALL ON public.manager_users, public.manager_keys, public.bot_registry,\n  public.manager_sessions, public.bot_settings, public.audit_logs,\n  public.bot_chat_logs, public.bot_event_logs, public.bot_position_state,\n  public.bot_position_logs, public.manager_backups TO service_role;\n\nCREATE OR REPLACE FUNCTION public.record_bot_position_change(\n  p_id text,\n  p_bot_id text,\n  p_changed_at timestamptz,\n  p_to_position jsonb,\n  p_to_dimension text,\n  p_location_state text,\n  p_reason text,\n  p_event_key text,\n  p_min_distance double precision DEFAULT 5.0\n) RETURNS jsonb\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $$\nDECLARE\n  prior public.bot_position_state%ROWTYPE;\n  dx double precision := 0;\n  dy double precision := 0;\n  dz double precision := 0;\n  distance double precision := 0;\n  dimension_changed boolean := false;\n  state_changed boolean := false;\nBEGIN\n  IF p_bot_id IS NULL OR p_bot_id !~ '^[1-9][0-9]{0,8}$' THEN\n    RAISE EXCEPTION 'Invalid bot_id';\n  END IF;\n  IF p_event_key IS NULL OR btrim(p_event_key) = '' THEN\n    RAISE EXCEPTION 'event_key is required';\n  END IF;\n  IF EXISTS (SELECT 1 FROM public.bot_position_logs WHERE event_key = p_event_key) THEN\n    RETURN jsonb_build_object('ok', true, 'recorded', false, 'duplicate', true);\n  END IF;\n\n  PERFORM pg_advisory_xact_lock(hashtext('bot-position:' || p_bot_id)::bigint);\n  -- Recheck under the bot lock so a concurrent retry cannot advance state twice.\n  IF EXISTS (SELECT 1 FROM public.bot_position_logs WHERE event_key = p_event_key) THEN\n    RETURN jsonb_build_object('ok', true, 'recorded', false, 'duplicate', true);\n  END IF;\n  SELECT * INTO prior FROM public.bot_position_state WHERE bot_id = p_bot_id FOR UPDATE;\n  IF FOUND THEN\n    dimension_changed := COALESCE(prior.dimension, '') <> COALESCE(p_to_dimension, 'unknown');\n    state_changed := COALESCE(prior.location_state, '') <> COALESCE(p_location_state, 'Unknown');\n    BEGIN\n      dx := COALESCE((p_to_position->>'x')::double precision, 0) - COALESCE((prior.position->>'x')::double precision, 0);\n      dy := COALESCE((p_to_position->>'y')::double precision, 0) - COALESCE((prior.position->>'y')::double precision, 0);\n      dz := COALESCE((p_to_position->>'z')::double precision, 0) - COALESCE((prior.position->>'z')::double precision, 0);\n      distance := sqrt(dx*dx + dy*dy + dz*dz);\n    EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN\n      distance := 0;\n    END;\n    IF NOT dimension_changed AND NOT state_changed AND distance < GREATEST(COALESCE(p_min_distance, 5.0), 0) THEN\n      RETURN jsonb_build_object('ok', true, 'recorded', false, 'duplicate', false, 'distance', distance);\n    END IF;\n  END IF;\n\n  INSERT INTO public.bot_position_logs(id, bot_id, changed_at, from_position, to_position,\n    from_dimension, to_dimension, location_state, reason, event_key)\n  VALUES (COALESCE(NULLIF(p_id,''), md5(random()::text || clock_timestamp()::text)), p_bot_id,\n    COALESCE(p_changed_at, now()), CASE WHEN prior.bot_id IS NULL THEN NULL ELSE prior.position END,\n    COALESCE(p_to_position, '{}'::jsonb), CASE WHEN prior.bot_id IS NULL THEN NULL ELSE prior.dimension END,\n    COALESCE(p_to_dimension, 'unknown'), COALESCE(p_location_state, 'Unknown'),\n    COALESCE(NULLIF(p_reason,''), 'MOVE'), p_event_key)\n  ON CONFLICT (event_key) DO NOTHING;\n\n  INSERT INTO public.bot_position_state(bot_id, position, dimension, location_state, last_event_key, updated_at)\n  VALUES (p_bot_id, COALESCE(p_to_position, '{}'::jsonb), COALESCE(p_to_dimension, 'unknown'),\n    COALESCE(p_location_state, 'Unknown'), p_event_key, COALESCE(p_changed_at, now()))\n  ON CONFLICT (bot_id) DO UPDATE SET position=EXCLUDED.position, dimension=EXCLUDED.dimension,\n    location_state=EXCLUDED.location_state, last_event_key=EXCLUDED.last_event_key, updated_at=EXCLUDED.updated_at;\n  RETURN jsonb_build_object('ok', true, 'recorded', true, 'distance', distance);\nEND;\n$$;\nREVOKE ALL ON FUNCTION public.record_bot_position_change(text,text,timestamptz,jsonb,text,text,text,text,double precision) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.record_bot_position_change(text,text,timestamptz,jsonb,text,text,text,text,double precision) TO service_role;\n\nCOMMIT;\n\nBEGIN;\n\nCREATE TABLE IF NOT EXISTS public.manager_locks (\n  lock_key text PRIMARY KEY,\n  owner_id text NOT NULL,\n  lease_until timestamptz NOT NULL,\n  fencing_token bigint NOT NULL DEFAULT 1,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_locks ADD COLUMN IF NOT EXISTS fencing_token bigint NOT NULL DEFAULT 1;\nALTER TABLE public.manager_locks ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_locks FROM PUBLIC, anon, authenticated;\nGRANT ALL ON TABLE public.manager_locks TO service_role;\n\nCREATE TABLE IF NOT EXISTS public.manager_key_usage_transactions (\n  transaction_id text PRIMARY KEY,\n  key_id text NOT NULL,\n  username text NOT NULL,\n  usage_snapshot jsonb NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_key_usage_transactions ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_key_usage_transactions FROM PUBLIC, anon, authenticated;\nGRANT SELECT ON TABLE public.manager_key_usage_transactions TO service_role;\n\nCREATE TABLE IF NOT EXISTS public.bot_log_clear_cutoffs (\n  bot_id text PRIMARY KEY,\n  event_cutoff timestamptz,\n  chat_cutoff timestamptz,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.bot_log_clear_cutoffs ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.bot_log_clear_cutoffs FROM PUBLIC, anon, authenticated;\nGRANT SELECT ON TABLE public.bot_log_clear_cutoffs TO service_role;\n\nDROP FUNCTION IF EXISTS public.acquire_manager_lock(text,text,integer);\nCREATE OR REPLACE FUNCTION public.acquire_manager_lock(\n  p_lock_key text,\n  p_owner_id text,\n  p_lease_seconds integer DEFAULT 900\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_lease_interval interval;\n  v_now timestamptz := now();\n  v_current RECORD;\n  v_token bigint;\nBEGIN\n  IF COALESCE(btrim(p_lock_key), '') = '' OR COALESCE(btrim(p_owner_id), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'fencing_token', 0);\n  END IF;\n\n  v_lease_interval := make_interval(secs => GREATEST(30, LEAST(COALESCE(p_lease_seconds, 900), 3600)));\n\n  SELECT owner_id, lease_until, fencing_token INTO v_current\n  FROM public.manager_locks\n  WHERE lock_key = p_lock_key\n  FOR UPDATE;\n\n  IF NOT FOUND THEN\n    v_token := 1;\n    INSERT INTO public.manager_locks(lock_key, owner_id, lease_until, updated_at, fencing_token)\n    VALUES (p_lock_key, p_owner_id, v_now + v_lease_interval, v_now, v_token);\n    RETURN jsonb_build_object('ok', true, 'fencing_token', v_token);\n  END IF;\n\n  IF v_current.owner_id <> p_owner_id AND v_current.lease_until > v_now THEN\n    RETURN jsonb_build_object('ok', false, 'fencing_token', v_current.fencing_token);\n  END IF;\n\n  v_token := COALESCE(v_current.fencing_token, 0) + 1;\n  UPDATE public.manager_locks\n  SET owner_id = p_owner_id,\n      lease_until = v_now + v_lease_interval,\n      updated_at = v_now,\n      fencing_token = v_token\n  WHERE lock_key = p_lock_key;\n\n  RETURN jsonb_build_object('ok', true, 'fencing_token', v_token);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.release_manager_lock(p_lock_key text, p_owner_id text)\nRETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE affected integer;\nBEGIN\n  DELETE FROM public.manager_locks WHERE lock_key = p_lock_key AND owner_id = p_owner_id;\n  GET DIAGNOSTICS affected = ROW_COUNT;\n  RETURN affected = 1;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.renew_manager_lock(\n  p_lock_key text,\n  p_owner_id text,\n  p_lease_seconds integer DEFAULT 900\n) RETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE affected integer;\nBEGIN\n  UPDATE public.manager_locks\n  SET lease_until = now() + make_interval(secs => GREATEST(30, LEAST(COALESCE(p_lease_seconds, 900), 3600))),\n      updated_at = now()\n  WHERE lock_key = p_lock_key AND owner_id = p_owner_id AND lease_until > now();\n  GET DIAGNOSTICS affected = ROW_COUNT;\n  RETURN affected = 1;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.verify_manager_lock_fencing(\n  p_lock_key text,\n  p_owner_id text,\n  p_fencing_token bigint\n) RETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_valid boolean := false;\nBEGIN\n  IF COALESCE(btrim(p_lock_key), '') = '' OR COALESCE(btrim(p_owner_id), '') = '' OR p_fencing_token IS NULL OR p_fencing_token <= 0 THEN\n    RETURN false;\n  END IF;\n\n  SELECT (owner_id = p_owner_id AND fencing_token = p_fencing_token AND lease_until > now()) INTO v_valid\n  FROM public.manager_locks\n  WHERE lock_key = p_lock_key;\n\n  RETURN COALESCE(v_valid, false);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.patch_manager_registry(\n  p_patch jsonb DEFAULT '{}'::jsonb,\n  p_pending_reset_patch jsonb DEFAULT '{}'::jsonb,\n  p_pending_reset_deletes text[] DEFAULT '{}'::text[]\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_data jsonb;\n  v_resets jsonb;\n  v_key text;\nBEGIN\n  INSERT INTO public.bot_registry(id, data, updated_at)\n  VALUES ('default', '{}'::jsonb, now()) ON CONFLICT (id) DO NOTHING;\n  SELECT COALESCE(data, '{}'::jsonb) INTO v_data\n  FROM public.bot_registry WHERE id = 'default' FOR UPDATE;\n  v_data := v_data || COALESCE(p_patch, '{}'::jsonb);\n  v_resets := CASE WHEN jsonb_typeof(v_data->'pendingResets') = 'object' THEN v_data->'pendingResets' ELSE '{}'::jsonb END;\n  FOREACH v_key IN ARRAY COALESCE(p_pending_reset_deletes, '{}'::text[]) LOOP\n    v_resets := v_resets - v_key;\n  END LOOP;\n  v_resets := v_resets || CASE WHEN jsonb_typeof(p_pending_reset_patch) = 'object' THEN p_pending_reset_patch ELSE '{}'::jsonb END;\n  v_data := jsonb_set(v_data, '{pendingResets}', v_resets, true);\n  UPDATE public.bot_registry SET data = v_data, updated_at = now() WHERE id = 'default';\n  RETURN jsonb_build_object('ok', true);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.set_bot_log_clear_cutoff(\n  p_bot_id text,\n  p_kind text,\n  p_cutoff timestamptz\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE v_cutoff timestamptz;\nBEGIN\n  IF p_bot_id IS NULL OR p_bot_id !~ '^[1-9][0-9]{0,8}$' OR p_cutoff IS NULL OR p_kind IS NULL OR p_kind NOT IN ('event','chat') THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_INPUT');\n  END IF;\n  IF p_kind = 'event' THEN\n    INSERT INTO public.bot_log_clear_cutoffs(bot_id, event_cutoff, updated_at)\n    VALUES (p_bot_id, p_cutoff, now())\n    ON CONFLICT (bot_id) DO UPDATE SET\n      event_cutoff = CASE WHEN public.bot_log_clear_cutoffs.event_cutoff IS NULL THEN EXCLUDED.event_cutoff ELSE GREATEST(public.bot_log_clear_cutoffs.event_cutoff, EXCLUDED.event_cutoff) END,\n      updated_at = now()\n    RETURNING event_cutoff INTO v_cutoff;\n  ELSE\n    INSERT INTO public.bot_log_clear_cutoffs(bot_id, chat_cutoff, updated_at)\n    VALUES (p_bot_id, p_cutoff, now())\n    ON CONFLICT (bot_id) DO UPDATE SET\n      chat_cutoff = CASE WHEN public.bot_log_clear_cutoffs.chat_cutoff IS NULL THEN EXCLUDED.chat_cutoff ELSE GREATEST(public.bot_log_clear_cutoffs.chat_cutoff, EXCLUDED.chat_cutoff) END,\n      updated_at = now()\n    RETURNING chat_cutoff INTO v_cutoff;\n  END IF;\n  RETURN jsonb_build_object('ok', true, 'cutoff', v_cutoff);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.reject_cleared_bot_log()\nRETURNS trigger\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE v_cutoff timestamptz;\nBEGIN\n  IF TG_TABLE_NAME = 'bot_event_logs' THEN\n    SELECT event_cutoff INTO v_cutoff FROM public.bot_log_clear_cutoffs WHERE bot_id = NEW.bot_id;\n  ELSE\n    SELECT chat_cutoff INTO v_cutoff FROM public.bot_log_clear_cutoffs WHERE bot_id = NEW.bot_id;\n  END IF;\n  IF v_cutoff IS NOT NULL AND NEW.created_at < v_cutoff THEN\n    RETURN NULL;\n  END IF;\n  RETURN NEW;\nEND;\n$$;\n\nDROP TRIGGER IF EXISTS reject_cleared_event_log ON public.bot_event_logs;\nCREATE TRIGGER reject_cleared_event_log BEFORE INSERT ON public.bot_event_logs\nFOR EACH ROW EXECUTE FUNCTION public.reject_cleared_bot_log();\nDROP TRIGGER IF EXISTS reject_cleared_chat_log ON public.bot_chat_logs;\nCREATE TRIGGER reject_cleared_chat_log BEFORE INSERT ON public.bot_chat_logs\nFOR EACH ROW EXECUTE FUNCTION public.reject_cleared_bot_log();\n\nCREATE OR REPLACE FUNCTION public.consume_manager_key_usage(p_code text, p_username text, p_transaction_id text)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_key public.manager_keys%ROWTYPE;\n  v_code text := upper(btrim(COALESCE(p_code, '')));\n  v_username text := lower(btrim(COALESCE(p_username, '')));\n  v_users jsonb;\n  v_count integer;\n  v_max integer;\n  v_used_by text;\n  v_transaction public.manager_key_usage_transactions%ROWTYPE;\nBEGIN\n  IF v_code = '' OR v_username = '' OR COALESCE(btrim(p_transaction_id), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_INPUT');\n  END IF;\n  SELECT * INTO v_transaction FROM public.manager_key_usage_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF v_transaction.username <> v_username OR upper(COALESCE(v_transaction.usage_snapshot->>'code', v_transaction.usage_snapshot->>'key_code', '')) <> v_code THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN jsonb_build_object('ok', true, 'replayed', true, 'transactionId', p_transaction_id, 'row', v_transaction.usage_snapshot);\n  END IF;\n  SELECT * INTO v_key\n  FROM public.manager_keys\n  WHERE upper(COALESCE(NULLIF(code, ''), key_code, '')) = v_code\n  FOR UPDATE;\n  IF NOT FOUND THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'KEY_NOT_FOUND');\n  END IF;\n\n  -- A duplicate request may have waited on this key row while its first attempt committed.\n  SELECT * INTO v_transaction FROM public.manager_key_usage_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF v_transaction.username <> v_username\n       OR upper(COALESCE(v_transaction.usage_snapshot->>'code', v_transaction.usage_snapshot->>'key_code', '')) <> v_code THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN jsonb_build_object('ok', true, 'replayed', true, 'transactionId', p_transaction_id, 'row', v_transaction.usage_snapshot);\n  END IF;\n\n  v_max := COALESCE(v_key.max_uses, 1);\n  IF v_max < 0 THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_MAX_USES');\n  END IF;\n  v_users := CASE WHEN jsonb_typeof(v_key.used_users) = 'array' THEN v_key.used_users ELSE '[]'::jsonb END;\n  IF jsonb_array_length(v_users) > 0 THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM jsonb_array_elements_text(v_users) AS u(value)\n    WHERE btrim(value) <> '';\n  END IF;\n  IF jsonb_array_length(v_users) = 0 AND COALESCE(v_key.used_by, '') <> '' THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM unnest(string_to_array(v_key.used_by, ',')) AS value\n    WHERE btrim(value) <> '';\n  END IF;\n  IF v_users ? v_username THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'ALREADY_USED');\n  END IF;\n  v_count := GREATEST(COALESCE(v_key.used_count, 0), jsonb_array_length(v_users), CASE WHEN v_key.used THEN 1 ELSE 0 END);\n  IF v_max > 0 AND v_count >= v_max THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'EXHAUSTED');\n  END IF;\n\n  v_users := v_users || jsonb_build_array(v_username);\n  v_count := v_count + 1;\n  SELECT string_agg(value, ', ' ORDER BY ord) INTO v_used_by\n  FROM jsonb_array_elements_text(v_users) WITH ORDINALITY AS u(value, ord);\n  UPDATE public.manager_keys\n  SET used_users = v_users,\n      used_count = v_count,\n      used_by = v_used_by,\n      used_at = now(),\n      used = (v_max > 0 AND v_count >= v_max)\n  WHERE id = v_key.id\n  RETURNING * INTO v_key;\n  INSERT INTO public.manager_key_usage_transactions(transaction_id, key_id, username, usage_snapshot)\n  VALUES (p_transaction_id, v_key.id, v_username, to_jsonb(v_key));\n  RETURN jsonb_build_object('ok', true, 'transactionId', p_transaction_id, 'row', to_jsonb(v_key));\nEND;\n$$;\n\nREVOKE ALL ON FUNCTION public.acquire_manager_lock(text,text,integer) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.release_manager_lock(text,text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.renew_manager_lock(text,text,integer) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.verify_manager_lock_fencing(text,text,bigint) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.patch_manager_registry(jsonb,jsonb,text[]) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.set_bot_log_clear_cutoff(text,text,timestamptz) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.reject_cleared_bot_log() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.consume_manager_key_usage(text,text,text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.acquire_manager_lock(text,text,integer) TO service_role;\nGRANT EXECUTE ON FUNCTION public.release_manager_lock(text,text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.renew_manager_lock(text,text,integer) TO service_role;\nGRANT EXECUTE ON FUNCTION public.verify_manager_lock_fencing(text,text,bigint) TO service_role;\nGRANT EXECUTE ON FUNCTION public.patch_manager_registry(jsonb,jsonb,text[]) TO service_role;\nGRANT EXECUTE ON FUNCTION public.set_bot_log_clear_cutoff(text,text,timestamptz) TO service_role;\nGRANT EXECUTE ON FUNCTION public.consume_manager_key_usage(text,text,text) TO service_role;\n\nCOMMIT;\n\nNOTIFY pgrst, 'reload schema';\n\nBEGIN;\n\n-- User entitlement fields were previously accepted by Manager but not persisted.\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS allow_account_change boolean NOT NULL DEFAULT true;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS lock_reason text NOT NULL DEFAULT '';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS note text NOT NULL DEFAULT '';\n\nCREATE TABLE IF NOT EXISTS public.manager_user_state (\n  singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),\n  revision bigint NOT NULL DEFAULT 1 CHECK (revision >= 1),\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nINSERT INTO public.manager_user_state(singleton, revision)\nVALUES (true, 1) ON CONFLICT (singleton) DO NOTHING;\n\nCREATE TABLE IF NOT EXISTS public.manager_users_write_transactions (\n  transaction_id uuid PRIMARY KEY,\n  expected_revision bigint NOT NULL,\n  users_payload jsonb NOT NULL,\n  result jsonb NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE TABLE IF NOT EXISTS public.manager_session_revocations (\n  token_hash text PRIMARY KEY,\n  revoked_at timestamptz NOT NULL DEFAULT now()\n);\n\nALTER TABLE public.manager_key_usage_transactions\n  ADD COLUMN IF NOT EXISTS user_revision bigint;\n\nALTER TABLE public.manager_user_state ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_users_write_transactions ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_session_revocations ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_user_state FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON TABLE public.manager_users_write_transactions FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON TABLE public.manager_session_revocations FROM PUBLIC, anon, authenticated;\nGRANT SELECT ON TABLE public.manager_user_state, public.manager_session_revocations, public.manager_users_write_transactions, public.manager_key_usage_transactions, public.bot_log_clear_cutoffs TO service_role;\n-- Force every service-role user write through the revision-checked RPCs below.\n-- This makes stale legacy snapshot upserts fail closed during mixed-version deploys.\nREVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE public.manager_users FROM service_role;\nGRANT SELECT ON TABLE public.manager_users TO service_role;\n\nCREATE OR REPLACE FUNCTION public.bump_manager_users_revision()\nRETURNS trigger\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nBEGIN\n  UPDATE public.manager_user_state\n  SET revision = revision + 1, updated_at = now()\n  WHERE singleton = true;\n  RETURN NULL;\nEND;\n$$;\n\nDROP TRIGGER IF EXISTS manager_users_revision_after_write ON public.manager_users;\nCREATE TRIGGER manager_users_revision_after_write\nAFTER INSERT OR UPDATE OR DELETE ON public.manager_users\nFOR EACH STATEMENT EXECUTE FUNCTION public.bump_manager_users_revision();\n\nCREATE OR REPLACE FUNCTION public.reject_revoked_manager_session()\nRETURNS trigger\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nBEGIN\n  IF EXISTS (\n    SELECT 1 FROM public.manager_session_revocations\n    WHERE token_hash = NEW.token_hash\n  ) THEN\n    RETURN NULL;\n  END IF;\n  RETURN NEW;\nEND;\n$$;\n\nDROP TRIGGER IF EXISTS manager_sessions_reject_revoked ON public.manager_sessions;\nCREATE TRIGGER manager_sessions_reject_revoked\nBEFORE INSERT OR UPDATE ON public.manager_sessions\nFOR EACH ROW EXECUTE FUNCTION public.reject_revoked_manager_session();\n\nCREATE OR REPLACE FUNCTION public.read_manager_users_snapshot()\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_result jsonb;\nBEGIN\n  WITH state_cte AS (\n    SELECT COALESCE(revision, 1) AS revision\n    FROM public.manager_user_state\n    WHERE singleton = true\n  ),\n  users_cte AS (\n    SELECT COALESCE(jsonb_agg(to_jsonb(u) ORDER BY u.username), '[]'::jsonb) AS users\n    FROM public.manager_users AS u\n  )\n  SELECT jsonb_build_object(\n    'ok', true,\n    'revision', state_cte.revision,\n    'users', users_cte.users\n  ) INTO v_result\n  FROM state_cte, users_cte;\n  RETURN v_result;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.read_manager_session(p_token_hash text)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE v_session jsonb;\nBEGIN\n  IF COALESCE(btrim(p_token_hash), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_TOKEN_HASH');\n  END IF;\n  SELECT to_jsonb(s) INTO v_session\n  FROM public.manager_sessions AS s\n  WHERE s.token_hash = p_token_hash\n    AND s.expires_at > (extract(epoch FROM now()) * 1000)::bigint\n    AND NOT EXISTS (\n      SELECT 1 FROM public.manager_session_revocations AS r\n      WHERE r.token_hash = s.token_hash\n    );\n  RETURN jsonb_build_object('ok', true, 'session', v_session);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.read_manager_authorization(p_token_hash text)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_session public.manager_sessions%ROWTYPE;\n  v_user jsonb;\nBEGIN\n  IF COALESCE(btrim(p_token_hash), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_TOKEN_HASH');\n  END IF;\n  SELECT * INTO v_session\n  FROM public.manager_sessions AS s\n  WHERE s.token_hash = p_token_hash\n    AND s.expires_at > (extract(epoch FROM now()) * 1000)::bigint\n    AND NOT EXISTS (\n      SELECT 1 FROM public.manager_session_revocations AS r\n      WHERE r.token_hash = s.token_hash\n    );\n  IF NOT FOUND THEN\n    RETURN jsonb_build_object('ok', true, 'session', NULL, 'user', NULL);\n  END IF;\n  IF v_session.role <> 'admin' THEN\n    SELECT jsonb_build_object(\n      'id', u.id, 'username', u.username, 'status', u.status,\n      'assigned_bot_ids', u.assigned_bot_ids, 'expires_at', u.expires_at,\n      'plan_name', u.plan_name, 'allow_account_change', u.allow_account_change,\n      'is_permanent', u.is_permanent,\n      'lock_reason', u.lock_reason\n    ) INTO v_user\n    FROM public.manager_users AS u\n    WHERE u.id = v_session.user_id\n      AND lower(u.username) = lower(v_session.username);\n  END IF;\n  RETURN jsonb_build_object('ok', true, 'session', to_jsonb(v_session), 'user', v_user);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.revoke_manager_session(p_token_hash text)\nRETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nBEGIN\n  IF COALESCE(btrim(p_token_hash), '') = '' THEN RETURN false; END IF;\n  INSERT INTO public.manager_session_revocations(token_hash, revoked_at)\n  VALUES (p_token_hash, now())\n  ON CONFLICT (token_hash) DO NOTHING;\n  DELETE FROM public.manager_sessions WHERE token_hash = p_token_hash;\n  RETURN true;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.create_manager_user_session(\n  p_expected_revision bigint,\n  p_session jsonb\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_revision bigint;\n  v_user_id text;\n  v_username text;\n  v_token_hash text;\n  v_expires_at bigint;\n  v_rows integer;\nBEGIN\n  v_user_id := btrim(COALESCE(p_session->>'user_id', ''));\n  v_username := btrim(COALESCE(p_session->>'username', ''));\n  v_token_hash := btrim(COALESCE(p_session->>'token_hash', ''));\n  v_expires_at := NULLIF(p_session->>'expires_at', '')::bigint;\n  IF v_user_id = '' OR v_username = '' OR v_token_hash !~ '^[a-f0-9]{64}$' OR v_expires_at IS NULL\n     OR v_expires_at <= (extract(epoch FROM now()) * 1000)::bigint THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_SESSION');\n  END IF;\n  IF NOT EXISTS (\n    SELECT 1 FROM public.manager_users AS u\n    WHERE u.id = v_user_id AND lower(u.username) = lower(v_username)\n      AND lower(COALESCE(u.status, 'active')) <> 'disabled'\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_CHANGED');\n  END IF;\n  SELECT revision INTO v_revision\n  FROM public.manager_user_state\n  WHERE singleton = true FOR UPDATE;\n  INSERT INTO public.manager_sessions(\n    token_hash, user_id, username, role, assigned_bot_ids, expires_at,\n    plan_name, allow_account_change, status, updated_at\n  ) VALUES (\n    v_token_hash, v_user_id, v_username, 'user',\n    COALESCE(p_session->'assigned_bot_ids', '[]'::jsonb), v_expires_at,\n    COALESCE(NULLIF(p_session->>'plan_name', ''), 'Gói thường'),\n    COALESCE((p_session->>'allow_account_change')::boolean, true),\n    COALESCE(NULLIF(p_session->>'status', ''), 'active'), now()\n  ) ON CONFLICT (token_hash) DO NOTHING;\n  GET DIAGNOSTICS v_rows = ROW_COUNT;\n  IF v_rows <> 1 THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'SESSION_NOT_CREATED');\n  END IF;\n  RETURN jsonb_build_object('ok', true, 'revision', v_revision);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.apply_manager_users_snapshot_locked(\n  p_expected_revision bigint,\n  p_users jsonb,\n  p_allow_empty boolean DEFAULT false\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_revision bigint;\n  v_user jsonb;\n  v_id text;\n  v_username text;\n  v_affected integer;\n  v_result jsonb;\nBEGIN\n  SELECT revision INTO v_revision\n  FROM public.manager_user_state\n  WHERE singleton = true FOR UPDATE;\n  IF v_revision IS DISTINCT FROM p_expected_revision THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'REVISION_CONFLICT', 'revision', v_revision);\n  END IF;\n  IF p_users IS NULL OR jsonb_typeof(p_users) <> 'array' OR (jsonb_array_length(p_users) = 0 AND NOT p_allow_empty) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_OR_EMPTY_SNAPSHOT', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY lower(btrim(value->>'username'))\n    HAVING lower(btrim(value->>'username')) = '' OR count(*) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'DUPLICATE_OR_INVALID_USERNAME', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE jsonb_typeof(item.value->'assigned_bot_ids') NOT IN ('array', 'null')\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_BOT_ASSIGNMENTS', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT btrim(bot_id.value)\n    FROM jsonb_array_elements(p_users) AS item(value)\n    CROSS JOIN LATERAL jsonb_array_elements_text(\n      CASE WHEN jsonb_typeof(item.value->'assigned_bot_ids') = 'array'\n        THEN item.value->'assigned_bot_ids' ELSE '[]'::jsonb END\n    ) AS bot_id(value)\n    GROUP BY btrim(bot_id.value)\n    HAVING btrim(bot_id.value) = '' OR count(DISTINCT lower(btrim(item.value->>'username'))) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'BOT_OWNERSHIP_CONFLICT', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY btrim(COALESCE(value->>'id', ''))\n    HAVING btrim(COALESCE(value->>'id', '')) = '' OR count(*) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'DUPLICATE_OR_INVALID_USER_ID', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE btrim(COALESCE(item.value->>'username', '')) = ''\n       OR btrim(COALESCE(item.value->>'id', '')) = ''\n       OR btrim(COALESCE(item.value->>'password', '')) = ''\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW', 'revision', v_revision);\n  END IF;\n\n  FOR v_user IN SELECT value FROM jsonb_array_elements(p_users) AS item(value)\n  LOOP\n    v_username := btrim(COALESCE(v_user->>'username', ''));\n    v_id := btrim(COALESCE(v_user->>'id', ''));\n    IF v_username = '' OR v_id = '' OR COALESCE(v_user->>'password', '') = '' THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW', 'revision', v_revision);\n    END IF;\n\n    UPDATE public.manager_users AS u\n    SET id = v_id,\n        username = v_username,\n        password = v_user->>'password',\n        role = COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n        status = COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n        assigned_bot_ids = COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n        expires_at = NULLIF(v_user->>'expires_at', '')::timestamptz,\n        plan_name = COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n        bot_aliases = CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n        allow_account_change = COALESCE((v_user->>'allow_account_change')::boolean, true),\n        is_permanent = COALESCE((v_user->>'is_permanent')::boolean, (NULLIF(v_user->>'expires_at', '') IS NULL AND COALESCE(NULLIF(v_user->>'role', ''), 'user') <> 'admin' AND COALESCE(NULLIF(v_user->>'status', ''), 'active') = 'active'), false),\n        lock_reason = COALESCE(v_user->>'lock_reason', ''),\n        note = COALESCE(v_user->>'note', ''),\n        bot_count = GREATEST(1, COALESCE((v_user->>'bot_count')::integer, jsonb_array_length(COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb)), 1)),\n        created_at = COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, u.created_at, now()),\n        updated_at = COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n    WHERE u.id = v_id;\n    GET DIAGNOSTICS v_affected = ROW_COUNT;\n    IF v_affected = 0 THEN\n      UPDATE public.manager_users AS u\n      SET id = v_id,\n          username = v_username,\n          password = v_user->>'password',\n          role = COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n          status = COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n          assigned_bot_ids = COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n          expires_at = NULLIF(v_user->>'expires_at', '')::timestamptz,\n          plan_name = COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n          bot_aliases = CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n          allow_account_change = COALESCE((v_user->>'allow_account_change')::boolean, true),\n          is_permanent = COALESCE((v_user->>'is_permanent')::boolean, (NULLIF(v_user->>'expires_at', '') IS NULL AND COALESCE(NULLIF(v_user->>'role', ''), 'user') <> 'admin' AND COALESCE(NULLIF(v_user->>'status', ''), 'active') = 'active'), false),\n          lock_reason = COALESCE(v_user->>'lock_reason', ''),\n          note = COALESCE(v_user->>'note', ''),\n          bot_count = GREATEST(1, COALESCE((v_user->>'bot_count')::integer, jsonb_array_length(COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb)), 1)),\n          created_at = COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, u.created_at, now()),\n          updated_at = COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n      WHERE lower(u.username) = lower(v_username);\n      GET DIAGNOSTICS v_affected = ROW_COUNT;\n    END IF;\n    IF v_affected = 0 THEN\n      INSERT INTO public.manager_users(\n        id, username, password, role, status, assigned_bot_ids, expires_at,\n        plan_name, bot_aliases, allow_account_change, is_permanent, lock_reason, note,\n        bot_count, created_at, updated_at\n      ) VALUES (\n        v_id, v_username, v_user->>'password',\n        COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n        COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n        COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n        NULLIF(v_user->>'expires_at', '')::timestamptz,\n        COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n        CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n        COALESCE((v_user->>'allow_account_change')::boolean, true),\n        COALESCE((v_user->>'is_permanent')::boolean, (NULLIF(v_user->>'expires_at', '') IS NULL AND COALESCE(NULLIF(v_user->>'role', ''), 'user') <> 'admin' AND COALESCE(NULLIF(v_user->>'status', ''), 'active') = 'active'), false),\n        COALESCE(v_user->>'lock_reason', ''), COALESCE(v_user->>'note', ''),\n        GREATEST(1, COALESCE((v_user->>'bot_count')::integer, jsonb_array_length(COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb)), 1)),\n        COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, now()),\n        COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n      );\n    END IF;\n  END LOOP;\n\n  DELETE FROM public.manager_users AS u\n  WHERE NOT EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE COALESCE(item.value->>'id', '') = u.id\n       OR lower(COALESCE(item.value->>'username', '')) = lower(u.username)\n  );\n\n  SELECT revision INTO v_revision FROM public.manager_user_state WHERE singleton = true;\n  v_result := jsonb_build_object('ok', true, 'revision', v_revision);\n  RETURN v_result;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.save_manager_users_snapshot(\n  p_expected_revision bigint,\n  p_transaction_id uuid,\n  p_users jsonb,\n  p_allow_empty boolean DEFAULT false\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_existing public.manager_users_write_transactions%ROWTYPE;\n  v_result jsonb;\nBEGIN\n  IF p_transaction_id IS NULL THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_TRANSACTION_ID');\n  END IF;\n  PERFORM 1 FROM public.manager_user_state WHERE singleton = true FOR UPDATE;\n  SELECT * INTO v_existing FROM public.manager_users_write_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF v_existing.expected_revision <> p_expected_revision OR v_existing.users_payload <> p_users THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN v_existing.result;\n  END IF;\n  v_result := public.apply_manager_users_snapshot_locked(p_expected_revision, p_users, p_allow_empty);\n  IF COALESCE((v_result->>'ok')::boolean, false) THEN\n    INSERT INTO public.manager_users_write_transactions(transaction_id, expected_revision, users_payload, result)\n    VALUES (p_transaction_id, p_expected_revision, p_users, v_result);\n    DELETE FROM public.manager_users_write_transactions WHERE created_at < now() - interval '24 hours';\n  END IF;\n  RETURN v_result;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.insert_manager_users_if_absent(p_users jsonb)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_user jsonb;\n  v_id text;\n  v_username text;\n  v_revision bigint;\n  v_inserted integer := 0;\n  v_rows integer;\nBEGIN\n  PERFORM 1 FROM public.manager_user_state WHERE singleton = true FOR UPDATE;\n  IF p_users IS NULL OR jsonb_typeof(p_users) <> 'array' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USERS');\n  END IF;\n  IF EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE btrim(COALESCE(item.value->>'username', '')) = ''\n       OR btrim(COALESCE(item.value->>'id', '')) = ''\n       OR btrim(COALESCE(item.value->>'password', '')) = ''\n       OR (item.value ? 'assigned_bot_ids' AND jsonb_typeof(item.value->'assigned_bot_ids') NOT IN ('array', 'null'))\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW');\n  END IF;\n  IF EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY lower(btrim(value->>'username'))\n    HAVING lower(btrim(value->>'username')) = '' OR count(*) > 1\n  ) OR EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY btrim(COALESCE(value->>'id', ''))\n    HAVING btrim(COALESCE(value->>'id', '')) = '' OR count(*) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'DUPLICATE_OR_INVALID_USER');\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    CROSS JOIN LATERAL jsonb_array_elements_text(\n      CASE WHEN jsonb_typeof(item.value->'assigned_bot_ids') = 'array'\n        THEN item.value->'assigned_bot_ids' ELSE '[]'::jsonb END\n    ) AS assigned(value)\n    GROUP BY assigned.value\n    HAVING assigned.value = '' OR count(DISTINCT lower(btrim(item.value->>'username'))) > 1\n  ) OR EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    CROSS JOIN LATERAL jsonb_array_elements_text(\n      CASE WHEN jsonb_typeof(item.value->'assigned_bot_ids') = 'array'\n        THEN item.value->'assigned_bot_ids' ELSE '[]'::jsonb END\n    ) AS assigned(value)\n    JOIN public.manager_users AS existing\n      ON existing.assigned_bot_ids ? assigned.value\n     AND existing.id <> COALESCE(item.value->>'id', '')\n     AND lower(existing.username) <> lower(COALESCE(item.value->>'username', ''))\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'BOT_OWNERSHIP_CONFLICT');\n  END IF;\n  FOR v_user IN SELECT value FROM jsonb_array_elements(p_users) AS item(value)\n  LOOP\n    v_username := btrim(COALESCE(v_user->>'username', ''));\n    v_id := btrim(COALESCE(v_user->>'id', ''));\n    IF v_username = '' OR v_id = '' OR COALESCE(v_user->>'password', '') = '' THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW');\n    END IF;\n    IF EXISTS (\n      SELECT 1 FROM public.manager_users AS existing\n      WHERE lower(existing.username) = lower(v_username) OR existing.id = v_id\n    ) THEN\n      CONTINUE;\n    END IF;\n    IF EXISTS (\n      SELECT 1\n      FROM jsonb_array_elements(COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb)) AS assigned(value)\n      JOIN public.manager_users AS existing\n        ON existing.assigned_bot_ids ? (assigned.value #>> '{}')\n    ) THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'BOT_OWNERSHIP_CONFLICT');\n    END IF;\n    INSERT INTO public.manager_users(\n      id, username, password, role, status, assigned_bot_ids, expires_at,\n      plan_name, bot_aliases, allow_account_change, is_permanent, lock_reason, note,\n      bot_count, created_at, updated_at\n    ) VALUES (\n      v_id, v_username, v_user->>'password',\n      COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n      COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n      COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n      NULLIF(v_user->>'expires_at', '')::timestamptz,\n      COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n      CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n      COALESCE((v_user->>'allow_account_change')::boolean, true),\n      COALESCE((v_user->>'is_permanent')::boolean, (NULLIF(v_user->>'expires_at', '') IS NULL AND COALESCE(NULLIF(v_user->>'role', ''), 'user') <> 'admin' AND COALESCE(NULLIF(v_user->>'status', ''), 'active') = 'active'), false),\n      COALESCE(v_user->>'lock_reason', ''), COALESCE(v_user->>'note', ''),\n      GREATEST(1, COALESCE((v_user->>'bot_count')::integer, jsonb_array_length(COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb)), 1)),\n      COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, now()),\n      COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n    ) ON CONFLICT DO NOTHING;\n    GET DIAGNOSTICS v_rows = ROW_COUNT;\n    v_inserted := v_inserted + v_rows;\n  END LOOP;\n  SELECT revision INTO v_revision FROM public.manager_user_state WHERE singleton = true;\n  RETURN jsonb_build_object('ok', true, 'inserted', v_inserted, 'revision', v_revision);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.redeem_manager_key_and_save_users(\n  p_code text,\n  p_username text,\n  p_transaction_id text,\n  p_expected_revision bigint,\n  p_users jsonb,\n  p_allow_empty boolean DEFAULT false\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_key public.manager_keys%ROWTYPE;\n  v_transaction public.manager_key_usage_transactions%ROWTYPE;\n  v_code text := upper(btrim(COALESCE(p_code, '')));\n  v_username text := lower(btrim(COALESCE(p_username, '')));\n  v_users jsonb;\n  v_count integer;\n  v_max integer;\n  v_used_by text;\n  v_user_revision bigint;\n  v_result jsonb;\nBEGIN\n  IF v_code = '' OR v_username = '' OR COALESCE(btrim(p_transaction_id), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_INPUT');\n  END IF;\n  PERFORM 1 FROM public.manager_user_state WHERE singleton = true FOR UPDATE;\n  SELECT * INTO v_transaction FROM public.manager_key_usage_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF lower(v_transaction.username) <> v_username\n       OR upper(COALESCE(v_transaction.usage_snapshot->>'code', v_transaction.usage_snapshot->>'key_code', '')) <> v_code THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN jsonb_build_object('ok', true, 'replayed', true, 'transactionId', p_transaction_id,\n      'row', v_transaction.usage_snapshot, 'userRevision', v_transaction.user_revision);\n  END IF;\n  SELECT * INTO v_key\n  FROM public.manager_keys\n  WHERE upper(COALESCE(NULLIF(code, ''), key_code, '')) = v_code\n  FOR UPDATE;\n  IF NOT FOUND THEN RETURN jsonb_build_object('ok', false, 'error', 'KEY_NOT_FOUND'); END IF;\n\n  v_max := COALESCE(v_key.max_uses, 1);\n  IF v_max < 0 THEN RETURN jsonb_build_object('ok', false, 'error', 'INVALID_MAX_USES'); END IF;\n  IF v_key.expires_at IS NOT NULL AND v_key.expires_at <= now() THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'KEY_EXPIRED');\n  END IF;\n  v_users := CASE WHEN jsonb_typeof(v_key.used_users) = 'array' THEN v_key.used_users ELSE '[]'::jsonb END;\n  IF jsonb_array_length(v_users) > 0 THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM jsonb_array_elements_text(v_users) AS item(value) WHERE btrim(value) <> '';\n  END IF;\n  IF jsonb_array_length(v_users) = 0 AND COALESCE(v_key.used_by, '') <> '' THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM unnest(string_to_array(v_key.used_by, ',')) AS value WHERE btrim(value) <> '';\n  END IF;\n  IF v_users ? v_username THEN RETURN jsonb_build_object('ok', false, 'error', 'ALREADY_USED'); END IF;\n  v_count := GREATEST(COALESCE(v_key.used_count, 0), jsonb_array_length(v_users), CASE WHEN v_key.used THEN 1 ELSE 0 END);\n  IF v_max > 0 AND v_count >= v_max THEN RETURN jsonb_build_object('ok', false, 'error', 'EXHAUSTED'); END IF;\n\n  v_users := v_users || jsonb_build_array(v_username);\n  v_count := v_count + 1;\n  SELECT string_agg(value, ', ' ORDER BY ord) INTO v_used_by\n  FROM jsonb_array_elements_text(v_users) WITH ORDINALITY AS item(value, ord);\n  IF NOT EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE lower(btrim(item.value->>'username')) = v_username\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'REDEEM_USER_MISSING');\n  END IF;\n  v_result := public.apply_manager_users_snapshot_locked(p_expected_revision, p_users, p_allow_empty);\n  IF NOT COALESCE((v_result->>'ok')::boolean, false) THEN RETURN v_result; END IF;\n\n  UPDATE public.manager_keys\n  SET used_users = v_users, used_count = v_count, used_by = v_used_by,\n      used_at = now(), used = (v_max > 0 AND v_count >= v_max)\n  WHERE id = v_key.id\n  RETURNING * INTO v_key;\n  SELECT revision INTO v_user_revision FROM public.manager_user_state WHERE singleton = true;\n  INSERT INTO public.manager_key_usage_transactions(transaction_id, key_id, username, usage_snapshot, user_revision)\n  VALUES (p_transaction_id, v_key.id, v_username, to_jsonb(v_key), v_user_revision);\n  RETURN jsonb_build_object('ok', true, 'transactionId', p_transaction_id,\n    'row', to_jsonb(v_key), 'userRevision', v_user_revision);\nEND;\n$$;\n\nREVOKE ALL ON FUNCTION public.bump_manager_users_revision() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.reject_revoked_manager_session() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.read_manager_users_snapshot() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.read_manager_session(text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.read_manager_authorization(text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.revoke_manager_session(text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.create_manager_user_session(bigint,jsonb) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.apply_manager_users_snapshot_locked(bigint,jsonb,boolean) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.save_manager_users_snapshot(bigint,uuid,jsonb,boolean) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.insert_manager_users_if_absent(jsonb) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.redeem_manager_key_and_save_users(text,text,text,bigint,jsonb,boolean) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.read_manager_users_snapshot() TO service_role;\nGRANT EXECUTE ON FUNCTION public.read_manager_session(text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.read_manager_authorization(text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.revoke_manager_session(text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.create_manager_user_session(bigint,jsonb) TO service_role;\nGRANT EXECUTE ON FUNCTION public.save_manager_users_snapshot(bigint,uuid,jsonb,boolean) TO service_role;\nGRANT EXECUTE ON FUNCTION public.insert_manager_users_if_absent(jsonb) TO service_role;\nGRANT EXECUTE ON FUNCTION public.redeem_manager_key_and_save_users(text,text,text,bigint,jsonb,boolean) TO service_role;\n\n-- Compatibility views for alternative table names & aliases\nCREATE OR REPLACE VIEW public.manager_audit AS SELECT * FROM public.audit_logs;\nCREATE OR REPLACE VIEW public.backups AS SELECT * FROM public.manager_backups;\nCREATE OR REPLACE VIEW public.system_settings AS\nSELECT\n  id,\n  (data->'systemSettings') AS settings,\n  updated_at\nFROM public.bot_registry\nWHERE id = 'default';\n\nCREATE OR REPLACE VIEW public.bot_schedules AS\nSELECT\n  bot_id,\n  COALESCE(bot_schedules, schedules) AS schedules,\n  updated_at\nFROM public.bot_settings;\n\nGRANT ALL ON public.manager_audit TO service_role;\nGRANT ALL ON public.backups TO service_role;\nGRANT ALL ON public.system_settings TO service_role;\nGRANT ALL ON public.bot_schedules TO service_role;\nREVOKE ALL ON public.manager_audit, public.backups, public.system_settings, public.bot_schedules FROM anon, authenticated;\n\n\n\nCREATE TABLE IF NOT EXISTS public.manager_outbox_queue (\n  id text PRIMARY KEY,\n  bot_id integer NOT NULL,\n  type text NOT NULL DEFAULT 'auth_sync',\n  event_type text DEFAULT 'auth_sync',\n  aggregate_type text DEFAULT 'bot',\n  aggregate_id text DEFAULT '',\n  payload jsonb NOT NULL DEFAULT '{}'::jsonb,\n  status text NOT NULL DEFAULT 'pending',\n  attempts integer NOT NULL DEFAULT 0,\n  max_attempts integer NOT NULL DEFAULT 8,\n  next_retry_at timestamptz NOT NULL DEFAULT now(),\n  backoff_ms integer NOT NULL DEFAULT 3000,\n  processing_started_at timestamptz,\n  completed_at timestamptz,\n  lease_owner text,\n  lease_until timestamptz,\n  last_status_code integer,\n  error_code text,\n  last_error text,\n  committed_transaction jsonb,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS bot_id integer;\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS type text NOT NULL DEFAULT 'auth_sync';\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS processing_started_at timestamptz;\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS completed_at timestamptz;\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS payload jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS lease_owner text;\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS lease_until timestamptz;\nALTER TABLE public.manager_outbox_queue ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_outbox_queue FROM PUBLIC, anon, authenticated;\nGRANT ALL ON TABLE public.manager_outbox_queue TO service_role;\nCREATE INDEX IF NOT EXISTS idx_manager_outbox_queue_claim\n  ON public.manager_outbox_queue(status, next_retry_at)\n  WHERE status IN ('pending', 'processing');\n\nCREATE TABLE IF NOT EXISTS public.manager_pending_allocations (\n  id text PRIMARY KEY,\n  username text NOT NULL,\n  target_bot_count integer NOT NULL DEFAULT 1,\n  current_assigned integer NOT NULL DEFAULT 0,\n  missing_bot_count integer NOT NULL DEFAULT 1,\n  preferred_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  status text NOT NULL DEFAULT 'pending_retry',\n  attempts integer NOT NULL DEFAULT 0,\n  max_attempts integer NOT NULL DEFAULT 10,\n  lease_owner text,\n  lease_until timestamptz,\n  last_error text,\n  next_retry_at timestamptz NOT NULL DEFAULT now(),\n  completed_at timestamptz,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_pending_allocations ADD COLUMN IF NOT EXISTS completed_at timestamptz;\nALTER TABLE public.manager_pending_allocations ADD COLUMN IF NOT EXISTS lease_owner text;\nALTER TABLE public.manager_pending_allocations ADD COLUMN IF NOT EXISTS lease_until timestamptz;\nALTER TABLE public.manager_pending_allocations ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_pending_allocations FROM PUBLIC, anon, authenticated;\nGRANT ALL ON TABLE public.manager_pending_allocations TO service_role;\nCREATE UNIQUE INDEX IF NOT EXISTS idx_mgr_pending_alloc_user_pending ON public.manager_pending_allocations (username) WHERE (status IN ('pending', 'pending_retry'));\nCREATE INDEX IF NOT EXISTS idx_manager_pending_allocations_claim\n  ON public.manager_pending_allocations(status, next_retry_at)\n  WHERE status = 'pending_retry';\n\nCREATE TABLE IF NOT EXISTS public.manager_link4m_attempts (\n  attempt_id text PRIMARY KEY,\n  username text NOT NULL,\n  token_hash text NOT NULL,\n  status text NOT NULL DEFAULT 'pending',\n  vietnam_date text NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  expires_at timestamptz NOT NULL,\n  verified_at timestamptz,\n  rewarded_at timestamptz,\n  reward_hours integer NOT NULL DEFAULT 12,\n  ip_address text NOT NULL DEFAULT '',\n  provider_reference text NOT NULL DEFAULT '',\n  failure_reason text NOT NULL DEFAULT '',\n  sync_status text NOT NULL DEFAULT 'synced'\n);\n-- NEW-01 (Wave B1): tách URL rút gọn provider khỏi provider_reference (callback/return URL).\n-- provider_reference = return URL của Manager (audit trail); provider_short_url = link rút gọn\n-- do provider sinh ra SAU khi createRewardLink thành công (persist để nhánh reuse trả đúng URL).\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS provider_short_url text NOT NULL DEFAULT '';\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS attempt_id text;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS username text;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS token_hash text;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending';\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS vietnam_date text;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS expires_at timestamptz;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS verified_at timestamptz;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS rewarded_at timestamptz;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS reward_hours integer NOT NULL DEFAULT 12;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS ip_address text NOT NULL DEFAULT '';\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS provider_reference text NOT NULL DEFAULT '';\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS failure_reason text NOT NULL DEFAULT '';\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS sync_status text NOT NULL DEFAULT 'synced';\n\nCREATE INDEX IF NOT EXISTS idx_link4m_attempts_user_date ON public.manager_link4m_attempts(username, vietnam_date);\nCREATE INDEX IF NOT EXISTS idx_link4m_attempts_status ON public.manager_link4m_attempts(status);\nCREATE INDEX IF NOT EXISTS idx_link4m_attempts_token_hash ON public.manager_link4m_attempts(token_hash);\nCREATE INDEX IF NOT EXISTS idx_link4m_attempts_sync_status ON public.manager_link4m_attempts(sync_status);\n\nALTER TABLE public.manager_link4m_attempts ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON public.manager_link4m_attempts FROM anon, authenticated;\nGRANT ALL ON public.manager_link4m_attempts TO service_role;\n\n-- 1. Atomic RPC: start_manager_link4m_attempt\nCREATE OR REPLACE FUNCTION public.start_manager_link4m_attempt(\n  p_attempt_id text,\n  p_token_hash text,\n  p_username text,\n  p_vietnam_date text,\n  p_daily_limit integer DEFAULT 2,\n  p_reward_hours integer DEFAULT 12,\n  p_ip_address text DEFAULT '',\n  p_provider_reference text DEFAULT ''\n)\nRETURNS jsonb\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $l4m_start$\nDECLARE\n  v_username text := lower(btrim(p_username));\n  v_user record;\n  v_today_count integer;\n  v_last_rewarded_at timestamptz;\n  v_active_attempt record;\n  v_now timestamptz := now();\n  v_expires_at timestamptz := v_now + interval '15 minutes';\n  v_limit integer := GREATEST(1, LEAST(10, COALESCE(p_daily_limit, 2)));\n  v_hours integer := GREATEST(1, LEAST(48, COALESCE(p_reward_hours, 12)));\nBEGIN\n  -- §3.2 Null and empty input guards\n  IF p_attempt_id IS NULL OR btrim(p_attempt_id) = '' OR\n     p_token_hash IS NULL OR btrim(p_token_hash) = '' OR\n     p_username IS NULL OR btrim(p_username) = '' OR\n     p_vietnam_date IS NULL OR btrim(p_vietnam_date) = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_ARGUMENTS', 'message', 'Tham số đầu vào không được để trống hoặc NULL.');\n  END IF;\n\n  -- 1. Consistent locking order: Always lock manager_users first\n  SELECT * INTO v_user\n  FROM public.manager_users\n  WHERE lower(btrim(username)) = v_username\n  FOR UPDATE;\n\n  IF NOT FOUND THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_NOT_FOUND', 'message', 'Tài khoản người dùng không tồn tại.');\n  END IF;\n\n  -- §3.2: Strict status allowlist. Only 'active' and 'expired' are permitted; disabled/unknown/null fail-closed\n  IF v_user.status NOT IN ('active', 'expired') OR v_user.status IS NULL THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_LOCKED', 'message', 'Tài khoản không ở trạng thái hợp lệ để vượt link nhận thưởng.');\n  END IF;\n\n  IF v_user.is_permanent IS TRUE THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'PERMANENT_ACCOUNT', 'message', 'Tài khoản VIP Vĩnh viễn không cần vượt link.');\n  END IF;\n\n  -- 2. Lock manager_link4m_attempts second\n  SELECT * INTO v_active_attempt\n  FROM public.manager_link4m_attempts\n  WHERE lower(btrim(username)) = v_username\n    AND status = 'pending'\n    AND expires_at > v_now\n  ORDER BY created_at DESC\n  LIMIT 1\n  FOR UPDATE;\n\n  IF FOUND THEN\n    RETURN jsonb_build_object(\n      'ok', true,\n      'reused', true,\n      'attemptId', v_active_attempt.attempt_id,\n      'expiresAt', v_active_attempt.expires_at,\n      'providerUrl', v_active_attempt.provider_short_url\n    );\n  END IF;\n\n  -- Check cooldown: at least 2 hours between rewarded claims\n  SELECT rewarded_at INTO v_last_rewarded_at\n  FROM public.manager_link4m_attempts\n  WHERE lower(btrim(username)) = v_username\n    AND status = 'rewarded'\n  ORDER BY rewarded_at DESC NULLS LAST\n  LIMIT 1;\n\n  IF v_last_rewarded_at IS NOT NULL AND (v_now - v_last_rewarded_at) < interval '2 hours' THEN\n    RETURN jsonb_build_object(\n      'ok', false,\n      'error', 'COOLDOWN',\n      'message', 'Khoảng cách giữa 2 lần vượt link tối thiểu là 2 tiếng.',\n      'cooldownRemainingMs', GREATEST(0, EXTRACT(EPOCH FROM ((v_last_rewarded_at + interval '2 hours') - v_now)) * 1000)\n    );\n  END IF;\n\n  -- Daily quota check: Count ONLY rewarded attempts\n  SELECT count(*) INTO v_today_count\n  FROM public.manager_link4m_attempts\n  WHERE lower(btrim(username)) = v_username\n    AND vietnam_date = p_vietnam_date\n    AND status = 'rewarded';\n\n  IF v_today_count >= v_limit THEN\n    RETURN jsonb_build_object(\n      'ok', false,\n      'error', 'DAILY_LIMIT_REACHED',\n      'count', v_today_count,\n      'limit', v_limit,\n      'message', 'Đã hết lượt vượt link hôm nay (' || v_today_count || '/' || v_limit || ' lượt). Làm mới lúc 00:00 VN.'\n    );\n  END IF;\n\n  INSERT INTO public.manager_link4m_attempts (\n    attempt_id, username, token_hash, status, vietnam_date,\n    created_at, expires_at, reward_hours, ip_address, provider_reference, sync_status\n  ) VALUES (\n    p_attempt_id, v_username, p_token_hash, 'pending', p_vietnam_date,\n    v_now, v_expires_at, v_hours, COALESCE(p_ip_address, ''), COALESCE(p_provider_reference, ''), 'synced'\n  );\n\n  RETURN jsonb_build_object(\n    'ok', true,\n    'reused', false,\n    'attemptId', p_attempt_id,\n    'todayCount', v_today_count,\n    'remaining', v_limit - v_today_count,\n    'expiresAt', v_expires_at\n  );\nEND;\n$l4m_start$;\n\n-- 2. Atomic RPC: claim_manager_link4m_reward\nCREATE OR REPLACE FUNCTION public.claim_manager_link4m_reward(\n  p_attempt_id text,\n  p_token_hash text,\n  p_username text,\n  p_reward_hours integer DEFAULT 12,\n  p_provider_reference text DEFAULT ''\n)\nRETURNS jsonb\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $l4m_claim$\nDECLARE\n  v_username text := lower(btrim(p_username));\n  v_user record;\n  v_attempt record;\n  v_now timestamptz := now();\n  v_current_expires_at timestamptz;\n  v_new_expires_at timestamptz;\n  v_new_revision bigint;\n  v_reward_hours integer;\n  v_reward_interval interval;\nBEGIN\n  -- §3.2 Null and empty input guards\n  IF p_attempt_id IS NULL OR btrim(p_attempt_id) = '' OR\n     p_token_hash IS NULL OR btrim(p_token_hash) = '' OR\n     p_username IS NULL OR btrim(p_username) = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_ARGUMENTS', 'message', 'Tham số đầu vào không được để trống hoặc NULL.');\n  END IF;\n\n  -- 1. Consistent locking order: Lock manager_users FIRST across all RPCs\n  SELECT * INTO v_user\n  FROM public.manager_users\n  WHERE lower(btrim(username)) = v_username\n  FOR UPDATE;\n\n  IF NOT FOUND THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_NOT_FOUND', 'message', 'Tài khoản người dùng không tồn tại.');\n  END IF;\n\n  -- §3.2 Strict status allowlist: Only 'active' and 'expired' can claim rewards\n  IF v_user.status NOT IN ('active', 'expired') OR v_user.status IS NULL THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_LOCKED', 'message', 'Tài khoản không ở trạng thái hợp lệ để nhận thưởng.');\n  END IF;\n\n  -- 2. Lock manager_link4m_attempts SECOND\n  SELECT * INTO v_attempt\n  FROM public.manager_link4m_attempts\n  WHERE attempt_id = p_attempt_id\n  FOR UPDATE;\n\n  IF NOT FOUND THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'ATTEMPT_NOT_FOUND', 'message', 'Không tìm thấy phiên vượt link này.');\n  END IF;\n\n  -- §3.2 Null-safe comparisons with IS DISTINCT FROM\n  IF v_attempt.token_hash IS DISTINCT FROM p_token_hash THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_TOKEN', 'message', 'Mã bảo mật phiên vượt link không hợp lệ.');\n  END IF;\n\n  IF lower(btrim(v_attempt.username)) IS DISTINCT FROM v_username THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_MISMATCH', 'message', 'Phiên vượt link không thuộc về tài khoản này.');\n  END IF;\n\n  IF v_attempt.status = 'rewarded' THEN\n    RETURN jsonb_build_object('ok', true, 'replayed', true, 'message', 'Phiên vượt link này đã nhận thưởng trước đó.');\n  END IF;\n\n  IF v_attempt.status NOT IN ('pending', 'verified') THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_STATUS', 'message', 'Trạng thái phiên không hợp lệ: ' || COALESCE(v_attempt.status, 'NULL'));\n  END IF;\n\n  IF v_attempt.expires_at IS NULL OR v_attempt.expires_at <= v_now THEN\n    UPDATE public.manager_link4m_attempts SET status = 'expired', failure_reason = 'Phiên vượt link đã quá hạn hoặc thiếu thời hạn.' WHERE attempt_id = p_attempt_id;\n    RETURN jsonb_build_object('ok', false, 'error', 'ATTEMPT_EXPIRED', 'message', 'Phiên vượt link đã hết hạn thời gian thực hiện.');\n  END IF;\n\n  IF v_user.is_permanent IS TRUE THEN\n    UPDATE public.manager_link4m_attempts SET status = 'rewarded', rewarded_at = v_now, failure_reason = 'Tài khoản VIP Vĩnh viễn (không tiêu thụ thêm thời gian).' WHERE attempt_id = p_attempt_id;\n    RETURN jsonb_build_object('ok', true, 'permanent', true, 'expiresAt', NULL, 'message', 'Tài khoản của bạn là VIP Vĩnh viễn!');\n  END IF;\n\n  v_reward_hours := GREATEST(1, LEAST(48, COALESCE(v_attempt.reward_hours, p_reward_hours, 12)));\n  v_reward_interval := (v_reward_hours || ' hours')::interval;\n\n  v_current_expires_at := v_user.expires_at;\n  IF v_current_expires_at > v_now THEN\n    v_new_expires_at := v_current_expires_at + v_reward_interval;\n  ELSE\n    v_new_expires_at := v_now + v_reward_interval;\n  END IF;\n\n  UPDATE public.manager_users\n  SET expires_at = v_new_expires_at,\n      status = CASE WHEN v_user.status = 'expired' THEN 'active' ELSE v_user.status END,\n      updated_at = v_now\n  WHERE lower(btrim(username)) = v_username;\n  SELECT revision INTO v_new_revision FROM public.manager_user_state WHERE singleton = true;\n\n  UPDATE public.manager_link4m_attempts\n  SET status = 'rewarded',\n      verified_at = COALESCE(verified_at, v_now),\n      rewarded_at = v_now,\n      sync_status = 'synced',\n      provider_reference = COALESCE(NULLIF(p_provider_reference, ''), provider_reference)\n  WHERE attempt_id = p_attempt_id;\n\n  RETURN jsonb_build_object(\n    'ok', true,\n    'username', v_username,\n    'addedHours', v_reward_hours,\n    'expiresAt', v_new_expires_at,\n    'userRevision', v_new_revision,\n    'message', 'Đã cộng thành công ' || v_reward_hours || ' giờ sử dụng vào tài khoản!'\n  );\nEND;\n$l4m_claim$;\n\nCREATE OR REPLACE FUNCTION public.update_manager_link4m_sync_status(\n  p_attempt_id text,\n  p_sync_status text\n)\nRETURNS boolean\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $l4m_sync$\nBEGIN\n  UPDATE public.manager_link4m_attempts\n  SET sync_status = p_sync_status\n  WHERE attempt_id = p_attempt_id;\n  RETURN FOUND;\nEND;\n$l4m_sync$;\n\n-- 3b. Utility RPC: set_manager_link4m_short_url (NEW-01, Wave B1)\n-- Persist URL rút gọn provider SAU khi createRewardLink thành công. Chỉ ghi khi attempt\n-- còn 'pending' (không đụng attempt đã verified/rewarded/expired). Trả false nếu không\n-- tìm thấy attempt hoặc attempt không còn pending — route coi như persist-thất-bại-mềm\n-- (reuse lần sau sẽ sinh lại shortlink, không tiêu thêm hạn mức).\nCREATE OR REPLACE FUNCTION public.set_manager_link4m_short_url(\n  p_attempt_id text,\n  p_short_url text\n)\nRETURNS boolean\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $l4m_short$\nBEGIN\n  UPDATE public.manager_link4m_attempts\n  SET provider_short_url = COALESCE(NULLIF(p_short_url, ''), provider_short_url)\n  WHERE attempt_id = p_attempt_id AND status = 'pending';\n  RETURN FOUND;\nEND;\n$l4m_short$;\n\n-- 4. Utility RPC: rollback_manager_link4m_attempt\nCREATE OR REPLACE FUNCTION public.rollback_manager_link4m_attempt(\n  p_attempt_id text\n)\nRETURNS boolean\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $l4m_rollback$\nBEGIN\n  DELETE FROM public.manager_link4m_attempts\n  WHERE attempt_id = p_attempt_id AND status = 'pending';\n  RETURN FOUND;\nEND;\n$l4m_rollback$;\n\nREVOKE ALL ON FUNCTION public.start_manager_link4m_attempt(text,text,text,text,integer,integer,text,text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.start_manager_link4m_attempt(text,text,text,text,integer,integer,text,text) TO service_role;\n\nREVOKE ALL ON FUNCTION public.claim_manager_link4m_reward(text,text,text,integer,text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.claim_manager_link4m_reward(text,text,text,integer,text) TO service_role;\n\nREVOKE ALL ON FUNCTION public.update_manager_link4m_sync_status(text,text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.update_manager_link4m_sync_status(text,text) TO service_role;\n\nREVOKE ALL ON FUNCTION public.set_manager_link4m_short_url(text,text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.set_manager_link4m_short_url(text,text) TO service_role;\n\nREVOKE ALL ON FUNCTION public.rollback_manager_link4m_attempt(text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.rollback_manager_link4m_attempt(text) TO service_role;\n\nCREATE OR REPLACE FUNCTION public.claim_manager_outbox_batch(\n  p_worker_id text,\n  p_limit integer DEFAULT 10,\n  p_lease_seconds integer DEFAULT 60\n)\nRETURNS SETOF public.manager_outbox_queue\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $outbox_claim$\nDECLARE\n  v_now timestamptz := now();\n  v_lease_until timestamptz := v_now + (p_lease_seconds || ' seconds')::interval;\nBEGIN\n  RETURN QUERY\n  WITH candidate AS (\n    SELECT id\n    FROM public.manager_outbox_queue\n    WHERE (status = 'pending' AND (next_retry_at <= v_now OR next_retry_at IS NULL))\n       OR (status = 'processing' AND lease_until <= v_now)\n    ORDER BY next_retry_at ASC\n    LIMIT GREATEST(1, LEAST(100, p_limit))\n    FOR UPDATE SKIP LOCKED\n  )\n  UPDATE public.manager_outbox_queue q\n  SET status = 'processing',\n      processing_started_at = v_now,\n      lease_until = v_lease_until,\n      lease_owner = p_worker_id,\n      attempts = q.attempts + 1,\n      updated_at = v_now\n  FROM candidate c\n  WHERE q.id = c.id\n  RETURNING q.*;\nEND;\n$outbox_claim$;\n\nREVOKE ALL ON FUNCTION public.claim_manager_outbox_batch(text, integer, integer) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.claim_manager_outbox_batch(text, integer, integer) TO service_role;\n\nCREATE OR REPLACE FUNCTION public.claim_manager_pending_allocations(\n  p_worker_id text,\n  p_limit integer DEFAULT 5,\n  p_lease_seconds integer DEFAULT 60\n)\nRETURNS SETOF public.manager_pending_allocations\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $alloc_claim$\nDECLARE\n  v_now timestamptz := now();\n  v_lease_until timestamptz := v_now + (p_lease_seconds || ' seconds')::interval;\nBEGIN\n  RETURN QUERY\n  WITH candidate AS (\n    SELECT id\n    FROM public.manager_pending_allocations\n    WHERE status = 'pending_retry'\n      AND (next_retry_at <= v_now OR next_retry_at IS NULL)\n      AND (lease_until IS NULL OR lease_until <= v_now)\n    ORDER BY created_at ASC\n    LIMIT GREATEST(1, LEAST(50, p_limit))\n    FOR UPDATE SKIP LOCKED\n  )\n  UPDATE public.manager_pending_allocations a\n  SET lease_owner = p_worker_id,\n      lease_until = v_lease_until,\n      attempts = a.attempts + 1,\n      updated_at = v_now\n  FROM candidate c\n  WHERE a.id = c.id\n  RETURNING a.*;\nEND;\n$alloc_claim$;\n\nREVOKE ALL ON FUNCTION public.claim_manager_pending_allocations(text, integer, integer) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.claim_manager_pending_allocations(text, integer, integer) TO service_role;\n\nCREATE OR REPLACE FUNCTION public.prune_manager_historical_data()\nRETURNS jsonb\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $prune$\nDECLARE\n  v_deleted_tx integer := 0;\n  v_deleted_rev integer := 0;\n  v_deleted_outbox integer := 0;\nBEGIN\n  DELETE FROM public.manager_users_write_transactions WHERE created_at < now() - interval '24 hours';\n  GET DIAGNOSTICS v_deleted_tx = ROW_COUNT;\n  DELETE FROM public.manager_session_revocations WHERE revoked_at < now() - interval '31 days';\n  GET DIAGNOSTICS v_deleted_rev = ROW_COUNT;\n  DELETE FROM public.manager_outbox_queue WHERE status IN ('completed', 'dead_letter') AND updated_at < now() - interval '7 days';\n  GET DIAGNOSTICS v_deleted_outbox = ROW_COUNT;\n  DELETE FROM public.bot_event_logs WHERE created_at < now() - interval '14 days';\n  DELETE FROM public.bot_chat_logs WHERE created_at < now() - interval '14 days';\n  DELETE FROM public.bot_position_logs WHERE changed_at < now() - interval '14 days';\n  RETURN jsonb_build_object('ok', true, 'deleted_write_transactions', v_deleted_tx, 'deleted_session_revocations', v_deleted_rev, 'deleted_outbox_items', v_deleted_outbox);\nEND;\n$prune$;\n\nREVOKE ALL ON FUNCTION public.prune_manager_historical_data() FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.prune_manager_historical_data() TO service_role;\n\nCOMMIT;\nNOTIFY pgrst, 'reload schema';\n";
+const SUPABASE_SCHEMA_SQL = "-- KingMC Bot Manager storage contract, aligned with manager.js and bot.js.\n-- Safe to run more than once. Keeps legacy columns/rows and adds the current API schema.\n--\n-- SCHEMA VERSION: 2026-10-30-v11.9 (Audit V4 Master Directive)\n--   - Link4M RPC chỉ chặn user 'disabled'; user 'expired' ĐƯỢC vượt link để hồi sinh.\n--   - claim_manager_link4m_reward revive 'expired' -> 'active' ATOMIC (cùng UPDATE với\n--     expires_at), chỉ chạy sau khi attempt đã được xác minh (token/status/expiry).\n--   - Không tự mở khóa 'disabled' (chỉ admin mới có quyền).\n-- ROLLBACK: toàn bộ hàm dùng CREATE OR REPLACE — chạy lại nguyên văn bản schema NGAY TRƯỚC\n--   (phiên bản 2026-10-28) là quay về hành vi cũ, không mất dữ liệu. Nếu chỉ muốn rollback\n--   riêng BUG-09: khôi phục guard chặn trạng thái khác active ở cả hai RPC và bỏ dòng\n--   `status = CASE WHEN v_user.status = 'expired' ...` trong UPDATE manager_users của claim.\n--\nBEGIN;\n\nCREATE TABLE IF NOT EXISTS public.manager_users (\n  id text,\n  username text PRIMARY KEY,\n  password text,\n  password_hash text,\n  role text NOT NULL DEFAULT 'user',\n  status text NOT NULL DEFAULT 'active',\n  assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  expires_at timestamptz,\n  plan_name text NOT NULL DEFAULT 'Gói mặc định',\n  bot_aliases jsonb NOT NULL DEFAULT '{}'::jsonb,\n  allow_account_change boolean NOT NULL DEFAULT true,\n  lock_reason text NOT NULL DEFAULT '',\n  note text NOT NULL DEFAULT '',\n  bot_count integer NOT NULL DEFAULT 1,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS username text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS password text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS password_hash text;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS expires_at timestamptz;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS plan_name text NOT NULL DEFAULT 'Gói mặc định';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS bot_aliases jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS allow_account_change boolean NOT NULL DEFAULT true;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS lock_reason text NOT NULL DEFAULT '';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS note text NOT NULL DEFAULT '';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS is_permanent boolean NOT NULL DEFAULT false;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS bot_count integer NOT NULL DEFAULT 1;\nUPDATE public.manager_users SET bot_count = GREATEST(bot_count, jsonb_array_length(assigned_bot_ids)) WHERE jsonb_typeof(assigned_bot_ids) = 'array' AND jsonb_array_length(assigned_bot_ids) > bot_count;\nCREATE TABLE IF NOT EXISTS public.manager_migration_entitlement_undo (\n  migration_id text NOT NULL,\n  entity_type text NOT NULL CHECK (entity_type IN ('user', 'key')),\n  entity_key text NOT NULL,\n  old_is_permanent boolean NOT NULL,\n  new_is_permanent boolean NOT NULL,\n  captured_at timestamptz NOT NULL DEFAULT now(),\n  rolled_back_at timestamptz,\n  PRIMARY KEY (migration_id, entity_type, entity_key)\n);\nALTER TABLE public.manager_migration_entitlement_undo ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_migration_entitlement_undo FROM PUBLIC, anon, authenticated;\nGRANT ALL ON TABLE public.manager_migration_entitlement_undo TO service_role;\nINSERT INTO public.manager_migration_entitlement_undo (migration_id, entity_type, entity_key, old_is_permanent, new_is_permanent) SELECT '2026-10-30-v11.9', 'user', username, is_permanent, true FROM public.manager_users WHERE is_permanent = false AND expires_at IS NULL AND (plan_name ILIKE '%vĩnh viễn%' OR plan_name ILIKE '%permanent%' OR plan_name ILIKE '%lifetime%') AND status = 'active' AND role <> 'admin' ON CONFLICT (migration_id, entity_type, entity_key) DO UPDATE SET old_is_permanent = EXCLUDED.old_is_permanent, new_is_permanent = EXCLUDED.new_is_permanent, captured_at = now();\nUPDATE public.manager_users SET is_permanent = true, updated_at = now() WHERE is_permanent = false AND expires_at IS NULL AND (plan_name ILIKE '%vĩnh viễn%' OR plan_name ILIKE '%permanent%' OR plan_name ILIKE '%lifetime%') AND status = 'active' AND role <> 'admin';\nALTER TABLE public.manager_users ALTER COLUMN password_hash DROP NOT NULL;\nUPDATE public.manager_users SET id = 'usr_' || username WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.manager_users SET password = password_hash WHERE (password IS NULL OR password = '') AND password_hash IS NOT NULL;\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_users_id_unique ON public.manager_users(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_users_username_unique ON public.manager_users(username);\n\nCREATE TABLE IF NOT EXISTS public.manager_keys (\n  id text PRIMARY KEY,\n  code text,\n  key_code text,\n  days integer NOT NULL DEFAULT 1,\n  duration_days integer NOT NULL DEFAULT 0,\n  duration_ms bigint NOT NULL DEFAULT 0,\n  plan_name text NOT NULL DEFAULT 'Gói mặc định',\n  bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  bot_count integer NOT NULL DEFAULT 1,\n  used boolean NOT NULL DEFAULT false,\n  status text NOT NULL DEFAULT 'unused',\n  allow_account_change boolean NOT NULL DEFAULT true,\n  used_by text,\n  used_at timestamptz,\n  max_uses integer NOT NULL DEFAULT 1,\n  used_count integer NOT NULL DEFAULT 0,\n  used_users jsonb NOT NULL DEFAULT '[]'::jsonb,\n  expires_at timestamptz,\n  note text,\n  created_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS code text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS key_code text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS days integer NOT NULL DEFAULT 1;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS duration_days integer NOT NULL DEFAULT 0;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS duration_ms bigint NOT NULL DEFAULT 0;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS role text DEFAULT 'user';\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS plan_name text NOT NULL DEFAULT 'Gói mặc định';\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS bot_count integer NOT NULL DEFAULT 1;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used boolean NOT NULL DEFAULT false;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'unused';\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS allow_account_change boolean NOT NULL DEFAULT true;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_by text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_at timestamptz;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS max_uses integer NOT NULL DEFAULT 1;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_count integer NOT NULL DEFAULT 0;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS used_users jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS expires_at timestamptz;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS note text;\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_keys ADD COLUMN IF NOT EXISTS is_permanent boolean NOT NULL DEFAULT false;\nUPDATE public.manager_keys SET is_permanent = true WHERE days = -1 OR duration_days = -1;\nUPDATE public.manager_keys SET code = key_code WHERE code IS NULL OR code = '';\nUPDATE public.manager_keys SET key_code = code WHERE key_code IS NULL OR key_code = '';\nUPDATE public.manager_keys SET id = 'key_' || code WHERE (id IS NULL OR id = '') AND code IS NOT NULL;\nUPDATE public.manager_keys SET days = duration_days WHERE duration_days > 0 AND (days IS NULL OR days = 1);\nUPDATE public.manager_keys SET bot_ids = assigned_bot_ids WHERE bot_ids = '[]'::jsonb AND assigned_bot_ids <> '[]'::jsonb;\nUPDATE public.manager_keys SET used = (lower(status) IN ('used','active','redeemed')) WHERE status IS NOT NULL AND used = false;\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_keys_code_unique ON public.manager_keys(code);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_keys_id_unique ON public.manager_keys(id);\n\nCREATE TABLE IF NOT EXISTS public.bot_registry (\n  id text PRIMARY KEY,\n  data jsonb NOT NULL DEFAULT '{}'::jsonb,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\n-- Earlier versions stored one bot per row with numeric ids. Convert the id type\n-- without removing those rows, then create the singleton registry document.\nDO $$\nBEGIN\n  IF EXISTS (\n    SELECT 1 FROM information_schema.columns\n    WHERE table_schema='public' AND table_name='bot_registry'\n      AND column_name='id' AND data_type <> 'text'\n  ) THEN\n    ALTER TABLE public.bot_registry ALTER COLUMN id TYPE text USING id::text;\n  END IF;\nEND $$;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS data jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS url text;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS label text DEFAULT '';\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS sort_order integer DEFAULT 0;\nALTER TABLE public.bot_registry ADD COLUMN IF NOT EXISTS admin_password text DEFAULT '';\nDO $$\nDECLARE\n  legacy_bots jsonb;\n  legacy_id_map jsonb;\n  legacy_order jsonb;\n  legacy_admin text;\nBEGIN\n  IF NOT EXISTS (SELECT 1 FROM public.bot_registry WHERE id='default') THEN\n    SELECT COALESCE(jsonb_agg(jsonb_build_object('label', COALESCE(label,''), 'url', url) ORDER BY sort_order, id), '[]'::jsonb),\n           COALESCE(jsonb_object_agg(url, id), '{}'::jsonb),\n           COALESCE(jsonb_agg(url ORDER BY sort_order, id), '[]'::jsonb),\n           COALESCE(max(admin_password), '')\n      INTO legacy_bots, legacy_id_map, legacy_order, legacy_admin\n      FROM public.bot_registry\n      WHERE id <> 'default' AND url IS NOT NULL AND btrim(url) <> '';\n    INSERT INTO public.bot_registry(id, data, updated_at, url, label, sort_order, admin_password)\n      VALUES ('default', jsonb_build_object(\n        'dynamicBots', legacy_bots, 'botIdMap', legacy_id_map,\n        'orderUrls', legacy_order, 'adminPassword', legacy_admin,\n        'disabledEnvUrls', '[]'::jsonb, 'disabledEnvIds', '[]'::jsonb,\n        'overrides', '[]'::jsonb, 'order', '[]'::jsonb,\n        'botAliases', '{}'::jsonb, 'botTags', '{}'::jsonb,\n        'systemSettings', '{}'::jsonb, 'lastBotId', 0\n      ), now(), '', 'KingMC Registry', -1, legacy_admin) ON CONFLICT (id) DO NOTHING;\n  END IF;\nEND $$;\n\nCREATE TABLE IF NOT EXISTS public.manager_sessions (\n  token_hash text PRIMARY KEY,\n  user_id text NOT NULL DEFAULT '',\n  username text NOT NULL,\n  role text NOT NULL DEFAULT 'user',\n  assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  expires_at bigint NOT NULL DEFAULT 0,\n  plan_name text NOT NULL DEFAULT 'Gói thường',\n  allow_account_change boolean NOT NULL DEFAULT true,\n  status text NOT NULL DEFAULT 'active',\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS user_id text NOT NULL DEFAULT '';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS token_hash text;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS username text;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS assigned_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS expires_at bigint NOT NULL DEFAULT 0;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS plan_name text NOT NULL DEFAULT 'Gói thường';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS allow_account_change boolean NOT NULL DEFAULT true;\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active';\nALTER TABLE public.manager_sessions ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nUPDATE public.manager_sessions SET user_id = username WHERE user_id IS NULL OR user_id = '';\n\nCREATE TABLE IF NOT EXISTS public.bot_settings (\n  bot_id text PRIMARY KEY,\n  username text NOT NULL DEFAULT '',\n  password text NOT NULL DEFAULT '',\n  settings jsonb NOT NULL DEFAULT '{}'::jsonb,\n  proxy jsonb NOT NULL DEFAULT '{}'::jsonb,\n  schedules jsonb NOT NULL DEFAULT '[]'::jsonb,\n  bot_schedules jsonb NOT NULL DEFAULT '[]'::jsonb,\n  auto_chat jsonb NOT NULL DEFAULT '[]'::jsonb,\n  manually_stopped boolean NOT NULL DEFAULT false,\n  synced_auth jsonb NOT NULL DEFAULT '{}'::jsonb,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS username text NOT NULL DEFAULT '';\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS password text NOT NULL DEFAULT '';\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS settings jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS proxy jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS schedules jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS bot_schedules jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS auto_chat jsonb NOT NULL DEFAULT '[]'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS manually_stopped boolean NOT NULL DEFAULT false;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS synced_auth jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\n\nCREATE OR REPLACE FUNCTION public.sync_bot_schedules_column()\nRETURNS trigger\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nBEGIN\n  IF NEW.schedules IS NOT NULL AND (NEW.bot_schedules IS NULL OR NEW.bot_schedules = '[]'::jsonb) AND NEW.schedules <> '[]'::jsonb THEN\n    NEW.bot_schedules := NEW.schedules;\n  ELSIF NEW.bot_schedules IS NOT NULL AND (NEW.schedules IS NULL OR NEW.schedules = '[]'::jsonb) AND NEW.bot_schedules <> '[]'::jsonb THEN\n    NEW.schedules := NEW.bot_schedules;\n  ELSIF NEW.schedules IS NOT NULL AND NEW.bot_schedules IS NULL THEN\n    NEW.bot_schedules := NEW.schedules;\n  ELSIF NEW.bot_schedules IS NOT NULL AND NEW.schedules IS NULL THEN\n    NEW.schedules := NEW.bot_schedules;\n  END IF;\n  RETURN NEW;\nEND;\n$$;\n\nDROP TRIGGER IF EXISTS trg_sync_bot_schedules ON public.bot_settings;\nCREATE TRIGGER trg_sync_bot_schedules\nBEFORE INSERT OR UPDATE ON public.bot_settings\nFOR EACH ROW EXECUTE FUNCTION public.sync_bot_schedules_column();\n\nCREATE TABLE IF NOT EXISTS public.audit_logs (\n  id text PRIMARY KEY,\n  bot_id text,\n  log_type text NOT NULL DEFAULT 'SYSTEM',\n  category text NOT NULL DEFAULT 'SYSTEM',\n  action text NOT NULL DEFAULT '',\n  action_label text NOT NULL DEFAULT '',\n  actor_username text NOT NULL DEFAULT 'system',\n  actor_role text NOT NULL DEFAULT 'system',\n  actor_ip text NOT NULL DEFAULT '',\n  target jsonb NOT NULL DEFAULT '{}'::jsonb,\n  details text NOT NULL DEFAULT '',\n  status text NOT NULL DEFAULT 'SUCCESS',\n  timestamp timestamptz NOT NULL DEFAULT now(),\n  actor jsonb NOT NULL DEFAULT '{}'::jsonb,\n  ip text NOT NULL DEFAULT ''\n);\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS log_type text NOT NULL DEFAULT 'SYSTEM';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS category text NOT NULL DEFAULT 'SYSTEM';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS action text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS action_label text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_username text NOT NULL DEFAULT 'system';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_role text NOT NULL DEFAULT 'system';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_ip text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS target jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS details text NOT NULL DEFAULT '';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'SUCCESS';\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS timestamp timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS ip text NOT NULL DEFAULT '';\nUPDATE public.audit_logs SET\n  actor_username = COALESCE(NULLIF(actor_username, 'system'), actor->>'username', 'system'),\n  actor_role = COALESCE(NULLIF(actor_role, 'system'), actor->>'role', 'system'),\n  actor_ip = COALESCE(NULLIF(actor_ip, ''), ip, ''),\n  bot_id = COALESCE(NULLIF(bot_id, ''), NULLIF(target->>'botId',''), NULLIF(target->>'bot_id',''))\nWHERE actor IS NOT NULL OR ip <> '' OR bot_id IS NULL;\n\nCREATE TABLE IF NOT EXISTS public.bot_chat_logs (\n  id text PRIMARY KEY,\n  bot_id text NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  sender text NOT NULL DEFAULT 'SERVER',\n  event_type text NOT NULL DEFAULT 'CHAT',\n  message text NOT NULL DEFAULT '',\n  metadata jsonb NOT NULL DEFAULT '{}'::jsonb\n);\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS sender text NOT NULL DEFAULT 'SERVER';\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS event_type text NOT NULL DEFAULT 'CHAT';\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS message text NOT NULL DEFAULT '';\nALTER TABLE public.bot_chat_logs ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb;\nCREATE TABLE IF NOT EXISTS public.bot_event_logs (\n  id text PRIMARY KEY,\n  bot_id text NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  level text NOT NULL DEFAULT 'INFO',\n  event_type text NOT NULL DEFAULT 'SYSTEM',\n  message text NOT NULL DEFAULT '',\n  metadata jsonb NOT NULL DEFAULT '{}'::jsonb\n);\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS level text NOT NULL DEFAULT 'INFO';\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS event_type text NOT NULL DEFAULT 'SYSTEM';\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS message text NOT NULL DEFAULT '';\nALTER TABLE public.bot_event_logs ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb;\nCREATE TABLE IF NOT EXISTS public.bot_position_state (\n  bot_id text PRIMARY KEY,\n  position jsonb NOT NULL DEFAULT '{}'::jsonb,\n  dimension text NOT NULL DEFAULT 'unknown',\n  location_state text NOT NULL DEFAULT 'Unknown',\n  last_event_key text,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS position jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS dimension text NOT NULL DEFAULT 'unknown';\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS location_state text NOT NULL DEFAULT 'Unknown';\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS last_event_key text;\nALTER TABLE public.bot_position_state ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();\nCREATE TABLE IF NOT EXISTS public.bot_position_logs (\n  id text PRIMARY KEY,\n  bot_id text NOT NULL,\n  changed_at timestamptz NOT NULL DEFAULT now(),\n  from_position jsonb,\n  to_position jsonb NOT NULL,\n  from_dimension text,\n  to_dimension text NOT NULL DEFAULT 'unknown',\n  location_state text NOT NULL DEFAULT 'Unknown',\n  reason text NOT NULL DEFAULT 'MOVE',\n  event_key text NOT NULL UNIQUE\n);\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS id text;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS changed_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS from_position jsonb;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS to_position jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS from_dimension text;\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS to_dimension text NOT NULL DEFAULT 'unknown';\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS location_state text NOT NULL DEFAULT 'Unknown';\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS reason text NOT NULL DEFAULT 'MOVE';\nALTER TABLE public.bot_position_logs ADD COLUMN IF NOT EXISTS event_key text;\nCREATE TABLE IF NOT EXISTS public.manager_backups (\n  name text PRIMARY KEY,\n  bot_id text,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  size_bytes integer NOT NULL DEFAULT 0,\n  payload jsonb NOT NULL DEFAULT '{}'::jsonb\n);\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS name text;\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS bot_id text;\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS size_bytes integer NOT NULL DEFAULT 0;\nALTER TABLE public.manager_backups ADD COLUMN IF NOT EXISTS payload jsonb NOT NULL DEFAULT '{}'::jsonb;\n\n-- Repair nullable legacy identifiers without deleting or merging existing rows.\nUPDATE public.audit_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_chat_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_event_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_position_logs SET id = md5(random()::text || clock_timestamp()::text || ctid::text) WHERE id IS NULL OR btrim(id) = '';\nUPDATE public.bot_position_logs SET event_key = 'legacy:' || id WHERE event_key IS NULL OR btrim(event_key) = '';\n\nCREATE INDEX IF NOT EXISTS idx_manager_users_role_status ON public.manager_users(role, status);\nCREATE INDEX IF NOT EXISTS idx_manager_keys_used_created ON public.manager_keys(used, created_at DESC);\nCREATE INDEX IF NOT EXISTS idx_manager_sessions_username ON public.manager_sessions(username);\nCREATE INDEX IF NOT EXISTS idx_manager_sessions_expires_at ON public.manager_sessions(expires_at);\nCREATE INDEX IF NOT EXISTS idx_audit_logs_bot_time ON public.audit_logs(bot_id, timestamp DESC);\nCREATE INDEX IF NOT EXISTS idx_audit_logs_user_time ON public.audit_logs(actor_username, timestamp DESC);\nCREATE INDEX IF NOT EXISTS idx_bot_chat_logs_bot_time ON public.bot_chat_logs(bot_id, created_at DESC);\nCREATE INDEX IF NOT EXISTS idx_bot_event_logs_bot_time ON public.bot_event_logs(bot_id, created_at DESC);\nCREATE INDEX IF NOT EXISTS idx_bot_position_logs_bot_time ON public.bot_position_logs(bot_id, changed_at DESC);\nCREATE INDEX IF NOT EXISTS idx_manager_backups_bot_time ON public.manager_backups(bot_id, created_at DESC);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_sessions_token_hash_unique ON public.manager_sessions(token_hash);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_settings_bot_id_unique ON public.bot_settings(bot_id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_audit_logs_id_unique ON public.audit_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_chat_logs_id_unique ON public.bot_chat_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_event_logs_id_unique ON public.bot_event_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_position_state_bot_id_unique ON public.bot_position_state(bot_id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_position_logs_id_unique ON public.bot_position_logs(id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_bot_position_logs_event_key_unique ON public.bot_position_logs(event_key);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_manager_backups_name_unique ON public.manager_backups(name);\n\nALTER TABLE public.manager_users ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_keys ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_registry ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_sessions ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_settings ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_chat_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_event_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_position_state ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.bot_position_logs ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_backups ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON public.manager_users, public.manager_keys, public.bot_registry,\n  public.manager_sessions, public.bot_settings, public.audit_logs,\n  public.bot_chat_logs, public.bot_event_logs, public.bot_position_state,\n  public.bot_position_logs, public.manager_backups FROM anon, authenticated;\nGRANT ALL ON public.manager_users, public.manager_keys, public.bot_registry,\n  public.manager_sessions, public.bot_settings, public.audit_logs,\n  public.bot_chat_logs, public.bot_event_logs, public.bot_position_state,\n  public.bot_position_logs, public.manager_backups TO service_role;\n\nCREATE OR REPLACE FUNCTION public.record_bot_position_change(\n  p_id text,\n  p_bot_id text,\n  p_changed_at timestamptz,\n  p_to_position jsonb,\n  p_to_dimension text,\n  p_location_state text,\n  p_reason text,\n  p_event_key text,\n  p_min_distance double precision DEFAULT 5.0\n) RETURNS jsonb\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $$\nDECLARE\n  prior public.bot_position_state%ROWTYPE;\n  dx double precision := 0;\n  dy double precision := 0;\n  dz double precision := 0;\n  distance double precision := 0;\n  dimension_changed boolean := false;\n  state_changed boolean := false;\nBEGIN\n  IF p_bot_id IS NULL OR p_bot_id !~ '^[1-9][0-9]{0,8}$' THEN\n    RAISE EXCEPTION 'Invalid bot_id';\n  END IF;\n  IF p_event_key IS NULL OR btrim(p_event_key) = '' THEN\n    RAISE EXCEPTION 'event_key is required';\n  END IF;\n  IF EXISTS (SELECT 1 FROM public.bot_position_logs WHERE event_key = p_event_key) THEN\n    RETURN jsonb_build_object('ok', true, 'recorded', false, 'duplicate', true);\n  END IF;\n\n  PERFORM pg_advisory_xact_lock(hashtext('bot-position:' || p_bot_id)::bigint);\n  -- Recheck under the bot lock so a concurrent retry cannot advance state twice.\n  IF EXISTS (SELECT 1 FROM public.bot_position_logs WHERE event_key = p_event_key) THEN\n    RETURN jsonb_build_object('ok', true, 'recorded', false, 'duplicate', true);\n  END IF;\n  SELECT * INTO prior FROM public.bot_position_state WHERE bot_id = p_bot_id FOR UPDATE;\n  IF FOUND THEN\n    dimension_changed := COALESCE(prior.dimension, '') <> COALESCE(p_to_dimension, 'unknown');\n    state_changed := COALESCE(prior.location_state, '') <> COALESCE(p_location_state, 'Unknown');\n    BEGIN\n      dx := COALESCE((p_to_position->>'x')::double precision, 0) - COALESCE((prior.position->>'x')::double precision, 0);\n      dy := COALESCE((p_to_position->>'y')::double precision, 0) - COALESCE((prior.position->>'y')::double precision, 0);\n      dz := COALESCE((p_to_position->>'z')::double precision, 0) - COALESCE((prior.position->>'z')::double precision, 0);\n      distance := sqrt(dx*dx + dy*dy + dz*dz);\n    EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN\n      distance := 0;\n    END;\n    IF NOT dimension_changed AND NOT state_changed AND distance < GREATEST(COALESCE(p_min_distance, 5.0), 0) THEN\n      RETURN jsonb_build_object('ok', true, 'recorded', false, 'duplicate', false, 'distance', distance);\n    END IF;\n  END IF;\n\n  INSERT INTO public.bot_position_logs(id, bot_id, changed_at, from_position, to_position,\n    from_dimension, to_dimension, location_state, reason, event_key)\n  VALUES (COALESCE(NULLIF(p_id,''), md5(random()::text || clock_timestamp()::text)), p_bot_id,\n    COALESCE(p_changed_at, now()), CASE WHEN prior.bot_id IS NULL THEN NULL ELSE prior.position END,\n    COALESCE(p_to_position, '{}'::jsonb), CASE WHEN prior.bot_id IS NULL THEN NULL ELSE prior.dimension END,\n    COALESCE(p_to_dimension, 'unknown'), COALESCE(p_location_state, 'Unknown'),\n    COALESCE(NULLIF(p_reason,''), 'MOVE'), p_event_key)\n  ON CONFLICT (event_key) DO NOTHING;\n\n  INSERT INTO public.bot_position_state(bot_id, position, dimension, location_state, last_event_key, updated_at)\n  VALUES (p_bot_id, COALESCE(p_to_position, '{}'::jsonb), COALESCE(p_to_dimension, 'unknown'),\n    COALESCE(p_location_state, 'Unknown'), p_event_key, COALESCE(p_changed_at, now()))\n  ON CONFLICT (bot_id) DO UPDATE SET position=EXCLUDED.position, dimension=EXCLUDED.dimension,\n    location_state=EXCLUDED.location_state, last_event_key=EXCLUDED.last_event_key, updated_at=EXCLUDED.updated_at;\n  RETURN jsonb_build_object('ok', true, 'recorded', true, 'distance', distance);\nEND;\n$$;\nREVOKE ALL ON FUNCTION public.record_bot_position_change(text,text,timestamptz,jsonb,text,text,text,text,double precision) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.record_bot_position_change(text,text,timestamptz,jsonb,text,text,text,text,double precision) TO service_role;\n\nCOMMIT;\n\nBEGIN;\n\nCREATE TABLE IF NOT EXISTS public.manager_locks (\n  lock_key text PRIMARY KEY,\n  owner_id text NOT NULL,\n  lease_until timestamptz NOT NULL,\n  fencing_token bigint NOT NULL DEFAULT 1,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_locks ADD COLUMN IF NOT EXISTS fencing_token bigint NOT NULL DEFAULT 1;\nALTER TABLE public.manager_locks ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_locks FROM PUBLIC, anon, authenticated;\nGRANT ALL ON TABLE public.manager_locks TO service_role;\n\nCREATE TABLE IF NOT EXISTS public.manager_key_usage_transactions (\n  transaction_id text PRIMARY KEY,\n  key_id text NOT NULL,\n  username text NOT NULL,\n  usage_snapshot jsonb NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_key_usage_transactions ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_key_usage_transactions FROM PUBLIC, anon, authenticated;\nGRANT SELECT ON TABLE public.manager_key_usage_transactions TO service_role;\n\nCREATE TABLE IF NOT EXISTS public.bot_log_clear_cutoffs (\n  bot_id text PRIMARY KEY,\n  event_cutoff timestamptz,\n  chat_cutoff timestamptz,\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.bot_log_clear_cutoffs ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.bot_log_clear_cutoffs FROM PUBLIC, anon, authenticated;\nGRANT SELECT ON TABLE public.bot_log_clear_cutoffs TO service_role;\n\nDROP FUNCTION IF EXISTS public.acquire_manager_lock(text,text,integer);\nCREATE OR REPLACE FUNCTION public.acquire_manager_lock(\n  p_lock_key text,\n  p_owner_id text,\n  p_lease_seconds integer DEFAULT 900\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_lease_interval interval;\n  v_now timestamptz := now();\n  v_current RECORD;\n  v_token bigint;\nBEGIN\n  IF COALESCE(btrim(p_lock_key), '') = '' OR COALESCE(btrim(p_owner_id), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'fencing_token', 0);\n  END IF;\n\n  v_lease_interval := make_interval(secs => GREATEST(30, LEAST(COALESCE(p_lease_seconds, 900), 3600)));\n\n  SELECT owner_id, lease_until, fencing_token INTO v_current\n  FROM public.manager_locks\n  WHERE lock_key = p_lock_key\n  FOR UPDATE;\n\n  IF NOT FOUND THEN\n    v_token := 1;\n    INSERT INTO public.manager_locks(lock_key, owner_id, lease_until, updated_at, fencing_token)\n    VALUES (p_lock_key, p_owner_id, v_now + v_lease_interval, v_now, v_token);\n    RETURN jsonb_build_object('ok', true, 'fencing_token', v_token);\n  END IF;\n\n  IF v_current.owner_id <> p_owner_id AND v_current.lease_until > v_now THEN\n    RETURN jsonb_build_object('ok', false, 'fencing_token', v_current.fencing_token);\n  END IF;\n\n  v_token := COALESCE(v_current.fencing_token, 0) + 1;\n  UPDATE public.manager_locks\n  SET owner_id = p_owner_id,\n      lease_until = v_now + v_lease_interval,\n      updated_at = v_now,\n      fencing_token = v_token\n  WHERE lock_key = p_lock_key;\n\n  RETURN jsonb_build_object('ok', true, 'fencing_token', v_token);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.release_manager_lock(p_lock_key text, p_owner_id text)\nRETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE affected integer;\nBEGIN\n  DELETE FROM public.manager_locks WHERE lock_key = p_lock_key AND owner_id = p_owner_id;\n  GET DIAGNOSTICS affected = ROW_COUNT;\n  RETURN affected = 1;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.renew_manager_lock(\n  p_lock_key text,\n  p_owner_id text,\n  p_lease_seconds integer DEFAULT 900\n) RETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE affected integer;\nBEGIN\n  UPDATE public.manager_locks\n  SET lease_until = now() + make_interval(secs => GREATEST(30, LEAST(COALESCE(p_lease_seconds, 900), 3600))),\n      updated_at = now()\n  WHERE lock_key = p_lock_key AND owner_id = p_owner_id AND lease_until > now();\n  GET DIAGNOSTICS affected = ROW_COUNT;\n  RETURN affected = 1;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.verify_manager_lock_fencing(\n  p_lock_key text,\n  p_owner_id text,\n  p_fencing_token bigint\n) RETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_valid boolean := false;\nBEGIN\n  IF COALESCE(btrim(p_lock_key), '') = '' OR COALESCE(btrim(p_owner_id), '') = '' OR p_fencing_token IS NULL OR p_fencing_token <= 0 THEN\n    RETURN false;\n  END IF;\n\n  SELECT (owner_id = p_owner_id AND fencing_token = p_fencing_token AND lease_until > now()) INTO v_valid\n  FROM public.manager_locks\n  WHERE lock_key = p_lock_key;\n\n  RETURN COALESCE(v_valid, false);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.patch_manager_registry(\n  p_patch jsonb DEFAULT '{}'::jsonb,\n  p_pending_reset_patch jsonb DEFAULT '{}'::jsonb,\n  p_pending_reset_deletes text[] DEFAULT '{}'::text[]\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_data jsonb;\n  v_resets jsonb;\n  v_key text;\nBEGIN\n  INSERT INTO public.bot_registry(id, data, updated_at)\n  VALUES ('default', '{}'::jsonb, now()) ON CONFLICT (id) DO NOTHING;\n  SELECT COALESCE(data, '{}'::jsonb) INTO v_data\n  FROM public.bot_registry WHERE id = 'default' FOR UPDATE;\n  v_data := v_data || COALESCE(p_patch, '{}'::jsonb);\n  v_resets := CASE WHEN jsonb_typeof(v_data->'pendingResets') = 'object' THEN v_data->'pendingResets' ELSE '{}'::jsonb END;\n  FOREACH v_key IN ARRAY COALESCE(p_pending_reset_deletes, '{}'::text[]) LOOP\n    v_resets := v_resets - v_key;\n  END LOOP;\n  v_resets := v_resets || CASE WHEN jsonb_typeof(p_pending_reset_patch) = 'object' THEN p_pending_reset_patch ELSE '{}'::jsonb END;\n  v_data := jsonb_set(v_data, '{pendingResets}', v_resets, true);\n  UPDATE public.bot_registry SET data = v_data, updated_at = now() WHERE id = 'default';\n  RETURN jsonb_build_object('ok', true);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.set_bot_log_clear_cutoff(\n  p_bot_id text,\n  p_kind text,\n  p_cutoff timestamptz\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE v_cutoff timestamptz;\nBEGIN\n  IF p_bot_id IS NULL OR p_bot_id !~ '^[1-9][0-9]{0,8}$' OR p_cutoff IS NULL OR p_kind IS NULL OR p_kind NOT IN ('event','chat') THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_INPUT');\n  END IF;\n  IF p_kind = 'event' THEN\n    INSERT INTO public.bot_log_clear_cutoffs(bot_id, event_cutoff, updated_at)\n    VALUES (p_bot_id, p_cutoff, now())\n    ON CONFLICT (bot_id) DO UPDATE SET\n      event_cutoff = CASE WHEN public.bot_log_clear_cutoffs.event_cutoff IS NULL THEN EXCLUDED.event_cutoff ELSE GREATEST(public.bot_log_clear_cutoffs.event_cutoff, EXCLUDED.event_cutoff) END,\n      updated_at = now()\n    RETURNING event_cutoff INTO v_cutoff;\n  ELSE\n    INSERT INTO public.bot_log_clear_cutoffs(bot_id, chat_cutoff, updated_at)\n    VALUES (p_bot_id, p_cutoff, now())\n    ON CONFLICT (bot_id) DO UPDATE SET\n      chat_cutoff = CASE WHEN public.bot_log_clear_cutoffs.chat_cutoff IS NULL THEN EXCLUDED.chat_cutoff ELSE GREATEST(public.bot_log_clear_cutoffs.chat_cutoff, EXCLUDED.chat_cutoff) END,\n      updated_at = now()\n    RETURNING chat_cutoff INTO v_cutoff;\n  END IF;\n  RETURN jsonb_build_object('ok', true, 'cutoff', v_cutoff);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.reject_cleared_bot_log()\nRETURNS trigger\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE v_cutoff timestamptz;\nBEGIN\n  IF TG_TABLE_NAME = 'bot_event_logs' THEN\n    SELECT event_cutoff INTO v_cutoff FROM public.bot_log_clear_cutoffs WHERE bot_id = NEW.bot_id;\n  ELSE\n    SELECT chat_cutoff INTO v_cutoff FROM public.bot_log_clear_cutoffs WHERE bot_id = NEW.bot_id;\n  END IF;\n  IF v_cutoff IS NOT NULL AND NEW.created_at < v_cutoff THEN\n    RETURN NULL;\n  END IF;\n  RETURN NEW;\nEND;\n$$;\n\nDROP TRIGGER IF EXISTS reject_cleared_event_log ON public.bot_event_logs;\nCREATE TRIGGER reject_cleared_event_log BEFORE INSERT ON public.bot_event_logs\nFOR EACH ROW EXECUTE FUNCTION public.reject_cleared_bot_log();\nDROP TRIGGER IF EXISTS reject_cleared_chat_log ON public.bot_chat_logs;\nCREATE TRIGGER reject_cleared_chat_log BEFORE INSERT ON public.bot_chat_logs\nFOR EACH ROW EXECUTE FUNCTION public.reject_cleared_bot_log();\n\nCREATE OR REPLACE FUNCTION public.consume_manager_key_usage(p_code text, p_username text, p_transaction_id text)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_key public.manager_keys%ROWTYPE;\n  v_code text := upper(btrim(COALESCE(p_code, '')));\n  v_username text := lower(btrim(COALESCE(p_username, '')));\n  v_users jsonb;\n  v_count integer;\n  v_max integer;\n  v_used_by text;\n  v_transaction public.manager_key_usage_transactions%ROWTYPE;\nBEGIN\n  IF v_code = '' OR v_username = '' OR COALESCE(btrim(p_transaction_id), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_INPUT');\n  END IF;\n  SELECT * INTO v_transaction FROM public.manager_key_usage_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF v_transaction.username <> v_username OR upper(COALESCE(v_transaction.usage_snapshot->>'code', v_transaction.usage_snapshot->>'key_code', '')) <> v_code THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN jsonb_build_object('ok', true, 'replayed', true, 'transactionId', p_transaction_id, 'row', v_transaction.usage_snapshot);\n  END IF;\n  SELECT * INTO v_key\n  FROM public.manager_keys\n  WHERE upper(COALESCE(NULLIF(code, ''), key_code, '')) = v_code\n  FOR UPDATE;\n  IF NOT FOUND THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'KEY_NOT_FOUND');\n  END IF;\n\n  -- A duplicate request may have waited on this key row while its first attempt committed.\n  SELECT * INTO v_transaction FROM public.manager_key_usage_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF v_transaction.username <> v_username\n       OR upper(COALESCE(v_transaction.usage_snapshot->>'code', v_transaction.usage_snapshot->>'key_code', '')) <> v_code THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN jsonb_build_object('ok', true, 'replayed', true, 'transactionId', p_transaction_id, 'row', v_transaction.usage_snapshot);\n  END IF;\n\n  v_max := COALESCE(v_key.max_uses, 1);\n  IF v_max < 0 THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_MAX_USES');\n  END IF;\n  v_users := CASE WHEN jsonb_typeof(v_key.used_users) = 'array' THEN v_key.used_users ELSE '[]'::jsonb END;\n  IF jsonb_array_length(v_users) > 0 THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM jsonb_array_elements_text(v_users) AS u(value)\n    WHERE btrim(value) <> '';\n  END IF;\n  IF jsonb_array_length(v_users) = 0 AND COALESCE(v_key.used_by, '') <> '' THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM unnest(string_to_array(v_key.used_by, ',')) AS value\n    WHERE btrim(value) <> '';\n  END IF;\n  IF v_users ? v_username THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'ALREADY_USED');\n  END IF;\n  v_count := GREATEST(COALESCE(v_key.used_count, 0), jsonb_array_length(v_users), CASE WHEN v_key.used THEN 1 ELSE 0 END);\n  IF v_max > 0 AND v_count >= v_max THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'EXHAUSTED');\n  END IF;\n\n  v_users := v_users || jsonb_build_array(v_username);\n  v_count := v_count + 1;\n  SELECT string_agg(value, ', ' ORDER BY ord) INTO v_used_by\n  FROM jsonb_array_elements_text(v_users) WITH ORDINALITY AS u(value, ord);\n  UPDATE public.manager_keys\n  SET used_users = v_users,\n      used_count = v_count,\n      used_by = v_used_by,\n      used_at = now(),\n      used = (v_max > 0 AND v_count >= v_max)\n  WHERE id = v_key.id\n  RETURNING * INTO v_key;\n  INSERT INTO public.manager_key_usage_transactions(transaction_id, key_id, username, usage_snapshot)\n  VALUES (p_transaction_id, v_key.id, v_username, to_jsonb(v_key));\n  RETURN jsonb_build_object('ok', true, 'transactionId', p_transaction_id, 'row', to_jsonb(v_key));\nEND;\n$$;\n\nREVOKE ALL ON FUNCTION public.acquire_manager_lock(text,text,integer) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.release_manager_lock(text,text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.renew_manager_lock(text,text,integer) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.verify_manager_lock_fencing(text,text,bigint) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.patch_manager_registry(jsonb,jsonb,text[]) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.set_bot_log_clear_cutoff(text,text,timestamptz) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.reject_cleared_bot_log() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.consume_manager_key_usage(text,text,text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.acquire_manager_lock(text,text,integer) TO service_role;\nGRANT EXECUTE ON FUNCTION public.release_manager_lock(text,text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.renew_manager_lock(text,text,integer) TO service_role;\nGRANT EXECUTE ON FUNCTION public.verify_manager_lock_fencing(text,text,bigint) TO service_role;\nGRANT EXECUTE ON FUNCTION public.patch_manager_registry(jsonb,jsonb,text[]) TO service_role;\nGRANT EXECUTE ON FUNCTION public.set_bot_log_clear_cutoff(text,text,timestamptz) TO service_role;\nGRANT EXECUTE ON FUNCTION public.consume_manager_key_usage(text,text,text) TO service_role;\n\nCOMMIT;\n\nNOTIFY pgrst, 'reload schema';\n\nBEGIN;\n\n-- User entitlement fields were previously accepted by Manager but not persisted.\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS allow_account_change boolean NOT NULL DEFAULT true;\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS lock_reason text NOT NULL DEFAULT '';\nALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS note text NOT NULL DEFAULT '';\n\nCREATE TABLE IF NOT EXISTS public.manager_user_state (\n  singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),\n  revision bigint NOT NULL DEFAULT 1 CHECK (revision >= 1),\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nINSERT INTO public.manager_user_state(singleton, revision)\nVALUES (true, 1) ON CONFLICT (singleton) DO NOTHING;\n\nCREATE TABLE IF NOT EXISTS public.manager_users_write_transactions (\n  transaction_id uuid PRIMARY KEY,\n  expected_revision bigint NOT NULL,\n  users_payload jsonb NOT NULL,\n  result jsonb NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE TABLE IF NOT EXISTS public.manager_session_revocations (\n  token_hash text PRIMARY KEY,\n  revoked_at timestamptz NOT NULL DEFAULT now()\n);\n\nALTER TABLE public.manager_key_usage_transactions\n  ADD COLUMN IF NOT EXISTS user_revision bigint;\n\nALTER TABLE public.manager_user_state ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_users_write_transactions ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.manager_session_revocations ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_user_state FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON TABLE public.manager_users_write_transactions FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON TABLE public.manager_session_revocations FROM PUBLIC, anon, authenticated;\nGRANT SELECT ON TABLE public.manager_user_state, public.manager_session_revocations, public.manager_users_write_transactions, public.manager_key_usage_transactions, public.bot_log_clear_cutoffs TO service_role;\n-- Force every service-role user write through the revision-checked RPCs below.\n-- This makes stale legacy snapshot upserts fail closed during mixed-version deploys.\nREVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE public.manager_users FROM service_role;\nGRANT SELECT ON TABLE public.manager_users TO service_role;\n\nCREATE OR REPLACE FUNCTION public.bump_manager_users_revision()\nRETURNS trigger\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nBEGIN\n  UPDATE public.manager_user_state\n  SET revision = revision + 1, updated_at = now()\n  WHERE singleton = true;\n  RETURN NULL;\nEND;\n$$;\n\nDROP TRIGGER IF EXISTS manager_users_revision_after_write ON public.manager_users;\nCREATE TRIGGER manager_users_revision_after_write\nAFTER INSERT OR UPDATE OR DELETE ON public.manager_users\nFOR EACH STATEMENT EXECUTE FUNCTION public.bump_manager_users_revision();\n\nCREATE OR REPLACE FUNCTION public.reject_revoked_manager_session()\nRETURNS trigger\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nBEGIN\n  IF EXISTS (\n    SELECT 1 FROM public.manager_session_revocations\n    WHERE token_hash = NEW.token_hash\n  ) THEN\n    RETURN NULL;\n  END IF;\n  RETURN NEW;\nEND;\n$$;\n\nDROP TRIGGER IF EXISTS manager_sessions_reject_revoked ON public.manager_sessions;\nCREATE TRIGGER manager_sessions_reject_revoked\nBEFORE INSERT OR UPDATE ON public.manager_sessions\nFOR EACH ROW EXECUTE FUNCTION public.reject_revoked_manager_session();\n\nCREATE OR REPLACE FUNCTION public.read_manager_users_snapshot()\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_result jsonb;\nBEGIN\n  WITH state_cte AS (\n    SELECT COALESCE(revision, 1) AS revision\n    FROM public.manager_user_state\n    WHERE singleton = true\n  ),\n  users_cte AS (\n    SELECT COALESCE(jsonb_agg(to_jsonb(u) ORDER BY u.username), '[]'::jsonb) AS users\n    FROM public.manager_users AS u\n  )\n  SELECT jsonb_build_object(\n    'ok', true,\n    'revision', state_cte.revision,\n    'users', users_cte.users\n  ) INTO v_result\n  FROM state_cte, users_cte;\n  RETURN v_result;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.read_manager_session(p_token_hash text)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE v_session jsonb;\nBEGIN\n  IF COALESCE(btrim(p_token_hash), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_TOKEN_HASH');\n  END IF;\n  SELECT to_jsonb(s) INTO v_session\n  FROM public.manager_sessions AS s\n  WHERE s.token_hash = p_token_hash\n    AND s.expires_at > (extract(epoch FROM now()) * 1000)::bigint\n    AND NOT EXISTS (\n      SELECT 1 FROM public.manager_session_revocations AS r\n      WHERE r.token_hash = s.token_hash\n    );\n  RETURN jsonb_build_object('ok', true, 'session', v_session);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.read_manager_authorization(p_token_hash text)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_session public.manager_sessions%ROWTYPE;\n  v_user jsonb;\nBEGIN\n  IF COALESCE(btrim(p_token_hash), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_TOKEN_HASH');\n  END IF;\n  SELECT * INTO v_session\n  FROM public.manager_sessions AS s\n  WHERE s.token_hash = p_token_hash\n    AND s.expires_at > (extract(epoch FROM now()) * 1000)::bigint\n    AND NOT EXISTS (\n      SELECT 1 FROM public.manager_session_revocations AS r\n      WHERE r.token_hash = s.token_hash\n    );\n  IF NOT FOUND THEN\n    RETURN jsonb_build_object('ok', true, 'session', NULL, 'user', NULL);\n  END IF;\n  IF v_session.role <> 'admin' THEN\n    SELECT jsonb_build_object(\n      'id', u.id, 'username', u.username, 'status', u.status,\n      'assigned_bot_ids', u.assigned_bot_ids, 'expires_at', u.expires_at,\n      'plan_name', u.plan_name, 'allow_account_change', u.allow_account_change,\n      'is_permanent', u.is_permanent,\n      'lock_reason', u.lock_reason\n    ) INTO v_user\n    FROM public.manager_users AS u\n    WHERE u.id = v_session.user_id\n      AND lower(u.username) = lower(v_session.username);\n  END IF;\n  RETURN jsonb_build_object('ok', true, 'session', to_jsonb(v_session), 'user', v_user);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.revoke_manager_session(p_token_hash text)\nRETURNS boolean\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nBEGIN\n  IF COALESCE(btrim(p_token_hash), '') = '' THEN RETURN false; END IF;\n  INSERT INTO public.manager_session_revocations(token_hash, revoked_at)\n  VALUES (p_token_hash, now())\n  ON CONFLICT (token_hash) DO NOTHING;\n  DELETE FROM public.manager_sessions WHERE token_hash = p_token_hash;\n  RETURN true;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.create_manager_user_session(\n  p_expected_revision bigint,\n  p_session jsonb\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_revision bigint;\n  v_user_id text;\n  v_username text;\n  v_token_hash text;\n  v_expires_at bigint;\n  v_rows integer;\nBEGIN\n  v_user_id := btrim(COALESCE(p_session->>'user_id', ''));\n  v_username := btrim(COALESCE(p_session->>'username', ''));\n  v_token_hash := btrim(COALESCE(p_session->>'token_hash', ''));\n  v_expires_at := NULLIF(p_session->>'expires_at', '')::bigint;\n  IF v_user_id = '' OR v_username = '' OR v_token_hash !~ '^[a-f0-9]{64}$' OR v_expires_at IS NULL\n     OR v_expires_at <= (extract(epoch FROM now()) * 1000)::bigint THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_SESSION');\n  END IF;\n  IF NOT EXISTS (\n    SELECT 1 FROM public.manager_users AS u\n    WHERE u.id = v_user_id AND lower(u.username) = lower(v_username)\n      AND lower(COALESCE(u.status, 'active')) <> 'disabled'\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_CHANGED');\n  END IF;\n  SELECT revision INTO v_revision\n  FROM public.manager_user_state\n  WHERE singleton = true FOR UPDATE;\n  INSERT INTO public.manager_sessions(\n    token_hash, user_id, username, role, assigned_bot_ids, expires_at,\n    plan_name, allow_account_change, status, updated_at\n  ) VALUES (\n    v_token_hash, v_user_id, v_username, 'user',\n    COALESCE(p_session->'assigned_bot_ids', '[]'::jsonb), v_expires_at,\n    COALESCE(NULLIF(p_session->>'plan_name', ''), 'Gói thường'),\n    COALESCE((p_session->>'allow_account_change')::boolean, true),\n    COALESCE(NULLIF(p_session->>'status', ''), 'active'), now()\n  ) ON CONFLICT (token_hash) DO NOTHING;\n  GET DIAGNOSTICS v_rows = ROW_COUNT;\n  IF v_rows <> 1 THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'SESSION_NOT_CREATED');\n  END IF;\n  RETURN jsonb_build_object('ok', true, 'revision', v_revision);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.apply_manager_users_snapshot_locked(\n  p_expected_revision bigint,\n  p_users jsonb,\n  p_allow_empty boolean DEFAULT false\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_revision bigint;\n  v_user jsonb;\n  v_id text;\n  v_username text;\n  v_affected integer;\n  v_result jsonb;\nBEGIN\n  SELECT revision INTO v_revision\n  FROM public.manager_user_state\n  WHERE singleton = true FOR UPDATE;\n  IF v_revision IS DISTINCT FROM p_expected_revision THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'REVISION_CONFLICT', 'revision', v_revision);\n  END IF;\n  IF p_users IS NULL OR jsonb_typeof(p_users) <> 'array' OR (jsonb_array_length(p_users) = 0 AND NOT p_allow_empty) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_OR_EMPTY_SNAPSHOT', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY lower(btrim(value->>'username'))\n    HAVING lower(btrim(value->>'username')) = '' OR count(*) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'DUPLICATE_OR_INVALID_USERNAME', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE jsonb_typeof(item.value->'assigned_bot_ids') NOT IN ('array', 'null')\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_BOT_ASSIGNMENTS', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT btrim(bot_id.value)\n    FROM jsonb_array_elements(p_users) AS item(value)\n    CROSS JOIN LATERAL jsonb_array_elements_text(\n      CASE WHEN jsonb_typeof(item.value->'assigned_bot_ids') = 'array'\n        THEN item.value->'assigned_bot_ids' ELSE '[]'::jsonb END\n    ) AS bot_id(value)\n    GROUP BY btrim(bot_id.value)\n    HAVING btrim(bot_id.value) = '' OR count(DISTINCT lower(btrim(item.value->>'username'))) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'BOT_OWNERSHIP_CONFLICT', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY btrim(COALESCE(value->>'id', ''))\n    HAVING btrim(COALESCE(value->>'id', '')) = '' OR count(*) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'DUPLICATE_OR_INVALID_USER_ID', 'revision', v_revision);\n  END IF;\n  IF EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE btrim(COALESCE(item.value->>'username', '')) = ''\n       OR btrim(COALESCE(item.value->>'id', '')) = ''\n       OR btrim(COALESCE(item.value->>'password', '')) = ''\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW', 'revision', v_revision);\n  END IF;\n\n  FOR v_user IN SELECT value FROM jsonb_array_elements(p_users) AS item(value)\n  LOOP\n    v_username := btrim(COALESCE(v_user->>'username', ''));\n    v_id := btrim(COALESCE(v_user->>'id', ''));\n    IF v_username = '' OR v_id = '' OR COALESCE(v_user->>'password', '') = '' THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW', 'revision', v_revision);\n    END IF;\n\n    UPDATE public.manager_users AS u\n    SET id = v_id,\n        username = v_username,\n        password = v_user->>'password',\n        role = COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n        status = COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n        assigned_bot_ids = COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n        expires_at = NULLIF(v_user->>'expires_at', '')::timestamptz,\n        plan_name = COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n        bot_aliases = CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n        allow_account_change = COALESCE((v_user->>'allow_account_change')::boolean, true),\n        is_permanent = COALESCE((v_user->>'is_permanent')::boolean, (NULLIF(v_user->>'expires_at', '') IS NULL AND COALESCE(NULLIF(v_user->>'role', ''), 'user') <> 'admin' AND COALESCE(NULLIF(v_user->>'status', ''), 'active') = 'active'), false),\n        lock_reason = COALESCE(v_user->>'lock_reason', ''),\n        note = COALESCE(v_user->>'note', ''),\n        bot_count = GREATEST(1, COALESCE((v_user->>'bot_count')::integer, jsonb_array_length(COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb)), 1)),\n        created_at = COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, u.created_at, now()),\n        updated_at = COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n    WHERE u.id = v_id;\n    GET DIAGNOSTICS v_affected = ROW_COUNT;\n    IF v_affected = 0 THEN\n      UPDATE public.manager_users AS u\n      SET id = v_id,\n          username = v_username,\n          password = v_user->>'password',\n          role = COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n          status = COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n          assigned_bot_ids = COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n          expires_at = NULLIF(v_user->>'expires_at', '')::timestamptz,\n          plan_name = COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n          bot_aliases = CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n          allow_account_change = COALESCE((v_user->>'allow_account_change')::boolean, true),\n          is_permanent = COALESCE((v_user->>'is_permanent')::boolean, (NULLIF(v_user->>'expires_at', '') IS NULL AND COALESCE(NULLIF(v_user->>'role', ''), 'user') <> 'admin' AND COALESCE(NULLIF(v_user->>'status', ''), 'active') = 'active'), false),\n          lock_reason = COALESCE(v_user->>'lock_reason', ''),\n          note = COALESCE(v_user->>'note', ''),\n          bot_count = GREATEST(1, COALESCE((v_user->>'bot_count')::integer, jsonb_array_length(COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb)), 1)),\n          created_at = COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, u.created_at, now()),\n          updated_at = COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n      WHERE lower(u.username) = lower(v_username);\n      GET DIAGNOSTICS v_affected = ROW_COUNT;\n    END IF;\n    IF v_affected = 0 THEN\n      INSERT INTO public.manager_users(\n        id, username, password, role, status, assigned_bot_ids, expires_at,\n        plan_name, bot_aliases, allow_account_change, is_permanent, lock_reason, note,\n        bot_count, created_at, updated_at\n      ) VALUES (\n        v_id, v_username, v_user->>'password',\n        COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n        COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n        COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n        NULLIF(v_user->>'expires_at', '')::timestamptz,\n        COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n        CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n        COALESCE((v_user->>'allow_account_change')::boolean, true),\n        COALESCE((v_user->>'is_permanent')::boolean, (NULLIF(v_user->>'expires_at', '') IS NULL AND COALESCE(NULLIF(v_user->>'role', ''), 'user') <> 'admin' AND COALESCE(NULLIF(v_user->>'status', ''), 'active') = 'active'), false),\n        COALESCE(v_user->>'lock_reason', ''), COALESCE(v_user->>'note', ''),\n        GREATEST(1, COALESCE((v_user->>'bot_count')::integer, jsonb_array_length(COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb)), 1)),\n        COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, now()),\n        COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n      );\n    END IF;\n  END LOOP;\n\n  DELETE FROM public.manager_users AS u\n  WHERE NOT EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE COALESCE(item.value->>'id', '') = u.id\n       OR lower(COALESCE(item.value->>'username', '')) = lower(u.username)\n  );\n\n  SELECT revision INTO v_revision FROM public.manager_user_state WHERE singleton = true;\n  v_result := jsonb_build_object('ok', true, 'revision', v_revision);\n  RETURN v_result;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.save_manager_users_snapshot(\n  p_expected_revision bigint,\n  p_transaction_id uuid,\n  p_users jsonb,\n  p_allow_empty boolean DEFAULT false\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_existing public.manager_users_write_transactions%ROWTYPE;\n  v_result jsonb;\nBEGIN\n  IF p_transaction_id IS NULL THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_TRANSACTION_ID');\n  END IF;\n  PERFORM 1 FROM public.manager_user_state WHERE singleton = true FOR UPDATE;\n  SELECT * INTO v_existing FROM public.manager_users_write_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF v_existing.expected_revision <> p_expected_revision OR v_existing.users_payload <> p_users THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN v_existing.result;\n  END IF;\n  v_result := public.apply_manager_users_snapshot_locked(p_expected_revision, p_users, p_allow_empty);\n  IF COALESCE((v_result->>'ok')::boolean, false) THEN\n    INSERT INTO public.manager_users_write_transactions(transaction_id, expected_revision, users_payload, result)\n    VALUES (p_transaction_id, p_expected_revision, p_users, v_result);\n    DELETE FROM public.manager_users_write_transactions WHERE created_at < now() - interval '24 hours';\n  END IF;\n  RETURN v_result;\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.insert_manager_users_if_absent(p_users jsonb)\nRETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_user jsonb;\n  v_id text;\n  v_username text;\n  v_revision bigint;\n  v_inserted integer := 0;\n  v_rows integer;\nBEGIN\n  PERFORM 1 FROM public.manager_user_state WHERE singleton = true FOR UPDATE;\n  IF p_users IS NULL OR jsonb_typeof(p_users) <> 'array' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USERS');\n  END IF;\n  IF EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE btrim(COALESCE(item.value->>'username', '')) = ''\n       OR btrim(COALESCE(item.value->>'id', '')) = ''\n       OR btrim(COALESCE(item.value->>'password', '')) = ''\n       OR (item.value ? 'assigned_bot_ids' AND jsonb_typeof(item.value->'assigned_bot_ids') NOT IN ('array', 'null'))\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW');\n  END IF;\n  IF EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY lower(btrim(value->>'username'))\n    HAVING lower(btrim(value->>'username')) = '' OR count(*) > 1\n  ) OR EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    GROUP BY btrim(COALESCE(value->>'id', ''))\n    HAVING btrim(COALESCE(value->>'id', '')) = '' OR count(*) > 1\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'DUPLICATE_OR_INVALID_USER');\n  END IF;\n  IF EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    CROSS JOIN LATERAL jsonb_array_elements_text(\n      CASE WHEN jsonb_typeof(item.value->'assigned_bot_ids') = 'array'\n        THEN item.value->'assigned_bot_ids' ELSE '[]'::jsonb END\n    ) AS assigned(value)\n    GROUP BY assigned.value\n    HAVING assigned.value = '' OR count(DISTINCT lower(btrim(item.value->>'username'))) > 1\n  ) OR EXISTS (\n    SELECT 1\n    FROM jsonb_array_elements(p_users) AS item(value)\n    CROSS JOIN LATERAL jsonb_array_elements_text(\n      CASE WHEN jsonb_typeof(item.value->'assigned_bot_ids') = 'array'\n        THEN item.value->'assigned_bot_ids' ELSE '[]'::jsonb END\n    ) AS assigned(value)\n    JOIN public.manager_users AS existing\n      ON existing.assigned_bot_ids ? assigned.value\n     AND existing.id <> COALESCE(item.value->>'id', '')\n     AND lower(existing.username) <> lower(COALESCE(item.value->>'username', ''))\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'BOT_OWNERSHIP_CONFLICT');\n  END IF;\n  FOR v_user IN SELECT value FROM jsonb_array_elements(p_users) AS item(value)\n  LOOP\n    v_username := btrim(COALESCE(v_user->>'username', ''));\n    v_id := btrim(COALESCE(v_user->>'id', ''));\n    IF v_username = '' OR v_id = '' OR COALESCE(v_user->>'password', '') = '' THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'INVALID_USER_ROW');\n    END IF;\n    IF EXISTS (\n      SELECT 1 FROM public.manager_users AS existing\n      WHERE lower(existing.username) = lower(v_username) OR existing.id = v_id\n    ) THEN\n      CONTINUE;\n    END IF;\n    IF EXISTS (\n      SELECT 1\n      FROM jsonb_array_elements(COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb)) AS assigned(value)\n      JOIN public.manager_users AS existing\n        ON existing.assigned_bot_ids ? (assigned.value #>> '{}')\n    ) THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'BOT_OWNERSHIP_CONFLICT');\n    END IF;\n    INSERT INTO public.manager_users(\n      id, username, password, role, status, assigned_bot_ids, expires_at,\n      plan_name, bot_aliases, allow_account_change, is_permanent, lock_reason, note,\n      bot_count, created_at, updated_at\n    ) VALUES (\n      v_id, v_username, v_user->>'password',\n      COALESCE(NULLIF(v_user->>'role', ''), 'user'),\n      COALESCE(NULLIF(v_user->>'status', ''), 'active'),\n      COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb),\n      NULLIF(v_user->>'expires_at', '')::timestamptz,\n      COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),\n      CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,\n      COALESCE((v_user->>'allow_account_change')::boolean, true),\n      COALESCE((v_user->>'is_permanent')::boolean, (NULLIF(v_user->>'expires_at', '') IS NULL AND COALESCE(NULLIF(v_user->>'role', ''), 'user') <> 'admin' AND COALESCE(NULLIF(v_user->>'status', ''), 'active') = 'active'), false),\n      COALESCE(v_user->>'lock_reason', ''), COALESCE(v_user->>'note', ''),\n      GREATEST(1, COALESCE((v_user->>'bot_count')::integer, jsonb_array_length(COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb)), 1)),\n      COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, now()),\n      COALESCE(NULLIF(v_user->>'updated_at', '')::timestamptz, now())\n    ) ON CONFLICT DO NOTHING;\n    GET DIAGNOSTICS v_rows = ROW_COUNT;\n    v_inserted := v_inserted + v_rows;\n  END LOOP;\n  SELECT revision INTO v_revision FROM public.manager_user_state WHERE singleton = true;\n  RETURN jsonb_build_object('ok', true, 'inserted', v_inserted, 'revision', v_revision);\nEND;\n$$;\n\nCREATE OR REPLACE FUNCTION public.redeem_manager_key_and_save_users(\n  p_code text,\n  p_username text,\n  p_transaction_id text,\n  p_expected_revision bigint,\n  p_users jsonb,\n  p_allow_empty boolean DEFAULT false\n) RETURNS jsonb\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public\nAS $$\nDECLARE\n  v_key public.manager_keys%ROWTYPE;\n  v_transaction public.manager_key_usage_transactions%ROWTYPE;\n  v_code text := upper(btrim(COALESCE(p_code, '')));\n  v_username text := lower(btrim(COALESCE(p_username, '')));\n  v_users jsonb;\n  v_count integer;\n  v_max integer;\n  v_used_by text;\n  v_user_revision bigint;\n  v_result jsonb;\nBEGIN\n  IF v_code = '' OR v_username = '' OR COALESCE(btrim(p_transaction_id), '') = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_INPUT');\n  END IF;\n  PERFORM 1 FROM public.manager_user_state WHERE singleton = true FOR UPDATE;\n  SELECT * INTO v_transaction FROM public.manager_key_usage_transactions WHERE transaction_id = p_transaction_id;\n  IF FOUND THEN\n    IF lower(v_transaction.username) <> v_username\n       OR upper(COALESCE(v_transaction.usage_snapshot->>'code', v_transaction.usage_snapshot->>'key_code', '')) <> v_code THEN\n      RETURN jsonb_build_object('ok', false, 'error', 'TRANSACTION_MISMATCH');\n    END IF;\n    RETURN jsonb_build_object('ok', true, 'replayed', true, 'transactionId', p_transaction_id,\n      'row', v_transaction.usage_snapshot, 'userRevision', v_transaction.user_revision);\n  END IF;\n  SELECT * INTO v_key\n  FROM public.manager_keys\n  WHERE upper(COALESCE(NULLIF(code, ''), key_code, '')) = v_code\n  FOR UPDATE;\n  IF NOT FOUND THEN RETURN jsonb_build_object('ok', false, 'error', 'KEY_NOT_FOUND'); END IF;\n\n  v_max := COALESCE(v_key.max_uses, 1);\n  IF v_max < 0 THEN RETURN jsonb_build_object('ok', false, 'error', 'INVALID_MAX_USES'); END IF;\n  IF v_key.expires_at IS NOT NULL AND v_key.expires_at <= now() THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'KEY_EXPIRED');\n  END IF;\n  v_users := CASE WHEN jsonb_typeof(v_key.used_users) = 'array' THEN v_key.used_users ELSE '[]'::jsonb END;\n  IF jsonb_array_length(v_users) > 0 THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM jsonb_array_elements_text(v_users) AS item(value) WHERE btrim(value) <> '';\n  END IF;\n  IF jsonb_array_length(v_users) = 0 AND COALESCE(v_key.used_by, '') <> '' THEN\n    SELECT COALESCE(jsonb_agg(to_jsonb(lower(btrim(value)))), '[]'::jsonb) INTO v_users\n    FROM unnest(string_to_array(v_key.used_by, ',')) AS value WHERE btrim(value) <> '';\n  END IF;\n  IF v_users ? v_username THEN RETURN jsonb_build_object('ok', false, 'error', 'ALREADY_USED'); END IF;\n  v_count := GREATEST(COALESCE(v_key.used_count, 0), jsonb_array_length(v_users), CASE WHEN v_key.used THEN 1 ELSE 0 END);\n  IF v_max > 0 AND v_count >= v_max THEN RETURN jsonb_build_object('ok', false, 'error', 'EXHAUSTED'); END IF;\n\n  v_users := v_users || jsonb_build_array(v_username);\n  v_count := v_count + 1;\n  SELECT string_agg(value, ', ' ORDER BY ord) INTO v_used_by\n  FROM jsonb_array_elements_text(v_users) WITH ORDINALITY AS item(value, ord);\n  IF NOT EXISTS (\n    SELECT 1 FROM jsonb_array_elements(p_users) AS item(value)\n    WHERE lower(btrim(item.value->>'username')) = v_username\n  ) THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'REDEEM_USER_MISSING');\n  END IF;\n  v_result := public.apply_manager_users_snapshot_locked(p_expected_revision, p_users, p_allow_empty);\n  IF NOT COALESCE((v_result->>'ok')::boolean, false) THEN RETURN v_result; END IF;\n\n  UPDATE public.manager_keys\n  SET used_users = v_users, used_count = v_count, used_by = v_used_by,\n      used_at = now(), used = (v_max > 0 AND v_count >= v_max)\n  WHERE id = v_key.id\n  RETURNING * INTO v_key;\n  SELECT revision INTO v_user_revision FROM public.manager_user_state WHERE singleton = true;\n  INSERT INTO public.manager_key_usage_transactions(transaction_id, key_id, username, usage_snapshot, user_revision)\n  VALUES (p_transaction_id, v_key.id, v_username, to_jsonb(v_key), v_user_revision);\n  RETURN jsonb_build_object('ok', true, 'transactionId', p_transaction_id,\n    'row', to_jsonb(v_key), 'userRevision', v_user_revision);\nEND;\n$$;\n\nREVOKE ALL ON FUNCTION public.bump_manager_users_revision() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.reject_revoked_manager_session() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.read_manager_users_snapshot() FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.read_manager_session(text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.read_manager_authorization(text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.revoke_manager_session(text) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.create_manager_user_session(bigint,jsonb) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.apply_manager_users_snapshot_locked(bigint,jsonb,boolean) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.save_manager_users_snapshot(bigint,uuid,jsonb,boolean) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.insert_manager_users_if_absent(jsonb) FROM PUBLIC, anon, authenticated;\nREVOKE ALL ON FUNCTION public.redeem_manager_key_and_save_users(text,text,text,bigint,jsonb,boolean) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.read_manager_users_snapshot() TO service_role;\nGRANT EXECUTE ON FUNCTION public.read_manager_session(text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.read_manager_authorization(text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.revoke_manager_session(text) TO service_role;\nGRANT EXECUTE ON FUNCTION public.create_manager_user_session(bigint,jsonb) TO service_role;\nGRANT EXECUTE ON FUNCTION public.save_manager_users_snapshot(bigint,uuid,jsonb,boolean) TO service_role;\nGRANT EXECUTE ON FUNCTION public.insert_manager_users_if_absent(jsonb) TO service_role;\nGRANT EXECUTE ON FUNCTION public.redeem_manager_key_and_save_users(text,text,text,bigint,jsonb,boolean) TO service_role;\n\n-- Compatibility views for alternative table names & aliases\nCREATE OR REPLACE VIEW public.manager_audit AS SELECT * FROM public.audit_logs;\nCREATE OR REPLACE VIEW public.backups AS SELECT * FROM public.manager_backups;\nCREATE OR REPLACE VIEW public.system_settings AS\nSELECT\n  id,\n  (data->'systemSettings') AS settings,\n  updated_at\nFROM public.bot_registry\nWHERE id = 'default';\n\nCREATE OR REPLACE VIEW public.bot_schedules AS\nSELECT\n  bot_id,\n  COALESCE(bot_schedules, schedules) AS schedules,\n  updated_at\nFROM public.bot_settings;\n\nGRANT ALL ON public.manager_audit TO service_role;\nGRANT ALL ON public.backups TO service_role;\nGRANT ALL ON public.system_settings TO service_role;\nGRANT ALL ON public.bot_schedules TO service_role;\nREVOKE ALL ON public.manager_audit, public.backups, public.system_settings, public.bot_schedules FROM anon, authenticated;\n\n\n\nCREATE TABLE IF NOT EXISTS public.manager_outbox_queue (\n  id text PRIMARY KEY,\n  bot_id integer NOT NULL,\n  type text NOT NULL DEFAULT 'auth_sync',\n  event_type text DEFAULT 'auth_sync',\n  aggregate_type text DEFAULT 'bot',\n  aggregate_id text DEFAULT '',\n  payload jsonb NOT NULL DEFAULT '{}'::jsonb,\n  status text NOT NULL DEFAULT 'pending',\n  attempts integer NOT NULL DEFAULT 0,\n  max_attempts integer NOT NULL DEFAULT 8,\n  next_retry_at timestamptz NOT NULL DEFAULT now(),\n  backoff_ms integer NOT NULL DEFAULT 3000,\n  processing_started_at timestamptz,\n  completed_at timestamptz,\n  lease_owner text,\n  lease_until timestamptz,\n  last_status_code integer,\n  error_code text,\n  last_error text,\n  committed_transaction jsonb,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS bot_id integer;\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS type text NOT NULL DEFAULT 'auth_sync';\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS processing_started_at timestamptz;\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS completed_at timestamptz;\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS payload jsonb NOT NULL DEFAULT '{}'::jsonb;\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS lease_owner text;\nALTER TABLE public.manager_outbox_queue ADD COLUMN IF NOT EXISTS lease_until timestamptz;\nALTER TABLE public.manager_outbox_queue ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_outbox_queue FROM PUBLIC, anon, authenticated;\nGRANT ALL ON TABLE public.manager_outbox_queue TO service_role;\nCREATE INDEX IF NOT EXISTS idx_manager_outbox_queue_claim\n  ON public.manager_outbox_queue(status, next_retry_at)\n  WHERE status IN ('pending', 'processing');\n\nCREATE TABLE IF NOT EXISTS public.manager_pending_allocations (\n  id text PRIMARY KEY,\n  username text NOT NULL,\n  target_bot_count integer NOT NULL DEFAULT 1,\n  current_assigned integer NOT NULL DEFAULT 0,\n  missing_bot_count integer NOT NULL DEFAULT 1,\n  preferred_bot_ids jsonb NOT NULL DEFAULT '[]'::jsonb,\n  status text NOT NULL DEFAULT 'pending_retry',\n  attempts integer NOT NULL DEFAULT 0,\n  max_attempts integer NOT NULL DEFAULT 10,\n  lease_owner text,\n  lease_until timestamptz,\n  last_error text,\n  next_retry_at timestamptz NOT NULL DEFAULT now(),\n  completed_at timestamptz,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  updated_at timestamptz NOT NULL DEFAULT now()\n);\nALTER TABLE public.manager_pending_allocations ADD COLUMN IF NOT EXISTS completed_at timestamptz;\nALTER TABLE public.manager_pending_allocations ADD COLUMN IF NOT EXISTS lease_owner text;\nALTER TABLE public.manager_pending_allocations ADD COLUMN IF NOT EXISTS lease_until timestamptz;\nALTER TABLE public.manager_pending_allocations ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON TABLE public.manager_pending_allocations FROM PUBLIC, anon, authenticated;\nGRANT ALL ON TABLE public.manager_pending_allocations TO service_role;\nCREATE UNIQUE INDEX IF NOT EXISTS idx_mgr_pending_alloc_user_pending ON public.manager_pending_allocations (username) WHERE (status IN ('pending', 'pending_retry'));\nCREATE INDEX IF NOT EXISTS idx_manager_pending_allocations_claim\n  ON public.manager_pending_allocations(status, next_retry_at)\n  WHERE status = 'pending_retry';\n\nCREATE TABLE IF NOT EXISTS public.manager_link4m_attempts (\n  attempt_id text PRIMARY KEY,\n  username text NOT NULL,\n  token_hash text NOT NULL,\n  status text NOT NULL DEFAULT 'pending',\n  vietnam_date text NOT NULL,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  expires_at timestamptz NOT NULL,\n  verified_at timestamptz,\n  rewarded_at timestamptz,\n  reward_hours integer NOT NULL DEFAULT 12,\n  ip_address text NOT NULL DEFAULT '',\n  provider_reference text NOT NULL DEFAULT '',\n  failure_reason text NOT NULL DEFAULT '',\n  sync_status text NOT NULL DEFAULT 'synced'\n);\n-- NEW-01 (Wave B1): tách URL rút gọn provider khỏi provider_reference (callback/return URL).\n-- provider_reference = return URL của Manager (audit trail); provider_short_url = link rút gọn\n-- do provider sinh ra SAU khi createRewardLink thành công (persist để nhánh reuse trả đúng URL).\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS provider_short_url text NOT NULL DEFAULT '';\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS attempt_id text;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS username text;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS token_hash text;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending';\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS vietnam_date text;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS expires_at timestamptz;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS verified_at timestamptz;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS rewarded_at timestamptz;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS reward_hours integer NOT NULL DEFAULT 12;\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS ip_address text NOT NULL DEFAULT '';\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS provider_reference text NOT NULL DEFAULT '';\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS failure_reason text NOT NULL DEFAULT '';\nALTER TABLE public.manager_link4m_attempts ADD COLUMN IF NOT EXISTS sync_status text NOT NULL DEFAULT 'synced';\n\nCREATE INDEX IF NOT EXISTS idx_link4m_attempts_user_date ON public.manager_link4m_attempts(username, vietnam_date);\nCREATE INDEX IF NOT EXISTS idx_link4m_attempts_status ON public.manager_link4m_attempts(status);\nCREATE INDEX IF NOT EXISTS idx_link4m_attempts_token_hash ON public.manager_link4m_attempts(token_hash);\nCREATE INDEX IF NOT EXISTS idx_link4m_attempts_sync_status ON public.manager_link4m_attempts(sync_status);\n\nALTER TABLE public.manager_link4m_attempts ENABLE ROW LEVEL SECURITY;\nREVOKE ALL ON public.manager_link4m_attempts FROM anon, authenticated;\nGRANT ALL ON public.manager_link4m_attempts TO service_role;\n\n-- 1. Atomic RPC: start_manager_link4m_attempt\nCREATE OR REPLACE FUNCTION public.start_manager_link4m_attempt(\n  p_attempt_id text,\n  p_token_hash text,\n  p_username text,\n  p_vietnam_date text,\n  p_daily_limit integer DEFAULT 2,\n  p_reward_hours integer DEFAULT 12,\n  p_ip_address text DEFAULT '',\n  p_provider_reference text DEFAULT ''\n)\nRETURNS jsonb\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $l4m_start$\nDECLARE\n  v_username text := lower(btrim(p_username));\n  v_user record;\n  v_today_count integer;\n  v_last_rewarded_at timestamptz;\n  v_active_attempt record;\n  v_now timestamptz := now();\n  v_expires_at timestamptz := v_now + interval '15 minutes';\n  v_limit integer := GREATEST(1, LEAST(10, COALESCE(p_daily_limit, 2)));\n  v_hours integer := GREATEST(1, LEAST(48, COALESCE(p_reward_hours, 12)));\nBEGIN\n  -- §3.2 Null and empty input guards\n  IF p_attempt_id IS NULL OR btrim(p_attempt_id) = '' OR\n     p_token_hash IS NULL OR btrim(p_token_hash) = '' OR\n     p_username IS NULL OR btrim(p_username) = '' OR\n     p_vietnam_date IS NULL OR btrim(p_vietnam_date) = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_ARGUMENTS', 'message', 'Tham số đầu vào không được để trống hoặc NULL.');\n  END IF;\n\n  -- 1. Consistent locking order: Always lock manager_users first\n  SELECT * INTO v_user\n  FROM public.manager_users\n  WHERE lower(btrim(username)) = v_username\n  FOR UPDATE;\n\n  IF NOT FOUND THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_NOT_FOUND', 'message', 'Tài khoản người dùng không tồn tại.');\n  END IF;\n\n  -- §3.2: Strict status allowlist. Only 'active' and 'expired' are permitted; disabled/unknown/null fail-closed\n  IF v_user.status NOT IN ('active', 'expired') OR v_user.status IS NULL THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_LOCKED', 'message', 'Tài khoản không ở trạng thái hợp lệ để vượt link nhận thưởng.');\n  END IF;\n\n  IF v_user.is_permanent IS TRUE THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'PERMANENT_ACCOUNT', 'message', 'Tài khoản VIP Vĩnh viễn không cần vượt link.');\n  END IF;\n\n  -- 2. Lock manager_link4m_attempts second\n  SELECT * INTO v_active_attempt\n  FROM public.manager_link4m_attempts\n  WHERE lower(btrim(username)) = v_username\n    AND status = 'pending'\n    AND expires_at > v_now\n  ORDER BY created_at DESC\n  LIMIT 1\n  FOR UPDATE;\n\n  IF FOUND THEN\n    RETURN jsonb_build_object(\n      'ok', true,\n      'reused', true,\n      'attemptId', v_active_attempt.attempt_id,\n      'expiresAt', v_active_attempt.expires_at,\n      'providerUrl', v_active_attempt.provider_short_url\n    );\n  END IF;\n\n  -- Check cooldown: at least 2 hours between rewarded claims\n  SELECT rewarded_at INTO v_last_rewarded_at\n  FROM public.manager_link4m_attempts\n  WHERE lower(btrim(username)) = v_username\n    AND status = 'rewarded'\n  ORDER BY rewarded_at DESC NULLS LAST\n  LIMIT 1;\n\n  IF v_last_rewarded_at IS NOT NULL AND (v_now - v_last_rewarded_at) < interval '2 hours' THEN\n    RETURN jsonb_build_object(\n      'ok', false,\n      'error', 'COOLDOWN',\n      'message', 'Khoảng cách giữa 2 lần vượt link tối thiểu là 2 tiếng.',\n      'cooldownRemainingMs', GREATEST(0, EXTRACT(EPOCH FROM ((v_last_rewarded_at + interval '2 hours') - v_now)) * 1000)\n    );\n  END IF;\n\n  -- Daily quota check: Count ONLY rewarded attempts\n  SELECT count(*) INTO v_today_count\n  FROM public.manager_link4m_attempts\n  WHERE lower(btrim(username)) = v_username\n    AND vietnam_date = p_vietnam_date\n    AND status = 'rewarded';\n\n  IF v_today_count >= v_limit THEN\n    RETURN jsonb_build_object(\n      'ok', false,\n      'error', 'DAILY_LIMIT_REACHED',\n      'count', v_today_count,\n      'limit', v_limit,\n      'message', 'Đã hết lượt vượt link hôm nay (' || v_today_count || '/' || v_limit || ' lượt). Làm mới lúc 00:00 VN.'\n    );\n  END IF;\n\n  INSERT INTO public.manager_link4m_attempts (\n    attempt_id, username, token_hash, status, vietnam_date,\n    created_at, expires_at, reward_hours, ip_address, provider_reference, sync_status\n  ) VALUES (\n    p_attempt_id, v_username, p_token_hash, 'pending', p_vietnam_date,\n    v_now, v_expires_at, v_hours, COALESCE(p_ip_address, ''), COALESCE(p_provider_reference, ''), 'synced'\n  );\n\n  RETURN jsonb_build_object(\n    'ok', true,\n    'reused', false,\n    'attemptId', p_attempt_id,\n    'todayCount', v_today_count,\n    'remaining', v_limit - v_today_count,\n    'expiresAt', v_expires_at\n  );\nEND;\n$l4m_start$;\n\n-- 2. Atomic RPC: claim_manager_link4m_reward\nCREATE OR REPLACE FUNCTION public.claim_manager_link4m_reward(\n  p_attempt_id text,\n  p_token_hash text,\n  p_username text,\n  p_reward_hours integer DEFAULT 12,\n  p_provider_reference text DEFAULT ''\n)\nRETURNS jsonb\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $l4m_claim$\nDECLARE\n  v_username text := lower(btrim(p_username));\n  v_user record;\n  v_attempt record;\n  v_now timestamptz := now();\n  v_current_expires_at timestamptz;\n  v_new_expires_at timestamptz;\n  v_new_revision bigint;\n  v_reward_hours integer;\n  v_reward_interval interval;\nBEGIN\n  -- §3.2 Null and empty input guards\n  IF p_attempt_id IS NULL OR btrim(p_attempt_id) = '' OR\n     p_token_hash IS NULL OR btrim(p_token_hash) = '' OR\n     p_username IS NULL OR btrim(p_username) = '' THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_ARGUMENTS', 'message', 'Tham số đầu vào không được để trống hoặc NULL.');\n  END IF;\n\n  -- 1. Consistent locking order: Lock manager_users FIRST across all RPCs\n  SELECT * INTO v_user\n  FROM public.manager_users\n  WHERE lower(btrim(username)) = v_username\n  FOR UPDATE;\n\n  IF NOT FOUND THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_NOT_FOUND', 'message', 'Tài khoản người dùng không tồn tại.');\n  END IF;\n\n  -- §3.2 Strict status allowlist: Only 'active' and 'expired' can claim rewards\n  IF v_user.status NOT IN ('active', 'expired') OR v_user.status IS NULL THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_LOCKED', 'message', 'Tài khoản không ở trạng thái hợp lệ để nhận thưởng.');\n  END IF;\n\n  -- 2. Lock manager_link4m_attempts SECOND\n  SELECT * INTO v_attempt\n  FROM public.manager_link4m_attempts\n  WHERE attempt_id = p_attempt_id\n  FOR UPDATE;\n\n  IF NOT FOUND THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'ATTEMPT_NOT_FOUND', 'message', 'Không tìm thấy phiên vượt link này.');\n  END IF;\n\n  -- §3.2 Null-safe comparisons with IS DISTINCT FROM\n  IF v_attempt.token_hash IS DISTINCT FROM p_token_hash THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_TOKEN', 'message', 'Mã bảo mật phiên vượt link không hợp lệ.');\n  END IF;\n\n  IF lower(btrim(v_attempt.username)) IS DISTINCT FROM v_username THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'USER_MISMATCH', 'message', 'Phiên vượt link không thuộc về tài khoản này.');\n  END IF;\n\n  IF v_attempt.status = 'rewarded' THEN\n    RETURN jsonb_build_object('ok', true, 'replayed', true, 'expiresAt', v_user.expires_at, 'message', 'Phiên vượt link này đã nhận thưởng trước đó.');\n  END IF;\n\n  IF v_attempt.status NOT IN ('pending', 'verified') THEN\n    RETURN jsonb_build_object('ok', false, 'error', 'INVALID_STATUS', 'message', 'Trạng thái phiên không hợp lệ: ' || COALESCE(v_attempt.status, 'NULL'));\n  END IF;\n\n  IF v_attempt.expires_at IS NULL OR v_attempt.expires_at <= v_now THEN\n    UPDATE public.manager_link4m_attempts SET status = 'expired', failure_reason = 'Phiên vượt link đã quá hạn hoặc thiếu thời hạn.' WHERE attempt_id = p_attempt_id;\n    RETURN jsonb_build_object('ok', false, 'error', 'ATTEMPT_EXPIRED', 'message', 'Phiên vượt link đã hết hạn thời gian thực hiện.');\n  END IF;\n\n  IF v_user.is_permanent IS TRUE THEN\n    UPDATE public.manager_link4m_attempts SET status = 'rewarded', rewarded_at = v_now, failure_reason = 'Tài khoản VIP Vĩnh viễn (không tiêu thụ thêm thời gian).' WHERE attempt_id = p_attempt_id;\n    RETURN jsonb_build_object('ok', true, 'permanent', true, 'expiresAt', NULL, 'message', 'Tài khoản của bạn là VIP Vĩnh viễn!');\n  END IF;\n\n  v_reward_hours := GREATEST(1, LEAST(48, COALESCE(v_attempt.reward_hours, p_reward_hours, 12)));\n  v_reward_interval := (v_reward_hours || ' hours')::interval;\n\n  v_current_expires_at := v_user.expires_at;\n  IF v_current_expires_at > v_now THEN\n    v_new_expires_at := v_current_expires_at + v_reward_interval;\n  ELSE\n    v_new_expires_at := v_now + v_reward_interval;\n  END IF;\n\n  UPDATE public.manager_users\n  SET expires_at = v_new_expires_at,\n      status = CASE WHEN v_user.status = 'expired' THEN 'active' ELSE v_user.status END,\n      updated_at = v_now\n  WHERE lower(btrim(username)) = v_username;\n  SELECT revision INTO v_new_revision FROM public.manager_user_state WHERE singleton = true;\n\n  UPDATE public.manager_link4m_attempts\n  SET status = 'rewarded',\n      verified_at = COALESCE(verified_at, v_now),\n      rewarded_at = v_now,\n      sync_status = 'synced',\n      provider_reference = COALESCE(NULLIF(p_provider_reference, ''), provider_reference)\n  WHERE attempt_id = p_attempt_id;\n\n  RETURN jsonb_build_object(\n    'ok', true,\n    'username', v_username,\n    'addedHours', v_reward_hours,\n    'expiresAt', v_new_expires_at,\n    'userRevision', v_new_revision,\n    'message', 'Đã cộng thành công ' || v_reward_hours || ' giờ sử dụng vào tài khoản!'\n  );\nEND;\n$l4m_claim$;\n\nCREATE OR REPLACE FUNCTION public.update_manager_link4m_sync_status(\n  p_attempt_id text,\n  p_sync_status text\n)\nRETURNS boolean\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $l4m_sync$\nBEGIN\n  UPDATE public.manager_link4m_attempts\n  SET sync_status = p_sync_status\n  WHERE attempt_id = p_attempt_id;\n  RETURN FOUND;\nEND;\n$l4m_sync$;\n\n-- 3b. Utility RPC: set_manager_link4m_short_url (NEW-01, Wave B1)\n-- Persist URL rút gọn provider SAU khi createRewardLink thành công. Chỉ ghi khi attempt\n-- còn 'pending' (không đụng attempt đã verified/rewarded/expired). Trả false nếu không\n-- tìm thấy attempt hoặc attempt không còn pending — route coi như persist-thất-bại-mềm\n-- (reuse lần sau sẽ sinh lại shortlink, không tiêu thêm hạn mức).\nCREATE OR REPLACE FUNCTION public.set_manager_link4m_short_url(\n  p_attempt_id text,\n  p_short_url text\n)\nRETURNS boolean\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $l4m_short$\nBEGIN\n  UPDATE public.manager_link4m_attempts\n  SET provider_short_url = COALESCE(NULLIF(p_short_url, ''), provider_short_url)\n  WHERE attempt_id = p_attempt_id AND status = 'pending';\n  RETURN FOUND;\nEND;\n$l4m_short$;\n\n-- 4. Utility RPC: rollback_manager_link4m_attempt\nCREATE OR REPLACE FUNCTION public.rollback_manager_link4m_attempt(\n  p_attempt_id text\n)\nRETURNS boolean\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $l4m_rollback$\nBEGIN\n  DELETE FROM public.manager_link4m_attempts\n  WHERE attempt_id = p_attempt_id AND status = 'pending';\n  RETURN FOUND;\nEND;\n$l4m_rollback$;\n\nREVOKE ALL ON FUNCTION public.start_manager_link4m_attempt(text,text,text,text,integer,integer,text,text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.start_manager_link4m_attempt(text,text,text,text,integer,integer,text,text) TO service_role;\n\nREVOKE ALL ON FUNCTION public.claim_manager_link4m_reward(text,text,text,integer,text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.claim_manager_link4m_reward(text,text,text,integer,text) TO service_role;\n\nREVOKE ALL ON FUNCTION public.update_manager_link4m_sync_status(text,text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.update_manager_link4m_sync_status(text,text) TO service_role;\n\nREVOKE ALL ON FUNCTION public.set_manager_link4m_short_url(text,text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.set_manager_link4m_short_url(text,text) TO service_role;\n\nREVOKE ALL ON FUNCTION public.rollback_manager_link4m_attempt(text) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.rollback_manager_link4m_attempt(text) TO service_role;\n\nCREATE OR REPLACE FUNCTION public.claim_manager_outbox_batch(\n  p_worker_id text,\n  p_limit integer DEFAULT 10,\n  p_lease_seconds integer DEFAULT 60\n)\nRETURNS SETOF public.manager_outbox_queue\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $outbox_claim$\nDECLARE\n  v_now timestamptz := now();\n  v_lease_until timestamptz := v_now + (p_lease_seconds || ' seconds')::interval;\nBEGIN\n  RETURN QUERY\n  WITH candidate AS (\n    SELECT id\n    FROM public.manager_outbox_queue\n    WHERE (status = 'pending' AND (next_retry_at <= v_now OR next_retry_at IS NULL))\n       OR (status = 'processing' AND lease_until <= v_now)\n    ORDER BY next_retry_at ASC\n    LIMIT GREATEST(1, LEAST(100, p_limit))\n    FOR UPDATE SKIP LOCKED\n  )\n  UPDATE public.manager_outbox_queue q\n  SET status = 'processing',\n      processing_started_at = v_now,\n      lease_until = v_lease_until,\n      lease_owner = p_worker_id,\n      attempts = q.attempts + 1,\n      updated_at = v_now\n  FROM candidate c\n  WHERE q.id = c.id\n  RETURNING q.*;\nEND;\n$outbox_claim$;\n\nREVOKE ALL ON FUNCTION public.claim_manager_outbox_batch(text, integer, integer) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.claim_manager_outbox_batch(text, integer, integer) TO service_role;\n\nCREATE OR REPLACE FUNCTION public.claim_manager_pending_allocations(\n  p_worker_id text,\n  p_limit integer DEFAULT 5,\n  p_lease_seconds integer DEFAULT 60\n)\nRETURNS SETOF public.manager_pending_allocations\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $alloc_claim$\nDECLARE\n  v_now timestamptz := now();\n  v_lease_until timestamptz := v_now + (p_lease_seconds || ' seconds')::interval;\nBEGIN\n  RETURN QUERY\n  WITH candidate AS (\n    SELECT id\n    FROM public.manager_pending_allocations\n    WHERE status = 'pending_retry'\n      AND (next_retry_at <= v_now OR next_retry_at IS NULL)\n      AND (lease_until IS NULL OR lease_until <= v_now)\n    ORDER BY created_at ASC\n    LIMIT GREATEST(1, LEAST(50, p_limit))\n    FOR UPDATE SKIP LOCKED\n  )\n  UPDATE public.manager_pending_allocations a\n  SET lease_owner = p_worker_id,\n      lease_until = v_lease_until,\n      attempts = a.attempts + 1,\n      updated_at = v_now\n  FROM candidate c\n  WHERE a.id = c.id\n  RETURNING a.*;\nEND;\n$alloc_claim$;\n\nREVOKE ALL ON FUNCTION public.claim_manager_pending_allocations(text, integer, integer) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.claim_manager_pending_allocations(text, integer, integer) TO service_role;\n\nCREATE OR REPLACE FUNCTION public.prune_manager_historical_data()\nRETURNS jsonb\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_temp\nAS $prune$\nDECLARE\n  v_deleted_tx integer := 0;\n  v_deleted_rev integer := 0;\n  v_deleted_outbox integer := 0;\nBEGIN\n  DELETE FROM public.manager_users_write_transactions WHERE created_at < now() - interval '24 hours';\n  GET DIAGNOSTICS v_deleted_tx = ROW_COUNT;\n  DELETE FROM public.manager_session_revocations WHERE revoked_at < now() - interval '31 days';\n  GET DIAGNOSTICS v_deleted_rev = ROW_COUNT;\n  DELETE FROM public.manager_outbox_queue WHERE status IN ('completed', 'dead_letter') AND updated_at < now() - interval '7 days';\n  GET DIAGNOSTICS v_deleted_outbox = ROW_COUNT;\n  DELETE FROM public.bot_event_logs WHERE created_at < now() - interval '14 days';\n  DELETE FROM public.bot_chat_logs WHERE created_at < now() - interval '14 days';\n  DELETE FROM public.bot_position_logs WHERE changed_at < now() - interval '14 days';\n  RETURN jsonb_build_object('ok', true, 'deleted_write_transactions', v_deleted_tx, 'deleted_session_revocations', v_deleted_rev, 'deleted_outbox_items', v_deleted_outbox);\nEND;\n$prune$;\n\nREVOKE ALL ON FUNCTION public.prune_manager_historical_data() FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION public.prune_manager_historical_data() TO service_role;\n\nCOMMIT;\nNOTIFY pgrst, 'reload schema';\n";
 
 // Phân loại khóa Supabase để chặn khóa công khai (anon/publishable) được dùng làm khóa ghi.
 // Chỉ trả về 'anon' khi khẳng định được; không xác định được thì trả 'unknown' (không chặn).
@@ -902,7 +902,8 @@ async function withLocalProcessLock(lockKey, fn) {
     const prevPromise = localProcessLocks.get(key) || Promise.resolve();
     let release;
     const nextPromise = new Promise(resolve => { release = resolve; });
-    localProcessLocks.set(key, prevPromise.then(() => nextPromise));
+    const chainedPromise = prevPromise.then(() => nextPromise);
+    localProcessLocks.set(key, chainedPromise);
     await prevPromise;
     const fencingToken = ++localFencingTokenCounter;
     const lockContext = {
@@ -915,7 +916,7 @@ async function withLocalProcessLock(lockKey, fn) {
         return await fn(lockContext);
     } finally {
         release();
-        if (localProcessLocks.get(key) === nextPromise) {
+        if (localProcessLocks.get(key) === chainedPromise) {
             localProcessLocks.delete(key);
         }
     }
@@ -1032,6 +1033,12 @@ class SupabaseAdapter {
     }
 
     async withManagerLock(lockKey, fn, leaseSeconds = 900, options = {}) {
+        if (typeof fn === 'object' && typeof leaseSeconds === 'function') {
+            const temp = fn;
+            fn = leaseSeconds;
+            options = { ...options, ...temp };
+            leaseSeconds = temp.leaseSeconds ?? temp.lease ?? 900;
+        }
         if (options._localLockHeld !== true) {
             return await withLocalProcessLock(lockKey, () => this.withManagerLock(lockKey, fn, leaseSeconds, { ...options, _localLockHeld: true }));
         }
@@ -1409,7 +1416,8 @@ class SupabaseAdapter {
                     assignedBotIds: Array.isArray(userRow.assigned_bot_ids) ? userRow.assigned_bot_ids.map(Number) : [],
                     expiresAt: userRow.expires_at || null, planName: String(userRow.plan_name || 'Gói thường'),
                     isPermanent: Boolean(userRow.is_permanent === true || (!userRow.expires_at && String(userRow.status || 'active').toLowerCase() === 'active')),
-                    allowAccountChange: userRow.allow_account_change !== false, lockReason: String(userRow.lock_reason || '')
+                    allowAccountChange: userRow.allow_account_change !== false, lockReason: String(userRow.lock_reason || ''),
+                    botCount: Math.max(1, parseInt(userRow.bot_count ?? userRow.botCount, 10) || (Array.isArray(userRow.assigned_bot_ids) ? userRow.assigned_bot_ids.length : 1))
                 } : null
             };
         } catch (err) {
@@ -1421,7 +1429,7 @@ class SupabaseAdapter {
         if (!this.isEnabled()) return { ok: false, error: 'Supabase users chưa sẵn sàng.' };
         try {
             const params = new URLSearchParams({
-                select: 'id,username,status,assigned_bot_ids,expires_at,plan_name,allow_account_change,lock_reason,is_permanent',
+                select: 'id,username,status,assigned_bot_ids,expires_at,plan_name,allow_account_change,lock_reason,is_permanent,bot_count',
                 limit: '2'
             });
             if (userId) params.set('id', 'eq.' + String(userId));
@@ -1438,7 +1446,8 @@ class SupabaseAdapter {
                 assignedBotIds: Array.isArray(row.assigned_bot_ids) ? row.assigned_bot_ids.map(Number) : [],
                 expiresAt: row.expires_at || null, planName: String(row.plan_name || 'Gói thường'),
                 isPermanent: Boolean(row.is_permanent === true || (!row.expires_at && String(row.status || 'active').toLowerCase() === 'active')),
-                allowAccountChange: row.allow_account_change !== false, lockReason: String(row.lock_reason || '')
+                allowAccountChange: row.allow_account_change !== false, lockReason: String(row.lock_reason || ''),
+                botCount: Math.max(1, parseInt(row.bot_count ?? row.botCount, 10) || (Array.isArray(row.assigned_bot_ids) ? row.assigned_bot_ids.length : 1))
             } : null };
         } catch (err) {
             return { ok: false, error: err.message || 'Không thể xác minh entitlement user trên Supabase.' };
@@ -2349,7 +2358,7 @@ class SupabaseAdapter {
             const settings = incomingSettings || (existing?.settings && typeof existing.settings === 'object' ? { ...existing.settings } : {});
             if (settings.proxy && typeof settings.proxy === 'object') settings.proxy = { ...settings.proxy, password: proxy.password };
             else if (incomingProxy) settings.proxy = { ...proxy };
-            const schedulesData = payload.botSchedules ?? payload.schedules ?? existing?.bot_schedules ?? existing?.schedules ?? [];
+            const schedulesData = payload.botSchedules ?? payload.bot_schedules ?? payload.schedules ?? existing?.bot_schedules ?? existing?.schedules ?? [];
             const row = {
                 bot_id: stableId,
                 username: clearCredentials ? '' : (payload.username !== undefined && String(payload.username).trim() ? String(payload.username).trim() : (existing?.username || '')),
@@ -3918,6 +3927,15 @@ async function saveUsers(users) {
         try {
             const freshSnapshot = await supabaseAdapter.fetchUsersSnapshot();
             if (freshSnapshot && Number.isSafeInteger(freshSnapshot.revision) && freshSnapshot.revision > 0) {
+                if (Array.isArray(freshSnapshot.users)) {
+                    const localUsernames = new Set(users.map(u => String(u.username || '').toLowerCase()));
+                    for (const remoteUser of freshSnapshot.users) {
+                        if (remoteUser && remoteUser.username && !localUsernames.has(String(remoteUser.username).toLowerCase())) {
+                            users.push(remoteUser);
+                            localUsernames.add(String(remoteUser.username).toLowerCase());
+                        }
+                    }
+                }
                 expectedRevision = freshSnapshot.revision;
             }
         } catch (_) {}
@@ -4812,6 +4830,10 @@ function initializeAdminPassword({ allowBootstrap = false } = {}) {
         }
         return { ok: true, source: 'env', created: false, password: '' };
     }
+    // ƯU TIÊN: Nếu đã có mật khẩu trong registry (từ Cloud/lần chạy trước), giữ nguyên!
+    if (String(registry.adminPassword || '').trim()) {
+        return { ok: true, source: 'existing', created: false, password: '' };
+    }
     if (configPass && KNOWN_DEFAULT_ADMIN_PASSWORDS.has(configPass)) {
         console.error('[SECURITY] ❌ Mật khẩu Admin trong cấu hình trùng mật khẩu mặc định đã biết; bị từ chối.');
         return { ok: false, source: 'rejected-default', created: false, password: '', error: 'Mật khẩu Admin không được dùng mật khẩu mặc định đã biết.' };
@@ -4822,9 +4844,6 @@ function initializeAdminPassword({ allowBootstrap = false } = {}) {
             console.log('[SECURITY] 🔑 Mật khẩu Admin đã được áp dụng từ cấu hình môi trường.');
         }
         return { ok: true, source: 'config', created: false, password: '' };
-    }
-    if (String(registry.adminPassword || '').trim()) {
-        return { ok: true, source: 'existing', created: false, password: '' };
     }
     if (!allowBootstrap) {
         return { ok: true, source: 'missing', created: false, password: '' };
@@ -5340,7 +5359,11 @@ function finiteNonNegativeNumberOrNull(value) {
 
 function buildUnavailableSummary(botConfig, error = 'Chưa kết nối được tới bot.', httpStatus = null, apiState = {}) {
     const isMismatch = error ? (error.includes('409') || error.toLowerCase().includes('secret') || error.includes('lệch key')) : false;
-    const resolvedStatus = httpStatus || (error && error.includes('404') ? 404 : (isMismatch ? 409 : (error && (error.includes('503') || error.includes('502') || error.includes('Timeout')) ? 503 : null)));
+    const lowerErr = String(error || '').toLowerCase();
+    const resolvedStatus = httpStatus || (error && error.includes('404') ? 404 : (isMismatch ? 409 : (error && (lowerErr.includes('503') || lowerErr.includes('502') || lowerErr.includes('timeout') || lowerErr.includes('quá thời gian')) ? 503 : null)));
+    const cachedItem = (typeof summaryCache !== 'undefined' && summaryCache?.get) ? summaryCache.get(botConfig?.id)?.data : null;
+    const isManuallyStopped = Boolean(cachedItem?.manuallyStopped || apiState.manuallyStopped || botConfig?.manuallyStopped);
+    const lastKnownUser = String(cachedItem?.username || apiState.username || botConfig?.username || '');
     // BUG-02/API-STATE-01: phân biệt rõ 4 trạng thái để watchdog + UI không nhầm lẫn
     // "process sống" với "đã xác thực service" và "đã xác minh danh tính bot".
     return {
@@ -5351,7 +5374,7 @@ function buildUnavailableSummary(botConfig, error = 'Chưa kết nối được 
         label: botConfig.label,
         configured: !!botConfig.url,
         available: false,
-        username: '',
+        username: lastKnownUser,
         status: 'offline',
         ready: false,
         ping: null,
@@ -5367,7 +5390,7 @@ function buildUnavailableSummary(botConfig, error = 'Chưa kết nối được 
         ipAddress: '',
         locationState: 'unknown',
         roundedLocation: null,
-        settings: null,
+        settings: cachedItem?.settings || null,
         totemCount: 0,
         foodCount: 0,
         health: 20,
@@ -5376,7 +5399,7 @@ function buildUnavailableSummary(botConfig, error = 'Chưa kết nối được 
         isDead: false,
         deathCount: 0,
         lastDeathCoords: '',
-        manuallyStopped: false,
+        manuallyStopped: isManuallyStopped,
         lastKickReason: '',
         currentWindow: null,
         memory: null,
@@ -7210,7 +7233,8 @@ async function assertSafeChildUrl(childUrl) {
         safeHostDnsCache.set(hostname, { safe: true, ip: resolvedIp, timestamp: now });
         return { pinnedIp: resolvedIp, hostname };
     } catch (e) {
-        safeHostDnsCache.set(hostname, { safe: false, error: e.message, timestamp: now });
+        // Negative DNS cache: chỉ cache 2s (timestamp: now - 28000) để DNS worker chập chờn thử lại ngay lập tức
+        safeHostDnsCache.set(hostname, { safe: false, error: e.message, timestamp: now - 28000 });
         throw new Error(`Lỗi phân giải DNS an toàn cho '${hostname}': ${e.message}`);
     }
 }
@@ -7325,15 +7349,23 @@ async function fetchChild(botConfig, path, options = {}) {
         throw new Error('Chưa cấu hình URL cho bot.');
     }
 
+    const botIdHeaders = options.omitBotIdHeaders ? {} : {
+        'X-Manager-Bot-Id': String(botConfig.id || ''),
+        'X-Expected-Bot-ID': String(botConfig.id || '')
+    };
+
     const safety = await assertSafeChildUrl(botConfig.url);
 
     const controller = new AbortController();
-    const timeoutMs = readPositiveInt(
+    const isExternalBot = botConfig.url && !botConfig.url.includes('.onrender.com') && !botConfig.url.includes('localhost') && !botConfig.url.includes('127.0.0.1');
+    const defaultTimeout = isExternalBot ? Math.max(12000, POLL_TIMEOUT_MS) : POLL_TIMEOUT_MS;
+    const requestedTimeout = readPositiveInt(
         options.timeoutMs,
-        POLL_TIMEOUT_MS,
+        defaultTimeout,
         1000,
         60000
     );
+    const timeoutMs = isExternalBot ? Math.max(12000, requestedTimeout) : requestedTimeout;
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     const botSecret = String(
@@ -7344,10 +7376,6 @@ async function fetchChild(botConfig, path, options = {}) {
         ''
     ).trim();
     const requestId = options.requestId || crypto.randomUUID();
-    const botIdHeaders = options.omitBotIdHeaders ? {} : {
-        'X-Manager-Bot-Id': String(botConfig.id || ''),
-        'X-Expected-Bot-ID': String(botConfig.id || '')
-    };
     let secretHeaders = {
         'X-Bot-Secret': botSecret,
         'X-Request-Id': requestId
@@ -7373,6 +7401,7 @@ async function fetchChild(botConfig, path, options = {}) {
             const requestHeaders = {
                 'Accept': 'application/json',
                 'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive', // BANDWIDTH-OPT: tái sử dụng TCP/TLS connection
                 ...(options.headers || {}),
                 ...botIdHeaders,
                 ...secretHeaders,
@@ -7617,18 +7646,18 @@ async function fetchBotSummary(botConfig) {
         const snapshotRes = await fetchChild(botConfig, snapshotPath, {
             timeoutMs: 5500,
             headers: lastRev ? { 'If-None-Match': `"${lastRev}"` } : {}
-        });
-        if (snapshotRes.ok && snapshotRes.data?.unchanged) {
+        }).catch(() => null);
+        if (snapshotRes && snapshotRes.ok && snapshotRes.data?.unchanged) {
             const cached = summaryCache.get(botConfig.id)?.data;
             if (cached) return cached;
         }
-        if (snapshotRes.ok && snapshotRes.data?.rev) {
+        if (snapshotRes && snapshotRes.ok && snapshotRes.data?.rev) {
             botLastRevMap.set(botConfig.id, snapshotRes.data.rev);
         }
         // BUG-02/BLOCKER-02: secret sai / bị từ chối auth (401/403) hoặc secret-mismatch
         // phiên bản (409) → KHÔNG rơi vào fallback /api/bot hay /health
         // (health không xác thực sẽ che mất tín hiệu lỗi auth và làm bot "online" giả).
-        if (snapshotRes.status === 401 || snapshotRes.status === 403 || snapshotRes.status === 409) {
+        if (snapshotRes && (snapshotRes.status === 401 || snapshotRes.status === 403 || snapshotRes.status === 409)) {
             const authCode = snapshotRes.status === 403 ? 'FORBIDDEN' : 'SECRET_MISMATCH';
             return buildUnavailableSummary(
                 botConfig,
@@ -7639,7 +7668,7 @@ async function fetchBotSummary(botConfig) {
                 { processReachable: true, serviceAuthenticated: false, identityVerified: false, lastErrorCode: authCode }
             );
         }
-        if (snapshotRes.ok && snapshotRes.data?.bot) {
+        if (snapshotRes && snapshotRes.ok && snapshotRes.data?.bot) {
             const data = snapshotRes.data.bot;
             const inv = snapshotRes.data.inventory || {};
             // BLOCKER-02 (API-STATE-01): danh tính phải được xác minh TRƯỚC khi coi bot
@@ -7700,7 +7729,7 @@ async function fetchBotSummary(botConfig) {
             };
         }
 
-        const result = await fetchChild(botConfig, '/api/bot', { timeoutMs: 12000 });
+        const result = await fetchChild(botConfig, '/api/bot', { timeoutMs: 12000 }).catch(err => ({ ok: false, status: (err && err.message && err.message.includes('Timeout')) ? 503 : 500, error: err?.message, data: null }));
 
         if (!result.ok || !result.data) {
             // BUG-02/BLOCKER-02: auth failure trên /api/bot (401/403/409) cũng KHÔNG được fallback sang /health.
@@ -7716,8 +7745,8 @@ async function fetchBotSummary(botConfig) {
                 );
             }
             try {
-                const healthRes = await fetchChild(botConfig, '/health', { timeoutMs: 8000, omitBotIdHeaders: true });
-                if (healthRes.ok && healthRes.data) {
+                const healthRes = await fetchChild(botConfig, '/health', { timeoutMs: 8000, omitBotIdHeaders: true }).catch(() => null);
+                if (healthRes && healthRes.ok && healthRes.data) {
                     const hData = healthRes.data;
                     const sec = Number(hData.uptime || 0);
                     const h = Math.floor(sec / 3600);
@@ -7802,14 +7831,14 @@ async function fetchBotSummary(botConfig) {
                 rssMb: 0,
                 heapMb: 0,
                 httpStatus: result.status,
-                lastError: result.data?.error || (isWaking ? 'Render Sleep / Timeout (503)' : `HTTP ${result.status}`),
+                lastError: result.data?.error || (isWaking ? ((botConfig?.url && !botConfig.url.includes('.onrender.com')) ? 'Đang kết nối lại / Timeout (503)' : 'Render Sleep / Timeout (503)') : `HTTP ${result.status}`),
                 secretMismatch: !!(result.status === 409 || result.data?.secretMismatch || String(result.data?.error || '').includes('chưa xác thực') || String(result.data?.error || '').toLowerCase().includes('secret') || String(result.data?.error || '').includes('lệch key')),
                 processReachable: false,
                 serviceAuthenticated: false,
                 identityVerified: false,
                 lastErrorCode: isWaking ? 'WAKING' : `HTTP_${result.status}`,
                 error: isWaking
-                    ? 'Đang khởi động dịch vụ Cloud (Render)...'
+                    ? ((botConfig?.url && !botConfig.url.includes('.onrender.com')) ? 'Đang kết nối bot (Worker đang phản hồi chậm hoặc tải nặng, vui lòng chờ)...' : 'Đang khởi động dịch vụ Cloud (Render)...')
                     : (result.data?.error || `Bot trả HTTP ${result.status}.`)
             };
         }
@@ -7867,6 +7896,8 @@ async function fetchBotSummary(botConfig) {
         };
     } catch (err) {
         const isTimeout = err.message && (err.message.includes('Timeout') || err.message.includes('aborted'));
+        const isRender = botConfig?.url ? String(botConfig.url).includes('.onrender.com') : true;
+        const timeoutLabel = isRender ? 'Render Sleep / Timeout (503)' : 'Đang kết nối lại / Timeout (503)';
         return {
             id: botConfig.id,
             url: botConfig.url || '',
@@ -7895,14 +7926,16 @@ async function fetchBotSummary(botConfig) {
             totemCount: 0,
             foodCount: 0,
             httpStatus: isTimeout ? 503 : (err.status || 0),
-            lastError: isTimeout ? 'Render Sleep / Timeout (503)' : (err.message || 'Mất kết nối'),
+            lastError: isTimeout ? timeoutLabel : (err.message || 'Mất kết nối'),
             secretMismatch: false,
             processReachable: false,
             serviceAuthenticated: false,
             identityVerified: false,
             lastErrorCode: isTimeout ? 'TIMEOUT' : 'NETWORK_ERROR',
             error: isTimeout
-                ? 'Đang kết nối bot (Render có thể đang khởi động từ chế độ ngủ, vui lòng chờ)...'
+                ? (isRender
+                    ? 'Đang kết nối bot (Render có thể đang khởi động từ chế độ ngủ, vui lòng chờ)...'
+                    : 'Đang kết nối bot (Worker đang phản hồi chậm hoặc tải nặng, vui lòng chờ)...')
                 : (err.message || 'Không thể kết nối tới bot.')
         };
     }
@@ -7940,6 +7973,16 @@ async function getBotSummary(botConfig, options = {}) {
             }
             const lastApplied = summaryLastAppliedSeq.get(id) || 0;
             if (seq < lastApplied) return cached?.data || data;
+
+            // RESILIENCE CHO WORKER (WISPBYTE / VPS / CROSS-CLOUD):
+            // Nếu bot đã được xác nhận online (available: true) trong vòng 25s qua,
+            // và lần poll nền này (!force) bị timeout đột xuất (503 / waking / TIMEOUT),
+            // giữ lại cache cũ thay vì ngay lập tức đổi màu tím "Render Sleep".
+            const isTransientTimeout = !force && cached?.data?.available && !data.available && (data.httpStatus === 503 || data.status === 'waking' || data.lastErrorCode === 'TIMEOUT');
+            if (isTransientTimeout && (now - cached.at < 25000)) {
+                return cached.data;
+            }
+
             if (cached && !cached.data?.available && data.available) {
                 lastAuthSyncSignatures.delete(id);
                 lastAuthConfirmedAt.delete(id);
@@ -7954,6 +7997,10 @@ async function getBotSummary(botConfig, options = {}) {
         })
         .catch(err => {
             const current = BOT_CONFIG.find(config => config.id === id);
+            // Giữ lại cache cũ nếu là timeout đột xuất trong vòng 25s
+            if (!force && cached?.data?.available && (now - cached.at < 25000)) {
+                return cached.data;
+            }
             const fallback = cached?.data || buildUnavailableSummary(
                 botConfig,
                 err.message || 'Không thể kết nối tới bot.'
@@ -10873,6 +10920,19 @@ input:focus, select:focus, textarea:focus {
 .line:hover {
   background: rgba(255, 255, 255, 0.04);
 }
+
+.line-error { color: #f87171 !important; background: rgba(239, 68, 68, 0.08); border-left: 2px solid #ef4444; }
+.line-warn { color: #fbbf24 !important; background: rgba(245, 158, 11, 0.08); border-left: 2px solid #f59e0b; }
+.line-flow { color: #38bdf8 !important; border-left: 2px solid #0284c7; background: rgba(56, 189, 248, 0.04); }
+.line-chat { color: #e2e8f0 !important; }
+.line-success { color: #4ade80 !important; border-left: 2px solid #22c55e; background: rgba(34, 197, 94, 0.05); }
+.line-time { color: var(--muted, #64748b); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; margin-right: 6px; user-select: none; }
+.chat-sender { color: #38bdf8; font-weight: 600; }
+.chat-badge { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 4px; padding: 0 5px; font-size: 11px; font-weight: 600; }
+.chat-server-badge { background: rgba(249, 115, 22, 0.15); color: #fb923c; border: 1px solid rgba(249, 115, 22, 0.3); border-radius: 4px; padding: 0 5px; font-size: 11px; font-weight: 600; }
+.chat-outgoing { color: #f472b6 !important; font-style: italic; }
+.chat-server-text { color: #fed7aa; }
+.chat-text { color: #f1f5f9; }
 
 .note {
   margin-top: 8px;
@@ -13952,7 +14012,8 @@ body.theme-morning .cosmic-toggle-pill {
           <button class="primary" type="submit">Gửi</button>
         </form>
         <div class="chip-row">
-          <button type="button" class="chip" onclick="quickDetailCommand('/menu')">⚡ /menu (Slot 24)</button>
+          <button type="button" class="chip" style="background:rgba(14,165,233,0.18);color:#38bdf8;border-color:rgba(14,165,233,0.45);font-weight:700;" onclick="quickEnterServer()">⚡ Vào Server (Slot 24)</button>
+          <button type="button" class="chip" onclick="quickDetailCommand('/menu')">⚡ /menu</button>
           <button type="button" class="chip" onclick="quickDetailCommand('/dn')">🔑 /dn [MK]</button>
           <button type="button" class="chip" onclick="quickDetailCommand('/login')">🔓 /login [MK]</button>
           <button type="button" class="chip" onclick="quickDetailCommand('/bal')">💵 /bal</button>
@@ -13976,6 +14037,7 @@ body.theme-morning .cosmic-toggle-pill {
         <div class="chat-title-row">
           <h3>Inventory Manager</h3>
           <span id="detailInventoryCapacity" class="capacity-badge">0/36 ô (0%)</span>
+          <button type="button" class="small" style="background:rgba(234,179,8,0.2);color:#fbbf24;border:1px solid rgba(234,179,8,0.5);font-weight:700;margin-left:auto;" onclick="quickEquipTotem()" title="Tự động tìm Totem trong 36 ô rương đồ và lắp vào tay phụ">⚡ Lắp Totem Tay Phụ</button>
         </div>
         <div class="inventory-grid">
           <div class="inventory-stat"><div class="info-label">HEALTH</div><div id="detailHealth" class="info-value">20 / 20</div><div class="bar health-bar"><span id="detailHealthBar"></span></div></div>
@@ -14007,11 +14069,11 @@ body.theme-morning .cosmic-toggle-pill {
       <div class="panel">
         <div class="chat-title-row"><h3>Settings</h3><div class="revision">đồng bộ từ bot con</div></div>
         <div class="setting-list">
-          <label class="check-row"><input id="detailSettingEcoMode" type="checkbox"> <span>🌱 Eco Mode Siêu Tiết Kiệm (Giảm 80% CPU & giữ RAM &lt; 220MB)</span></label>
-          <label class="check-row"><input id="detailSettingAutoTotem" type="checkbox"> <span>Auto Totem phản xạ tức thì (&lt; 50ms)</span></label>
-          <label class="check-row"><input id="detailSettingAntiHungry" type="checkbox"> <span>Anti Hungry / Auto Eat</span></label>
-          <label class="check-row"><input id="detailSettingAutoReconnect" type="checkbox"> <span>Auto Reconnect + LOGIN/DN/MENU</span></label>
-          <label class="check-row"><input id="detailSettingAntiAfkKick" type="checkbox"> <span>Smart Anti-AFK Kick (Xoay đầu, vung tay nhẹ)</span></label>
+          <label class="check-row"><input id="detailSettingEcoMode" type="checkbox" checked> <span>🌱 Eco Mode Siêu Tiết Kiệm (Giảm 80% CPU & giữ RAM &lt; 220MB)</span></label>
+          <label class="check-row"><input id="detailSettingAutoTotem" type="checkbox" checked> <span>Auto Totem phản xạ tức thì (&lt; 50ms)</span></label>
+          <label class="check-row"><input id="detailSettingAntiHungry" type="checkbox" checked> <span>Anti Hungry / Auto Eat</span></label>
+          <label class="check-row"><input id="detailSettingAutoReconnect" type="checkbox" checked> <span>Auto Reconnect + LOGIN/DN/MENU</span></label>
+          <label class="check-row"><input id="detailSettingAntiAfkKick" type="checkbox" checked> <span>Smart Anti-AFK Kick (Xoay đầu, vung tay nhẹ)</span></label>
           <label for="detailSpawnCommands" style="display:block;font-size:12px;font-weight:600;margin-top:6px;">⚡ Spawn Commands (lệnh chạy khi vào AFK, phân tách bằng ; hoặc xuống dòng)</label>
           <textarea id="detailSpawnCommands" rows="3" style="width:100%;box-sizing:border-box;border-radius:6px;padding:6px 8px;font-family:monospace;font-size:12px;background:rgba(15,23,42,0.6);border:1px solid var(--border);resize:vertical;" placeholder="/server town;&#10;/fly;&#10;/home afk" oninput="markDetailSettingsDirty()"></textarea>
           <div class="note" style="margin-top:4px;">Nếu hiển thị ******** nghĩa là tài khoản của bạn không có quyền đổi tài khoản Minecraft — giữ nguyên để không thay đổi cấu hình.</div>
@@ -14781,12 +14843,12 @@ body.theme-morning .cosmic-toggle-pill {
         <div id="batchFixedSettings">
           <div style="display:flex;gap:10px;">
             <div class="form-row" style="flex:1;">
-              <label>Giờ Tắt (VD: 03:00)</label>
-              <input type="time" id="batchFixedStopTime" value="03:00">
+              <label>Giờ Tắt (VD: 04:30)</label>
+              <input type="time" id="batchFixedStopTime" value="04:30">
             </div>
             <div class="form-row" style="flex:1;">
-              <label>Giờ Bật (VD: 06:00)</label>
-              <input type="time" id="batchFixedStartTime" value="06:00">
+              <label>Giờ Bật (VD: 05:30)</label>
+              <input type="time" id="batchFixedStartTime" value="05:30">
             </div>
           </div>
         </div>
@@ -15577,15 +15639,20 @@ document.addEventListener('change',event=>{
 });
 
 function statusMeta(status, available=true, manuallyStopped=false, bot=null) {
+  const isStopped = Boolean(manuallyStopped || bot?.manuallyStopped);
+  if (isStopped && (status === 'offline' || status === 'kicked' || status === 'stopped' || !available)) {
+    return ['gray', 'STOPPED', 'stopped'];
+  }
   if (!available) {
     const httpStatus = bot?.httpStatus;
     const isSecretMismatch = !!(bot?.secretMismatch || httpStatus === 409 || String(bot?.lastError || bot?.error || '').includes('409') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('secret') || String(bot?.lastError || bot?.error || '').includes('khóa') || String(bot?.lastError || bot?.error || '').includes('lệch key'));
     if (isSecretMismatch) {
       return ['orange', 'Lệch Secret Key (409)', 'secret_mismatch'];
     }
-    const isSleep = !!(httpStatus === 503 || httpStatus === 502 || bot?.status === 'waking' || String(bot?.lastError || bot?.error || '').includes('503') || String(bot?.lastError || bot?.error || '').includes('502') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('sleep') || String(bot?.lastError || bot?.error || '').includes('ngủ') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('timeout') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('waking'));
+    const isSleep = !!(httpStatus === 503 || httpStatus === 502 || bot?.status === 'waking' || String(bot?.lastError || bot?.error || '').includes('503') || String(bot?.lastError || bot?.error || '').includes('502') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('sleep') || String(bot?.lastError || bot?.error || '').includes('ngủ') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('timeout') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('quá thời gian') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('waking'));
     if (isSleep) {
-      return ['purple', 'Render Sleep / Timeout (503)', 'render_sleep'];
+      const isRender = bot?.url ? String(bot.url).includes('.onrender.com') : true;
+      return ['purple', isRender ? 'Render Sleep / Timeout (503)' : 'Đang kết nối lại / Timeout (503)', 'render_sleep'];
     }
     const isNotFound = !!(httpStatus === 404 || String(bot?.lastError || bot?.error || '').includes('404') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('not found') || String(bot?.lastError || bot?.error || '').includes('không tồn tại'));
     if (isNotFound) {
@@ -15596,9 +15663,6 @@ function statusMeta(status, available=true, manuallyStopped=false, bot=null) {
       return ['yellow', 'ĐANG KIỂM TRA...', 'probing'];
     }
     return ['red', 'Mất kết nối / Unreachable', 'unreachable'];
-  }
-  if (manuallyStopped && (status === 'offline' || status === 'kicked' || status === 'stopped')) {
-    return ['gray', 'STOPPED', 'stopped'];
   }
   const map={
     online:['green','ONLINE','online'],
@@ -15758,8 +15822,9 @@ function botCardHtml(bot) {
         (isAdmin ? '<button type="button" class="bot-action-chip warning" onclick="event.stopPropagation(); openEditSecretModal(' + id + ')" title="Cập nhật Secret Key cho Bot #' + idStr + '">🔑 Sửa Secret Key</button>' : '') +
       '</div>';
     } else if (errorType === 'render_sleep') {
+      const isRender = bot?.url ? String(bot.url).includes('.onrender.com') : true;
       errorBannerHtml = '<div class="bot-error-action-banner sleep">' +
-        '<div class="bot-error-text">💤 <strong>Render Sleep / Timeout (503):</strong> Máy chủ Cloud đang khởi động từ chế độ ngủ đông (~30-50s) hoặc timeout.</div>' +
+        '<div class="bot-error-text">💤 <strong>' + (isRender ? 'Render Sleep / Timeout (503):' : 'Đang kết nối lại / Timeout (503):') + '</strong> ' + (isRender ? 'Máy chủ Cloud đang khởi động từ chế độ ngủ đông (~30-50s) hoặc timeout.' : 'Worker phản hồi chậm hoặc đang tải nặng, đang tự động kết nối lại...') + '</div>' +
         '<button type="button" class="bot-action-chip info" onclick="event.stopPropagation(); quickBotAction(event,' + id + ',\'restart\')" title="Ping lại kết nối">⚡ Thử lại</button>' +
       '</div>';
     } else if (errorType === 'not_found') {
@@ -15791,6 +15856,11 @@ function botCardHtml(bot) {
         '<span class="bot-id-chip">#' + idStr + '</span>' +
         '<h2 class="bot-card-name" title="' + escapeHtml(bot.label) + '">' + escapeHtml(bot.label) + '</h2>' +
         '<button type="button" class="bot-mini-btn btn-rename-alias" data-bot-id="' + id + '" data-bot-label="' + escapeHtml(bot.label) + '" onclick="event.stopPropagation(); handleRenameClick(this)" title="Đổi tên / Ghi chú hiển thị">✏</button>' +
+        '<div class="bot-card-quick-actions" style="display:inline-flex;margin-left:4px;" onclick="event.stopPropagation()">' +
+          (isOffline ?
+            '<button type="button" class="bot-mini-btn" style="background:rgba(16,185,129,0.18);color:#34d399;border:1px solid rgba(16,185,129,0.45);font-weight:700;" onclick="quickCardAction(this,' + id + ',\'start\')" title="Chạy bot ngay">▶ Chạy</button>' :
+            '<button type="button" class="bot-mini-btn danger" onclick="quickCardAction(this,' + id + ',\'stop\')" title="Dừng bot ngay">■ Dừng</button>') +
+        '</div>' +
       '</div>' +
       (isAdmin ?
         '<div class="bot-card-admin-actions" onclick="event.stopPropagation()">' +
@@ -16878,8 +16948,6 @@ function toggleUserProfileDropdown(event) {
 }
 
 function closeUserProfileDropdown() {
-  document.getElementById('userProfileDropdown')?.classList.add('hidden');
-  document.getElementById('detailUserProfileDropdown')?.classList.add('hidden');
   document.getElementById('globalUserProfileDropdown')?.classList.add('hidden');
 }
 
@@ -18295,6 +18363,17 @@ async function quickBotAction(event, id, action) {
     openBot(id);
     return;
   }
+  if (targetBot) {
+    if (action === 'start') {
+      targetBot.status = 'waking';
+      targetBot.manuallyStopped = false;
+      targetBot.available = true;
+    } else if (action === 'stop') {
+      targetBot.status = 'offline';
+      targetBot.manuallyStopped = true;
+    }
+    renderHome();
+  }
   showToast('Đang gửi lệnh ' + action + ' tới Bot ' + id + '...');
   try {
     const res = await requestJson('/api/manager/bot/' + id + '/' + action, {
@@ -18304,7 +18383,10 @@ async function quickBotAction(event, id, action) {
     });
     if (res.ok) {
       showToast('Đã thực hiện ' + action + ' Bot ' + id + ' thành công!', 'success');
-      refreshHome();
+      lastHomeSig = '';
+      void refreshHome();
+      setTimeout(() => { lastHomeSig = ''; void refreshHome(); }, 800);
+      setTimeout(() => { lastHomeSig = ''; void refreshHome(); }, 2000);
     } else {
       var errText = res.data?.error || ('Lỗi khi ' + action + ' bot.');
       if (errText.indexOf('username') !== -1 || errText.indexOf('password') !== -1 || errText.indexOf('chưa có') !== -1) {
@@ -18312,10 +18394,14 @@ async function quickBotAction(event, id, action) {
         openBot(id);
       } else {
         showToast(errText, 'error');
+        lastHomeSig = '';
+        void refreshHome();
       }
     }
   } catch (err) {
     showToast(err.message || 'Lỗi kết nối.', 'error');
+    lastHomeSig = '';
+    void refreshHome();
   }
 }
 window.quickBotAction = quickBotAction;
@@ -18687,6 +18773,7 @@ function filterBots() {
   const query = String(document.getElementById('searchInput')?.value || '').toLowerCase().trim();
   const grid = document.getElementById('botGrid');
   if(!grid) return;
+  const isAdmin = Boolean(currentUser && currentUser.role === 'admin');
   const filtered = bots.filter(b => {
     // 1. Lọc theo Tab trạng thái
     if (activeStatusFilter === 'afk' && b.status !== 'afk') return false;
@@ -19055,8 +19142,8 @@ async function submitBatchSettings() {
     const mode = document.getElementById('batchScheduleMode')?.value === 'cycle' ? 'cycle' : 'fixed';
     let items = [];
     if (mode === 'fixed') {
-      const stopTime = String(document.getElementById('batchFixedStopTime')?.value || '03:00').trim();
-      const startTime = String(document.getElementById('batchFixedStartTime')?.value || '06:00').trim();
+      const stopTime = String(document.getElementById('batchFixedStopTime')?.value || '04:30').trim();
+      const startTime = String(document.getElementById('batchFixedStartTime')?.value || '05:30').trim();
       if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(stopTime) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(startTime)) {
         showToast('Giờ hẹn bật/tắt cố định không hợp lệ.');
         return;
@@ -19553,7 +19640,9 @@ function goHome() {
   history.pushState({},'',url.pathname+url.search);
   document.getElementById('detailPage').classList.add('hidden');
   document.getElementById('homePage').classList.remove('hidden');
-  refreshHome();
+  renderHome();
+  lastHomeSig = '';
+  void refreshHome();
 }
 
 async function resolveRouteFromUrl() {
@@ -19658,6 +19747,7 @@ async function runAllAction(action) {
 
 function detailStatusHtml() {
   if(!detailBot) return;
+  const isAdmin = Boolean(currentUser && currentUser.role === 'admin');
   const numId = selectedBotId || detailBot.id;
   const [color,label,errorType]=statusMeta(detailBot.status,detailBot.available,!!detailBot.manuallyStopped,detailBot);
   let statusDetailHtml = '<span class="dot '+color+'"></span>'+escapeHtml(label);
@@ -20286,12 +20376,17 @@ async function clickDetailGuiSlot(slot) {
     const res = await requestJson('/api/manager/bot/' + selectedBotId + '/window/click', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ slot, mouseButton: 0 })
+      body: JSON.stringify({ slot, mouseButton: 0 }),
+      timeoutMs: 8000
     });
-    if (!res.ok) showToast(res.data?.error || 'Lỗi click GUI');
-    else showToast('Đã click ô ' + slot);
+    if (!res.ok) {
+      showToast(res.data?.error || 'Lỗi click GUI', 'error');
+    } else {
+      showToast('Đã click ô ' + slot, 'success');
+      await refreshDetail(true);
+    }
   } catch(e) {
-    showToast('Lỗi gửi click GUI');
+    showToast('Lỗi gửi click GUI', 'error');
   }
 }
 
@@ -20510,6 +20605,12 @@ async function refreshDetail(force=false) {
     }
 
     if(!isCurrentRequest()) return;
+    if (detailBot) {
+      const bIdx = bots.findIndex(b => Number(b.id) === Number(requestBotId));
+      if (bIdx !== -1) {
+        bots[bIdx] = { ...bots[bIdx], ...detailBot };
+      }
+    }
     uptimeSyncAt=Date.now();
     detailStatusHtml();
     renderDetailInventory();
@@ -20556,7 +20657,34 @@ async function loadDetailLogs(force=false, expectedGeneration=detailRefreshGener
       return;
     }
     const keep=nearBottom(box);
-    const newHtml=(data.logs||[]).map(line=>'<div class="line">'+escapeHtml(line)+'</div>').join('');
+    function formatLogLineHtml(line) {
+      if (!line) return '';
+      let cls = 'line';
+      const lower = line.toLowerCase();
+      if (lower.includes('[lỗi]') || lower.includes('[error]') || lower.includes('lỗi') || lower.includes('❌')) {
+        cls += ' line-error';
+      } else if (lower.includes('[cảnh báo]') || lower.includes('[warn]') || lower.includes('warning') || lower.includes('⚠️')) {
+        cls += ' line-warn';
+      } else if (lower.includes('[totem]') || lower.includes('⚡')) {
+        cls += ' line-flow';
+      } else if (lower.includes('[afk]') || lower.includes('✅') || lower.includes('🎉')) {
+        cls += ' line-success';
+      } else if (lower.includes('[vào cụm]') || lower.includes('[flow]') || lower.includes('[gui]') || lower.includes('[menu]') || lower.includes('🎯')) {
+        cls += ' line-flow';
+      } else if (lower.includes('[chat]') || lower.includes('[tin nhắn]')) {
+        cls += ' line-chat';
+      }
+
+      const timeMatch = line.match(/^(\d{2}:\d{2}:\d{2})\s*(.*)$/);
+      if (timeMatch) {
+        return '<div class="' + cls + '"><span class="line-time">' + escapeHtml(timeMatch[1]) + '</span>' + escapeHtml(timeMatch[2]) + '</div>';
+      }
+      return '<div class="' + cls + '">' + escapeHtml(line) + '</div>';
+    }
+    const lines = Array.isArray(data?.logs) ? data.logs : [];
+    const newHtml = lines.length > 0
+      ? lines.map(formatLogLineHtml).join('')
+      : '<div class="empty" style="color:var(--muted);padding:8px;font-style:italic;">Chưa có nhật ký sự kiện.</div>';
     if (box && box.innerHTML !== newHtml) {
       box.innerHTML = newHtml;
     }
@@ -20578,7 +20706,59 @@ async function loadDetailChat(force=false, expectedGeneration=detailRefreshGener
       return;
     }
     const keep=nearBottom(box);
-    const newHtml=(data.logs||[]).map(line=>'<div class="line">'+escapeHtml(line)+'</div>').join('');
+    function formatChatLineHtml(line) {
+      if (!line) return '';
+      let cls = 'line line-chat';
+      const timeMatch = line.match(/^(\d{2}:\d{2}:\d{2})\s*(.*)$/);
+      const timePart = timeMatch ? timeMatch[1] : '';
+      let rest = timeMatch ? timeMatch[2] : line;
+
+      let innerHtml = '';
+      if (timePart) {
+        innerHtml += '<span class="line-time">' + escapeHtml(timePart) + '</span>';
+      }
+
+      // 1. Tin nhắn lệnh / outgoing do bot gửi: "→ /menu"
+      if (rest.startsWith('→') || rest.includes('→ /')) {
+        cls += ' line-outgoing';
+        innerHtml += '<span class="chat-outgoing">' + escapeHtml(rest) + '</span>';
+      }
+      // 2. Tin nhắn Role | Player: "VIP | Alex: hello" hoặc "[VIP] Alex: hello"
+      else if (/^\[?([^\]|]+)[\]|]\s*([A-Za-z0-9_]{1,16})\s*[:»]\s*(.+)$/u.test(rest)) {
+        const m = rest.match(/^\[?([^\]|]+)[\]|]\s*([A-Za-z0-9_]{1,16})\s*[:»]\s*(.+)$/u);
+        const role = m[1].trim();
+        const user = m[2].trim();
+        const msg = m[3].trim();
+        innerHtml += '<span class="chat-badge">' + escapeHtml(role) + '</span> ' +
+                     '<span class="chat-sender">' + escapeHtml(user) + ':</span> ' +
+                     '<span class="chat-text">' + escapeHtml(msg) + '</span>';
+      }
+      // 3. Tin nhắn người chơi chuẩn vanilla: "<Player> hello"
+      else if (/^<([A-Za-z0-9_]{1,16})>\s*(.+)$/u.test(rest)) {
+        const m = rest.match(/^<([A-Za-z0-9_]{1,16})>\s*(.+)$/u);
+        const user = m[1].trim();
+        const msg = m[2].trim();
+        innerHtml += '<span class="chat-sender">&lt;' + escapeHtml(user) + '&gt;</span> ' +
+                     '<span class="chat-text">' + escapeHtml(msg) + '</span>';
+      }
+      // 4. Tin nhắn hệ thống server: "[HỆ THỐNG] ..." hoặc "[Server] ..."
+      else if (rest.startsWith('[HỆ THỐNG]') || rest.startsWith('[Server]') || rest.startsWith('Server:')) {
+        cls += ' line-server';
+        const cleanMsg = rest.replace(/^(\[HỆ THỐNG\]|\[Server\]|Server:)\s*/, '');
+        innerHtml += '<span class="chat-server-badge">HỆ THỐNG</span> ' +
+                     '<span class="chat-server-text">' + escapeHtml(cleanMsg) + '</span>';
+      }
+      // 5. Mặc định
+      else {
+        innerHtml += '<span class="chat-text">' + escapeHtml(rest) + '</span>';
+      }
+
+      return '<div class="' + cls + '">' + innerHtml + '</div>';
+    }
+    const lines = Array.isArray(data?.logs) ? data.logs : [];
+    const newHtml = lines.length > 0
+      ? lines.map(formatChatLineHtml).join('')
+      : '<div class="empty" style="color:var(--muted);padding:8px;font-style:italic;">Chưa có tin nhắn nào.</div>';
     if (box && box.innerHTML !== newHtml) {
       box.innerHTML = newHtml;
     }
@@ -20874,14 +21054,6 @@ async function selectDetailHotbar(slot){
     if(!result.ok) await refreshDetail(true);
   } finally {detailInventoryBusy=false;}
 }
-function setDetailScheduleFieldVisibility(card){
-  if(!card)return;
-  const mode=card.querySelector('[data-field="mode"]')?.value==='fixed'?'fixed':'interval';
-  const interval=card.querySelector('[data-role="interval-field"]');
-  const fixed=card.querySelector('[data-role="fixed-field"]');
-  if(interval)interval.classList.toggle('hidden-field',mode!=='interval');
-  if(fixed)fixed.classList.toggle('hidden-field',mode!=='fixed');
-}
 
 function renderDetailSettings(data){
   const settings=data?.settings||data||{};
@@ -20952,7 +21124,7 @@ function allowDetailAutoChatDrop(event){event.preventDefault();event.dataTransfe
 function dropDetailAutoChat(event,targetIndex){event.preventDefault();const from=draggedDetailAutoChatIndex;draggedDetailAutoChatIndex=null;if(!Number.isInteger(from)||from===targetIndex)return;const data=collectDetailAutoChatSchedules();const [moved]=data.splice(from,1);data.splice(targetIndex,0,moved);detailAutoChatDirty=true;renderDetailAutoChatSchedules(data);}
 function endDetailScheduleDrag(element){if(element)element.classList.remove('dragging');draggedDetailAutoChatIndex=null;draggedDetailBotScheduleIndex=null;}
 
-function detailDefaultFixedTime(index){const hour=(3+Number(index||0)*3)%24;return String(hour).padStart(2,'0')+':00';}
+function detailDefaultFixedTime(index){const i=Number(index||0);if(i===0)return '04:30';if(i===1)return '05:30';const hour=(6+(i-2)*3)%24;return String(hour).padStart(2,'0')+':00';}
 // BUG-21: Worker sanitizer chấp nhận action 'command' (+ trường command). Trước đây
 // normalize chỉ cho start/stop nên action 'command' bị âm thầm đổi thành 'stop' khi
 // Admin mở trang Detail và lưu lại. Giữ nguyên action/command để không phá cấu hình.
@@ -20961,15 +21133,24 @@ function normalizeDetailBotScheduleAction(item){
 }
 function normalizeDetailBotScheduler(schedules){
   const raw=Array.isArray(schedules)?schedules[0]:null;
-  if(!raw)return{id:String(Date.now()),enabled:true,mode:'fixed',items:[]};
+  if(!raw)return{id:String(Date.now()),enabled:true,mode:'fixed',items:[
+    {id:'default-stop-0430',action:'stop',time:'04:30'},
+    {id:'default-start-0530',action:'start',time:'05:30'}
+  ]};
   const mode=raw.mode==='cycle'?'cycle':'fixed';
   let items=Array.isArray(raw.items)?raw.items.slice():[];
   if(!items.length&&Array.isArray(schedules))items=schedules.filter(s=>(s.mode==='cycle'?'cycle':'fixed')===mode).flatMap(s=>mode==='fixed'?[{id:s.id,action:s.action,time:s.time}]:[{id:String(s.id||'')+'-stop',action:'stop',afterMinutes:clampClientNumber(s.offAfterMinutes,120,1,43200)},{id:String(s.id||'')+'-start',action:'start',afterMinutes:clampClientNumber(s.onAfterMinutes,300,1,43200)}]);
+  if(!items.length&&mode==='fixed'){
+    items=[
+      {id:'default-stop-0430',action:'stop',time:'04:30'},
+      {id:'default-start-0530',action:'start',time:'05:30'}
+    ];
+  }
   return{id:String(raw.id||Date.now()),enabled:raw.enabled!==false,mode,items:items.map((item,i)=>mode==='fixed'
-    ?{id:String(item.id||Date.now()+'-'+i),action:normalizeDetailBotScheduleAction(item),time:String(item.time||'03:00'),...(normalizeDetailBotScheduleAction(item)==='command'?{command:String(item.command||'')}:{})}
+    ?{id:String(item.id||Date.now()+'-'+i),action:normalizeDetailBotScheduleAction(item),time:String(item.time||(i===0?'04:30':(i===1?'05:30':'04:30'))),...(normalizeDetailBotScheduleAction(item)==='command'?{command:String(item.command||'')}:{})}
     :{id:String(item.id||Date.now()+'-'+i),action:normalizeDetailBotScheduleAction(item),afterMinutes:clampClientNumber(item.afterMinutes,i===0?120:300,1,43200),...(normalizeDetailBotScheduleAction(item)==='command'?{command:String(item.command||'')}:{})})};
 }
-function renderDetailBotScheduleModeNote(mode){const note=document.getElementById('detailBotScheduleModeNote');if(!note)return;note.textContent=mode==='cycle'?'Mỗi dòng kích hoạt sau khoảng thời gian tính từ dòng ngay phía trên. Dòng đầu tiên tính từ lúc bấm Lưu. Kéo ⋮⋮ để đổi thứ tự.':'Mỗi dòng dùng giờ Việt Nam (GMT+7). Có thể thêm nhiều giờ: 03:00 Tắt → 06:00 Bật → 12:00 Tắt → 19:00 Bật.';}
+function renderDetailBotScheduleModeNote(mode){const note=document.getElementById('detailBotScheduleModeNote');if(!note)return;note.textContent=mode==='cycle'?'Mỗi dòng kích hoạt sau khoảng thời gian tính từ dòng ngay phía trên. Dòng đầu tiên tính từ lúc bấm Lưu. Kéo ⋮⋮ để đổi thứ tự.':'Mỗi dòng dùng giờ Việt Nam (GMT+7). Mặc định: 04:30 Tắt → 05:30 Bật (bảo trì server hằng ngày). Có thể thêm/sửa tùy ý.';}
 function renderDetailBotSchedules(schedules){
   detailBotSchedules=(Array.isArray(schedules)?schedules:[]);const box=document.getElementById('detailBotSchedules');if(!box)return;
   const scheduler=normalizeDetailBotScheduler(detailBotSchedules);
@@ -21028,18 +21209,50 @@ async function saveDetailSettings(){
     ...(spawnElement?{spawnCommands:String(spawnElement.value||'')}:{})
   }};
   detailSettingsSaveInFlight=true;setDetailSettingsDisabled(true);
-  try{const result=await detailPost('/settings',body);showToast(result.data?.message||result.data?.error||'Đã xử lý.');if(result.ok){detailSettingsDirty=false;renderDetailSettings(result.data.settings||result.data);}}finally{detailSettingsSaveInFlight=false;setDetailSettingsDisabled(false);}
+  try{
+    const result=await detailPost('/settings',body);
+    showToast(result.data?.message||result.data?.error||'Đã xử lý.');
+    if(result.ok){
+      detailSettingsDirty=false;
+      renderDetailSettings(result.data.settings||result.data);
+      lastHomeSig = '';
+      if(selectedBotId!==null)detailLastRevMap.delete(selectedBotId);
+      await refreshDetail(true);
+    }
+  }finally{detailSettingsSaveInFlight=false;setDetailSettingsDisabled(false);}
 }
 async function saveDetailAutoChat(){
   if(detailAutoChatSaveInFlight)return;
   invalidateDetailReads();const schedules=collectDetailAutoChatSchedules();const validationError=validateDetailAutoChatSchedules(schedules);if(validationError){showToast(validationError);return;}
   detailAutoChatSaveInFlight=true;setDetailAutoChatDisabled(true);
-  try{const result=await detailPost('/auto-chat',{autoChatSchedules:schedules});showToast(result.data?.message||result.data?.error||'Đã xử lý.');if(result.ok){detailAutoChatDirty=false;detailAutoChatSchedules=result.data?.autoChatSchedules||schedules;renderDetailAutoChatSchedules(detailAutoChatSchedules);}}finally{detailAutoChatSaveInFlight=false;setDetailAutoChatDisabled(false);}
+  try{
+    const result=await detailPost('/auto-chat',{autoChatSchedules:schedules});
+    showToast(result.data?.message||result.data?.error||'Đã xử lý.');
+    if(result.ok){
+      detailAutoChatDirty=false;
+      detailAutoChatSchedules=result.data?.autoChatSchedules||schedules;
+      renderDetailAutoChatSchedules(detailAutoChatSchedules);
+      lastHomeSig = '';
+      if(selectedBotId!==null)detailLastRevMap.delete(selectedBotId);
+      await refreshDetail(true);
+    }
+  }finally{detailAutoChatSaveInFlight=false;setDetailAutoChatDisabled(false);}
 }
 async function saveDetailBotSchedules(){
   if(detailBotScheduleSaveInFlight)return;const schedules=collectDetailBotSchedules();const validationError=validateDetailBotSchedules(schedules);if(validationError){showToast(validationError);return;}
   detailBotScheduleSaveInFlight=true;setDetailBotScheduleDisabled(true);
-  try{const result=await detailPost('/bot-schedules',{botSchedules:schedules});showToast(result.data?.message||result.data?.error||'Đã xử lý.');if(result.ok){detailBotScheduleDirty=false;detailBotSchedules=result.data?.botSchedules||schedules;renderDetailBotSchedules(detailBotSchedules);}}finally{detailBotScheduleSaveInFlight=false;setDetailBotScheduleDisabled(false);}
+  try{
+    const result=await detailPost('/bot-schedules',{botSchedules:schedules});
+    showToast(result.data?.message||result.data?.error||'Đã xử lý.');
+    if(result.ok){
+      detailBotScheduleDirty=false;
+      detailBotSchedules=result.data?.botSchedules||schedules;
+      renderDetailBotSchedules(detailBotSchedules);
+      lastHomeSig = '';
+      if(selectedBotId!==null)detailLastRevMap.delete(selectedBotId);
+      await refreshDetail(true);
+    }
+  }finally{detailBotScheduleSaveInFlight=false;setDetailBotScheduleDisabled(false);}
 }
 
 async function clearDetailLogs(){if(!confirm('Xóa Event Log của bot này?'))return;try{const result=await detailPost('/logs/clear',{});showToast(result.data?.message||result.data?.error||'Đã xử lý.');if(result.ok)await loadDetailLogs(true);}catch(err){showToast(err.message||'Không thể xóa Event Log.');}}
@@ -21061,7 +21274,7 @@ async function detailPost(path,body){
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify(body||{}),
-      timeoutMs:30000
+      timeoutMs:15000
     }
   );
 }
@@ -21071,13 +21284,51 @@ async function detailAction(action){
   invalidateDetailReads();
   detailLifecycleActionInFlight=true;
   const buttons=['detailStartButton','detailStopButton','detailRestartButton'];
+  const activeBtn=document.getElementById(action==='start'?'detailStartButton':action==='stop'?'detailStopButton':'detailRestartButton');
+  const prevBtnText=activeBtn?activeBtn.textContent:'';
+  if(activeBtn)activeBtn.textContent=action==='start'?'⏳ Đang chạy...':action==='stop'?'⏳ Đang dừng...':'⏳ Đang chạy lại...';
   buttons.forEach(function(id){const button=document.getElementById(id);if(button)button.disabled=true;});
+
+  // Cập nhật Optimistic tức thì trên giao diện Detail và cache danh sách bots
+  if (detailBot) {
+    if (action === 'start') {
+      detailBot.manuallyStopped = false;
+      detailBot.status = 'waking';
+    } else if (action === 'stop') {
+      detailBot.manuallyStopped = true;
+      detailBot.status = 'offline';
+    } else if (action === 'restart') {
+      detailBot.manuallyStopped = false;
+      detailBot.status = 'waking';
+    }
+    renderDetailHeader(detailBot);
+  }
+  const bIdx = bots.findIndex(function(b) { return Number(b.id) === Number(selectedBotId); });
+  if (bIdx !== -1) {
+    if (action === 'start') {
+      bots[bIdx].manuallyStopped = false;
+      bots[bIdx].status = 'waking';
+    } else if (action === 'stop') {
+      bots[bIdx].manuallyStopped = true;
+      bots[bIdx].status = 'offline';
+    } else if (action === 'restart') {
+      bots[bIdx].manuallyStopped = false;
+      bots[bIdx].status = 'waking';
+    }
+  }
+  lastHomeSig = '';
+  if (selectedBotId !== null) detailLastRevMap.delete(selectedBotId);
+
   try{
     showToast(action==='start'?'Đang chạy bot...':action==='stop'?'Đang dừng bot...':'Đang khởi động lại bot...');
     const result=await detailPost('/'+encodeURIComponent(action),{});
     if (result.ok) {
       showToast(result.data?.message||result.data?.error||'Đã xử lý thành công!', 'success');
+      lastHomeSig = '';
+      if (selectedBotId !== null) detailLastRevMap.delete(selectedBotId);
       await refreshDetail(true);
+      setTimeout(function() { if (selectedBotId !== null) refreshDetail(true); }, 800);
+      setTimeout(function() { if (selectedBotId !== null) refreshDetail(true); }, 2000);
     } else {
       var err = result.data?.error || 'Không thể thực hiện thao tác.';
       if (action === 'start' && (err.indexOf('username') !== -1 || err.indexOf('password') !== -1 || err.indexOf('chưa có') !== -1)) {
@@ -21086,10 +21337,22 @@ async function detailAction(action){
         if (uInput) { uInput.focus(); }
       } else {
         showToast(err, 'error');
+        lastHomeSig = '';
+        if (selectedBotId !== null) detailLastRevMap.delete(selectedBotId);
+        await refreshDetail(true);
       }
     }
-  }catch(err){showToast(err.message||'Không thể thực hiện thao tác.', 'error');}
-  finally{detailLifecycleActionInFlight=false;buttons.forEach(function(id){const button=document.getElementById(id);if(button)button.disabled=false;});}
+  }catch(err){
+    showToast(err.message||'Không thể thực hiện thao tác.', 'error');
+    lastHomeSig = '';
+    if (selectedBotId !== null) detailLastRevMap.delete(selectedBotId);
+    await refreshDetail(true);
+  }
+  finally{
+    detailLifecycleActionInFlight=false;
+    if(activeBtn)activeBtn.textContent=prevBtnText;
+    buttons.forEach(function(id){const button=document.getElementById(id);if(button)button.disabled=false;});
+  }
 }
 
 let detailCommandHistory = [];
@@ -21134,6 +21397,125 @@ function quickDetailCommand(cmd) {
   input.setSelectionRange(input.value.length, input.value.length);
 }
 window.quickDetailCommand = quickDetailCommand;
+
+async function quickEnterServer() {
+  if (!selectedBotId) return;
+  if (detailBot?.currentWindow && Array.isArray(detailBot.currentWindow.slots) && detailBot.currentWindow.slots.length > 24) {
+    showToast('Đang click Slot 24 vào server...');
+    await clickDetailGuiSlot(24);
+  } else {
+    showToast('Đang gửi lệnh /menu để vào server...');
+    try {
+      const res = await detailPost('/send', { text: '/menu' });
+      if (res.ok) {
+        showToast('Đã gửi /menu! Bot sẽ tự động click slot 24 ngay khi menu mở.', 'success');
+        await refreshDetail(true);
+      } else {
+        showToast(res.data?.error || 'Không thể gửi /menu.', 'error');
+      }
+    } catch(e) {
+      showToast(e.message || 'Lỗi gửi /menu', 'error');
+    }
+  }
+}
+window.quickEnterServer = quickEnterServer;
+
+async function quickEquipTotem() {
+  if (!selectedBotId || !detailInventory) return;
+  const slots = detailInventory.slots || {};
+  let totemSlot = null;
+  for (let s = 9; s <= 44; s++) {
+    const item = slots[String(s)];
+    if (item && item.name && item.name.includes('totem')) {
+      totemSlot = s;
+      break;
+    }
+  }
+  if (totemSlot === null) {
+    showToast('⚠️ Không tìm thấy Totem trong 36 ô rương đồ!', 'warning');
+    return;
+  }
+  showToast('Đang trang bị Totem vào tay phụ...');
+  try {
+    const res = await detailPost('/inventory/equip', {
+      sourceSlot: totemSlot,
+      destination: 'off-hand',
+      revision: detailInventory.revision
+    });
+    if (res.ok) {
+      showToast('🛡️ Đã trang bị Totem vào tay phụ thành công!', 'success');
+      await refreshDetail(true);
+    } else {
+      showToast(res.data?.error || 'Lỗi trang bị Totem.', 'error');
+    }
+  } catch (e) {
+    showToast(e.message || 'Lỗi gửi yêu cầu trang bị Totem.', 'error');
+  }
+}
+window.quickEquipTotem = quickEquipTotem;
+
+function refreshStatus() {
+  lastHomeSig = '';
+  if (selectedBotId === null) {
+    void refreshHome();
+  } else {
+    if (selectedBotId !== null) detailLastRevMap.delete(selectedBotId);
+    void refreshDetail(true);
+  }
+}
+window.refreshStatus = refreshStatus;
+
+async function quickCardAction(btn, botId, action) {
+  if (!botId || btn.disabled) return;
+  btn.disabled = true;
+  const oldText = btn.textContent;
+  btn.textContent = '...';
+
+  // Optimistic UI update in bots array and immediate re-render
+  const numId = Number(botId);
+  const targetBot = bots.find(function(b) { return Number(b.id) === numId; });
+  if (targetBot) {
+    if (action === 'start') {
+      targetBot.manuallyStopped = false;
+      targetBot.status = 'waking';
+      targetBot.available = true;
+    } else if (action === 'stop') {
+      targetBot.manuallyStopped = true;
+      targetBot.status = 'offline';
+    } else if (action === 'restart') {
+      targetBot.manuallyStopped = false;
+      targetBot.status = 'waking';
+    }
+    renderHome();
+  }
+  lastHomeSig = '';
+
+  try {
+    const res = await requestJson('/api/manager/bot/' + encodeURIComponent(botId) + '/' + action, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      timeoutMs: 10000
+    });
+    if (res.ok) {
+      showToast(res.data?.message || ('Đã gửi lệnh ' + action + ' bot #' + botId), 'success');
+      lastHomeSig = '';
+      refreshStatus();
+      setTimeout(refreshStatus, 800);
+      setTimeout(refreshStatus, 2000);
+    } else {
+      showToast(res.data?.error || ('Lỗi thao tác bot #' + botId), 'error');
+      refreshStatus();
+    }
+  } catch (err) {
+    showToast(err.message || 'Lỗi kết nối khi gửi lệnh.', 'error');
+    refreshStatus();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = oldText;
+  }
+}
+window.quickCardAction = quickCardAction;
 
 async function copyToClipboard(text, label) {
   text = String(text || '').trim();
@@ -21196,7 +21578,14 @@ async function saveDetailAccount(){
   try{
     const result=await detailPost('/account',{username,password});
     showToast(result.data?.message||result.data?.error||'Đã xử lý.');
-    if(result.ok){if(userInput)userInput.value='';if(passInput)passInput.value='';await refreshDetail(true);}
+    if(result.ok){
+      if(userInput)userInput.value='';
+      if(passInput)passInput.value='';
+      lastHomeSig = '';
+      if(selectedBotId!==null)detailLastRevMap.delete(selectedBotId);
+      await refreshDetail(true);
+      setTimeout(function() { if(selectedBotId!==null)refreshDetail(true); }, 1000);
+    }
   }catch(err){showToast(err.message||'Không thể cập nhật tài khoản.');}
   finally{detailAccountSaveInFlight=false;if(userInput)userInput.disabled=false;if(passInput)passInput.disabled=false;}
 }
@@ -21220,7 +21609,11 @@ async function saveAndRestartBot(){
     if(passInput)passInput.value='';
     const restartRes=await detailPost('/restart',{});
     showToast(restartRes.data?.message||restartRes.data?.error||'Đã gửi lệnh chạy lại bot.');
+    lastHomeSig = '';
+    if(selectedBotId!==null)detailLastRevMap.delete(selectedBotId);
     await refreshDetail(true);
+    setTimeout(function() { if(selectedBotId!==null)refreshDetail(true); }, 800);
+    setTimeout(function() { if(selectedBotId!==null)refreshDetail(true); }, 2000);
   }catch(err){showToast(err.message||'Lỗi khi lưu và khởi động lại bot.');}
   finally{detailAccountSaveInFlight=false;if(userInput)userInput.disabled=false;if(passInput)passInput.disabled=false;}
 }
@@ -21291,6 +21684,8 @@ async function saveDetailProxy() {
     });
     if (res.ok) {
       showToast('Đã lưu cấu hình Proxy thành công!');
+      lastHomeSig = '';
+      if (selectedBotId !== null) detailLastRevMap.delete(selectedBotId);
       await refreshDetail(true);
     } else {
       showToast('Lỗi lưu Proxy: ' + (res.data?.error || 'Không rõ nguyên nhân'));
@@ -22374,7 +22769,7 @@ function scheduleNextManagerPoll() {
   if (managerPollTimerId) clearTimeout(managerPollTimerId);
   if (!currentUser) return;
   const isIdle = Date.now() - lastUserActivityAt > 2 * 60 * 1000;
-  const delay = document.hidden ? 45000 : (isIdle ? 12000 : 4000);
+  const delay = document.hidden ? 45000 : (isIdle ? 15000 : 3000); // 3s active poll for real-time responsiveness, 15s idle
   managerPollTimerId = setTimeout(async () => {
     try {
       if (!routeResolving && currentUser) {
@@ -23085,6 +23480,30 @@ async function revokeBotOwnership(botId, options = {}) {
 // restart or transient Cloud/worker failure.
 // ---------------------------------------------------------------------------
 const customerResetLocks = new Set();
+// BUG-R1 FIX: Theo dõi thời gian lock thêm vào + tự dọn khi hết lease
+const customerResetLockTimestamps = new Map();
+
+function addCustomerResetLock(key, leaseMs = 10 * 60 * 1000) {
+    customerResetLocks.add(key);
+    customerResetLockTimestamps.set(key, Date.now() + leaseMs);
+}
+
+function deleteCustomerResetLock(key) {
+    customerResetLocks.delete(key);
+    customerResetLockTimestamps.delete(key);
+}
+
+// BUG-R1 FIX: Dọn lock mồ côi — chạy mỗi 2 phút
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, expiresAt] of customerResetLockTimestamps.entries()) {
+        if (now > expiresAt) {
+            console.warn(`[RESET_LOCK_CLEANUP] Lock mồ côi cho bot #${key} đã hết hạn (${Math.round((now - expiresAt) / 1000)}s trước). Tự động giải phóng.`);
+            customerResetLocks.delete(key);
+            customerResetLockTimestamps.delete(key);
+        }
+    }
+}, 2 * 60 * 1000).unref();
 
 function getPendingResets() {
     if (!registry.pendingResets || typeof registry.pendingResets !== 'object' || Array.isArray(registry.pendingResets)) {
@@ -23121,33 +23540,38 @@ async function beginCustomerReset(botId, requestedBy = 'admin', options = {}) {
     const bId = Number(botId);
     const key = String(bId);
     if (!Number.isSafeInteger(bId) || bId <= 0) return { ok: false, error: 'BOT_ID không hợp lệ' };
-    if (!supabaseAdapter?.isEnabled?.() || !supabaseStorageReady) {
-        return { ok: false, error: 'Supabase chưa sẵn sàng; không thể bắt đầu reset an toàn.' };
-    }
+    if (!supabaseAdapter?.isEnabled?.() || !supabaseStorageReady) return { ok: false, error: 'Supabase chưa sẵn sàng; không thể bắt đầu reset an toàn.' };
     const pending = getPendingResets();
     const existing = pending[key];
     const previousPending = existing ? JSON.parse(JSON.stringify(existing)) : null;
+    const isAdminCaller = requestedBy === 'admin' || options.force === true;
+
+    if (customerResetLocks.has(key) && (customerResetLockTimestamps.get(key) || 0) < Date.now()) deleteCustomerResetLock(key);
+
     const isRunning = customerResetLocks.has(key) ||
         (existing && (existing.status === 'running' || existing.status === 'in_progress' || existing.status === 'waiting_worker') && Number(existing.leaseUntil || 0) > Date.now());
     if (isRunning) {
-        return { ok: false, conflict: true, error: 'Đang có một tiến trình reset khác chạy trên bot này.', existing };
+        if (isAdminCaller && options.force === true) {
+            deleteCustomerResetLock(key);
+        } else {
+            return { ok: false, conflict: true, error: 'Đang có một tiến trình reset khác chạy trên bot này.', existing };
+        }
     }
-    if (existing && existing.status === 'conflict') return { ok: false, conflict: true, error: 'Reset đang ở trạng thái conflict và cần quản trị viên xử lý.', existing };
-    if (existing && existing.status === 'needs_admin') {
-        // Tự động phục hồi nếu khách cũ đã thu hồi sạch quyền (owner === null)
-        if (existing.owner === null && existing.steps?.users === true && existing.steps?.settings === true) {
+    if (existing && (existing.status === 'conflict' || existing.status === 'needs_admin')) {
+        if (isAdminCaller || (existing.owner === null && existing.steps?.users === true && existing.steps?.settings === true)) {
             existing.status = 'running';
             existing.attempts = 1;
             existing.leaseUntil = Date.now() + 10 * 60 * 1000;
             existing.updatedAt = new Date().toISOString();
             customerResetLocks.add(key);
+            customerResetLockTimestamps.set(key, existing.leaseUntil);
             if (!(await persistPendingReset(bId, existing))) {
-                customerResetLocks.delete(key);
+                deleteCustomerResetLock(key);
                 return { ok: false, error: 'Không lưu được checkpoint để thử lại reset bot.', existing };
             }
             return { ok: true, context: existing, resumed: true };
         }
-        return { ok: false, conflict: true, error: 'Reset đang ở trạng thái needs_admin và cần quản trị viên xử lý.', existing };
+        return { ok: false, conflict: true, error: `Reset đang ở trạng thái ${existing.status} và cần quản trị viên xử lý.`, existing };
     }
     if (existing && existing.status !== 'completed') {
         customerResetLocks.add(key);
@@ -23155,8 +23579,9 @@ async function beginCustomerReset(botId, requestedBy = 'admin', options = {}) {
         existing.leaseUntil = Date.now() + 10 * 60 * 1000;
         existing.attempts = Number(existing.attempts || 0) + 1;
         existing.updatedAt = new Date().toISOString();
+        customerResetLockTimestamps.set(key, existing.leaseUntil);
         if (!(await persistPendingReset(bId, existing))) {
-            customerResetLocks.delete(key);
+            deleteCustomerResetLock(key);
             return { ok: false, error: 'Không lưu được checkpoint để tiếp tục giao dịch reset đang chờ.', existing };
         }
         return { ok: true, context: existing, resumed: true };
@@ -23166,18 +23591,12 @@ async function beginCustomerReset(botId, requestedBy = 'admin', options = {}) {
         if (!(await saveRegistry())) { pending[key] = previousPending; return { ok: false, error: 'Không dọn được checkpoint reset đã hoàn tất.' }; }
     }
     customerResetLocks.add(key);
+    customerResetLockTimestamps.set(key, Date.now() + 10 * 60 * 1000);
     try {
-        const [cloudUsers, cloudSessions] = await Promise.all([
-            supabaseAdapter.fetchUsers(),
-            supabaseAdapter.fetchSessions()
-        ]);
-        if (!Array.isArray(cloudUsers) || !Array.isArray(cloudSessions)) {
-            throw new Error('Không đọc được đầy đủ users/sessions từ Cloud; chưa bắt đầu reset.');
-        }
+        const [cloudUsers, cloudSessions] = await Promise.all([supabaseAdapter.fetchUsers(), supabaseAdapter.fetchSessions()]);
+        if (!Array.isArray(cloudUsers) || !Array.isArray(cloudSessions)) throw new Error('Không đọc được đầy đủ users/sessions từ Cloud; chưa bắt đầu reset.');
         let settings = null;
-        try {
-            settings = await supabaseAdapter.fetchBotSettingsStrict(String(bId));
-        } catch (err) {
+        try { settings = await supabaseAdapter.fetchBotSettingsStrict(String(bId)); } catch (err) {
             throw new Error('Không đọc được bot_settings từ Cloud; chưa bắt đầu reset: ' + err.message);
         }
         const cloudPendingId = String(settings?.synced_auth?.pendingCustomerResetId || '');
@@ -23185,10 +23604,8 @@ async function beginCustomerReset(botId, requestedBy = 'admin', options = {}) {
             const isLocalResetActive = existing &&
                 (existing.status === 'running' || existing.status === 'in_progress' || existing.status === 'waiting_worker') &&
                 Number(existing.leaseUntil || 0) > Date.now();
-            if (isLocalResetActive) {
-                throw new Error('Cloud vẫn có giao dịch reset đang chờ xử lý: ' + cloudPendingId);
-            }
-            console.warn(`[RESET_ASSIGN] Phát hiện pendingCustomerResetId mồ côi trên Cloud (${cloudPendingId}) của bot #${bId}. Cho phép reset mới tiếp quản.`);
+            if (isLocalResetActive) throw new Error('Cloud vẫn có giao dịch reset đang chờ xử lý: ' + cloudPendingId);
+            console.warn(`[RESET_ASSIGN] pendingCustomerResetId mồ côi (${cloudPendingId}) bot #${bId}. Cho phép reset tiếp quản.`);
         }
         const assignmentFlow = /^(?:allocateBotsForUser|resetBotsForAssignment):/.test(String(requestedBy || ''));
         if (assignmentFlow) {
@@ -23204,7 +23621,7 @@ async function beginCustomerReset(botId, requestedBy = 'admin', options = {}) {
             const activeOwner = cloudUsers.find(user => user.role !== 'admin' && isActiveUserEntitlement(user) &&
                 Array.isArray(user.assignedBotIds) && user.assignedBotIds.some(id => Number(id) === bId));
             if (activeOwner) {
-                customerResetLocks.delete(key);
+                deleteCustomerResetLock(key);
                 return { ok: true, skipReset: true, activeOwner: activeOwner.username };
             }
         }
@@ -23232,29 +23649,27 @@ async function beginCustomerReset(botId, requestedBy = 'admin', options = {}) {
             }
         }
         const resetTransactionId = 'reset_' + bId + '_' + now.toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+        const isoNow = new Date(now).toISOString();
+        const fp = resetSettingsFingerprint(settings, true);
         const context = {
             resetId: resetTransactionId,
             resetTransactionId,
             botId: bId,
             requestedBy: String(requestedBy || 'admin'),
-            requestedAt: new Date(now).toISOString(),
-            createdAt: new Date(now).toISOString(),
-            updatedAt: new Date(now).toISOString(),
+            requestedAt: isoNow,
+            createdAt: isoNow,
+            updatedAt: isoNow,
             completedAt: null,
-            ownerBefore: {
-                userIds: ownerUserIds,
-                usernames: ownerUsernames,
-                username: ownerUsernames[0] || null
-            },
+            ownerBefore: { userIds: ownerUserIds, usernames: ownerUsernames, username: ownerUsernames[0] || null },
             ownerAfter: options.ownerAfter || null,
             ownerUserIds,
             ownerUsernames,
             sessionTokenHashes: [...sessionTokenHashes],
             settingsExisted: !!settings,
-            settingsUpdatedAt: String(settings?.updated_at || ''),
-            settingsUsername: String(settings?.username || ''),
-            fingerprint: resetSettingsFingerprint(settings, true),
-            settingsFingerprint: resetSettingsFingerprint(settings, true),
+            settingsUpdatedAt: settings?.updated_at || '',
+            settingsUsername: settings?.username || '',
+            fingerprint: fp,
+            settingsFingerprint: fp,
             settingsFingerprintBefore: resetSettingsFingerprint(settings, false),
             revision: Number(settings?.synced_auth?.authRevision || 0),
             steps: { users: false, settings: false, sessions: false, botReset: false, authSync: false },
@@ -23274,7 +23689,7 @@ async function beginCustomerReset(botId, requestedBy = 'admin', options = {}) {
         }
         return { ok: true, context };
     } catch (err) {
-        customerResetLocks.delete(key);
+        deleteCustomerResetLock(key);
         if (previousPending) pending[key] = previousPending;
         else delete pending[key];
         return { ok: false, error: err.message };
@@ -23290,7 +23705,7 @@ async function executeCustomerReset(botId, options = {}) {
         return await supabaseAdapter.withManagerLock('customer-reset-' + bId, () =>
             supabaseAdapter.withManagerLock('bot-auth-sync-' + bId, () => executeCustomerResetCore(bId, { ...options, distributedAuthLockHeld: true }), 900), 900);
     } catch (err) {
-        customerResetLocks.delete(key);
+        deleteCustomerResetLock(key);
         const context = options.context;
         context.status = 'failed_retriable';
         context.errorCode = 'LOCK_OR_EXECUTION_FAILED';
@@ -23389,7 +23804,9 @@ async function executeCustomerResetCore(botId, options = {}) {
                 }
                 context.status = 'waiting_worker';
                 context.currentStep = 'bot_reset';
+                context.leaseUntil = Date.now() + 10 * 60 * 1000;
                 context.updatedAt = new Date().toISOString();
+                customerResetLockTimestamps.set(key, context.leaseUntil);
                 await persistPendingReset(bId, context).catch(() => {});
 
                 let botResult = await runChildAction(bId, '/api/bot/reset-customer', { resetTransactionId: context.resetTransactionId || context.resetId }, {}, 'POST', { timeoutMs: 45000 });
@@ -23444,7 +23861,9 @@ async function executeCustomerResetCore(botId, options = {}) {
             } else {
                 context.status = 'waiting_worker';
                 context.currentStep = 'auth_sync';
+                context.leaseUntil = Date.now() + 10 * 60 * 1000;
                 context.updatedAt = new Date().toISOString();
+                customerResetLockTimestamps.set(key, context.leaseUntil);
                 const authSync = await syncAuthToBotAfterOwnershipChange(botConfig, { resetMarker: context.authResetMarker, pendingCustomerResetId: null, distributedAuthLockHeld: true });
                 if (authSync?.ok === true) {
                     context.steps.authSync = true;
@@ -23531,7 +23950,7 @@ async function executeCustomerResetCore(botId, options = {}) {
         await persistPendingReset(bId, context).catch(() => false);
         return { ok: false, status: 502, partial: true, resetId: context.resetId, resetTransactionId: context.resetTransactionId, errorCode: context.errorCode, error: err.message };
     } finally {
-        customerResetLocks.delete(key);
+        deleteCustomerResetLock(key);
     }
 }
 
@@ -23686,7 +24105,7 @@ async function resumePendingCustomerResets() {
         if (customerResetLocks.has(String(key))) continue;
         const bId = Number(context.botId || key);
         if (!Number.isSafeInteger(bId) || bId <= 0) continue;
-        customerResetLocks.add(String(key));
+        addCustomerResetLock(String(key));
         context.status = 'running';
         context.leaseUntil = Date.now() + 10 * 60 * 1000;
         context.updatedAt = new Date().toISOString();
@@ -23702,7 +24121,7 @@ async function resumePendingCustomerResets() {
                 console.warn('[RESET_CUSTOMER] Reset bot #' + bId + ' vẫn chưa hoàn tất: ' + (result.error || result.warning || 'PARTIAL'));
             }
         } catch (err) {
-            customerResetLocks.delete(String(key));
+            deleteCustomerResetLock(String(key));
             console.error('[RESET_CUSTOMER] Lỗi resume reset bot #' + bId + ':', err.message);
         }
     }
@@ -27529,7 +27948,7 @@ app.post('/api/manager/pending-resets/:id/resolve', async (req, res) => {
                 results.push({ botId: bId, ok: false, error: 'Bot không tồn tại' });
                 continue;
             }
-            customerResetLocks.add(key);
+            addCustomerResetLock(key);
             try {
                 context.status = 'running';
                 context.leaseUntil = Date.now() + 10 * 60 * 1000;
@@ -27543,7 +27962,7 @@ app.post('/api/manager/pending-resets/:id/resolve', async (req, res) => {
             } catch (err) {
                 results.push({ botId: bId, ok: false, error: err.message });
             } finally {
-                customerResetLocks.delete(key);
+                deleteCustomerResetLock(key);
             }
         }
         return res.json({ ok: true, message: `Đã xử lý hàng đợi resume cho ${results.length} bot.`, results });
@@ -27585,7 +28004,7 @@ app.post('/api/manager/pending-resets/:id/resolve', async (req, res) => {
     if (!botConfig) {
         return res.status(409).json({ ok: false, error: 'Bot không còn tồn tại trong cấu hình. Nếu bot đã bị xóa, hãy dùng action "discard".' });
     }
-    customerResetLocks.add(key);
+    addCustomerResetLock(key);
     try {
         context.status = 'running';
         context.leaseUntil = Date.now() + 10 * 60 * 1000;
@@ -27611,7 +28030,6 @@ app.post('/api/manager/pending-resets/:id/resolve', async (req, res) => {
             result: { ok: !!result.ok, conflict: !!result.conflict, error: result.error || null }
         });
     } catch (err) {
-        customerResetLocks.delete(key);
         logAuditEvent({
             req,
             action: 'ADMIN_RESOLVE_PENDING_RESET',
@@ -27620,6 +28038,8 @@ app.post('/api/manager/pending-resets/:id/resolve', async (req, res) => {
             status: 'FAILED'
         });
         return res.status(502).json({ ok: false, error: 'Resume checkpoint thất bại: ' + err.message });
+    } finally {
+        deleteCustomerResetLock(key);
     }
 });
 
@@ -28070,27 +28490,33 @@ for (const [name, childPath] of Object.entries(detailGetRoutes)) {
         if (!config) return res.status(404).json({ error: 'Bot không tồn tại.' });
 
         try {
-            if (name === 'logs' || name === 'chat-logs' || name === 'position-logs') {
-                if (!supabaseAdapter?.isEnabled()) return res.status(503).json({ error: 'Supabase chưa sẵn sàng; không thể tải lịch sử đã lưu.' });
-                if (name === 'position-logs') {
-                    const page = readPositiveInt(req.query?.page, 1, 1, 1000000);
-                    const limit = readPositiveInt(req.query?.limit, 20, 1, 100);
-                    const result = await supabaseAdapter.fetchBotPositionLogs(req.params.id, { page, limit });
-                    if (!result) return res.status(502).json({ error: 'Không thể tải lịch sử tọa độ từ Supabase.' });
-                    return res.json({ id: req.params.id, revision: result.total, total: result.total, page: result.page, limit: result.limit, logs: result.rows });
-                }
+            if (name === 'position-logs') {
+                if (!supabaseAdapter?.isEnabled()) return res.json({ id: req.params.id, revision: 0, total: 0, page: 1, limit: 20, logs: [] });
+                const page = readPositiveInt(req.query?.page, 1, 1, 1000000);
+                const limit = readPositiveInt(req.query?.limit, 20, 1, 100);
+                const result = await supabaseAdapter.fetchBotPositionLogs(req.params.id, { page, limit });
+                if (!result) return res.json({ id: req.params.id, revision: 0, total: 0, page, limit, logs: [] });
+                return res.json({ id: req.params.id, revision: result.total, total: result.total, page: result.page, limit: result.limit, logs: result.rows });
+            }
+            if (name === 'logs' || name === 'chat-logs') {
                 const kind = name === 'chat-logs' ? 'chat' : 'event';
                 const page = readPositiveInt(req.query?.page, 1, 1, 1000000);
                 const limit = readPositiveInt(req.query?.limit, 100, 1, 500);
-                const result = await supabaseAdapter.fetchBotLogs(req.params.id, kind, { page, limit });
-                if (!result) return res.status(502).json({ error: 'Không thể tải lịch sử từ Supabase.' });
-                const logs = result.rows.slice().reverse().map(row => {
-                    const stamp = new Date(row.created_at || Date.now()).toLocaleTimeString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh', hour12: false });
-                    return kind === 'chat'
-                        ? stamp + ' ' + (row.sender || 'SERVER') + ': ' + (row.message || '')
-                        : stamp + ' [' + (row.level || 'INFO') + '] ' + (row.message || '');
-                });
-                return res.json({ id: req.params.id, revision: result.total, total: result.total, page: result.page, limit: result.limit, logs });
+                if (supabaseAdapter?.isEnabled()) {
+                    try {
+                        const result = await supabaseAdapter.fetchBotLogs(req.params.id, kind, { page, limit });
+                        if (result && Array.isArray(result.rows) && result.rows.length > 0) {
+                            const logs = result.rows.slice().reverse().map(row => {
+                                const stamp = new Date(row.created_at || Date.now()).toLocaleTimeString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh', hour12: false });
+                                return kind === 'chat'
+                                    ? stamp + ' ' + (row.sender || 'SERVER') + ': ' + (row.message || '')
+                                    : stamp + ' [' + (row.level || 'INFO') + '] ' + (row.message || '');
+                            });
+                            return res.json({ id: req.params.id, revision: result.total, total: result.total, page: result.page, limit: result.limit, logs });
+                        }
+                    } catch (_) {}
+                }
+                // Nếu Supabase chưa bật hoặc chưa có bản ghi (0 logs), tự động fallback gọi Worker để lấy nhật ký trực tiếp trong RAM bot!
             }
             const query = new URLSearchParams();
             for (const [key, value] of Object.entries(req.query || {})) {
@@ -28791,7 +29217,12 @@ app.all(['/api/rewards/link4m/webhook', '/api/rewards/link4m/postback'], async (
     if (supabaseAdapter && supabaseAdapter.isEnabled()) {
         const claimRes = await supabaseAdapter.claimLink4mReward(attemptId, tokenHash, username, rewardHours, 'provider_postback');
         if (!claimRes.ok) return res.status(500).json({ ok: false, error: claimRes.error, message: claimRes.message });
-        newExpiresAtIso = claimRes.expiresAt ? new Date(claimRes.expiresAt).toISOString() : '';
+        if (claimRes.expiresAt) {
+            newExpiresAtIso = new Date(claimRes.expiresAt).toISOString();
+        } else {
+            const existingU = Array.isArray(cachedUsers) ? cachedUsers.find(x => x.username.toLowerCase() === username) : null;
+            newExpiresAtIso = existingU?.expiresAt ? new Date(existingU.expiresAt).toISOString() : '';
+        }
     } else {
         const user = Array.isArray(cachedUsers) ? cachedUsers.find(u => u.username.toLowerCase() === username) : null;
         if (user && user.expiresAt !== null) {
@@ -28812,13 +29243,17 @@ app.all(['/api/rewards/link4m/webhook', '/api/rewards/link4m/postback'], async (
     if (Array.isArray(cachedUsers)) {
         const u = cachedUsers.find(x => x.username.toLowerCase() === username);
         if (u) {
-            u.expiresAt = newExpiresAtIso;
+            if (newExpiresAtIso) {
+                u.expiresAt = newExpiresAtIso;
+            }
             u.status = 'active';
         }
     }
     for (const [hash, sess] of activeSessions.entries()) {
         if (sess.username?.toLowerCase() === username) {
-            sess.expiresAtRental = newExpiresAtIso;
+            if (newExpiresAtIso) {
+                sess.expiresAtRental = newExpiresAtIso;
+            }
             sess.isExpired = false;
             sess.status = 'active';
             activeSessions.set(hash, sess);
@@ -29543,8 +29978,22 @@ app.post('/api/manager/all/settings', async (req, res) => {
                 const rSched = await fetchChild(bot, '/api/bot-schedules', { method: 'POST', body: { botSchedules } });
                 schedOk = rSched.ok;
             }
+            if (supabaseAdapter?.isEnabled()) {
+                const payload = { settings };
+                if (botSchedules) payload.bot_schedules = botSchedules;
+                await supabaseAdapter.saveBotSettings(String(bot.id), payload).catch(err => {
+                    console.warn(`[SUPABASE] Không thể lưu cấu hình fleet cho bot ${bot.id}: ${err.message}`);
+                });
+            }
             return { id: bot.id, label: bot.label, ok: rSettings.ok && schedOk };
         } catch (e) {
+            if (supabaseAdapter?.isEnabled()) {
+                const payload = { settings };
+                if (botSchedules) payload.bot_schedules = botSchedules;
+                await supabaseAdapter.saveBotSettings(String(bot.id), payload).catch(err => {
+                    console.warn(`[SUPABASE] Không thể lưu cấu hình fleet cho offline bot ${bot.id}: ${err.message}`);
+                });
+            }
             return { id: bot.id, label: bot.label, ok: false, error: e.message };
         }
     }));
@@ -29567,7 +30016,16 @@ app.post('/api/manager/all/settings', async (req, res) => {
     });
 });
 
-app.get('/health', (req, res) => {
+app.all('/health', (req, res) => {
+    if (req.method === 'HEAD') {
+        res.writeHead(200, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Content-Length': '0',
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Connection': 'close'
+        });
+        return res.end();
+    }
     res.status(200).json({
         status: 'ok',
         service: 'kingmc-manager',
@@ -30113,8 +30571,8 @@ app.post('/api/auth/verify-bot-access', (req, res) => {
     }
 
     const users = loadUsers();
-    let user = users.find(u => u.username.toLowerCase() === username);
-    if (!user && username.toLowerCase() === 'admin') {
+    let user = null;
+    if (username.toLowerCase() === 'admin') {
         const adminPass = getAdminPassword();
         if (verifyAdminPassword(password, adminPass)) {
             user = {
@@ -30137,6 +30595,8 @@ app.post('/api/auth/verify-bot-access', (req, res) => {
             });
             return res.status(401).json({ ok: false, error: 'Mật khẩu Quản trị viên không chính xác.' });
         }
+    } else {
+        user = users.find(u => u.username.toLowerCase() === username);
     }
 
     if (!user) {
@@ -30249,7 +30709,16 @@ app.get(['/ready', '/api/ready'], (req, res) => {
     });
 });
 
-app.get(['/healthz', '/api/health'], (req, res) => {
+app.all(['/healthz', '/api/health'], (req, res) => {
+    if (req.method === 'HEAD') {
+        res.writeHead(200, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Content-Length': '0',
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Connection': 'close'
+        });
+        return res.end();
+    }
     const mem = process.memoryUsage();
     res.json({
         status: 'ok',
