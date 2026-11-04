@@ -5361,7 +5361,7 @@ function finiteNonNegativeNumberOrNull(value) {
 function buildUnavailableSummary(botConfig, error = 'Chưa kết nối được tới bot.', httpStatus = null, apiState = {}) {
     const isMismatch = error ? (error.includes('409') || error.toLowerCase().includes('secret') || error.includes('lệch key')) : false;
     const lowerErr = String(error || '').toLowerCase();
-    const resolvedStatus = httpStatus || (error && error.includes('404') ? 404 : (isMismatch ? 409 : (error && (lowerErr.includes('503') || lowerErr.includes('502') || lowerErr.includes('timeout') || lowerErr.includes('quá thời gian')) ? 503 : null)));
+    const resolvedStatus = httpStatus || (error && error.includes('404') ? 404 : (isMismatch ? 409 : (error && lowerErr.includes('521')) ? 521 : (error && (lowerErr.includes('503') || lowerErr.includes('502') || lowerErr.includes('timeout') || lowerErr.includes('quá thời gian')) ? 503 : null)));
     const cachedItem = (typeof summaryCache !== 'undefined' && summaryCache?.get) ? summaryCache.get(botConfig?.id)?.data : null;
     const isManuallyStopped = Boolean(cachedItem?.manuallyStopped || apiState.manuallyStopped || botConfig?.manuallyStopped);
     const lastKnownUser = String(cachedItem?.username || apiState.username || botConfig?.username || '');
@@ -7649,29 +7649,41 @@ async function fetchBotSummary(botConfig) {
             timeoutMs: 5500,
             headers: lastRev ? { 'If-None-Match': `"${lastRev}"` } : {}
         }).catch(() => null);
+        let activeSnapshotRes = snapshotRes;
         if (snapshotRes && snapshotRes.ok && snapshotRes.data?.unchanged) {
-            if (cached) return cached;
+            if (cached && cached.available && cached.httpStatus === 200) return cached;
+            // Nếu cache cũ đang ở trạng thái lỗi/offline (ví dụ 521/503) hoặc rỗng, nhưng worker đã phản hồi 200 unchanged:
+            // Xóa lastRev và kéo snapshot đầy đủ ngay lập tức để phục hồi trạng thái healthy cho bot!
+            botLastRevMap.delete(botConfig.id);
+            const freshSnapshotRes = await fetchChild(botConfig, '/api/snapshot', {
+                timeoutMs: 5500
+            }).catch(() => null);
+            if (freshSnapshotRes && freshSnapshotRes.ok && freshSnapshotRes.data?.bot) {
+                activeSnapshotRes = freshSnapshotRes;
+            } else if (cached) {
+                return cached;
+            }
         }
-        if (snapshotRes && snapshotRes.ok && snapshotRes.data?.rev) {
-            botLastRevMap.set(botConfig.id, snapshotRes.data.rev);
+        if (activeSnapshotRes && activeSnapshotRes.ok && activeSnapshotRes.data?.rev) {
+            botLastRevMap.set(botConfig.id, activeSnapshotRes.data.rev);
         }
         // BUG-02/BLOCKER-02: secret sai / bị từ chối auth (401/403) hoặc secret-mismatch
         // phiên bản (409) → KHÔNG rơi vào fallback /api/bot hay /health
         // (health không xác thực sẽ che mất tín hiệu lỗi auth và làm bot "online" giả).
-        if (snapshotRes && (snapshotRes.status === 401 || snapshotRes.status === 403 || snapshotRes.status === 409)) {
-            const authCode = snapshotRes.status === 403 ? 'FORBIDDEN' : 'SECRET_MISMATCH';
+        if (activeSnapshotRes && (activeSnapshotRes.status === 401 || activeSnapshotRes.status === 403 || activeSnapshotRes.status === 409)) {
+            const authCode = activeSnapshotRes.status === 403 ? 'FORBIDDEN' : 'SECRET_MISMATCH';
             return buildUnavailableSummary(
                 botConfig,
-                (snapshotRes.data && snapshotRes.data.error) || (authCode === 'SECRET_MISMATCH'
+                (activeSnapshotRes.data && activeSnapshotRes.data.error) || (authCode === 'SECRET_MISMATCH'
                     ? 'Worker từ chối X-Bot-Secret (lệch khóa service-to-service).'
                     : 'Worker từ chối request (403 Forbidden).'),
-                snapshotRes.status,
+                activeSnapshotRes.status,
                 { processReachable: true, serviceAuthenticated: false, identityVerified: false, lastErrorCode: authCode }
             );
         }
-        if (snapshotRes && snapshotRes.ok && snapshotRes.data?.bot) {
-            const data = snapshotRes.data.bot;
-            const inv = snapshotRes.data.inventory || {};
+        if (activeSnapshotRes && activeSnapshotRes.ok && activeSnapshotRes.data?.bot) {
+            const data = activeSnapshotRes.data.bot;
+            const inv = activeSnapshotRes.data.inventory || {};
             // BLOCKER-02 (API-STATE-01): danh tính phải được xác minh TRƯỚC khi coi bot
             // là khả dụng. botId rỗng hoặc sai (bao gồm chuỗi rỗng — ?? không thay thế '')
             // → identityVerified=false → available=false (không điều khiển được).
@@ -7801,7 +7813,7 @@ async function fetchBotSummary(botConfig) {
                 }
             } catch (_) {}
 
-            const isWaking = result.status === 502 || result.status === 503;
+            const isWaking = result.status === 502 || result.status === 503 || result.status === 521;
             return {
                 id: botConfig.id,
                 url: botConfig.url || '',
@@ -7833,14 +7845,14 @@ async function fetchBotSummary(botConfig) {
                 rssMb: 0,
                 heapMb: 0,
                 httpStatus: result.status,
-                lastError: result.data?.error || (isWaking ? ((botConfig?.url && !botConfig.url.includes('.onrender.com')) ? 'Đang kết nối lại / Timeout (503)' : 'Render Sleep / Timeout (503)') : `HTTP ${result.status}`),
+                lastError: result.data?.error || (isWaking ? ((botConfig?.url && !botConfig.url.includes('.onrender.com')) ? (result.status === 521 ? 'Wispbyte / Cloudflare Đang khởi động (521)' : 'Đang kết nối lại / Timeout (503)') : 'Render Sleep / Timeout (503)') : `HTTP ${result.status}`),
                 secretMismatch: !!(result.status === 409 || result.data?.secretMismatch || String(result.data?.error || '').includes('chưa xác thực') || String(result.data?.error || '').toLowerCase().includes('secret') || String(result.data?.error || '').includes('lệch key')),
                 processReachable: false,
                 serviceAuthenticated: false,
                 identityVerified: false,
                 lastErrorCode: isWaking ? 'WAKING' : `HTTP_${result.status}`,
                 error: isWaking
-                    ? ((botConfig?.url && !botConfig.url.includes('.onrender.com')) ? 'Đang kết nối bot (Worker đang phản hồi chậm hoặc tải nặng, vui lòng chờ)...' : 'Đang khởi động dịch vụ Cloud (Render)...')
+                    ? ((botConfig?.url && !botConfig.url.includes('.onrender.com')) ? (result.status === 521 ? 'Máy chủ Wispbyte đang khởi động hoặc kết nối lại qua Cloudflare edge (521), vui lòng chờ...' : 'Đang kết nối bot (Worker đang phản hồi chậm hoặc tải nặng, vui lòng chờ)...') : 'Đang khởi động dịch vụ Cloud (Render)...')
                     : (result.data?.error || `Bot trả HTTP ${result.status}.`)
             };
         }
@@ -7982,6 +7994,9 @@ async function getBotSummary(botConfig, options = {}) {
             // giữ lại cache cũ thay vì ngay lập tức đổi màu tím "Render Sleep".
             const isTransientTimeout = !force && cached?.data?.available && !data.available && (data.httpStatus === 503 || data.status === 'waking' || data.lastErrorCode === 'TIMEOUT');
             if (isTransientTimeout && (now - cached.at < 25000)) {
+                return cached.data;
+            }
+            if (!force && cached?.data?.available && !data.available && (data.httpStatus === 521 || data.httpStatus === 502) && (now - cached.at < 25000)) {
                 return cached.data;
             }
 
@@ -15651,10 +15666,11 @@ function statusMeta(status, available=true, manuallyStopped=false, bot=null) {
     if (isSecretMismatch) {
       return ['orange', 'Lệch Secret Key (409)', 'secret_mismatch'];
     }
-    const isSleep = !!(httpStatus === 503 || httpStatus === 502 || bot?.status === 'waking' || String(bot?.lastError || bot?.error || '').includes('503') || String(bot?.lastError || bot?.error || '').includes('502') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('sleep') || String(bot?.lastError || bot?.error || '').includes('ngủ') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('timeout') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('quá thời gian') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('waking'));
+    const isSleep = !!(httpStatus === 503 || httpStatus === 502 || httpStatus === 521 || bot?.status === 'waking' || String(bot?.lastError || bot?.error || '').includes('503') || String(bot?.lastError || bot?.error || '').includes('502') || String(bot?.lastError || bot?.error || '').includes('521') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('sleep') || String(bot?.lastError || bot?.error || '').includes('ngủ') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('timeout') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('quá thời gian') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('waking'));
     if (isSleep) {
       const isRender = bot?.url ? String(bot.url).includes('.onrender.com') : true;
-      return ['purple', isRender ? 'Render Sleep / Timeout (503)' : 'Đang kết nối lại / Timeout (503)', 'render_sleep'];
+      const is521 = httpStatus === 521 || String(bot?.lastError || bot?.error || '').includes('521');
+      return ['purple', is521 ? 'Wispbyte Sleep / Waking (521)' : (isRender ? 'Render Sleep / Timeout (503)' : 'Đang kết nối lại / Timeout (503)'), 'render_sleep'];
     }
     const isNotFound = !!(httpStatus === 404 || String(bot?.lastError || bot?.error || '').includes('404') || String(bot?.lastError || bot?.error || '').toLowerCase().includes('not found') || String(bot?.lastError || bot?.error || '').includes('không tồn tại'));
     if (isNotFound) {
@@ -15827,8 +15843,11 @@ function botCardHtml(bot) {
       '</div>';
     } else if (errorType === 'render_sleep') {
       const isRender = bot?.url ? String(bot.url).includes('.onrender.com') : true;
+      const is521 = bot?.httpStatus === 521 || String(bot?.lastError || bot?.error || '').includes('521');
+      const sleepLabel = is521 ? 'Wispbyte / Cloudflare Đang khởi động (521):' : (isRender ? 'Render Sleep / Timeout (503):' : 'Đang kết nối lại / Timeout (503):');
+      const sleepMsg = is521 ? 'Máy chủ Wispbyte đang khởi động hoặc kết nối lại qua Cloudflare edge (~10-20s)...' : (isRender ? 'Máy chủ Cloud đang khởi động từ chế độ ngủ đông (~30-50s) hoặc timeout.' : 'Worker phản hồi chậm hoặc đang tải nặng, đang tự động kết nối lại...');
       errorBannerHtml = '<div class="bot-error-action-banner sleep">' +
-        '<div class="bot-error-text">💤 <strong>' + (isRender ? 'Render Sleep / Timeout (503):' : 'Đang kết nối lại / Timeout (503):') + '</strong> ' + (isRender ? 'Máy chủ Cloud đang khởi động từ chế độ ngủ đông (~30-50s) hoặc timeout.' : 'Worker phản hồi chậm hoặc đang tải nặng, đang tự động kết nối lại...') + '</div>' +
+        '<div class="bot-error-text">💤 <strong>' + sleepLabel + '</strong> ' + sleepMsg + '</div>' +
         '<button type="button" class="bot-action-chip info" onclick="event.stopPropagation(); quickBotAction(event,' + id + ',\'restart\')" title="Ping lại kết nối">⚡ Thử lại</button>' +
       '</div>';
     } else if (errorType === 'not_found') {
@@ -28578,6 +28597,12 @@ for (const [name, childPath] of Object.entries(detailGetRoutes)) {
                     if (result.data.unchanged) {
                         const existingCached = summaryCache.get(botId);
                         if (existingCached) existingCached.at = Date.now();
+                        if (existingCached) {
+                            if (!existingCached.data?.available || existingCached.data?.httpStatus !== 200) {
+                                summaryCache.delete(botId);
+                                botLastRevMap.delete(botId);
+                            }
+                        }
                     } else if (result.data.bot) {
                         const seq = (summaryRequestSeq.get(botId) || 0) + 1;
                         summaryRequestSeq.set(botId, seq);
