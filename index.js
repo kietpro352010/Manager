@@ -21329,40 +21329,41 @@ async function detailAction(action){
   const buttons=['detailStartButton','detailStopButton','detailRestartButton'];
   const activeBtn=document.getElementById(action==='start'?'detailStartButton':action==='stop'?'detailStopButton':'detailRestartButton');
   const prevBtnText=activeBtn?activeBtn.textContent:'';
-  if(activeBtn)activeBtn.textContent=action==='start'?'⏳ Đang chạy...':action==='stop'?'⏳ Đang dừng...':'⏳ Đang chạy lại...';
-  buttons.forEach(function(id){const button=document.getElementById(id);if(button)button.disabled=true;});
-
-  // Cập nhật Optimistic tức thì trên giao diện Detail và cache danh sách bots
-  if (detailBot) {
-    if (action === 'start') {
-      detailBot.manuallyStopped = false;
-      detailBot.status = 'waking';
-    } else if (action === 'stop') {
-      detailBot.manuallyStopped = true;
-      detailBot.status = 'offline';
-    } else if (action === 'restart') {
-      detailBot.manuallyStopped = false;
-      detailBot.status = 'waking';
-    }
-    renderDetailHeader(detailBot);
-  }
-  const bIdx = bots.findIndex(function(b) { return Number(b.id) === Number(selectedBotId); });
-  if (bIdx !== -1) {
-    if (action === 'start') {
-      bots[bIdx].manuallyStopped = false;
-      bots[bIdx].status = 'waking';
-    } else if (action === 'stop') {
-      bots[bIdx].manuallyStopped = true;
-      bots[bIdx].status = 'offline';
-    } else if (action === 'restart') {
-      bots[bIdx].manuallyStopped = false;
-      bots[bIdx].status = 'waking';
-    }
-  }
-  lastHomeSig = '';
-  if (selectedBotId !== null) detailLastRevMap.delete(selectedBotId);
 
   try{
+    if(activeBtn)activeBtn.textContent=action==='start'?'⏳ Đang chạy...':action==='stop'?'⏳ Đang dừng...':'⏳ Đang chạy lại...';
+    buttons.forEach(function(id){const button=document.getElementById(id);if(button)button.disabled=true;});
+
+    // Cập nhật Optimistic tức thì trên giao diện Detail và cache danh sách bots
+    if (detailBot) {
+      if (action === 'start') {
+        detailBot.manuallyStopped = false;
+        detailBot.status = 'waking';
+      } else if (action === 'stop') {
+        detailBot.manuallyStopped = true;
+        detailBot.status = 'offline';
+      } else if (action === 'restart') {
+        detailBot.manuallyStopped = false;
+        detailBot.status = 'waking';
+      }
+      detailStatusHtml();
+    }
+    const bIdx = bots.findIndex(function(b) { return Number(b.id) === Number(selectedBotId); });
+    if (bIdx !== -1) {
+      if (action === 'start') {
+        bots[bIdx].manuallyStopped = false;
+        bots[bIdx].status = 'waking';
+      } else if (action === 'stop') {
+        bots[bIdx].manuallyStopped = true;
+        bots[bIdx].status = 'offline';
+      } else if (action === 'restart') {
+        bots[bIdx].manuallyStopped = false;
+        bots[bIdx].status = 'waking';
+      }
+    }
+    lastHomeSig = '';
+    if (selectedBotId !== null) detailLastRevMap.delete(selectedBotId);
+
     showToast(action==='start'?'Đang chạy bot...':action==='stop'?'Đang dừng bot...':'Đang khởi động lại bot...');
     const result=await detailPost('/'+encodeURIComponent(action),{});
     if (result.ok) {
@@ -21397,6 +21398,11 @@ async function detailAction(action){
     buttons.forEach(function(id){const button=document.getElementById(id);if(button)button.disabled=false;});
   }
 }
+
+function renderDetailHeader(bot) {
+  if (typeof detailStatusHtml === 'function') detailStatusHtml();
+}
+window.renderDetailHeader = renderDetailHeader;
 
 let detailCommandHistory = [];
 let detailCommandHistoryIndex = -1;
