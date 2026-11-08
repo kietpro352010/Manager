@@ -27,7 +27,7 @@ class WorkerRegistry {
     if (!ID_PATTERN.test(id)) throw new Error('Worker ID must be 2–40 lowercase letters, numbers, underscores, or hyphens.');
     if (!['render', 'wispbyte'].includes(host)) throw new Error('Provider must be render or wispbyte.');
     if (host === 'render' && !url && !renderServiceId) throw new Error('Render workers need a service URL or Render service ID.');
-    if (url && !/^https:\/\//i.test(url)) throw new Error('Worker URL must use HTTPS.');
+    if (url && !/^https:\/\//i.test(url) && !/^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(url)) throw new Error('Worker URL must use HTTPS.');
     if (host === 'render' && !url && renderServiceId) {
       if (!this.renderApi) throw new Error('Configure the Render API key through /setup → Integration secrets, or provide the worker HTTPS URL.');
       const service = await this.renderApi.getService(renderServiceId);
@@ -55,10 +55,20 @@ class WorkerRegistry {
     if (removed) await this.accessStore?.removeWorkerAssignments(id);
     return removed;
   }
-  async find(workerId) { return this.store.get(String(workerId || '').trim().toLowerCase()); }
+  computeReachable(record) {
+    if (!record) return null;
+    record.reachable = Boolean(record.lastHeartbeat && Date.now() - new Date(record.lastHeartbeat).getTime() <= 120000);
+    return record;
+  }
+  async find(workerId) {
+    const record = await this.store.get(String(workerId || '').trim().toLowerCase());
+    return this.computeReachable(record);
+  }
   async findByNumber(botNumber) {
     const number = Number(botNumber);
-    return Number.isInteger(number) && number > 0 ? this.store.getByNumber(number) : null;
+    if (!Number.isInteger(number) || number <= 0) return null;
+    const record = await this.store.getByNumber(number);
+    return this.computeReachable(record);
   }
   async list() { return (await this.store.list()).map((record) => this.publicView(record)); }
 
