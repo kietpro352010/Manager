@@ -3,7 +3,7 @@
 require('dotenv').config();
 
 const http = require('node:http');
-const { Client, GatewayIntentBits } = require('discord.js');
+const { Client, GatewayIntentBits, Events } = require('discord.js');
 const { loadConfig } = require('./config/env');
 const { createLogger } = require('./utils/logger');
 const SupabaseWorkerStore = require('./storage/supabase-worker-store');
@@ -99,7 +99,7 @@ async function main() {
     token: config.discordToken, clientId: config.discordClientId, guildId: config.discordGuildId
   });
   logger.info('discord_commands_registered', commandRegistration);
-  client.once('ready', () => {
+  client.once(Events?.ClientReady || 'clientReady', () => {
     logger.info('discord_bot_ready', { botUserId: client.user.id });
     wispbyteKeepAlive.start({ discordClient: client, adminRoleId: accessControl.adminRoleId });
   });
