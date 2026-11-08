@@ -12,7 +12,7 @@ const definition = new SlashCommandBuilder()
 
 async function execute(interaction, { entitlements, accessStore, accessControl, link4m }) {
   const action = interaction.options.getSubcommand();
-  const discordRole = accessControl.roleFor(interaction.member);
+  const discordRole = accessControl.roleFor(interaction.member, interaction);
   if (action === 'redeem') {
     const raw = interaction.options.getString('code') || interaction.options.getString('value', true);
     const result = await entitlements.redeem(interaction.user.id, raw, discordRole);

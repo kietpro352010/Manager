@@ -52,7 +52,8 @@ async function main() {
   }
   let adminRoleId = roleSettings?.adminRoleId || config.adminRoleId;
   let userRoleId = roleSettings?.userRoleId || config.userRoleId;
-  const accessControl = new AccessControl({ store: accessStore });
+  let adminUserId = roleSettings?.adminUserId || config.adminUserId;
+  const accessControl = new AccessControl({ store: accessStore, adminUserId });
   if (adminRoleId || userRoleId) {
     accessControl.setRoleIds(adminRoleId, userRoleId);
     if (!roleSettings?.guildId || !roleSettings?.adminRoleId || !roleSettings?.userRoleId) {

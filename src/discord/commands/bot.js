@@ -99,7 +99,7 @@ async function resolveWorker(registry, input) {
 
 async function execute(interaction, services) {
   const { registry, broker, logger, accessControl, accessStore, fleetOperations } = services;
-  const role = accessControl.roleFor(interaction.member);
+  const role = accessControl.roleFor(interaction.member, interaction);
   const subcommand = interaction.options.getSubcommand();
   const isAdmin = role === 'admin';
   const requireAdmin = () => { if (!isAdmin) throw new Error('Chỉ thành viên có role Discord Admin mới có thể thực hiện thao tác này.'); };

@@ -9,7 +9,7 @@ const data = new SlashCommandBuilder()
 async function execute(interaction, { registry, accessControl }) {
   const startedAt = Date.now();
   const allWorkers = await registry.list();
-  const role = accessControl.roleFor(interaction.member);
+  const role = accessControl.roleFor(interaction.member, interaction);
   const workers = await accessControl.workersFor(interaction.user.id, allWorkers, role);
   const databaseMs = Date.now() - startedAt;
   const gamePings = workers.map((worker) => worker.status?.pingMs).filter(Number.isFinite);

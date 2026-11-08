@@ -127,7 +127,7 @@ async function submitMemberModal(interaction, services, actorRole) {
 async function handlePanelInteraction(interaction, services) {
   const customId = interaction.customId || '';
   if (!customId.startsWith(PANEL_PREFIX)) return false;
-  const role = services.accessControl.roleFor(interaction.member);
+  const role = services.accessControl.roleFor(interaction.member, interaction);
   const setupSecretAction = customId === 'km:setup:secrets' || customId === 'km:modal:setup-secrets';
   if (!role && !setupSecretAction) {
     await deny(interaction, 'No configured Discord Admin/User role was found. Ask a server admin for the correct role; a User also needs an active grant and worker assignment.');

@@ -26,7 +26,7 @@ function safe(value, max = 160) { return escapeMarkdown(String(value || '—').r
 async function execute(interaction, { accessControl, accessStore, registry }) {
   const action = interaction.options.getSubcommand();
   const userId = interaction.options.getString('discord_id')?.trim();
-  const actorRole = accessControl.roleFor(interaction.member);
+  const actorRole = accessControl.roleFor(interaction.member, interaction);
   if (action === 'list') {
     const entries = await accessStore.listAccess();
     const records = entries.slice(0, 18).map((entry) => {

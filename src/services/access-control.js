@@ -4,11 +4,16 @@ const SNOWFLAKE = /^\d{17,20}$/;
 const ROLES = new Set(['user', 'admin']);
 
 class AccessControl {
-  constructor({ store, adminRoleId, userRoleId }) {
+  constructor({ store, adminRoleId, userRoleId, adminUserId }) {
     this.store = store;
     this.adminRoleId = '';
     this.userRoleId = '';
+    this.adminUserId = String(adminUserId || '').trim();
     if (adminRoleId || userRoleId) this.setRoleIds(adminRoleId, userRoleId);
+  }
+
+  setAdminUserId(adminUserId) {
+    this.adminUserId = String(adminUserId || '').trim();
   }
 
   setRoleIds(adminRoleId, userRoleId) {
@@ -29,14 +34,48 @@ class AccessControl {
     return this.store.getAccess(String(userId));
   }
 
-  roleFor(member) {
+  roleFor(member, interaction = null) {
+    const memberId = String(
+      member?.id ||
+      member?.user?.id ||
+      interaction?.user?.id ||
+      ''
+    );
+
+    // 1. Designated admin user ID (configured via env or /setup)
+    if (this.adminUserId && memberId && memberId === this.adminUserId) return 'admin';
+
+    // 2. Server Owner is always admin
+    const guildOwnerId = String(member?.guild?.ownerId || interaction?.guild?.ownerId || '');
+    if (guildOwnerId && memberId && memberId === guildOwnerId) return 'admin';
+
+    // 3. User with Discord Administrator permission is always admin
+    try {
+      if (interaction?.memberPermissions) {
+        if (interaction.memberPermissions.has('Administrator') || interaction.memberPermissions.has(8n)) {
+          return 'admin';
+        }
+      }
+    } catch (_) {}
+    try {
+      if (typeof member?.permissions?.has === 'function') {
+        if (member.permissions.has('Administrator') || member.permissions.has(8n)) {
+          return 'admin';
+        }
+      } else if (member?.permissions) {
+        if (BigInt(member.permissions) & 8n) return 'admin';
+      }
+    } catch (_) {}
+
     if (!this.isConfigured()) return null;
-    if (typeof member === 'string' || typeof member === 'number') return null;
+
+    // 4. Role-based check
     const roles = Array.isArray(member?.roles)
       ? member.roles.map(String)
       : member?.roles?.cache ? [...member.roles.cache.keys()].map(String) : [];
-    if (roles.includes(this.adminRoleId)) return 'admin';
-    if (roles.includes(this.userRoleId)) return 'user';
+
+    if (this.adminRoleId && roles.includes(this.adminRoleId)) return 'admin';
+    if (this.userRoleId && roles.includes(this.userRoleId)) return 'user';
     return null;
   }
 

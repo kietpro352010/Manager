@@ -12,16 +12,54 @@ const data = new SlashCommandBuilder()
   .addStringOption((option) => option.setName('admin_user_id').setDescription('Hoặc nhập ID Discord của Admin nhận báo lỗi (VD: 123456789012345678)').setRequired(false))
   .addStringOption((option) => option.setName('public_url').setDescription('URL Public HTTPS của Manager (nếu dùng vượt link Link4M)').setMaxLength(250));
 
+async function isAuthorizedSetupUser(interaction, services) {
+  const userId = interaction.user?.id;
+  if (!userId) return false;
+
+  // 1. Configured Admin User ID (from Render environment or saved settings)
+  if (services.config.adminUserId && services.config.adminUserId === userId) return true;
+  if (services.accessControl.adminUserId && services.accessControl.adminUserId === userId) return true;
+
+  // 2. Discord Server Owner
+  let ownerId = interaction.guild?.ownerId;
+  if (!ownerId && interaction.guild?.fetch) {
+    try {
+      const g = await interaction.guild.fetch();
+      ownerId = g?.ownerId;
+    } catch (_) {}
+  }
+  if (ownerId && ownerId === userId) return true;
+
+  // 3. User with Administrator permission in this Discord server
+  try {
+    if (interaction.memberPermissions?.has('Administrator') || interaction.memberPermissions?.has(8n)) {
+      return true;
+    }
+  } catch (_) {}
+  try {
+    if (typeof interaction.member?.permissions?.has === 'function') {
+      if (interaction.member.permissions.has('Administrator') || interaction.member.permissions.has(8n)) {
+        return true;
+      }
+    } else if (interaction.member?.permissions && (BigInt(interaction.member.permissions) & 8n)) {
+      return true;
+    }
+  } catch (_) {}
+
+  // 4. Configured Manager Admin role
+  const role = services.accessControl.roleFor(interaction.member, interaction);
+  if (role === 'admin') return true;
+
+  return false;
+}
+
 async function execute(interaction, services) {
   if (!interaction.inGuild?.() || interaction.guildId !== services.config.discordGuildId) {
     throw new Error('Setup is available only in the Discord server pinned in manager configuration.');
   }
-  const role = services.accessControl.roleFor(interaction.member);
-  const isGuildOwner = interaction.guild?.ownerId === interaction.user.id;
-  if (services.accessControl.isConfigured() ? role !== 'admin' : !isGuildOwner) {
-    throw new Error(services.accessControl.isConfigured()
-      ? 'Only the configured manager Admin role can change setup.'
-      : 'Only the Discord server owner can run the initial manager setup.');
+  const allowed = await isAuthorizedSetupUser(interaction, services);
+  if (!allowed) {
+    throw new Error('Chỉ Chủ sở hữu máy chủ Discord (Server Owner), Quản trị viên (Administrator), hoặc Admin được cấu hình mới có quyền chạy lệnh /setup.');
   }
 
   const adminRole = interaction.options.getRole('admin_role', true);
@@ -57,6 +95,7 @@ async function execute(interaction, services) {
   };
   await services.accessStore.setSetting('discord_access', next);
   services.accessControl.setRoleIds(next.adminRoleId, next.userRoleId);
+  services.accessControl.setAdminUserId?.(designatedAdminUserId);
   services.config.adminRoleId = next.adminRoleId;
   services.config.userRoleId = next.userRoleId;
   services.config.adminUserId = designatedAdminUserId;
