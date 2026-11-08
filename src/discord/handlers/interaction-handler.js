@@ -13,7 +13,10 @@ function requiredRole(interaction) {
     return ['add', 'remove', 'rotate-secret', 'reset', 'stop-all', 'reconnect-errors', 'clean-dead'].includes(subcommand) ? 'admin' : 'user';
   }
   if (interaction.commandName === 'render') return 'admin';
-  if (interaction.commandName === 'code') return 'user';
+  if (interaction.commandName === 'code') {
+    const subcommand = interaction.options.getSubcommand(false);
+    return ['create', 'list', 'delete'].includes(subcommand) ? 'admin' : 'user';
+  }
   if (interaction.commandName === 'link4m') return interaction.options.getSubcommand() === 'configure' ? 'admin' : 'user';
   if (['codecreate', 'codelist', 'codedelete', 'user', 'wispbyte'].includes(interaction.commandName)) return 'admin';
   return 'user';

@@ -88,13 +88,13 @@ function formatOperation(name, result) {
 
 async function resolveWorker(registry, input) {
   if (!input) return null;
-  const trimmed = String(input).trim();
+  const trimmed = String(input).trim().replace(/^#/, '');
   if (/^\d+$/.test(trimmed)) {
     const num = parseInt(trimmed, 10);
     const byNumber = await registry.findByNumber(num);
     if (byNumber) return byNumber;
   }
-  return registry.find(trimmed.toLowerCase());
+  return registry.find(String(input).trim().toLowerCase());
 }
 
 async function execute(interaction, services) {

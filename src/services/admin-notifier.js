@@ -75,7 +75,7 @@ class AdminNotifier {
 
     const item = { source, event, message: `${message}${repeatNote}`, error, details, level };
     this.queue.push(item);
-    void this.processQueue();
+    return this.processQueue();
   }
 
   async processQueue() {

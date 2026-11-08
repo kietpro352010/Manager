@@ -11,7 +11,7 @@ async function execute(interaction, { entitlements, accessStore }) {
   const keyId = interaction.options.getString('id', true).trim();
   const removed = await entitlements.deleteCode(keyId);
   if (removed) await accessStore.addAudit({ actorId: interaction.user.id, action: 'code.delete', target: keyId });
-  return removed ? `Deleted code \`${keyId}\`.` : `No code found with ID \`${keyId}\`.`;
+  return removed ? `✅ Đã xóa mã \`${keyId}\`.` : `Không tìm thấy mã nào có ID \`${keyId}\`.`;
 }
 
 module.exports = { data: definition, execute };

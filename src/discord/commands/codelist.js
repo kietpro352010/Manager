@@ -11,11 +11,11 @@ function safe(value) { return escapeMarkdown(String(value || '—').replace(/[@\
 
 async function execute(interaction, { entitlements }) {
   const entries = await entitlements.listCodes(interaction.options.getInteger('limit') || 15);
-  if (!entries.length) return 'No access codes have been created.';
+  if (!entries.length) return 'Chưa có mã kích hoạt nào được tạo.';
   return entries.map((entry) => {
-    const expires = entry.expiresAt ? new Date(entry.expiresAt).toLocaleDateString('en-GB') : 'never';
-    const duration = entry.isPermanent ? 'permanent' : `${entry.days} day(s)`;
-    return `• \`${safe(entry.keyId)}\` · ${safe(entry.planName)} · ${duration} · ${entry.usedCount}/${entry.maxUses} used · ${entry.status} · expires ${expires}`;
+    const expires = entry.expiresAt ? new Date(entry.expiresAt).toLocaleDateString('vi-VN') : 'vĩnh viễn';
+    const duration = entry.isPermanent ? 'vĩnh viễn' : `${entry.days} ngày`;
+    return `• \`${safe(entry.keyId)}\` · Gói: **${safe(entry.planName)}** · ${duration} · Đã dùng: ${entry.usedCount}/${entry.maxUses} · Trạng thái: \`${entry.status}\` · Hết hạn: ${expires}`;
   }).join('\n').slice(0, 1900);
 }
 

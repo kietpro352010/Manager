@@ -31,7 +31,7 @@ async function execute(interaction, { entitlements, accessStore }) {
     actorId: interaction.user.id
   });
   await accessStore.addAudit({ actorId: interaction.user.id, action: 'code.create', target: created.keyId, details: { days: created.days, botCount: created.botCount, maxUses: created.maxUses } });
-  return `Created **${safe(created.planName || 'Standard', 64)}** code for ${created.isPermanent ? 'permanent access' : `${created.days} day(s)`}, ${created.botCount} worker slot(s), ${created.maxUses} use(s).\n\n||${created.code}||\nCode ID: \`${created.keyId}\` (shown once).`;
+  return `🎉 **Tạo mã thành công!**\nGói: **${safe(created.planName || 'Standard', 64)}** · Thời hạn: ${created.isPermanent ? 'Vĩnh viễn' : `${created.days} ngày`} · Số slot bot: ${created.botCount} · Lượt dùng: ${created.maxUses}.\n\nMã kích hoạt:\n||${created.code}||\nID mã: \`${created.keyId}\` (chỉ hiển thị 1 lần).`;
 }
 
 module.exports = { data: definition, execute };

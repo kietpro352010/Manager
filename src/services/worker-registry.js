@@ -197,7 +197,7 @@ class WorkerRegistry {
     return {
       state, restriction, restricted: Boolean(restriction),
       settings: {
-        ...(settings.afkManaged ? { afkMode: 'still' } : {}),
+        afkMode: 'still',
         ...(settings.proxyManaged ? { proxyUrl: settings.proxyCiphertext ? decryptSecret(settings.proxyCiphertext, this.encryptionKey) : '' } : {})
       },
       credentials: settings.mcCredentialsCiphertext
