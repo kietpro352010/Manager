@@ -176,43 +176,45 @@ class AdminNotifier {
    */
   hookLogger(logger) {
     if (!logger || typeof logger !== 'object') return;
-    const originalError = logger.error;
-    if (typeof originalError === 'function') {
-      logger.error = (event, fields = {}) => {
-        originalError(event, fields);
-        // Dispatch alert without awaiting or crashing
-        try {
-          const strEvent = String(event || '').toLowerCase();
-          const strMsg = String(fields?.message || fields?.error || '').toLowerCase();
-          let source = fields.source;
-          if (!source) {
-            if (strEvent.includes('supabase') || strMsg.includes('supabase') || strMsg.includes('postgrest') || strMsg.includes('pgrst')) {
-              source = 'Supabase';
-            } else if (strEvent.includes('worker') || strEvent.includes('bot') || strMsg.includes('worker')) {
-              source = 'Worker';
-            } else if (strEvent.includes('discord') || strEvent.includes('interaction')) {
-              source = 'Discord';
-            } else if (strEvent.includes('wispbyte')) {
-              source = 'Wispbyte';
-            } else if (strEvent.includes('link4m')) {
-              source = 'Link4M';
-            } else {
-              source = 'Manager';
+    try {
+      const originalError = logger.error;
+      if (typeof originalError === 'function') {
+        logger.error = (event, fields = {}) => {
+          originalError(event, fields);
+          // Dispatch alert without awaiting or crashing
+          try {
+            const strEvent = String(event || '').toLowerCase();
+            const strMsg = String(fields?.message || fields?.error || '').toLowerCase();
+            let source = fields?.source;
+            if (!source) {
+              if (strEvent.includes('supabase') || strMsg.includes('supabase') || strMsg.includes('postgrest') || strMsg.includes('pgrst')) {
+                source = 'Supabase';
+              } else if (strEvent.includes('worker') || strEvent.includes('bot') || strMsg.includes('worker')) {
+                source = 'Worker';
+              } else if (strEvent.includes('discord') || strEvent.includes('interaction')) {
+                source = 'Discord';
+              } else if (strEvent.includes('wispbyte')) {
+                source = 'Wispbyte';
+              } else if (strEvent.includes('link4m')) {
+                source = 'Link4M';
+              } else {
+                source = 'Manager';
+              }
             }
-          }
-          const message = fields.message || fields.reason || fields.error || String(event);
-          const errorObj = fields.error || (fields.stack ? { message, stack: fields.stack } : null);
-          void this.sendAlert({
-            source,
-            event: String(event),
-            message: String(message),
-            error: errorObj,
-            details: fields,
-            level: 'error'
-          });
-        } catch (_) {}
-      };
-    }
+            const message = fields?.message || fields?.reason || fields?.error || String(event);
+            const errorObj = fields?.error || (fields?.stack ? { message, stack: fields.stack } : null);
+            void this.sendAlert({
+              source,
+              event: String(event),
+              message: String(message),
+              error: errorObj,
+              details: fields,
+              level: 'error'
+            });
+          } catch (_) {}
+        };
+      }
+    } catch (_) {}
   }
 }
 

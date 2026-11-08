@@ -14,12 +14,12 @@ function redact(value, key = '') {
 function createLogger(level = 'info') {
   const priorities = { debug: 10, info: 20, warn: 30, error: 40 };
   const threshold = priorities[level] || priorities.info;
-  return Object.freeze(Object.fromEntries(Object.entries(priorities).map(([name, priority]) => [name, (event, fields = {}) => {
+  return Object.fromEntries(Object.entries(priorities).map(([name, priority]) => [name, (event, fields = {}) => {
     if (priority < threshold) return;
     const line = { time: new Date().toISOString(), level: name, event, ...redact(fields) };
     const writer = name === 'error' ? console.error : name === 'warn' ? console.warn : console.log;
     writer(JSON.stringify(line));
-  }])));
+  }]));
 }
 
 module.exports = { createLogger };
