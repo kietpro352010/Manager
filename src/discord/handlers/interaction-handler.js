@@ -95,25 +95,26 @@ function attachInteractionHandler(client, { config, services, logger }) {
       if (interaction.isChatInputCommand()) {
         const command = commandMap.get(interaction.commandName);
         if (!command) return;
+
+        // Acknowledge immediately to prevent Discord's 3-second timeout ("The application did not respond")
+        await interaction.deferReply({ ephemeral: true }).catch(() => {});
+
         const role = services.accessControl.roleFor(interaction.member, interaction);
         if (interaction.commandName === 'setup') {
           const allowed = await isAuthorizedSetupUser(interaction, services);
           if (!allowed) {
-            return interaction.reply({
+            return interaction.editReply({
               content: 'Chỉ Chủ sở hữu máy chủ Discord (Server Owner), Quản trị viên (Administrator), hoặc Admin được cấu hình mới có quyền chạy lệnh /setup.',
-              ephemeral: true,
               allowedMentions: { parse: [] }
             });
           }
-          await interaction.deferReply({ ephemeral: true });
           const message = await command.execute(interaction, services);
           await interaction.editReply({ ...commandReply(message), allowedMentions: { parse: [] } });
           return;
         }
         if (!services.accessControl.isConfigured()) {
-          return interaction.reply({
+          return interaction.editReply({
             content: 'Manager chưa được cấu hình vai trò trên máy chủ này. Chủ sở hữu hoặc Quản trị viên hãy dùng `/setup` trước.',
-            ephemeral: true,
             allowedMentions: { parse: [] }
           });
         }
@@ -121,9 +122,8 @@ function attachInteractionHandler(client, { config, services, logger }) {
           const text = role
             ? 'Hành động này yêu cầu quyền Admin.'
             : 'Bạn cần được gán Role Admin hoặc Role User đã được cấu hình trong server này để sử dụng bot.';
-          return interaction.reply({ content: text, ephemeral: true, allowedMentions: { parse: [] } });
+          return interaction.editReply({ content: text, allowedMentions: { parse: [] } });
         }
-        await interaction.deferReply({ ephemeral: true });
         const message = await command.execute(interaction, services);
         await interaction.editReply({ ...commandReply(message), allowedMentions: { parse: [] } });
         return;
@@ -152,8 +152,13 @@ function attachInteractionHandler(client, { config, services, logger }) {
         });
       }
       const message = `Action failed: ${String(error.message || 'unknown error').slice(0, 800)}`;
-      if (interaction.deferred || interaction.replied) await interaction.followUp({ content: message, ephemeral: true, allowedMentions: { parse: [] } }).catch(() => {});
-      else await interaction.reply({ content: message, ephemeral: true, allowedMentions: { parse: [] } }).catch(() => {});
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply({ content: message, allowedMentions: { parse: [] } }).catch(() => {
+          return interaction.followUp({ content: message, ephemeral: true, allowedMentions: { parse: [] } }).catch(() => {});
+        });
+      } else {
+        await interaction.reply({ content: message, ephemeral: true, allowedMentions: { parse: [] } }).catch(() => {});
+      }
     }
   });
 
