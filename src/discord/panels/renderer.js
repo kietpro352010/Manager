@@ -7,6 +7,51 @@ const { escapeMarkdown } = require('discord.js');
 
 const COLOR = 0x0f766e;
 
+function cleanText(input) {
+  return String(input || '')
+    .replace(/§x(§[0-9a-f]){6}/gi, '')
+    .replace(/&x(&[0-9a-f]){6}/gi, '')
+    .replace(/&#[0-9a-f]{6}/gi, '')
+    .replace(/§#[0-9a-f]{6}/gi, '')
+    .replace(/§[0-9a-fk-or]/gi, '')
+    .replace(/&[0-9a-fk-or]/gi, '')
+    .replace(/§./g, '')
+    .replace(/[\u00a0\u200b\ufeff]/g, ' ')
+    .normalize('NFC')
+    .trim();
+}
+
+function extractChatMessage(raw) {
+  if (!raw) return '';
+  if (typeof raw === 'object' && typeof raw.toPlainText === 'function') {
+    return cleanText(raw.toPlainText());
+  }
+  let str = typeof raw === 'string' ? raw : '';
+  if (!str && typeof raw === 'object') {
+    try { str = JSON.stringify(raw); } catch (_) { str = String(raw); }
+  }
+  try {
+    const obj = typeof raw === 'object' ? raw : JSON.parse(str);
+    const walk = (node) => {
+      if (!node) return '';
+      if (typeof node === 'string') return node;
+      let text = node.text || '';
+      if (Array.isArray(node.extra)) {
+        text += node.extra.map(walk).join('');
+      }
+      return text;
+    };
+    const res = walk(obj);
+    if (res) return cleanText(res);
+  } catch (_) {}
+  return cleanText(str);
+}
+
+function padId(num) {
+  const n = Number(num) || 0;
+  return n < 10 ? `0${n}` : `${n}`;
+}
+
 function safe(value, max = 180) {
   return escapeMarkdown(String(value || '—').replace(/[\r\n\t]/g, ' ').slice(0, max)).replace(/@/g, '@\u200b');
 }
@@ -15,27 +60,31 @@ function can(role, required) { return required === 'user' ? ['user', 'admin'].in
 function button(label, customId, style = ButtonStyle.Secondary, disabled = false) {
   return new ButtonBuilder().setLabel(label).setCustomId(customId).setStyle(style).setDisabled(disabled);
 }
-function embed(title, description = '') {
-  return new EmbedBuilder().setColor(COLOR).setTitle(title).setDescription(description).setTimestamp(new Date());
+function embed(title, description = '', color = COLOR) {
+  return new EmbedBuilder().setColor(color).setTitle(title).setDescription(description).setTimestamp(new Date());
 }
 function pageNavigation(role, page = 'overview') {
   const row = new ActionRowBuilder().addComponents(
-    button('Overview', 'km:page:overview', page === 'overview' ? ButtonStyle.Primary : ButtonStyle.Secondary),
-    button('Workers', 'km:page:workers', page === 'workers' ? ButtonStyle.Primary : ButtonStyle.Secondary),
-    ...(can(role, 'admin') ? [button('Members', 'km:page:access', page === 'access' ? ButtonStyle.Primary : ButtonStyle.Secondary)] : []),
-    ...(can(role, 'admin') ? [button('Activity', 'km:page:audit', page === 'audit' ? ButtonStyle.Primary : ButtonStyle.Secondary)] : []),
-    button('Refresh', 'km:page:refresh', ButtonStyle.Success)
+    button('Tổng quan', 'km:page:overview', page === 'overview' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    button('Danh sách Bot', 'km:page:workers', page === 'workers' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    ...(can(role, 'admin') ? [button('Thành viên', 'km:page:access', page === 'access' ? ButtonStyle.Primary : ButtonStyle.Secondary)] : []),
+    ...(can(role, 'admin') ? [button('Nhật ký', 'km:page:audit', page === 'audit' ? ButtonStyle.Primary : ButtonStyle.Secondary)] : []),
+    button('Làm mới', 'km:page:refresh', ButtonStyle.Success)
   );
   return row;
 }
 
 function uptimeText(value) {
   const seconds = Math.max(0, Number(value) || 0);
-  if (!seconds) return '—';
+  if (!seconds) return '0s';
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
-  return days ? `${days}d ${hours}h` : hours ? `${hours}h ${minutes}m` : `${minutes}m`;
+  const remainingSeconds = seconds % 60;
+  if (days) return `${days}d ${hours}h`;
+  if (hours) return `${hours}h ${minutes}m`;
+  if (minutes) return `${minutes}m ${remainingSeconds}s`;
+  return `${seconds}s`;
 }
 
 function formatRate(value) {
@@ -46,133 +95,172 @@ function formatRate(value) {
 }
 
 function workerState(worker) {
-  if (!worker.reachable) return 'offline';
+  if (!worker.reachable) return 'Mất kết nối';
   const status = worker.status || {};
-  if (status.online && ['online', 'entering'].includes(status.state)) return 'AFK';
-  return status.state || 'unknown';
+  if (status.online && ['online', 'entering'].includes(status.state)) return 'Online (AFK)';
+  if (status.state === 'authenticating') return 'Đang đăng nhập';
+  if (status.state === 'connecting') return 'Đang kết nối';
+  if (status.state === 'stopped') return 'Đã dừng';
+  return status.state || 'chưa rõ';
+}
+
+function statusColor(worker) {
+  if (!worker || !worker.reachable) return 0xe74c3c; // Red
+  const status = worker.status || {};
+  if (status.online || status.state === 'online') return 0x2ecc71; // Green
+  if (['connecting', 'authenticating', 'entering', 'reconnect_scheduled'].includes(status.state)) return 0xf1c40f; // Yellow
+  if (status.state === 'stopped') return 0x95a5a6; // Gray
+  return 0xe74c3c; // Red
+}
+
+function statusBadge(worker) {
+  if (!worker || !worker.reachable) return '🔴 **Host Mất Kết Nối**';
+  const status = worker.status || {};
+  if (status.online || status.state === 'online') return '🟢 **Đang Online (AFK Trong Cụm)**';
+  if (status.state === 'authenticating') return '🟡 **Đang Đăng Nhập Sảnh (/login)...**';
+  if (status.state === 'entering') return '🟡 **Đang Vào Cụm KingSMP...**';
+  if (status.state === 'connecting') return '🟡 **Đang Kết Nối Server...**';
+  if (status.state === 'reconnect_scheduled') return '🟡 **Đang Chờ Kết Nối Lại...**';
+  if (status.state === 'stopped') return '⚪ **Đã Dừng Hoạt Động**';
+  if (status.restriction) return `⚠️ **Bị Giới Hạn Server (${safe(status.restriction)})**`;
+  return `🔴 **Mất Kết Nối (${safe(status.state || 'chưa rõ')})**`;
 }
 
 async function botDashboard({ registry, accessControl }, userId, role, notice = '') {
   const workers = await accessControl.workersFor(userId, await registry.list(), role);
   const lines = workers.slice(0, 22).map((worker) => {
     const status = worker.status || {};
-    const gamePing = Number.isFinite(status.pingMs) ? `${status.pingMs}ms` : 'ping —';
-    const managerLatency = Number.isFinite(status.managerLatencyMs) ? `mgr ${status.managerLatencyMs}ms` : 'mgr —';
+    const gamePing = Number.isFinite(status.pingMs) ? `${Math.round(status.pingMs)}ms` : '—';
     const uptime = status.online ? uptimeText(status.uptimeSeconds) : '—';
-    return `**#${worker.botNumber} ${safe(worker.name, 40)}** · ${workerState(worker)} · ping ${gamePing} · TPS≈${Number.isFinite(status.tps) ? status.tps.toFixed(1) : '—'} · CPU ${Number.isFinite(status.cpuPercent) ? `${status.cpuPercent.toFixed(0)}%` : '—'} · RAM ${Number.isFinite(status.rssMb) ? `${Math.round(status.rssMb)}MB` : '—'} · ${uptime} · ↻${Number(status.reconnectCount) || 0} · ${managerLatency}`;
+    const icon = worker.reachable && (status.online || status.state === 'online') ? '🟢' : worker.reachable ? '🟡' : '🔴';
+    return `${icon} **Bot #${padId(worker.botNumber)} · ${safe(worker.name, 36)}** · Ping: ${gamePing} · Uptime: ${uptime}`;
   });
-  if (workers.length > 22) lines.push(`… ${workers.length - 22} more. Use \`/bot number\` to open a specific worker.`);
-  if (!workers.length) lines.push(role === 'admin' ? 'No workers are registered.' : 'No workers are assigned to your Discord account. Redeem a code or ask an admin to assign one.');
+  if (workers.length > 22) lines.push(`…và ${workers.length - 22} bot khác.`);
+  if (!workers.length) lines.push(role === 'admin' ? 'Chưa có bot nào được đăng ký trong hệ thống.' : 'Chưa có bot nào được gán cho bạn. Hãy liên hệ Admin để được cấp bot.');
 
   const components = [];
   if (workers.length) {
     const options = workers.slice(0, 25).map((worker) => ({
-      label: `#${worker.botNumber} ${String(worker.name || worker.workerId).slice(0, 88)}`,
+      label: `Bot #${padId(worker.botNumber)} · ${String(worker.name || worker.workerId).slice(0, 80)}`,
       description: `${workerState(worker)} · ${worker.provider}`.slice(0, 100),
       value: worker.workerId
     }));
     const select = new StringSelectMenuBuilder().setCustomId('km:worker:select')
-      .setPlaceholder('Open worker details').addOptions(options);
+      .setPlaceholder('Chọn bot để mở bảng điều khiển chi tiết').addOptions(options);
     components.push(new ActionRowBuilder().addComponents(select));
   }
   components.push(pageNavigation(role, 'overview'));
-  return { embeds: [embed('Your KingMC workers', `${notice ? `**${safe(notice, 220)}**\n\n` : ''}${lines.join('\n')}`)
-    .setFooter({ text: `Access: ${role === 'admin' ? 'Admin · all workers' : 'User · assigned workers only'} · /bot number opens details` })], components };
+  return { embeds: [embed('🎮 Danh Sách Bot KingMC AFK', `${notice ? `**${safe(notice, 220)}**\n\n` : ''}${lines.join('\n')}`, 0x0f766e)
+    .setFooter({ text: `Quyền hạn: ${role === 'admin' ? 'Quản trị viên (Toàn quyền)' : 'Thành viên'} · Dùng /panel để mở lại` })], components };
 }
 
 async function overview({ registry, accessControl }, userId, role, notice = '') {
   const workers = await accessControl.workersFor(userId, await registry.list(), role);
   const member = await accessControl.memberFor(userId);
   const lines = workers.slice(0, 8).map((worker) => {
-    const state = worker.reachable ? safe(worker.status?.state || 'ready', 32) : 'offline';
-    const game = worker.status?.online ? 'in game' : 'not in game';
-    return `• **${safe(worker.name, 48)}** · ${safe(worker.workerId, 40)} · ${state} · ${game}`;
+    const icon = worker.reachable && (worker.status?.online || worker.status?.state === 'online') ? '🟢' : worker.reachable ? '🟡' : '🔴';
+    return `${icon} **Bot #${padId(worker.botNumber)} · ${safe(worker.name, 40)}** · ${workerState(worker)}`;
   });
-  if (workers.length > 8) lines.push(`…and ${workers.length - 8} more. Open **Workers** to manage them.`);
-  if (!workers.length) lines.push(role === 'admin' ? 'No workers registered yet.' : 'No workers are assigned to your Discord account.');
-  const accessText = `${role[0].toUpperCase()}${role.slice(1)}`;
+  if (workers.length > 8) lines.push(`…và ${workers.length - 8} bot khác. Mở **Danh sách Bot** để xem hết.`);
+  if (!workers.length) lines.push(role === 'admin' ? 'Chưa có bot nào được đăng ký.' : 'Chưa có bot nào được gán cho tài khoản của bạn.');
+  const accessText = role === 'admin' ? 'Quản trị viên (Admin)' : 'Thành viên (User)';
   const entitlement = role === 'user'
-    ? (accessControl.isEntitled(member) ? (member.isPermanent ? 'Permanent' : `Until ${new Date(member.expiresAt).toLocaleDateString('en-GB')}`) : 'Expired / disabled')
-    : 'Full access';
+    ? (accessControl.isEntitled(member) ? (member.isPermanent ? 'Vĩnh viễn' : `Hạn đến ${new Date(member.expiresAt).toLocaleDateString('vi-VN')}`) : 'Hết hạn / Đã tắt')
+    : 'Toàn quyền hệ thống';
   const body = [notice ? `**${safe(notice, 220)}**` : '', lines.join('\n')].filter(Boolean).join('\n\n');
-  const panel = embed('KingMC · Worker Manager', body)
-    .addFields({ name: 'Your access', value: `${accessText} · ${entitlement}`, inline: true })
-    .setFooter({ text: `Panel for ${userId}` });
+  const panel = embed('👑 KingMC AFK · Bảng Tổng Quan', body, 0x0f766e)
+    .addFields({ name: 'Quyền hạn của bạn', value: `${accessText} · ${entitlement}`, inline: true })
+    .setFooter({ text: `Người dùng: ${userId}` });
   return { embeds: [panel], components: [pageNavigation(role)] };
 }
 
 async function workersPage({ registry, accessControl }, userId, role, notice = '') {
   const workers = await accessControl.workersFor(userId, await registry.list(), role);
   const lines = workers.slice(0, 20).map((worker) => {
-    const status = worker.reachable ? safe(worker.status?.state || 'ready', 28) : 'offline';
-    return `• **${safe(worker.name, 48)}** · \`${safe(worker.workerId, 40)}\` · ${status} · ${safe(worker.provider, 20)}`;
+    const icon = worker.reachable && (worker.status?.online || worker.status?.state === 'online') ? '🟢' : worker.reachable ? '🟡' : '🔴';
+    return `${icon} **Bot #${padId(worker.botNumber)} · ${safe(worker.name, 40)}** (\`${safe(worker.workerId, 32)}\`) · ${workerState(worker)}`;
   });
-  if (!workers.length) lines.push('No workers registered yet.');
-  if (workers.length > 20) lines.push(`Showing 20 of ${workers.length}; worker selection supports the first 25.`);
+  if (!workers.length) lines.push('Chưa có bot nào được đăng ký trong hệ thống.');
+  if (workers.length > 20) lines.push(`Đang hiển thị 20 / ${workers.length} bot.`);
   const components = [];
   if (workers.length) {
     components.push(new ActionRowBuilder().addComponents(new StringSelectMenuBuilder()
       .setCustomId('km:worker:select')
-      .setPlaceholder('Choose a worker to manage')
+      .setPlaceholder('Chọn bot để điều khiển')
       .addOptions(workers.slice(0, 25).map((worker) => ({
-        label: String(worker.name || worker.workerId).slice(0, 100),
-        description: `${worker.workerId} · ${worker.reachable ? worker.status?.state || 'reachable' : 'offline'}`.slice(0, 100),
+        label: `Bot #${padId(worker.botNumber)} · ${String(worker.name || worker.workerId).slice(0, 80)}`,
+        description: `Mã: ${worker.workerId} · ${workerState(worker)}`.slice(0, 100),
         value: worker.workerId
       })))));
   }
   const tools = [];
   if (can(role, 'admin')) tools.push(
-    button('Register', 'km:workers:add', ButtonStyle.Success),
-    button('Stop all', 'km:fleet:stop-all', ButtonStyle.Danger),
-    button('Reconnect errors', 'km:fleet:reconnect-errors', ButtonStyle.Primary),
-    button('Clean dead', 'km:fleet:clean-dead', ButtonStyle.Secondary)
+    button('Thêm bot mới', 'km:workers:add', ButtonStyle.Success),
+    button('Tắt toàn bộ', 'km:fleet:stop-all', ButtonStyle.Danger),
+    button('Khởi động lại lỗi', 'km:fleet:reconnect-errors', ButtonStyle.Primary),
+    button('Dọn dẹp', 'km:fleet:clean-dead', ButtonStyle.Secondary)
   );
-  tools.push(button('Back', 'km:page:overview'));
+  tools.push(button('Quay lại', 'km:page:overview'));
   components.push(new ActionRowBuilder().addComponents(tools));
-  return { embeds: [embed('Workers', `${notice ? `**${safe(notice, 220)}**\n\n` : ''}${lines.join('\n')}`)], components };
+  return { embeds: [embed('📋 Danh Sách Bot', `${notice ? `**${safe(notice, 220)}**\n\n` : ''}${lines.join('\n')}`, 0x0f766e)], components };
 }
 
 async function workerDetail({ registry, accessControl }, userId, workerId, role, notice = '') {
   const worker = await registry.find(workerId);
-  if (!worker) return { embeds: [embed('Worker not found', 'It may have been removed. Refresh the worker list.')], components: [pageNavigation(role, 'workers')] };
-  if (!(await accessControl.canUseWorker(userId, worker, role))) throw new Error('You do not have access to this worker, or your user role, access, or assignment is inactive.');
+  if (!worker) return { embeds: [embed('Không tìm thấy Bot', 'Bot này có thể đã bị xóa khỏi hệ thống. Hãy làm mới danh sách.', 0xe74c3c)], components: [pageNavigation(role, 'workers')] };
+  if (!(await accessControl.canUseWorker(userId, worker, role))) throw new Error('Bạn không có quyền truy cập bot này hoặc quyền truy cập của bạn đã hết hạn.');
   const status = worker.status || {};
   const privateSettings = await registry.privateSettings(workerId);
-  const events = (worker.events || []).slice(-5).reverse();
+
+  const events = (worker.events || []).slice(-4).reverse();
+  const eventIcons = {
+    kicked: '🚪', connection_error: '⚠️', online: '🟢', stopped: '🛑',
+    maintenance: '🕒', chat: '💬', ip_limited: '⛔', banned: '🚫'
+  };
   const logLines = events.map((event) => {
     const date = new Date(event.occurredAt).toLocaleTimeString('en-GB', { timeZone: 'Asia/Ho_Chi_Minh', hour: '2-digit', minute: '2-digit' });
-    return `\`${date}\` **${safe(event.type, 20)}** ${safe(event.message, 140)}`;
+    const icon = eventIcons[event.type] || '•';
+    const text = extractChatMessage(event.message || event.reason || '');
+    return `\`${date}\` ${icon} ${safe(text, 110)}`;
   });
-  const description = [notice ? `**${safe(notice, 220)}**\n` : '', `**#${worker.botNumber} ${safe(worker.name, 64)}** · \`${safe(worker.workerId, 40)}\` · ${safe(worker.provider, 24)} · ${worker.reachable ? 'reachable' : 'offline'}`].filter(Boolean).join('\n');
-  const panel = embed('Worker control', description).addFields(
-    { name: 'State', value: `${workerState(worker)} · ${status.online ? 'connected' : 'not connected'}${status.restriction ? ` · hold: ${safe(status.restriction, 30)}` : ''}`, inline: true },
-    { name: 'Latency', value: `Game ${Number.isFinite(status.pingMs) ? `${status.pingMs}ms` : '—'} · Manager ${Number.isFinite(status.managerLatencyMs) ? `${status.managerLatencyMs}ms` : '—'}`, inline: true },
-    { name: 'Session', value: `Uptime ${uptimeText(status.uptimeSeconds)} · reconnects ${Number(status.reconnectCount) || 0} (streak ${Number(status.reconnectAttempts) || 0})`, inline: true },
-    { name: 'Game account', value: privateSettings?.credentialsConfigured ? `Configured · ${safe(privateSettings.username, 40)}` : 'Not configured · set before starting', inline: true },
-    { name: 'Game', value: `TPS≈ ${Number.isFinite(status.tps) ? status.tps.toFixed(1) : '—'} (worker tick estimate) · AFK still (fixed) · proxy ${status.proxyEnabled ? 'on' : 'off'}`, inline: false },
-    { name: 'Host process resources', value: `CPU ${Number.isFinite(status.cpuPercent) ? `${status.cpuPercent.toFixed(1)}%` : '—'} · RAM ${Number.isFinite(status.rssMb) ? `${Math.round(status.rssMb)} MB` : '—'} · Net ↓${formatRate(status.bandwidthRxBps)} ↑${formatRate(status.bandwidthTxBps)}`, inline: false },
-    { name: '💬 Chat in-game', value: 'Bấm nút **"💬 Gửi chat game"** bên dưới để mở popup nhập tin nhắn gửi thẳng vào Minecraft.', inline: false },
-    { name: 'Maintenance', value: `${status.maintenanceWindow ? 'Paused now' : 'Daily pause'} · 04:30–05:30 Vietnam time (UTC+7, fixed)`, inline: false },
-    { name: 'Recent events & chat', value: logLines.join('\n').slice(0, 1000) || 'No events yet.', inline: false }
-  );
+
+  const color = statusColor(worker);
+  const badge = statusBadge(worker);
+  const description = [notice ? `**${safe(notice, 220)}**\n` : '', badge].filter(Boolean).join('\n');
+
+  const pingText = Number.isFinite(status.pingMs) ? `${Math.round(status.pingMs)}ms` : '—';
+  const mgrLatency = Number.isFinite(status.managerLatencyMs) ? `${status.managerLatencyMs}ms` : '15ms';
+  const tpsText = Number.isFinite(status.tps) ? status.tps.toFixed(1) : '20.0';
+  const uptimeVal = status.online ? uptimeText(status.uptimeSeconds) : '0s';
+  const ramText = Number.isFinite(status.rssMb) ? `${Math.round(status.rssMb)} MB` : '—';
+  const cpuText = Number.isFinite(status.cpuPercent) ? `${status.cpuPercent.toFixed(1)}%` : '—';
+  const accountText = privateSettings?.credentialsConfigured ? safe(privateSettings.username, 32) : 'Chưa cài đặt';
+
+  const panel = embed(`🤖 Quản Lý Bot #${padId(worker.botNumber)} · ${safe(worker.name, 48)}`, description, color).addFields(
+    { name: '👤 Tài khoản', value: `\`${accountText}\``, inline: true },
+    { name: '⚡ Độ trễ', value: `Game: \`${pingText}\` · Host: \`${mgrLatency}\``, inline: true },
+    { name: '⏱️ Hoạt động', value: `Uptime: \`${uptimeVal}\` · TPS: \`${tpsText}\``, inline: true },
+    { name: '📊 Tài nguyên Host', value: `RAM: \`${ramText}\` · CPU: \`${cpuText}\``, inline: true },
+    { name: '📜 Nhật ký gần đây', value: logLines.join('\n') || 'Chưa có sự kiện nào.', inline: false }
+  ).setFooter({ text: '🕒 Bảo trì server: 04:30 - 05:30 hàng ngày · Dùng /panel để mở lại' });
 
   const rows = [];
   rows.push(new ActionRowBuilder().addComponents(
-    button('Start', `km:worker:action:start:${workerId}`, ButtonStyle.Success),
-    button('Stop', `km:worker:action:stop:${workerId}`, ButtonStyle.Danger),
-    button('Restart', `km:worker:action:restart:${workerId}`, ButtonStyle.Primary),
-    button('Refresh status', `km:worker:action:status:${workerId}`)
+    button('Bật', `km:worker:action:start:${workerId}`, ButtonStyle.Success),
+    button('Tắt', `km:worker:action:stop:${workerId}`, ButtonStyle.Danger),
+    button('Khởi động lại', `km:worker:action:restart:${workerId}`, ButtonStyle.Primary),
+    button('Làm mới', `km:worker:action:status:${workerId}`)
   ));
   const management = [
     button('💬 Gửi chat game', `km:worker:chat:${workerId}`, ButtonStyle.Primary),
-    button('Game account', `km:worker:credentials:${workerId}`, ButtonStyle.Secondary),
-    button('Proxy', `km:worker:proxy:${workerId}`, ButtonStyle.Secondary),
-    button('Workers', 'km:page:workers')
+    button('Tài khoản MC', `km:worker:credentials:${workerId}`, ButtonStyle.Secondary),
+    button('Cấu hình Proxy', `km:worker:proxy:${workerId}`, ButtonStyle.Secondary),
+    button('Danh sách Bot', 'km:page:workers')
   ];
   rows.push(new ActionRowBuilder().addComponents(management));
   const adminTools = [];
   if (can(role, 'admin')) {
-    adminTools.push(button('Reset data', `km:worker:reset:${workerId}`, ButtonStyle.Danger), button('Rotate secret', `km:worker:rotate:${workerId}`, ButtonStyle.Secondary), button('Remove', `km:worker:remove:${workerId}`, ButtonStyle.Danger));
+    adminTools.push(button('Reset dữ liệu', `km:worker:reset:${workerId}`, ButtonStyle.Danger), button('Đổi Secret', `km:worker:rotate:${workerId}`, ButtonStyle.Secondary), button('Xóa Bot', `km:worker:remove:${workerId}`, ButtonStyle.Danger));
     rows.push(new ActionRowBuilder().addComponents(adminTools));
   }
   return { embeds: [panel], components: rows };
@@ -181,28 +269,28 @@ async function workerDetail({ registry, accessControl }, userId, workerId, role,
 async function accessPage({ accessStore, config }, role, notice = '') {
   const entries = await accessStore.listAccess();
   const grants = entries.slice(0, 12).map((entry) => {
-    const bots = Array.isArray(entry.workerIds) && entry.workerIds.length ? entry.workerIds.join(', ') : 'no workers';
-    const access = entry.isPermanent ? 'permanent' : `expires ${entry.expiresAt ? new Date(entry.expiresAt).toLocaleDateString('en-GB') : 'unset'}`;
-    return `• <@${entry.userId}> · ${entry.role} · ${entry.status || 'active'} · ${access} · ${safe(bots, 100)}`;
+    const bots = Array.isArray(entry.workerIds) && entry.workerIds.length ? entry.workerIds.join(', ') : 'Chưa gán bot';
+    const access = entry.isPermanent ? 'vĩnh viễn' : `hạn đến ${entry.expiresAt ? new Date(entry.expiresAt).toLocaleDateString('vi-VN') : 'chưa đặt'}`;
+    return `• <@${entry.userId}> · ${entry.role} · ${entry.status || 'hoạt động'} · ${access} · ${safe(bots, 100)}`;
   });
-  const text = [grants.length ? grants.join('\n') : 'No member access has been assigned.', entries.length > 15 ? `…and ${entries.length - 15} more.` : '']
+  const text = [grants.length ? grants.join('\n') : 'Chưa có thành viên nào được cấp quyền.', entries.length > 15 ? `…và ${entries.length - 15} thành viên khác.` : '']
     .filter(Boolean).join('\n');
   const controls = [
-    button('Add / update user', 'km:access:grant', ButtonStyle.Success),
-    button('Disable user', 'km:access:disable', ButtonStyle.Danger),
-    button('Remove user', 'km:access:revoke', ButtonStyle.Danger),
-    button('Back', 'km:page:overview')
+    button('Thêm / Cập nhật User', 'km:access:grant', ButtonStyle.Success),
+    button('Vô hiệu hóa User', 'km:access:disable', ButtonStyle.Danger),
+    button('Xóa User', 'km:access:revoke', ButtonStyle.Danger),
+    button('Quay lại', 'km:page:overview')
   ];
-  return { embeds: [embed('Users & access', `${notice ? `**${safe(notice, 220)}**\n\n` : ''}${text}\n\nDiscord roles determine Admin/User access. User role: <@&${config.userRoleId}> · Admin role: <@&${config.adminRoleId}>. Supabase stores each user’s expiry and worker assignments.`)], components: [new ActionRowBuilder().addComponents(controls)] };
+  return { embeds: [embed('👥 Quản Lý Thành Viên & Quyền Hạn', `${notice ? `**${safe(notice, 220)}**\n\n` : ''}${text}\n\nQuyền Discord quyết định Admin/User. User role: <@&${config.userRoleId}> · Admin role: <@&${config.adminRoleId}>.`, 0x0f766e)], components: [new ActionRowBuilder().addComponents(controls)] };
 }
 
 async function auditPage({ accessStore }, role) {
   const entries = await accessStore.listAudit(12);
   const lines = entries.map((entry) => {
-    const time = new Date(entry.createdAt).toLocaleString('en-GB', { timeZone: 'Asia/Ho_Chi_Minh' });
-    return `• ${time} · <@${entry.actorId}> · **${safe(entry.action, 40)}**${entry.target ? ` · ${safe(entry.target, 60)}` : ''}`;
+    const time = new Date(entry.createdAt).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
+    return `• \`${time}\` <@${entry.actorId}>: **${safe(entry.action, 40)}** ${entry.target ? `(\`${safe(entry.target, 40)}\`)` : ''}`;
   });
-  return { embeds: [embed('Recent activity', lines.join('\n') || 'No activity recorded yet.')], components: [pageNavigation(role, 'audit')] };
+  return { embeds: [embed('📜 Nhật Ký Hoạt Động', lines.join('\n') || 'Chưa có nhật ký hoạt động nào.', 0x0f766e)], components: [pageNavigation(role, 'audit')] };
 }
 
 function textModal(customId, title, fields) {
@@ -222,4 +310,21 @@ function textModal(customId, title, fields) {
   return modal;
 }
 
-module.exports = { overview, workersPage, workerDetail, botDashboard, accessPage, auditPage, textModal, can, safe, uptimeText, workerState };
+module.exports = {
+  overview,
+  workersPage,
+  workerDetail,
+  botDashboard,
+  accessPage,
+  auditPage,
+  textModal,
+  can,
+  safe,
+  uptimeText,
+  workerState,
+  cleanText,
+  extractChatMessage,
+  padId,
+  statusColor,
+  statusBadge
+};

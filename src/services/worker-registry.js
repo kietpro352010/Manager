@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const { isLocalOrPrivateHost } = require('./proxy-validation');
 const { encryptSecret, decryptSecret, generateWorkerSecret } = require('../utils/secrets');
+const { extractChatMessage } = require('../discord/panels/renderer');
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{1,39}$/;
 const ACTIONS = new Set([
@@ -19,9 +20,12 @@ class WorkerRegistry {
   }
 
   async add({ workerId, name, provider, serviceUrl = '', serviceId = '' }) {
-    const id = String(workerId || '').trim().toLowerCase();
-    const label = String(name || id).trim().slice(0, 64) || id;
-    const host = String(provider || '').trim().toLowerCase();
+    const botNumber = await this.store.nextBotNumber();
+    const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
+    const defaultId = pad(botNumber);
+    const id = String(workerId || '').trim().toLowerCase() || defaultId;
+    const label = String(name || `KingMC Bot ${botNumber}`).trim().slice(0, 64);
+    const host = String(provider || 'wispbyte').trim().toLowerCase();
     let url = String(serviceUrl || '').trim().replace(/\/+$/, '');
     const renderServiceId = String(serviceId || '').trim();
     if (!ID_PATTERN.test(id)) throw new Error('Worker ID must be 2–40 lowercase letters, numbers, underscores, or hyphens.');
@@ -37,7 +41,6 @@ class WorkerRegistry {
     if (await this.store.get(id)) throw new Error(`Worker ${id} already exists.`);
 
     const secret = generateWorkerSecret();
-    const botNumber = await this.store.nextBotNumber();
     const now = new Date();
     const record = {
       botNumber, workerId: id, name: label, provider: host, serviceUrl: url, renderServiceId,
@@ -51,9 +54,25 @@ class WorkerRegistry {
 
   async remove(workerId) {
     const id = String(workerId || '').trim().toLowerCase();
+    const existing = await this.store.get(id);
     const removed = await this.store.remove(id);
-    if (removed) await this.accessStore?.removeWorkerAssignments(id);
+    if (removed) {
+      await this.accessStore?.removeWorkerAssignments(id);
+      if (existing && Number.isInteger(existing.botNumber)) {
+        await this.reindexAfterRemoval(existing.botNumber);
+      }
+    }
     return removed;
+  }
+
+  async reindexAfterRemoval(removedBotNumber) {
+    try {
+      const allWorkers = await this.store.list();
+      const toShift = allWorkers.filter((w) => w.botNumber > removedBotNumber).sort((a, b) => a.botNumber - b.botNumber);
+      for (const worker of toShift) {
+        await this.store.update(worker.workerId, { botNumber: worker.botNumber - 1 });
+      }
+    } catch (_) {}
   }
   computeReachable(record) {
     if (!record) return null;
@@ -164,9 +183,11 @@ class WorkerRegistry {
   }
 
   async addEvent(workerId, event) {
+    const rawMsg = event?.message || event?.reason || '';
+    const cleanMsg = extractChatMessage(rawMsg);
     const safeEvent = {
       type: String(event?.type || 'worker_event').slice(0, 48),
-      message: String(event?.message || event?.reason || '').replace(/[\r\n\t]+/g, ' ').slice(0, 300),
+      message: cleanMsg.replace(/[\r\n\t]+/g, ' ').slice(0, 300),
       occurredAt: event?.occurredAt ? new Date(event.occurredAt) : new Date()
     };
     if (Number.isNaN(safeEvent.occurredAt.getTime())) safeEvent.occurredAt = new Date();

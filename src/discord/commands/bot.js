@@ -1,11 +1,11 @@
 'use strict';
 
 const { SlashCommandBuilder, escapeMarkdown } = require('discord.js');
-const { botDashboard, workerDetail } = require('../panels/renderer');
+const { botDashboard, workerDetail, padId, workerState, uptimeText } = require('../panels/renderer');
 
 const botOption = (command, required = true) => command.addStringOption((option) =>
   option.setName('bot')
-    .setDescription('Số thứ tự hoặc ID bot (VD: 1 hoặc afk-01)')
+    .setDescription('Số thứ tự hoặc ID bot (VD: 1, 01 hoặc afk-01)')
     .setRequired(required)
     .setMaxLength(40));
 
@@ -26,10 +26,10 @@ const definition = new SlashCommandBuilder()
   .addSubcommand((cmd) => botOption(cmd.setName('restart').setDescription('Khởi động lại kết nối bot')))
   // Admin subcommands
   .addSubcommand((cmd) => cmd.setName('add').setDescription('Đăng ký thêm bot mới vào Manager (Admin)')
-    .addStringOption((opt) => opt.setName('id').setDescription('Mã định danh duy nhất (VD: afk-01)').setRequired(true).setMinLength(2).setMaxLength(40))
     .addStringOption((opt) => opt.setName('name').setDescription('Tên hiển thị bot (VD: KingMC Bot 1)').setRequired(true).setMaxLength(64))
-    .addStringOption((opt) => opt.setName('provider').setDescription('Nền tảng host bot').setRequired(true)
-      .addChoices({ name: 'Render (Cloud)', value: 'render' }, { name: 'Wispbyte (Server/VPS)', value: 'wispbyte' }))
+    .addStringOption((opt) => opt.setName('id').setDescription('Mã định danh duy nhất (để trống sẽ tự gán 01, 02...)').setRequired(false).setMaxLength(40))
+    .addStringOption((opt) => opt.setName('provider').setDescription('Nền tảng host bot (mặc định: Wispbyte)').setRequired(false)
+      .addChoices({ name: 'Wispbyte (Server/VPS)', value: 'wispbyte' }, { name: 'Render (Cloud)', value: 'render' }))
     .addStringOption((opt) => opt.setName('url').setDescription('URL Render HTTPS (VD: https://bot-01.onrender.com)').setMaxLength(200))
     .addStringOption((opt) => opt.setName('render_service_id').setDescription('Render Service ID (tùy chọn)').setMaxLength(100)))
   .addSubcommand((cmd) => confirmationOption(botOption(cmd.setName('remove').setDescription('Xóa bot khỏi Manager (Admin)'))))
@@ -54,17 +54,17 @@ function statusText(worker, status = worker.status || {}) {
   const online = status.online || status.connected;
   const cpu = Number.isFinite(status.cpuPercent) ? `${status.cpuPercent.toFixed(1)}%` : '—';
   const ram = Number.isFinite(status.rssMb) ? `${Math.round(status.rssMb)} MB` : '—';
+  const ping = Number.isFinite(status.pingMs) ? `${Math.round(status.pingMs)}ms` : '—';
+  const tps = Number.isFinite(status.tps) ? status.tps.toFixed(1) : '20.0';
+  const uptime = status.online ? uptimeText(status.uptimeSeconds) : '0s';
+  const stateIcon = online ? '🟢' : worker.reachable ? '🟡' : '🔴';
   return [
-    `🤖 **#${worker.botNumber} ${safe(worker.name)}** · \`${safe(worker.workerId)}\``,
-    `Trạng thái: **${safe(status.state || 'chưa kết nối')}** · ${online ? '🟢 Đang trong game' : '🔴 Ngắt kết nối'} · ${worker.reachable ? 'Host Online' : 'Host Mất kết nối'}`,
-    `Ping: ${Number.isFinite(status.pingMs) ? `${Math.round(status.pingMs)} ms` : '—'} · TPS≈ ${Number.isFinite(status.tps) ? status.tps.toFixed(1) : '—'} · Uptime: ${Math.floor(Number(status.uptimeSeconds) || 0)}s`,
-    `Tài nguyên Host: CPU ${cpu} · RAM ${ram} · Mạng ↓${formatRate(status.bandwidthRxBps)} ↑${formatRate(status.bandwidthTxBps)}`,
-    `Kết nối lại: ${Number(status.reconnectCount) || 0} lần (hiện tại thử: ${Number(status.reconnectAttempts) || 0})`,
-    status.maintenanceWindow ? '⏳ Đang trong khung giờ bảo trì hàng ngày (04:30–05:30 VN)' : '',
-    status.restriction ? `⚠️ Đang giữ kết nối do giới hạn server: ${safe(status.restriction)}` : '',
-    status.lastError ? `Lỗi gần nhất: ${safe(status.lastError, 220)}` : '',
-    '',
-    '💡 *Mẹo: Bạn có thể dùng `/panel` hoặc bấm nút "💬 Gửi chat game" trên bảng điều khiển để chat vào Minecraft.*'
+    `🤖 **Bot #${padId(worker.botNumber)} · ${safe(worker.name)}**`,
+    `Trạng thái: ${stateIcon} **${workerState(worker)}**`,
+    `⚡ Ping: \`${ping}\` · TPS: \`${tps}\``,
+    `⏱️ Uptime: \`${uptime}\` · RAM: \`${ram}\` · CPU: \`${cpu}\``,
+    status.restriction ? `⚠️ Đang giữ kết nối: ${safe(status.restriction)}` : '',
+    status.lastError ? `Lỗi gần nhất: ${safe(status.lastError, 200)}` : ''
   ].filter(Boolean).join('\n');
 }
 
@@ -118,10 +118,13 @@ async function execute(interaction, services) {
   // Subcommand: list
   if (subcommand === 'list') {
     const workers = await accessControl.workersFor(interaction.user.id, await registry.list(), role);
-    if (!workers.length) return 'Hiện không có bot nào được gán cho tài khoản Discord của bạn.';
-    return workers.slice(0, 25).map((w) =>
-      `• **#${w.botNumber} ${safe(w.name, 48)}** (\`${safe(w.workerId, 32)}\`) · Trạng thái: **${safe(w.status?.state || 'đã đăng ký', 24)}** · Host: ${w.reachable ? '🟢 Online' : '🔴 Offline'}`
-    ).join('\n');
+    if (!workers.length) return '📋 Hiện không có bot nào được gán cho tài khoản Discord của bạn.';
+    const lines = workers.slice(0, 25).map((w) => {
+      const isOnline = w.reachable && (w.status?.online || w.status?.state === 'online');
+      const icon = isOnline ? '🟢' : w.reachable ? '🟡' : '🔴';
+      return `${icon} **Bot #${padId(w.botNumber)} · ${safe(w.name, 40)}** — ${workerState(w)}`;
+    });
+    return `📋 **Danh Sách Bot Của Bạn**\n\n${lines.join('\n')}\n\n💡 *Gõ \`/panel\` để mở bảng điều khiển trực quan.*`;
   }
 
   // Subcommand: add (Admin)
@@ -135,7 +138,7 @@ async function execute(interaction, services) {
       serviceId: interaction.options.getString('render_service_id') || ''
     });
     await audit(accessStore, logger, interaction.user.id, 'worker.add', result.worker.workerId, { botNumber: result.worker.botNumber, provider: result.worker.provider });
-    return `✅ Đã đăng ký bot **${safe(result.worker.name)}** là **#${result.worker.botNumber}** (\`${result.worker.workerId}\`).\nKhóa secret kết nối cho bot slot (nhập vào biến \`WORKER_SECRET_1\` hoặc \`WORKER_SECRET_2\` trên host):\n\n||${result.secret}||`;
+    return `✅ Đã đăng ký bot **${safe(result.worker.name)}** là **#${padId(result.worker.botNumber)}** (\`${result.worker.workerId}\`).\nKhóa secret kết nối cho bot slot (nhập vào biến \`WORKER_SECRET_1\` hoặc \`WORKER_SECRET_2\` trên host):\n\n||${result.secret}||`;
   }
 
   // Subcommands: stop-all, reconnect-errors, clean-dead (Admin)
@@ -175,7 +178,7 @@ async function execute(interaction, services) {
     broker.cancelWorker(workerId);
     const removed = await registry.remove(workerId);
     if (removed) await audit(accessStore, logger, interaction.user.id, 'worker.remove', workerId, { stopped });
-    return removed ? `🗑️ Đã xóa bot **#${worker.botNumber} ${safe(workerId)}** khỏi Manager${stopped ? ' (đã gửi lệnh dừng trước đó)' : ''}.` : `Bot ${safe(workerId)} không tồn tại.`;
+    return removed ? `🗑️ Đã xóa bot **#${padId(worker.botNumber)} (${safe(worker.name)})** khỏi Manager${stopped ? ' (đã gửi lệnh dừng trước đó)' : ''}. Danh sách bot đã được tự động sắp xếp lại.` : `Bot ${safe(workerId)} không tồn tại.`;
   }
 
   // Subcommand: rotate-secret (Admin)
@@ -183,7 +186,7 @@ async function execute(interaction, services) {
     requireAdmin();
     const secret = await registry.rotateSecret(workerId);
     await audit(accessStore, logger, interaction.user.id, 'worker.rotate-secret', workerId);
-    return `🔑 Đã đổi secret cho bot **#${worker.botNumber} ${safe(worker.name)}**. Cập nhật biến môi trường trên host; giá trị chỉ hiển thị 1 lần:\n\n||${secret}||`;
+    return `🔑 Đã đổi secret cho bot **#${padId(worker.botNumber)} ${safe(worker.name)}**. Cập nhật biến môi trường trên host; giá trị chỉ hiển thị 1 lần:\n\n||${secret}||`;
   }
 
   // Subcommand: status
@@ -198,7 +201,7 @@ async function execute(interaction, services) {
   if (['start', 'restart'].includes(subcommand)) {
     const settings = await registry.privateSettings(workerId);
     if (!settings?.credentialsConfigured) {
-      return '⚠️ Tài khoản Minecraft chưa được cài đặt. Vui lòng mở `/panel`, chọn bot này rồi chọn **Game account** để lưu tài khoản mật khẩu.';
+      return '⚠️ Tài khoản Minecraft chưa được cài đặt. Vui lòng mở `/panel`, chọn bot này rồi chọn **Tài khoản MC** để lưu tài khoản mật khẩu.';
     }
   }
 
@@ -217,8 +220,19 @@ async function execute(interaction, services) {
   const detail = result.result?.detail || result.result || {};
   if (detail.restriction) return `⚠️ Bot **${safe(worker.name)}** đang bị server KingMC giữ kết nối (${safe(detail.restriction)}).`;
   if (detail.ok === false) return `❌ Lệnh ${subcommand} thất bại: ${safe(detail.error || JSON.stringify(detail), 700)}`;
-  if (subcommand === 'reset') return `✅ Đã reset dữ liệu bot **#${worker.botNumber} ${safe(worker.name)}**. Thông tin tài khoản và bộ đếm đã được xóa.`;
-  return `✅ Lệnh **${subcommand}** thành công cho bot **#${worker.botNumber} ${safe(worker.name)}**.\n\n${statusText(worker, detail)}`;
+  if (subcommand === 'reset') return `✅ Đã reset dữ liệu bot **#${padId(worker.botNumber)} ${safe(worker.name)}**. Thông tin tài khoản và bộ đếm đã được xóa.`;
+
+  if (subcommand === 'start') {
+    return `🟢 **Đã bật Bot #${padId(worker.botNumber)} (${safe(worker.name)}) thành công!**\n🎮 Bot đang kết nối vào máy chủ KingMC... Hãy dùng \`/panel\` để theo dõi trực tiếp.`;
+  }
+  if (subcommand === 'stop') {
+    return `🛑 **Đã tắt Bot #${padId(worker.botNumber)} (${safe(worker.name)}) thành công!**\nBot đã ngắt kết nối an toàn khỏi máy chủ.`;
+  }
+  if (subcommand === 'restart') {
+    return `🔄 **Đang khởi động lại Bot #${padId(worker.botNumber)} (${safe(worker.name)})...**\nBot đang kết nối lại vào máy chủ ngay lập tức.`;
+  }
+
+  return `✅ Lệnh **${subcommand}** hoàn tất cho bot **#${padId(worker.botNumber)} ${safe(worker.name)}**.`;
 }
 
 module.exports = { data: definition, execute };

@@ -1,7 +1,7 @@
 'use strict';
 
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, MessageFlags } = require('discord.js');
-const { overview, workersPage, workerDetail, accessPage, auditPage, textModal, safe } = require('../panels/renderer');
+const { overview, workersPage, workerDetail, accessPage, auditPage, textModal, safe, padId } = require('../panels/renderer');
 
 const PANEL_PREFIX = 'km:';
 
@@ -188,16 +188,18 @@ async function handlePanelInteraction(interaction, services) {
       if (customId.startsWith('km:modal:worker-add')) {
         if (!isAdmin(role)) return deny(interaction, 'Only admins can register workers.'), true;
         await interaction.deferUpdate();
-        const workerId = interaction.fields.getTextInputValue('worker_id').trim().toLowerCase();
+        let workerId = '';
+        try { workerId = (interaction.fields.getTextInputValue('worker_id') || '').trim().toLowerCase(); } catch (_) {}
         const name = interaction.fields.getTextInputValue('name').trim();
-        const provider = interaction.fields.getTextInputValue('provider').trim().toLowerCase();
-        const serviceUrl = interaction.fields.getTextInputValue('service_url').trim();
-        const serviceId = interaction.fields.getTextInputValue('render_service_id').trim();
-        const result = await services.registry.add({ workerId, name, provider, serviceUrl, serviceId });
-        await audit(services, interaction.user.id, 'worker.register', workerId, { provider });
-        const embed = new EmbedBuilder().setColor(0x15803d).setTitle('Worker registered')
-          .setDescription(`**${safe(result.worker.name)}** (\`${safe(workerId)}\`) is ready.\n\nOne-time worker secret:\n\`\`\`\n${result.secret}\n\`\`\`\nAdd it to the matching slot as \`WORKER_SECRET_1\` or \`WORKER_SECRET_2\`. This value will not be shown again.`);
-        return interaction.editReply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('km:page:workers').setLabel('Back to workers').setStyle(ButtonStyle.Secondary))] }), true;
+        let provider = 'wispbyte';
+        try { provider = (interaction.fields.getTextInputValue('provider') || 'wispbyte').trim().toLowerCase(); } catch (_) {}
+        let serviceUrl = '';
+        try { serviceUrl = (interaction.fields.getTextInputValue('service_url') || '').trim(); } catch (_) {}
+        const result = await services.registry.add({ workerId, name, provider, serviceUrl });
+        await audit(services, interaction.user.id, 'worker.register', result.worker.workerId, { provider });
+        const embed = new EmbedBuilder().setColor(0x15803d).setTitle('✅ Đã đăng ký Bot thành công')
+          .setDescription(`**${safe(result.worker.name)}** (\`#${padId(result.worker.botNumber)}\`) đã sẵn sàng.\n\nKhóa bí mật kết nối (chỉ hiển thị 1 lần):\n\`\`\`\n${result.secret}\n\`\`\`\nNhập giá trị này vào biến \`WORKER_SECRET_1\` hoặc \`WORKER_SECRET_2\` trên host.`);
+        return interaction.editReply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('km:page:workers').setLabel('Danh sách Bot').setStyle(ButtonStyle.Secondary))] }), true;
       }
       const credentialsSubmit = customId.match(/^km:modal:credentials:(save|start):([a-z0-9_-]{2,40})$/);
       if (credentialsSubmit) {
@@ -276,12 +278,11 @@ async function handlePanelInteraction(interaction, services) {
     }
     if (customId === 'km:workers:add') {
       if (!isAdmin(role)) return deny(interaction, 'Only admins can register workers.'), true;
-      return interaction.showModal(textModal('km:modal:worker-add', 'Register worker', [
-        { id: 'worker_id', label: 'Worker ID', placeholder: 'afk-01', maxLength: 40 },
-        { id: 'name', label: 'Display name', placeholder: 'KingMC AFK 01', maxLength: 64 },
-        { id: 'provider', label: 'Provider: render or wispbyte', placeholder: 'wispbyte', maxLength: 12 },
-        { id: 'service_url', label: 'Render worker HTTPS URL (optional)', placeholder: 'https://worker.example.com', required: false, maxLength: 200 },
-        { id: 'render_service_id', label: 'Render service ID (optional)', placeholder: 'srv-...', required: false, maxLength: 100 }
+      return interaction.showModal(textModal('km:modal:worker-add', 'Đăng ký Bot mới', [
+        { id: 'name', label: 'Tên hiển thị bot (VD: KingMC Bot 1)', placeholder: 'KingMC Bot 1', maxLength: 64 },
+        { id: 'worker_id', label: 'Mã Bot (để trống tự gán 01, 02...)', placeholder: '01', required: false, maxLength: 40 },
+        { id: 'provider', label: 'Nền tảng (wispbyte hoặc render)', placeholder: 'wispbyte', required: false, maxLength: 12 },
+        { id: 'service_url', label: 'URL Render HTTPS (tùy chọn)', placeholder: 'https://worker.example.com', required: false, maxLength: 200 }
       ])), true;
     }
     if (customId === 'km:fleet:stop-all' || customId === 'km:fleet:reconnect-errors' || customId === 'km:fleet:clean-dead') {
@@ -352,13 +353,15 @@ async function handlePanelInteraction(interaction, services) {
       await interaction.deferUpdate();
       if (action === 'status') {
         if (worker.provider === 'render') await services.broker.status(worker);
-        return interaction.editReply({ ...await workerDetail(services, interaction.user.id, workerId, role, 'Status refreshed.'), allowedMentions: { parse: [] } }), true;
+        return interaction.editReply({ ...await workerDetail(services, interaction.user.id, workerId, role, '🔄 Đã làm mới trạng thái.'), allowedMentions: { parse: [] } }), true;
       }
       const result = await services.broker.dispatch(workerId, action);
       await audit(services, interaction.user.id, `worker.${action}`, workerId, { timedOut: Boolean(result.timedOut) });
-      const notice = result.timedOut ? `${action} was sent but no response arrived before timeout.`
-        : result.result?.ok === false ? `${action} failed: ${safe(result.result.error || 'worker error', 120)}`
-          : `Worker ${action} command completed.`;
+      const actionLabels = { start: 'Bật bot', stop: 'Tắt bot', restart: 'Khởi động lại' };
+      const actionName = actionLabels[action] || action;
+      const notice = result.timedOut ? `⏳ Lệnh ${actionName} đã gửi nhưng bot phản hồi chậm. Vui lòng làm mới sau giây lát.`
+        : result.result?.ok === false ? `❌ Lệnh ${actionName} thất bại: ${safe(result.result.error || 'worker error', 120)}`
+          : `✅ Đã thực hiện ${actionName} thành công.`;
       return interaction.editReply({ ...await workerDetail(services, interaction.user.id, workerId, role, notice), allowedMentions: { parse: [] } }), true;
     }
 
