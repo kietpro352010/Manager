@@ -176,6 +176,10 @@ async function main() {
 }
 
 main().catch((error) => {
-  process.stderr.write(`${JSON.stringify({ time: new Date().toISOString(), level: 'error', event: 'manager_startup_failed', name: error.name || 'Error' })}\n`);
+  const message = error?.message || String(error);
+  const stack = error?.stack || '';
+  console.error('\n❌ [MANAGER STARTUP FAILED]:', message);
+  if (stack) console.error(stack);
+  process.stderr.write(`${JSON.stringify({ time: new Date().toISOString(), level: 'error', event: 'manager_startup_failed', name: error?.name || 'Error', message })}\n`);
   process.exitCode = 1;
 });
