@@ -208,16 +208,15 @@ async function workerDetail({ registry, accessControl }, userId, workerId, role,
 
   const rows = [];
   rows.push(new ActionRowBuilder().addComponents(
-    button('Bật', `km:worker:action:start:${workerId}`, ButtonStyle.Success),
-    button('Tắt', `km:worker:action:stop:${workerId}`, ButtonStyle.Danger),
-    button('Khởi động lại', `km:worker:action:restart:${workerId}`, ButtonStyle.Primary),
-    button('Làm mới', `km:worker:action:status:${workerId}`)
+    button('🟢 Bật Bot', `km:worker:action:start:${workerId}`, ButtonStyle.Success),
+    button('🛑 Tắt Bot', `km:worker:action:stop:${workerId}`, ButtonStyle.Danger),
+    button('🔄 Khởi động lại', `km:worker:action:restart:${workerId}`, ButtonStyle.Primary),
+    button('🔄 Cập nhật', `km:worker:action:status:${workerId}`)
   ));
   const management = [
     button('💬 Gửi chat game', `km:worker:chat:${workerId}`, ButtonStyle.Primary),
-    button('Tài khoản MC', `km:worker:credentials:${workerId}`, ButtonStyle.Secondary),
-    button('Cấu hình Proxy', `km:worker:proxy:${workerId}`, ButtonStyle.Secondary),
-    button('Danh sách Bot', 'km:page:workers')
+    button('👤 Tài khoản MC', `km:worker:credentials:${workerId}`, ButtonStyle.Secondary),
+    button('📋 Danh sách Bot', 'km:page:workers')
   ];
   rows.push(new ActionRowBuilder().addComponents(management));
   const adminTools = [];

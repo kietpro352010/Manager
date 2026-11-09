@@ -12,12 +12,7 @@ function requiredRole(interaction) {
     const subcommand = interaction.options.getSubcommand(false);
     return ['add', 'remove', 'rotate-secret', 'reset', 'stop-all', 'reconnect-errors', 'clean-dead'].includes(subcommand) ? 'admin' : 'user';
   }
-  if (interaction.commandName === 'render') return 'admin';
-  if (interaction.commandName === 'code') {
-    const subcommand = interaction.options.getSubcommand(false);
-    return ['create', 'list', 'delete'].includes(subcommand) ? 'admin' : 'user';
-  }
-  if (['user', 'wispbyte'].includes(interaction.commandName)) return 'admin';
+  if (['user', 'wispbyte', 'render'].includes(interaction.commandName)) return 'admin';
   return 'user';
 }
 
