@@ -3,7 +3,7 @@
 const crypto = require('node:crypto');
 const { isLocalOrPrivateHost } = require('./proxy-validation');
 const { encryptSecret, decryptSecret, generateWorkerSecret } = require('../utils/secrets');
-const { extractChatMessage } = require('../discord/panels/renderer');
+const { extractChatMessage } = require('../utils/text-format');
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{1,39}$/;
 const ACTIONS = new Set([

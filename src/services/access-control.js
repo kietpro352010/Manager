@@ -99,7 +99,7 @@ class AccessControl {
 
   isEntitled(member) {
     if (!member || member.status !== 'active') return false;
-    return member.isPermanent === true || Boolean(member.expiresAt && Date.parse(member.expiresAt) > Date.now());
+    return member.isPermanent === true || Boolean(!member.expiresAt || Date.parse(member.expiresAt) > Date.now());
   }
 
   async grant(actorId, userId, options = {}, actorRole) {
@@ -110,18 +110,9 @@ class AccessControl {
     const workerIds = [...new Set((options.workerIds || []).map((id) => String(id).trim().toLowerCase()).filter(Boolean))];
     if (workerIds.some((id) => !/^[a-z0-9][a-z0-9_-]{1,39}$/.test(id))) throw new Error('One or more worker IDs are invalid.');
 
-    let isPermanent = options.isPermanent === true;
-    let expiresAt = options.expiresAt || null;
-    if (role === 'admin') { isPermanent = true; expiresAt = null; }
-    if (role === 'user' && !isPermanent) {
-      const expiry = expiresAt ? new Date(expiresAt) : null;
-      if (!expiry || Number.isNaN(expiry.getTime()) || expiry <= new Date()) throw new Error('Users need a future expiration date or permanent access.');
-      expiresAt = expiry.toISOString();
-    }
-
     return this.store.setAccess(userId, {
       role, workerIds, status: options.status === 'disabled' ? 'disabled' : 'active',
-      isPermanent, expiresAt, planName: String(options.planName || (isPermanent ? 'Permanent' : 'Standard')).slice(0, 64),
+      isPermanent: true, expiresAt: null, planName: String(options.planName || 'Vĩnh viễn').slice(0, 64),
       note: String(options.note || '').slice(0, 300), username: String(options.username || '').slice(0, 64)
     }, actorId);
   }

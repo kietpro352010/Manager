@@ -81,47 +81,88 @@ function fleetNotice(action, result) {
 
 function memberModal(action) {
   if (action === 'grant') {
-    return textModal('km:modal:member-upsert', 'Add or update user', [
-      { id: 'user_id', label: 'Discord user ID', placeholder: 'Right-click user → Copy User ID', maxLength: 20 },
-      { id: 'worker_ids', label: 'Assigned worker IDs (comma separated)', placeholder: 'afk-01, afk-02', required: false, maxLength: 250 },
-      { id: 'duration', label: 'Access duration in days or permanent', placeholder: '30', maxLength: 16 },
-      { id: 'plan_name', label: 'Plan name', placeholder: 'Standard', required: false, maxLength: 64 }
+    return textModal('km:modal:member-upsert', 'Thêm / Gán Bot Cho Người Dùng', [
+      { id: 'user_id', label: 'ID Discord của người dùng', placeholder: 'VD: 123456789012345678', maxLength: 20 },
+      { id: 'worker_ids', label: 'Số thứ tự hoặc ID bot muốn gán', placeholder: 'VD: 1, 2 hoặc 01, 02', required: true, maxLength: 250 }
     ]);
   }
-  return textModal(`km:modal:member-${action}`, `${action === 'disable' ? 'Disable' : 'Remove'} user`, [
-    { id: 'user_id', label: 'Discord user ID', placeholder: 'Right-click user → Copy User ID', maxLength: 20 }
+  return textModal(`km:modal:member-${action}`, `${action === 'disable' ? 'Tạm khóa' : 'Thu hồi'} người dùng`, [
+    { id: 'user_id', label: 'ID Discord của người dùng', placeholder: 'VD: 123456789012345678', maxLength: 20 }
   ]);
 }
 
 async function submitMemberModal(interaction, services, actorRole) {
   const action = interaction.customId;
   const userId = interaction.fields.getTextInputValue('user_id').trim();
+  const guild = interaction.guild || (services.discordClient && services.config.discordGuildId ? await services.discordClient.guilds.fetch(services.config.discordGuildId).catch(() => null) : null);
+  const userRoleId = services.accessControl.userRoleId;
+
   if (action === 'km:modal:member-upsert') {
     const rawIds = interaction.fields.getTextInputValue('worker_ids').trim();
-    const workerIds = rawIds ? rawIds.split(',').map((id) => id.trim().toLowerCase()).filter(Boolean) : [];
-    const duration = interaction.fields.getTextInputValue('duration').trim().toLowerCase();
-    const planName = interaction.fields.getTextInputValue('plan_name').trim() || 'Standard';
-    const isPermanent = duration === 'permanent';
-    const days = Number(duration);
-    if (!isPermanent && (!Number.isInteger(days) || days < 1 || days > 36500)) throw new Error('Duration must be 1–36500 days or permanent.');
-    const knownWorkers = new Set((await services.registry.list()).map((worker) => worker.workerId));
-    const unknown = workerIds.filter((id) => !knownWorkers.has(id));
-    if (unknown.length) throw new Error(`Unknown worker ID(s): ${unknown.join(', ')}`);
-    const expiresAt = isPermanent ? null : new Date(Date.now() + days * 86400000).toISOString();
-    const member = await services.accessControl.grant(interaction.user.id, userId, {
-      role: 'user', workerIds, status: 'active', isPermanent, expiresAt, planName
+    const tokens = rawIds.split(',').map((id) => id.trim().replace(/^#/, '')).filter(Boolean);
+    if (!tokens.length) throw new Error('Vui lòng nhập ít nhất một số thứ tự hoặc ID bot muốn gán.');
+
+    const resolved = [];
+    const seen = new Set();
+    for (const token of tokens) {
+      let worker = null;
+      if (/^\d+$/.test(token)) {
+        worker = await services.registry.findByNumber(parseInt(token, 10));
+      }
+      if (!worker) {
+        worker = await services.registry.find(token.toLowerCase());
+      }
+      if (!worker) {
+        throw new Error(`Không tìm thấy bot nào khớp với "${token}".`);
+      }
+      if (seen.has(worker.workerId)) continue;
+      seen.add(worker.workerId);
+      resolved.push(worker);
+    }
+
+    // Strict Exclusive Check: A bot cannot be shared
+    for (const worker of resolved) {
+      const assigned = await services.accessStore.assignedUser(worker.workerId);
+      if (assigned && assigned.userId !== userId) {
+        throw new Error(`❌ Bot #${padId(worker.botNumber)} (${worker.name}) đang được gán cho <@${assigned.userId}>. Mỗi bot chỉ thuộc về 1 người dùng độc quyền.`);
+      }
+    }
+
+    const workerIds = resolved.map((w) => w.workerId);
+    await services.accessControl.grant(interaction.user.id, userId, {
+      role: 'user', workerIds, status: 'active', isPermanent: true, expiresAt: null, planName: 'Vĩnh viễn'
     }, actorRole);
-    await audit(services, interaction.user.id, 'user.upsert', userId, { workerIds, planName, isPermanent, expiresAt });
-    return `Saved access for <@${userId}> · ${workerIds.length} worker(s) · ${isPermanent ? 'permanent' : `expires ${new Date(expiresAt).toLocaleDateString('en-GB')}`}. Confirm they hold the configured Discord user role.`;
+
+    await audit(services, interaction.user.id, 'user.upsert', userId, { workerIds, planName: 'Vĩnh viễn', isPermanent: true });
+
+    // Auto-assign Member role in Discord
+    if (guild && userRoleId) {
+      const memberObj = await guild.members.fetch(userId).catch(() => null);
+      if (memberObj && !memberObj.roles.cache.has(userRoleId)) {
+        await memberObj.roles.add(userRoleId, 'Tự động cấp role Member khi gán bot KingMC').catch(() => {});
+      }
+    }
+
+    const botList = resolved.map((w) => `#${padId(w.botNumber)}`).join(', ');
+    return `✅ Đã gán Bot ${botList} vĩnh viễn cho <@${userId}>! Role Member đã được tự động đồng bộ.`;
   }
   if (action === 'km:modal:member-disable') {
     await services.accessControl.updateMember(interaction.user.id, userId, { status: 'disabled' }, actorRole);
     await audit(services, interaction.user.id, 'user.disable', userId);
-    return `Disabled access for <@${userId}>.`;
+    return `🔴 Đã tạm khóa quyền sử dụng bot của <@${userId}>.`;
   }
   await services.accessControl.revoke(interaction.user.id, userId, actorRole);
   await audit(services, interaction.user.id, 'user.remove', userId);
-  return `Removed <@${userId}> from manager access.`;
+
+  // Auto-remove Member role in Discord
+  if (guild && userRoleId) {
+    const memberObj = await guild.members.fetch(userId).catch(() => null);
+    if (memberObj && memberObj.roles.cache.has(userRoleId)) {
+      await memberObj.roles.remove(userRoleId, 'Tự động gỡ role Member khi thu hồi bot KingMC').catch(() => {});
+    }
+  }
+
+  return `🗑️ Đã thu hồi toàn bộ bot và gỡ role Member của <@${userId}>.`;
 }
 
 async function handlePanelInteraction(interaction, services) {

@@ -7,45 +7,7 @@ const { escapeMarkdown } = require('discord.js');
 
 const COLOR = 0x0f766e;
 
-function cleanText(input) {
-  return String(input || '')
-    .replace(/§x(§[0-9a-f]){6}/gi, '')
-    .replace(/&x(&[0-9a-f]){6}/gi, '')
-    .replace(/&#[0-9a-f]{6}/gi, '')
-    .replace(/§#[0-9a-f]{6}/gi, '')
-    .replace(/§[0-9a-fk-or]/gi, '')
-    .replace(/&[0-9a-fk-or]/gi, '')
-    .replace(/§./g, '')
-    .replace(/[\u00a0\u200b\ufeff]/g, ' ')
-    .normalize('NFC')
-    .trim();
-}
-
-function extractChatMessage(raw) {
-  if (!raw) return '';
-  if (typeof raw === 'object' && typeof raw.toPlainText === 'function') {
-    return cleanText(raw.toPlainText());
-  }
-  let str = typeof raw === 'string' ? raw : '';
-  if (!str && typeof raw === 'object') {
-    try { str = JSON.stringify(raw); } catch (_) { str = String(raw); }
-  }
-  try {
-    const obj = typeof raw === 'object' ? raw : JSON.parse(str);
-    const walk = (node) => {
-      if (!node) return '';
-      if (typeof node === 'string') return node;
-      let text = node.text || '';
-      if (Array.isArray(node.extra)) {
-        text += node.extra.map(walk).join('');
-      }
-      return text;
-    };
-    const res = walk(obj);
-    if (res) return cleanText(res);
-  } catch (_) {}
-  return cleanText(str);
-}
+const { cleanText, extractChatMessage } = require('../../utils/text-format');
 
 function padId(num) {
   const n = Number(num) || 0;
@@ -165,7 +127,7 @@ async function overview({ registry, accessControl }, userId, role, notice = '') 
   if (!workers.length) lines.push(role === 'admin' ? 'Chưa có bot nào được đăng ký.' : 'Chưa có bot nào được gán cho tài khoản của bạn.');
   const accessText = role === 'admin' ? 'Quản trị viên (Admin)' : 'Thành viên (User)';
   const entitlement = role === 'user'
-    ? (accessControl.isEntitled(member) ? (member.isPermanent ? 'Vĩnh viễn' : `Hạn đến ${new Date(member.expiresAt).toLocaleDateString('vi-VN')}`) : 'Hết hạn / Đã tắt')
+    ? (accessControl.isEntitled(member) ? 'Vĩnh viễn' : 'Đã tạm khóa')
     : 'Toàn quyền hệ thống';
   const body = [notice ? `**${safe(notice, 220)}**` : '', lines.join('\n')].filter(Boolean).join('\n\n');
   const panel = embed('👑 KingMC AFK · Bảng Tổng Quan', body, 0x0f766e)
@@ -270,7 +232,7 @@ async function accessPage({ accessStore, config }, role, notice = '') {
   const entries = await accessStore.listAccess();
   const grants = entries.slice(0, 12).map((entry) => {
     const bots = Array.isArray(entry.workerIds) && entry.workerIds.length ? entry.workerIds.join(', ') : 'Chưa gán bot';
-    const access = entry.isPermanent ? 'vĩnh viễn' : `hạn đến ${entry.expiresAt ? new Date(entry.expiresAt).toLocaleDateString('vi-VN') : 'chưa đặt'}`;
+    const access = 'vĩnh viễn';
     return `• <@${entry.userId}> · ${entry.role} · ${entry.status || 'hoạt động'} · ${access} · ${safe(bots, 100)}`;
   });
   const text = [grants.length ? grants.join('\n') : 'Chưa có thành viên nào được cấp quyền.', entries.length > 15 ? `…và ${entries.length - 15} thành viên khác.` : '']

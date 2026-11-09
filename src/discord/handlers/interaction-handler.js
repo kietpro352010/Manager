@@ -17,8 +17,7 @@ function requiredRole(interaction) {
     const subcommand = interaction.options.getSubcommand(false);
     return ['create', 'list', 'delete'].includes(subcommand) ? 'admin' : 'user';
   }
-  if (interaction.commandName === 'link4m') return interaction.options.getSubcommand() === 'configure' ? 'admin' : 'user';
-  if (['codecreate', 'codelist', 'codedelete', 'user', 'wispbyte'].includes(interaction.commandName)) return 'admin';
+  if (['user', 'wispbyte'].includes(interaction.commandName)) return 'admin';
   return 'user';
 }
 

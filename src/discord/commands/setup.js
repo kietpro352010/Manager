@@ -10,7 +10,7 @@ const data = new SlashCommandBuilder()
   .addRoleOption((option) => option.setName('user_role').setDescription('Role Discord Thành viên được dùng bot (User)').setRequired(true))
   .addUserOption((option) => option.setName('admin_user').setDescription('Tài khoản Discord Admin nhận tin nhắn thông báo lỗi (DM)').setRequired(false))
   .addStringOption((option) => option.setName('admin_user_id').setDescription('Hoặc nhập ID Discord của Admin nhận báo lỗi (VD: 123456789012345678)').setRequired(false))
-  .addStringOption((option) => option.setName('public_url').setDescription('URL Public HTTPS của Manager (nếu dùng vượt link Link4M)').setMaxLength(250));
+  .addStringOption((option) => option.setName('public_url').setDescription('URL Public HTTPS của Manager').setMaxLength(250));
 
 async function isAuthorizedSetupUser(interaction, services) {
   const userId = interaction.user?.id;

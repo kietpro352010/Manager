@@ -14,7 +14,6 @@ const RenderApi = require('./services/render-api');
 const { AccessControl } = require('./services/access-control');
 const { EntitlementService } = require('./services/entitlement-service');
 const AsyncKeyLock = require('./services/async-key-lock');
-const { Link4mService } = require('./services/link4m-service');
 const { WorkerRegistry } = require('./services/worker-registry');
 const CommandBroker = require('./services/command-broker');
 const FleetOperations = require('./services/fleet-operations');
@@ -71,26 +70,17 @@ async function main() {
 
   const runtimeConfig = { ...config, adminRoleId: accessControl.adminRoleId, userRoleId: accessControl.userRoleId,
     adminUserId: adminNotifier.getAdminUserId(),
-    publicBaseUrl: integrationSettings.publicBaseUrl, renderApiKey: integrationSettings.renderApiKey,
-    link4mApiToken: integrationSettings.link4mApiToken, link4mSecretKey: integrationSettings.link4mSecretKey };
+    publicBaseUrl: integrationSettings.publicBaseUrl, renderApiKey: integrationSettings.renderApiKey };
   const userLock = new AsyncKeyLock();
 
   const renderApi = new RenderApi({ apiKey: integrationSettings.renderApiKey, baseUrl: config.renderApiBaseUrl });
   const registry = new WorkerRegistry({ store, accessStore, encryptionKey: config.encryptionKey, renderApi, adminNotifier });
   const entitlements = new EntitlementService({ store: accessStore, registry, accessControl, logger, userLock });
-  const link4m = new Link4mService({
-    store: accessStore, accessControl, userLock, logger,
-    config: {
-      apiToken: integrationSettings.link4mApiToken, secretKey: integrationSettings.link4mSecretKey, publicBaseUrl: integrationSettings.publicBaseUrl,
-      enabled: config.link4mRewardEnabled, rewardHours: config.link4mRewardHours, dailyLimit: config.link4mDailyLimit
-    }
-  });
-  await link4m.initialize();
   const broker = new CommandBroker({ registry, commandStore, config: runtimeConfig, logger });
   const fleetOperations = new FleetOperations({ registry, broker, renderApi, logger });
   const wispbyteKeepAlive = new WispbyteKeepAliveManager({ store: accessStore, config: runtimeConfig, logger, adminNotifier });
-  const services = { config: runtimeConfig, logger, store, commandStore, registry, broker, renderApi, fleetOperations, accessStore, accessControl, entitlements, link4m, managerRuntimeSettings, wispbyteKeepAlive, adminNotifier };
-  const app = createApp({ registry, broker, config: runtimeConfig, logger, link4m });
+  const services = { config: runtimeConfig, logger, store, commandStore, registry, broker, renderApi, fleetOperations, accessStore, accessControl, entitlements, managerRuntimeSettings, wispbyteKeepAlive, adminNotifier, discordClient: client };
+  const app = createApp({ registry, broker, config: runtimeConfig, logger });
   const server = http.createServer(app);
   server.requestTimeout = 40000;
   server.headersTimeout = 10000;
