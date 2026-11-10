@@ -40,10 +40,17 @@ async function deny(interaction, content) {
 async function safeDeferUpdate(interaction) {
   if (interaction.deferred || interaction.replied) return;
   try {
-    await safeDeferUpdate(interaction);
+    await interaction.deferUpdate();
   } catch (err) {
     if (!isIgnorable(err)) throw err;
   }
+}
+
+async function handleStaleWorkerInteraction(interaction, services, role, customNotice) {
+  await safeDeferUpdate(interaction);
+  const notice = customNotice || '⚠️ Bot này đã được xóa hoặc gán lại từ Web Dashboard. Đã tự động đồng bộ lại danh sách mới nhất!';
+  const view = await botDashboard(services, interaction.user.id, role, notice);
+  return safeUpdate(interaction, view);
 }
 
 async function safeUpdate(interaction, payload) {
@@ -64,6 +71,10 @@ async function safeUpdate(interaction, payload) {
 }
 
 async function showWorker(interaction, services, role, workerId, notice = '') {
+  const worker = await services.registry.find(workerId);
+  if (!worker || !(await hasWorkerAccess(services, interaction.user.id, worker, role))) {
+    return handleStaleWorkerInteraction(interaction, services, role, '⚠️ Bot này không tồn tại hoặc đã được gán lại từ Web. Đã đồng bộ lại danh sách mới nhất!');
+  }
   return safeUpdate(interaction, await workerDetail(services, interaction.user.id, workerId, role, notice));
 }
 
@@ -279,7 +290,7 @@ async function handlePanelInteraction(interaction, services) {
       if (credentialsSubmit) {
         const [, mode, workerId] = credentialsSubmit;
         const worker = await services.registry.find(workerId);
-        if (!worker || !(await hasWorkerAccess(services, interaction.user.id, worker, role))) return deny(interaction, 'You do not have access to this worker.'), true;
+        if (!worker || !(await hasWorkerAccess(services, interaction.user.id, worker, role))) return await handleStaleWorkerInteraction(interaction, services, role), true;
         await safeDeferUpdate(interaction);
         const username = interaction.fields.getTextInputValue('username').trim();
         const password = interaction.fields.getTextInputValue('password');
@@ -303,7 +314,7 @@ async function handlePanelInteraction(interaction, services) {
       if (customId.startsWith('km:modal:chat:')) {
         const workerId = customId.slice('km:modal:chat:'.length);
         const worker = await services.registry.find(workerId);
-        if (!worker || !(await hasWorkerAccess(services, interaction.user.id, worker, role))) return deny(interaction, 'You do not have access to this worker.'), true;
+        if (!worker || !(await hasWorkerAccess(services, interaction.user.id, worker, role))) return await handleStaleWorkerInteraction(interaction, services, role), true;
         await safeDeferUpdate(interaction);
         const message = interaction.fields.getTextInputValue('message').trim();
         const result = await services.broker.dispatch(workerId, 'chat', { message });
@@ -314,7 +325,7 @@ async function handlePanelInteraction(interaction, services) {
       if (customId.startsWith('km:modal:worker-proxy:')) {
         const workerId = customId.slice('km:modal:worker-proxy:'.length);
         const worker = await services.registry.find(workerId);
-        if (!worker || !(await hasWorkerAccess(services, interaction.user.id, worker, role))) return deny(interaction, 'You do not have access to this worker.'), true;
+        if (!worker || !(await hasWorkerAccess(services, interaction.user.id, worker, role))) return await handleStaleWorkerInteraction(interaction, services, role), true;
         await safeDeferUpdate(interaction);
         const proxyUrl = interaction.fields.getTextInputValue('proxy_url').trim();
         if (proxyUrl && worker.status?.restriction) throw new Error('Proxy changes are paused while this worker is on a server restriction hold.');
@@ -385,7 +396,7 @@ async function handlePanelInteraction(interaction, services) {
     const chatMatch = customId.match(/^km:worker:chat:([a-z0-9_-]{2,40})$/);
     if (chatMatch) {
       const worker = await services.registry.find(chatMatch[1]);
-      if (!worker || !(await hasWorkerAccess(services, interaction.user.id, worker, role))) return deny(interaction, 'Bạn không có quyền truy cập bot này.'), true;
+      if (!worker || !(await hasWorkerAccess(services, interaction.user.id, worker, role))) return await handleStaleWorkerInteraction(interaction, services, role), true;
       return interaction.showModal(textModal(`km:modal:chat:${chatMatch[1]}`, `💬 Gửi chat (#${worker.botNumber} ${worker.name})`, [
         { id: 'message', label: 'Tin nhắn hoặc lệnh (/spawn, /pay, hello...)', placeholder: 'Nhập tin nhắn để bot gửi vào server game...', maxLength: 256 }
       ])), true;
@@ -394,7 +405,7 @@ async function handlePanelInteraction(interaction, services) {
     if (proxyMatch) {
       const workerId = proxyMatch[1];
       const worker = await services.registry.find(workerId);
-      if (!worker || !(await hasWorkerAccess(services, interaction.user.id, worker, role))) return deny(interaction, 'You do not have access to this worker.'), true;
+      if (!worker || !(await hasWorkerAccess(services, interaction.user.id, worker, role))) return await handleStaleWorkerInteraction(interaction, services, role), true;
       return interaction.showModal(textModal(`km:modal:worker-proxy:${workerId}`, 'Set SOCKS5 proxy', [
         { id: 'proxy_url', label: 'SOCKS5 URL (blank clears it)', placeholder: 'socks5://user:password@host:1080', required: false, maxLength: 512 }
       ])), true;
@@ -403,7 +414,7 @@ async function handlePanelInteraction(interaction, services) {
     if (credentialsMatch) {
       const workerId = credentialsMatch[1];
       const worker = await services.registry.find(workerId);
-      if (!worker || !(await hasWorkerAccess(services, interaction.user.id, worker, role))) return deny(interaction, 'You do not have access to this worker.'), true;
+      if (!worker || !(await hasWorkerAccess(services, interaction.user.id, worker, role))) return await handleStaleWorkerInteraction(interaction, services, role), true;
       const privateSettings = await services.registry.privateSettings(workerId);
       return interaction.showModal(textModal(`km:modal:credentials:save:${workerId}`, 'Minecraft account', [
         { id: 'username', label: 'Minecraft username', value: privateSettings?.username || '', maxLength: 64 },
@@ -414,7 +425,7 @@ async function handlePanelInteraction(interaction, services) {
     if (actionMatch) {
       const [, action, workerId] = actionMatch;
       const worker = await services.registry.find(workerId);
-      if (!worker || !(await hasWorkerAccess(services, interaction.user.id, worker, role))) return deny(interaction, 'You do not have access to this worker, or your user access is inactive.'), true;
+      if (!worker || !(await hasWorkerAccess(services, interaction.user.id, worker, role))) return await handleStaleWorkerInteraction(interaction, services, role), true;
       if (action === 'start') {
         const privateSettings = await services.registry.privateSettings(workerId);
         if (!privateSettings?.credentialsConfigured) {
