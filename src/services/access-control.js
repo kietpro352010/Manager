@@ -79,14 +79,24 @@ class AccessControl {
     return null;
   }
 
+  isEntitled(member) {
+    if (!member) return false;
+    const status = String(member.status || 'active').toLowerCase();
+    if (status !== 'active') return false;
+    if (member.isPermanent === true) return true;
+    if (!member.expiresAt) return true; // Null expiresAt with active status is treated as lifetime or unexpired
+    const expiryTime = Date.parse(member.expiresAt);
+    return Number.isFinite(expiryTime) && expiryTime > Date.now();
+  }
+
   async canUseWorker(userId, worker, discordRole) {
     if (discordRole === 'admin') return true;
     if (discordRole !== 'user') return false;
     const member = await this.memberFor(userId);
     if (!member || member.status === 'disabled') return false;
     if (!this.isEntitled(member)) return false;
-    const assignedIds = Array.isArray(member.workerIds) ? member.workerIds : [];
-    return assignedIds.includes(worker.workerId);
+    const assignedIds = Array.isArray(member.workerIds) ? member.workerIds.map(String) : [];
+    return assignedIds.includes(String(worker.workerId));
   }
 
   async workersFor(userId, workers, discordRole) {
@@ -94,12 +104,8 @@ class AccessControl {
     if (discordRole !== 'user') return [];
     const member = await this.memberFor(userId);
     if (!member || !this.isEntitled(member)) return [];
-    return workers.filter((worker) => Array.isArray(member.workerIds) && member.workerIds.includes(worker.workerId));
-  }
-
-  isEntitled(member) {
-    if (!member || member.status !== 'active') return false;
-    return member.isPermanent === true || Boolean(!member.expiresAt || Date.parse(member.expiresAt) > Date.now());
+    const assignedIds = new Set(Array.isArray(member.workerIds) ? member.workerIds.map(String) : []);
+    return workers.filter((worker) => assignedIds.has(String(worker.workerId)));
   }
 
   async grant(actorId, userId, options = {}, actorRole) {
@@ -110,10 +116,18 @@ class AccessControl {
     const workerIds = [...new Set((options.workerIds || []).map((id) => String(id).trim().toLowerCase()).filter(Boolean))];
     if (workerIds.some((id) => !/^[a-z0-9][a-z0-9_-]{1,39}$/.test(id))) throw new Error('One or more worker IDs are invalid.');
 
+    const isPermanent = options.isPermanent !== undefined ? Boolean(options.isPermanent) : true;
+    const expiresAt = isPermanent ? null : (options.expiresAt || null);
+
     return this.store.setAccess(userId, {
-      role, workerIds, status: options.status === 'disabled' ? 'disabled' : 'active',
-      isPermanent: true, expiresAt: null, planName: String(options.planName || 'Vĩnh viễn').slice(0, 64),
-      note: String(options.note || '').slice(0, 300), username: String(options.username || '').slice(0, 64)
+      role,
+      workerIds,
+      status: options.status === 'disabled' ? 'disabled' : 'active',
+      isPermanent,
+      expiresAt,
+      planName: String(options.planName || 'Vĩnh viễn').slice(0, 64),
+      note: String(options.note || '').slice(0, 300),
+      username: String(options.username || '').slice(0, 64)
     }, actorId);
   }
 

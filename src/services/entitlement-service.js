@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { normalizeMaxUses } = require('../storage/supabase-client');
 
 function normalizeCode(value) {
   return String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -27,92 +28,209 @@ class EntitlementService {
   async createCode({ days, permanent = false, botCount = 0, workerIds = [], maxUses = 1, planName = 'Standard', expiresAt = null, actorId }) {
     const duration = Number(days);
     const slots = Number(botCount);
-    const uses = Number(maxUses);
-    if (!permanent && (!Number.isInteger(duration) || duration < 1 || duration > 36500)) throw new Error('Code duration must be 1–36500 days or permanent.');
-    if (!Number.isInteger(slots) || slots < 0 || slots > 25) throw new Error('Bot count must be between 0 and 25.');
-    if (!Number.isInteger(uses) || uses < 1 || uses > 1000) throw new Error('Max uses must be between 1 and 1000.');
+    const uses = normalizeMaxUses(maxUses, 1);
+
+    if (!permanent && (!Number.isInteger(duration) || duration < 1 || duration > 36500)) {
+      throw new Error('Code duration must be 1–36500 days or permanent.');
+    }
+    if (!Number.isInteger(slots) || slots < 0 || slots > 25) {
+      throw new Error('Bot count must be between 0 and 25.');
+    }
+    if (uses === null || uses < 0 || uses > 100000) {
+      throw new Error('Max uses must be 0 (unlimited) or a positive integer up to 100,000.');
+    }
+
     const fixedIds = [...new Set(workerIds.map((id) => String(id).trim().toLowerCase()).filter(Boolean))];
     let codeExpiry = null;
     if (expiresAt) {
       codeExpiry = new Date(expiresAt);
-      if (Number.isNaN(codeExpiry.getTime()) || codeExpiry <= new Date()) throw new Error('Code expiry must be a valid future date.');
+      if (Number.isNaN(codeExpiry.getTime()) || codeExpiry <= new Date()) {
+        throw new Error('Code expiry must be a valid future date.');
+      }
     }
     if (fixedIds.length > 25) throw new Error('A code can include up to 25 fixed workers.');
     if (fixedIds.length && uses > 1) throw new Error('Codes with fixed worker assignments can only be redeemed once.');
-    const known = new Set((await this.registry.list()).map((worker) => worker.workerId));
+
+    const known = new Set((await this.registry.list()).map((worker) => String(worker.workerId)));
     if (fixedIds.some((id) => !known.has(id))) throw new Error('One or more fixed worker IDs are not registered.');
 
     const code = formatCode();
-    const keyId = crypto.randomUUID();
-    await this.store.createKey({
-      keyId, codeHash: hashCode(code), codeSuffix: code.slice(-4), status: 'unused',
-      days: permanent ? -1 : duration, isPermanent: Boolean(permanent), botCount: fixedIds.length || slots,
-      workerIds: fixedIds, planName: String(planName || 'Standard').slice(0, 64),
-      maxUses: uses, usedCount: 0, usedUsers: [], expiresAt: codeExpiry,
-      createdBy: actorId, createdAt: new Date()
-    });
-    return { code, keyId, days: permanent ? -1 : duration, isPermanent: Boolean(permanent), botCount: fixedIds.length || slots, maxUses: uses, planName: String(planName || 'Standard').slice(0, 64) };
+    const keyId = `key_${crypto.randomUUID()}`;
+
+    const record = {
+      id: keyId,
+      keyId,
+      code,
+      key: code,
+      keyCode: code,
+      codeHash: hashCode(code),
+      codeSuffix: code.slice(-4),
+      status: 'unused',
+      days: permanent ? -1 : duration,
+      durationDays: permanent ? -1 : duration,
+      isPermanent: Boolean(permanent),
+      botCount: fixedIds.length || slots || 1,
+      botIds: fixedIds,
+      workerIds: fixedIds,
+      planName: String(planName || 'Standard').slice(0, 64),
+      maxUses: uses,
+      usedCount: 0,
+      usedUsers: [],
+      expiresAt: codeExpiry ? codeExpiry.toISOString() : null,
+      createdBy: String(actorId || 'system'),
+      createdAt: new Date().toISOString()
+    };
+
+    await this.store.createKey(record);
+    return {
+      code,
+      keyId,
+      days: permanent ? -1 : duration,
+      isPermanent: Boolean(permanent),
+      botCount: fixedIds.length || slots || 1,
+      maxUses: uses,
+      planName: record.planName
+    };
   }
 
-  async listCodes(limit = 20) { return this.store.listKeys(limit); }
+  async listCodes(limit = 100) {
+    return this.store.listKeys(limit);
+  }
 
-  async deleteCode(keyId) { return this.store.deleteKey(String(keyId || '').trim()); }
+  async deleteCode(keyId) {
+    return this.store.deleteKey(String(keyId || '').trim());
+  }
 
-  async redeem(userId, rawCode, discordRole) {
+  async redeem(userId, rawCode, discordRole = 'user') {
     const run = () => this.redeemLocked(userId, rawCode, discordRole);
     return this.userLock ? this.userLock.run(userId, run) : run();
   }
 
   async redeemLocked(userId, rawCode, discordRole) {
     const normalized = normalizeCode(rawCode);
-    if (normalized.length < 12 || normalized.length > 32) throw new Error('That code is not valid.');
-    if (discordRole !== 'user') throw new Error('Only members with the configured Discord user role can redeem codes.');
-    const member = await this.accessControl.memberFor(userId);
-    if (member?.status === 'disabled') throw new Error('This code cannot be redeemed by this account.');
+    if (normalized.length < 10 || normalized.length > 36) {
+      throw new Error('Mã Giftcode không đúng định dạng.');
+    }
+
+    const cleanUserId = String(userId || '').trim();
+    const member = await this.accessControl.memberFor(cleanUserId);
+    if (member?.status === 'disabled') {
+      throw new Error('Tài khoản này đã bị khóa quyền nạp mã.');
+    }
 
     const codeHash = hashCode(normalized);
-    const key = await this.store.getKey(codeHash);
-    if (!key) throw new Error('Code is invalid, expired, already used, or has no uses remaining.');
+    let key = await this.store.getKey(codeHash);
+    if (!key) {
+      key = await this.store.getKey(normalized);
+    }
+    if (!key) {
+      throw new Error('Mã Giftcode không tồn tại hoặc đã hết hạn.');
+    }
 
+    // 1. Kiểm tra hạn mức sử dụng (max_uses)
+    const maxUses = normalizeMaxUses(key.maxUses ?? key.max_uses, 1);
+    const usedUsers = Array.isArray(key.usedUsers) ? key.usedUsers.map(String) : [];
+    const normalizedUser = cleanUserId.toLowerCase();
+
+    if (usedUsers.includes(normalizedUser)) {
+      throw new Error('Tài khoản của bạn đã từng nhập mã Giftcode này rồi.');
+    }
+    if (maxUses > 0 && (key.usedCount || 0) >= maxUses) {
+      throw new Error('Mã Giftcode này đã hết lượt sử dụng.');
+    }
+    if (key.expiresAt && Date.parse(key.expiresAt) <= Date.now()) {
+      throw new Error('Mã Giftcode này đã quá hạn sử dụng.');
+    }
+
+    // 2. Tính toán thời hạn thuê mới (Cộng dồn nếu còn hạn, hoặc tính từ now)
     const now = Date.now();
     const existingPermanent = member?.isPermanent === true;
-    const isPermanent = existingPermanent || key.isPermanent === true;
+    const isPermanent = existingPermanent || key.isPermanent === true || key.days === -1;
     const currentExpiry = member?.expiresAt ? Date.parse(member.expiresAt) : NaN;
     const base = Number.isFinite(currentExpiry) && currentExpiry > now ? currentExpiry : now;
-    const expiresAt = isPermanent ? null : new Date(base + Math.max(1, Number(key.days) || 1) * 86400000).toISOString();
-    const currentIds = Array.isArray(member?.workerIds) ? member.workerIds : [];
+    const addedDays = Math.max(1, Number(key.days) || 1);
+    const expiresAt = isPermanent ? null : new Date(base + addedDays * 86400000).toISOString();
+
+    // 3. Phân bổ Bot rảnh
+    const currentIds = Array.isArray(member?.workerIds) ? member.workerIds.map(String) : [];
     const desired = [...currentIds];
-    const fixedIds = Array.isArray(key.workerIds) ? key.workerIds : [];
+    const fixedIds = Array.isArray(key.workerIds) ? key.workerIds.map(String) : (Array.isArray(key.botIds) ? key.botIds.map(String) : []);
     const candidates = await this.registry.list();
-    const registeredIds = new Set(candidates.map((worker) => worker.workerId));
-    const targetCount = Math.max(currentIds.length, Number(key.botCount) || 0);
+    const registeredIds = new Set(candidates.map((w) => String(w.workerId)));
+    const targetCount = Math.max(currentIds.length, Number(key.botCount) || 1);
+
+    // Gán các bot cố định trong key
     for (const workerId of fixedIds) {
       if (desired.includes(workerId)) continue;
       if (!registeredIds.has(workerId)) continue;
       const assigned = await this.store.assignedUser(workerId);
-      if (assigned && assigned.userId !== userId) continue;
+      if (assigned && assigned.userId !== cleanUserId) continue;
       desired.push(workerId);
     }
 
-    if (!fixedIds.length && desired.length < targetCount) {
+    // Gán bổ sung bot rảnh nếu còn thiếu
+    if (desired.length < targetCount) {
       for (const worker of candidates) {
         if (desired.length >= targetCount) break;
-        if (desired.includes(worker.workerId)) continue;
-        if (await this.store.assignedUser(worker.workerId)) continue;
-        desired.push(worker.workerId);
+        if (desired.includes(String(worker.workerId))) continue;
+        if (await this.store.assignedUser(String(worker.workerId))) continue;
+        desired.push(String(worker.workerId));
       }
     }
 
-    const redeemed = await this.store.redeemKeyWithAccess(codeHash, userId, {
-      role: 'user', status: 'active', workerIds: desired, isPermanent,
-      expiresAt, planName: String(key.planName || member?.planName || 'Standard').slice(0, 64),
-      note: member?.note || '', username: member?.username || ''
-    }, `code:${key.keyId}`);
-    if (!redeemed) throw new Error('Code is invalid, expired, already used, or has no uses remaining.');
+    // 4. Gọi nạp nguyên tử qua Store
+    const transactionId = `tx_${crypto.randomUUID()}`;
+    const redeemed = await this.store.redeemKeyWithAccess(codeHash, cleanUserId, {
+      role: 'user',
+      status: 'active',
+      workerIds: desired,
+      isPermanent,
+      expiresAt,
+      planName: String(key.planName || member?.planName || 'Standard').slice(0, 64),
+      note: member?.note || '',
+      username: member?.username || cleanUserId,
+      botCount: targetCount
+    }, `code:${key.keyId || key.id}`);
+
+    if (!redeemed) {
+      // Fallback consume atomic
+      await this.store.redeemKeyAtomic(normalized, cleanUserId, transactionId);
+    }
+
+    // 5. Nếu thiếu bot so với hạn ngạch của key, đẩy vào hàng đợi cấp phát tự động
+    const missingWorkers = Math.max(0, targetCount - desired.length);
+    if (missingWorkers > 0) {
+      await this.store.client.from('manager_pending_allocations').insert({
+        id: `alloc_${crypto.randomUUID()}`,
+        user_id: cleanUserId,
+        username: member?.username || cleanUserId,
+        required_bot_count: missingWorkers,
+        status: 'pending_retry',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      }).catch((err) => {
+        this.logger?.warn('enqueue_pending_allocation_failed', { userId: cleanUserId, error: err.message });
+      });
+    }
+
+    this.logger?.info('key_redeemed_success', {
+      userId: cleanUserId,
+      code: key.code || normalized,
+      addedDays,
+      isPermanent,
+      expiresAt,
+      assignedBots: desired.length,
+      missingBots: missingWorkers
+    });
 
     return {
-      expiresAt, isPermanent, workerIds: desired,
-      missingWorkers: Math.max(0, targetCount - desired.length),
+      success: true,
+      expiresAt,
+      isPermanent,
+      workerIds: desired,
+      assignedCount: desired.length,
+      targetCount,
+      missingWorkers,
       planName: key.planName
     };
   }

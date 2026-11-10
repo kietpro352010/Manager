@@ -1,21 +1,264 @@
 'use strict';
 
+const zlib = require('node:zlib');
 const express = require('express');
 const helmet = require('helmet');
-const { createWorkerApi } = require('./routes/worker-api');
 
-function createApp({ registry, broker, config, logger }) {
+const { PUBLIC_LOGIN_HTML } = require('./views/login-html');
+const { HTML: DASHBOARD_HTML } = require('./views/dashboard-html');
+
+const {
+  createAuthApi,
+  hashSessionToken,
+  parseCookies,
+  getRequestManagerSessionToken,
+  isHttps
+} = require('./routes/auth-api');
+
+const { createUserApi } = require('./routes/user-api');
+const { createAdminApi } = require('./routes/admin-api');
+const { createWorkerApi } = require('./routes/worker-api');
+const { timingSafeStringEquals } = require('../utils/secrets');
+
+function createApp({
+  store,
+  entitlementService,
+  link4mService,
+  registry,
+  broker,
+  workerStore,
+  fleetOperations,
+  adminNotifier,
+  config,
+  logger
+}) {
   const app = express();
   app.disable('x-powered-by');
-  app.use(helmet({ contentSecurityPolicy: false }));
-  app.use(express.json({ limit: '32kb', strict: true }));
-  app.get(['/', '/health'], (_req, res) => res.json({ ok: true, service: 'kingmc-worker-manager', time: new Date().toISOString() }));
-  app.use('/api/v1/workers/:workerId', createWorkerApi({ registry, broker, config }));
-  app.use((_req, res) => res.status(404).json({ ok: false, error: 'not_found' }));
-  app.use((error, _req, res, _next) => {
-    logger.error('http_request_failed', { name: error.name, message: error.message });
-    res.status(500).json({ ok: false, error: 'internal_error' });
+
+  // Shared active sessions map in memory (TTL synced with DB)
+  const activeSessions = new Map();
+
+  // Helper to check worker bot secret
+  function isBotSecretRequest(req) {
+    const incoming = String(req?.headers?.['x-bot-secret'] || req?.headers?.['x-worker-secret'] || '').trim();
+    if (!incoming) return false;
+    const globalSecret = String(config.botSecretKey || '').trim();
+    if (globalSecret && timingSafeStringEquals(incoming, globalSecret)) return true;
+    const botId = String(req?.headers?.['x-manager-bot-id'] || req?.body?.workerId || req?.body?.botId || req?.query?.botId || req?.params?.workerId || '').trim();
+    if (botId && registry.verifyBotSecret(botId, incoming)) return true;
+    return false;
+  }
+
+  // 1. Lightweight Zero-Dependency Gzip Compression Middleware (saves ~85% outbound bandwidth)
+  app.use((req, res, next) => {
+    const acceptEncoding = req.headers['accept-encoding'] || '';
+    if (!acceptEncoding.includes('gzip')) return next();
+    const originalSend = res.send;
+    res.send = function (body) {
+      if (res.headersSent || !body) return originalSend.call(this, body);
+      const contentType = String(res.getHeader('Content-Type') || '');
+      const isCompressible = contentType.includes('json') ||
+                             contentType.includes('html') ||
+                             contentType.includes('text') ||
+                             contentType.includes('javascript') ||
+                             contentType.includes('css');
+      if (!isCompressible) return originalSend.call(this, body);
+      const buffer = Buffer.isBuffer(body)
+        ? body
+        : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
+      if (buffer.length < 512) return originalSend.call(this, body);
+      try {
+        const compressed = zlib.gzipSync(buffer, { level: 5 });
+        res.setHeader('Content-Encoding', 'gzip');
+        res.removeHeader('Content-Length');
+        return originalSend.call(this, compressed);
+      } catch (_) {
+        res.removeHeader('Content-Encoding');
+        return originalSend.call(this, body);
+      }
+    };
+    next();
   });
+
+  // 2. Security Headers & Caching
+  app.use(helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false
+  }));
+
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('X-XSS-Protection', '1; mode=block');
+    res.setHeader('Content-Security-Policy', "default-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:; img-src 'self' data: https: blob:; media-src 'self' https: data: blob:; connect-src 'self' https:;");
+
+    if (isHttps(req)) {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+
+    if (req.path.startsWith('/api/') || req.path === '/health' || req.path === '/ready') {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    }
+    next();
+  });
+
+  // 3. Body Parsers
+  app.use(express.json({ limit: '512kb', strict: true }));
+  app.use(express.urlencoded({ extended: false, limit: '128kb' }));
+
+  // 4. CSRF Protection for Browser State-Changing Requests
+  app.use((req, res, next) => {
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+      if (isBotSecretRequest(req)) return next();
+      if (req.path === '/api/auth/login' ||
+          req.path === '/api/auth/register' ||
+          req.path === '/api/auth/logout' ||
+          req.path === '/api/auth/verify-bot-access' ||
+          req.path === '/api/rewards/link4m/return' ||
+          req.path === '/api/rewards/link4m/verify' ||
+          req.path.startsWith('/api/worker/')) {
+        return next();
+      }
+
+      const cookies = parseCookies(req);
+      const hasSessionCookie = Boolean(cookies.kingmc_mgr_session);
+      const origin = req.headers['origin'];
+      const host = req.headers['host'];
+
+      if (hasSessionCookie && !origin && !req.headers['referer']) {
+        return res.status(403).json({ ok: false, error: 'Yêu cầu từ trình duyệt thiếu header xác thực nguồn (Origin/Referer).' });
+      }
+
+      if (origin && host) {
+        try {
+          const originHost = new URL(origin).host;
+          if (originHost !== host) {
+            return res.status(403).json({ ok: false, error: 'Yêu cầu bị từ chối do vi phạm bảo vệ CSRF (Origin mismatch).' });
+          }
+        } catch (_) {
+          return res.status(403).json({ ok: false, error: 'Origin header không hợp lệ.' });
+        }
+      }
+    }
+    next();
+  });
+
+  // 5. Dynamic Session Authentication Middleware
+  app.use(async (req, _res, next) => {
+    req.managerAuthChecked = true;
+    req.managerAuthSession = null;
+
+    if (isBotSecretRequest(req)) return next();
+
+    const rawToken = getRequestManagerSessionToken(req);
+    if (!rawToken) return next();
+
+    const tokenHash = hashSessionToken(rawToken);
+    let session = activeSessions.get(tokenHash);
+
+    if (!session && store.adapter?.fetchManagerAuthorization) {
+      try {
+        const authData = await store.adapter.fetchManagerAuthorization(tokenHash);
+        if (authData?.ok && authData.session) {
+          session = authData.session;
+          activeSessions.set(tokenHash, session);
+        }
+      } catch (_) {}
+    }
+
+    if (session) {
+      if (Number(session.expiresAt) <= Date.now()) {
+        activeSessions.delete(tokenHash);
+      } else {
+        req.managerAuthSession = session;
+      }
+    }
+    next();
+  });
+
+  // 6. Root SPA Route (Login view if unauthenticated, Dashboard view if authenticated)
+  app.get('/', (req, res) => {
+    if (req.managerAuthSession) {
+      return res.type('html').send(DASHBOARD_HTML);
+    }
+    return res.type('html').send(PUBLIC_LOGIN_HTML);
+  });
+
+  // Health and Ready endpoints
+  app.get(['/ready', '/api/ready', '/health'], (_req, res) => {
+    return res.json({
+      ok: true,
+      service: 'KingMC AFK Bot Cloud 24/7',
+      status: 'ready',
+      time: new Date().toISOString()
+    });
+  });
+
+  // 7. Mount Sub-APIs
+  const authRouter = createAuthApi({
+    store,
+    entitlementService,
+    registry,
+    config,
+    logger,
+    activeSessions
+  });
+  app.use('/api/auth', authRouter);
+
+  const userRouter = createUserApi({
+    store,
+    entitlementService,
+    link4mService,
+    registry,
+    broker,
+    fleetOperations,
+    config,
+    logger
+  });
+  app.use('/api/manager', userRouter);
+  app.use('/api/rewards/link4m', userRouter); // Route alias for Link4m
+  app.use('/api/public', userRouter); // Route alias for public stats
+
+  const adminRouter = createAdminApi({
+    store,
+    entitlementService,
+    registry,
+    broker,
+    fleetOperations,
+    adminNotifier,
+    config,
+    logger
+  });
+  app.use('/api/manager', adminRouter);
+
+  const workerRouter = createWorkerApi({
+    registry,
+    broker,
+    workerStore,
+    adminNotifier,
+    config,
+    logger
+  });
+  app.use('/api/v1/workers/:workerId', workerRouter);
+  app.use('/api/worker', workerRouter);
+
+  // 8. 404 Handler
+  app.use((_req, res) => {
+    return res.status(404).json({ ok: false, error: 'not_found' });
+  });
+
+  // 9. Error Handler
+  app.use((err, _req, res, _next) => {
+    if (err && (err.type === 'entity.parse.failed' || err instanceof SyntaxError)) {
+      return res.status(400).json({ ok: false, error: 'JSON request không hợp lệ.' });
+    }
+    logger?.error('HTTP Server Error', { error: err.message, stack: err.stack });
+    return res.status(500).json({ ok: false, error: 'internal_server_error' });
+  });
+
   return app;
 }
 

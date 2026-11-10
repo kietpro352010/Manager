@@ -26,9 +26,11 @@ function normalizePublicUrl(value) {
   const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
   try {
     const url = new URL(withScheme);
-    if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) return '';
+    if ((url.protocol !== 'https:' && url.protocol !== 'http:') || !url.hostname || url.username || url.password) return '';
     return url.origin;
-  } catch { return ''; }
+  } catch {
+    return '';
+  }
 }
 
 function detectHostRuntime(env = process.env) {
@@ -44,20 +46,82 @@ function detectHostRuntime(env = process.env) {
   if (!port) {
     for (const key of portCandidates) {
       const candidate = validPort(env[key]);
-      if (candidate) { port = candidate; portSource = key; break; }
+      if (candidate) {
+        port = candidate;
+        portSource = key;
+        break;
+      }
     }
   }
-  if (!port && render) { port = 10000; portSource = 'render-default'; }
-  if (!port) { port = 10000; portSource = 'application-default'; }
+  if (!port && render) {
+    port = 10000;
+    portSource = 'render-default';
+  }
+  if (!port) {
+    port = (platform === 'generic-node' ? 3000 : 10000);
+    portSource = 'application-default';
+  }
 
   let publicBaseUrl = '';
   let publicUrlSource = 'unset';
   for (const key of ['RENDER_EXTERNAL_URL', 'PUBLIC_BASE_URL', 'WISPBYTE_PUBLIC_URL', 'PUBLIC_URL', 'APP_URL', 'SERVICE_URL', 'RENDER_EXTERNAL_HOSTNAME']) {
     const candidate = normalizePublicUrl(env[key]);
-    if (candidate) { publicBaseUrl = candidate; publicUrlSource = key; break; }
+    if (candidate) {
+      publicBaseUrl = candidate;
+      publicUrlSource = key;
+      break;
+    }
   }
 
   return Object.freeze({ platform, port, portSource, publicBaseUrl, publicUrlSource });
 }
 
-module.exports = { detectHostRuntime, normalizePublicUrl, validPort };
+async function listenHttpServer(server, { host = '0.0.0.0', port, maxRetries = 10, retryDelayMs = 1000, logger = console } = {}) {
+  server.keepAliveTimeout = 65000;
+  server.headersTimeout = 66000;
+  server.requestTimeout = 40000;
+
+  let currentPort = port;
+  let attempts = 0;
+
+  while (attempts < maxRetries) {
+    attempts++;
+    try {
+      await new Promise((resolve, reject) => {
+        const errorHandler = (err) => {
+          server.removeListener('listening', successHandler);
+          reject(err);
+        };
+        const successHandler = () => {
+          server.removeListener('error', errorHandler);
+          resolve();
+        };
+        server.once('error', errorHandler);
+        server.once('listening', successHandler);
+        server.listen(currentPort, host);
+      });
+      if (logger && typeof logger.info === 'function') {
+        logger.info(`[HTTP] Server listening on ${host}:${currentPort}`);
+      }
+      return { host, port: currentPort };
+    } catch (err) {
+      if (err.code === 'EADDRINUSE' && attempts < maxRetries) {
+        if (logger && typeof logger.warn === 'function') {
+          logger.warn(`[HTTP] Cổng ${currentPort} đang bận (EADDRINUSE). Thử lại lần ${attempts}/${maxRetries} sau ${retryDelayMs}ms...`);
+        }
+        await new Promise((r) => setTimeout(r, retryDelayMs));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error(`Không thể khởi động HTTP server trên ${host}:${port} sau ${maxRetries} lần thử.`);
+}
+
+module.exports = {
+  detectHostRuntime,
+  normalizePublicUrl,
+  validPort,
+  cliPort,
+  listenHttpServer
+};

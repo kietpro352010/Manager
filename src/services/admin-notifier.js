@@ -3,9 +3,11 @@
 const { EmbedBuilder } = require('discord.js');
 
 class AdminNotifier {
-  constructor({ client, adminUserId = '', logger } = {}) {
+  constructor({ client, adminUserId = '', telegramBotToken = '', telegramChatId = '', logger } = {}) {
     this.client = client;
     this.adminUserId = String(adminUserId || '').trim();
+    this.telegramBotToken = String(telegramBotToken || process.env.TELEGRAM_BOT_TOKEN || '').trim();
+    this.telegramChatId = String(telegramChatId || process.env.TELEGRAM_CHAT_ID || '').trim();
     this.logger = logger;
     this.alertCache = new Map();
     this.cooldownMs = 60000; // 1 minute deduplication cooldown
@@ -25,21 +27,13 @@ class AdminNotifier {
     return this.adminUserId;
   }
 
-  /**
-   * Send an error or warning alert directly to the designated admin via Discord DM.
-   *
-   * @param {Object} params
-   * @param {string} params.source - Source system: 'Supabase', 'Worker', 'Manager', 'Discord', 'Wispbyte', 'Link4M'
-   * @param {string} params.event - Event / Error identifier (e.g. 'worker_error', 'database_failure')
-   * @param {string} params.message - Short human-readable summary of the error
-   * @param {Error|string} [params.error] - Original error object or stack string
-   * @param {Object} [params.details] - Additional contextual fields (workerId, command, user, etc.)
-   * @param {'error'|'warn'|'info'} [params.level] - Severity level
-   */
-  async sendAlert({ source = 'Manager', event = 'error', message = '', error = null, details = {}, level = 'error' } = {}) {
-    if (!this.adminUserId || !this.client) return;
+  setTelegramConfig(token, chatId) {
+    this.telegramBotToken = String(token || '').trim();
+    this.telegramChatId = String(chatId || '').trim();
+  }
 
-    // Filter out in-game kicks, bans, and temporary server restrictions (Only report SYSTEM errors)
+  async sendAlert({ source = 'Manager', event = 'error', message = '', error = null, details = {}, level = 'error' } = {}) {
+    // Filter out ordinary in-game events
     const filterHaystack = `${event} ${message} ${details?.lastKickReason || ''} ${details?.state || ''}`.toLowerCase();
     if (
       filterHaystack.includes('kick') ||
@@ -53,7 +47,6 @@ class AdminNotifier {
       return;
     }
 
-    // Deduplication check
     const dedupKey = `${source}:${event}:${details.workerId || details.id || ''}:${message.slice(0, 80)}`;
     const now = Date.now();
     const cached = this.alertCache.get(dedupKey);
@@ -63,10 +56,9 @@ class AdminNotifier {
       return;
     }
 
-    const repeatNote = cached?.suppressedCount ? `\n*(Lỗi tương tự đã lặp lại ${cached.suppressedCount} lần trong 60s qua)*` : '';
+    const repeatNote = cached?.suppressedCount ? `\n*(Lặp lại ${cached.suppressedCount} lần trong 60s qua)*` : '';
     this.alertCache.set(dedupKey, { lastSent: now, suppressedCount: 0 });
 
-    // Clean up old cache entries periodically
     if (this.alertCache.size > 200) {
       for (const [k, v] of this.alertCache.entries()) {
         if (now - v.lastSent > this.cooldownMs * 3) this.alertCache.delete(k);
@@ -85,8 +77,10 @@ class AdminNotifier {
     try {
       while (this.queue.length > 0) {
         const item = this.queue.shift();
-        await this.dispatchDm(item).catch(() => {});
-        // Safe spacing between DMs to respect Discord rate limits
+        await Promise.allSettled([
+          this.dispatchDm(item),
+          this.dispatchTelegram(item)
+        ]);
         await new Promise((r) => setTimeout(r, 600));
       }
     } finally {
@@ -99,10 +93,7 @@ class AdminNotifier {
 
     try {
       const user = await this.client.users.fetch(this.adminUserId).catch(() => null);
-      if (!user) {
-        this.logger?.warn?.('admin_dm_user_not_found', { adminUserId: this.adminUserId });
-        return;
-      }
+      if (!user) return;
 
       const now = new Date();
       const timeStr = now.toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
@@ -113,17 +104,16 @@ class AdminNotifier {
 
       const embed = new EmbedBuilder()
         .setColor(color)
-        .setTitle(`${icon} [BÁO LỖI: ${source.toUpperCase()}] ${event}`)
+        .setTitle(`${icon} [BÁO ĐỘNG: ${source.toUpperCase()}] ${event}`)
         .setDescription(message ? `**Nội dung:** ${message.slice(0, 1000)}` : 'Đã phát hiện sự cố hệ thống.')
         .setTimestamp();
 
       const fields = [
         { name: '📍 Nguồn / Hệ thống', value: `\`${source}\``, inline: true },
-        { name: '⏰ Thời gian xảy ra', value: `${timeStr}\n(<t:${unix}:R>)`, inline: true },
-        { name: '🏷️ Phân loại sự kiện', value: `\`${event}\``, inline: true }
+        { name: '⏰ Thời gian', value: `${timeStr}\n(<t:${unix}:R>)`, inline: true },
+        { name: '🏷️ Phân loại', value: `\`${event}\``, inline: true }
       ];
 
-      // Format details
       if (details && typeof details === 'object' && Object.keys(details).length > 0) {
         const detailLines = [];
         for (const [k, v] of Object.entries(details)) {
@@ -133,14 +123,13 @@ class AdminNotifier {
         }
         if (detailLines.length > 0) {
           fields.push({
-            name: '🔍 Ngữ cảnh & Thông số',
+            name: '🔍 Chi tiết & Thông số',
             value: detailLines.slice(0, 8).join('\n').slice(0, 1024),
             inline: false
           });
         }
       }
 
-      // Format error stack / details
       let stackText = '';
       if (error) {
         if (typeof error === 'string') stackText = error;
@@ -149,7 +138,6 @@ class AdminNotifier {
       }
 
       if (stackText) {
-        // Redact potential secrets or long tokens
         const safeStack = stackText.replace(/(?:token|secret|password|key)=([^\s&]+)/gi, '$1=[REDACTED]');
         fields.push({
           name: '📄 Chi tiết lỗi kỹ thuật',
@@ -159,21 +147,94 @@ class AdminNotifier {
       }
 
       embed.addFields(fields);
-      embed.setFooter({ text: 'KingMC AFK System Monitor • Báo lỗi tự động qua DM' });
+      embed.setFooter({ text: 'KingMC AFK System Monitor • Báo lỗi tự động đa kênh' });
 
       await user.send({ embeds: [embed] });
     } catch (err) {
-      // Avoid logging loop if DM fails
-      if (err.code !== 50007) { // 50007: Cannot send messages to this user (DMs disabled)
+      if (err.code !== 50007) {
         this.logger?.warn?.('admin_dm_dispatch_failed', { adminUserId: this.adminUserId, error: err.message });
       }
     }
   }
 
-  /**
-   * Attach an error listener to the application logger so any logger.error() calls
-   * automatically dispatch a DM alert to the admin.
-   */
+  async dispatchTelegram({ source, event, message, details, level }) {
+    if (!this.telegramBotToken || !this.telegramChatId) return;
+
+    try {
+      const icon = level === 'error' ? '🚨' : level === 'warn' ? '⚠️' : 'ℹ️';
+      let text = `${icon} <b>[KINGMC AFK ALERT: ${source.toUpperCase()}]</b>\n\n`;
+      text += `<b>Sự kiện:</b> <code>${event}</code>\n`;
+      if (message) text += `<b>Chi tiết:</b> ${message}\n`;
+
+      if (details && typeof details === 'object') {
+        text += `\n<b>Thông số:</b>\n`;
+        for (const [k, v] of Object.entries(details)) {
+          if (v !== undefined && v !== null && v !== '') {
+            text += `• <i>${k}:</i> <code>${String(v).slice(0, 80)}</code>\n`;
+          }
+        }
+      }
+
+      const url = `https://api.telegram.org/bot${this.telegramBotToken}/sendMessage`;
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: this.telegramChatId,
+          text: text.slice(0, 4000),
+          parse_mode: 'HTML'
+        }),
+        signal: AbortSignal.timeout(8000)
+      });
+    } catch (err) {
+      this.logger?.warn?.('telegram_alert_dispatch_failed', { error: err.message });
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // IN-GAME SURVIVAL NOTIFICATION SHORTCUTS
+  // --------------------------------------------------------------------------
+  notifyOfflineBot(botId, botName, offlineMinutes = 5) {
+    return this.sendAlert({
+      source: 'BotWorker Fleet',
+      event: 'bot_offline_warning',
+      message: `Bot **${botName || botId}** (#${botId}) đã offline quá ${offlineMinutes} phút!`,
+      details: { botId, botName, offlineMinutes },
+      level: 'warn'
+    });
+  }
+
+  notifyLowTotem(botId, botName, totemCount) {
+    return this.sendAlert({
+      source: 'KingMC Game Survival',
+      event: 'low_totem_warning',
+      message: `Bot **${botName || botId}** (#${botId}) sắp cạn Totem! Hiện chỉ còn **${totemCount}** cái!`,
+      details: { botId, botName, totemCount },
+      level: 'warn'
+    });
+  }
+
+  notifyBotDeath(botId, botName, deathCoords) {
+    const coordsStr = deathCoords ? `X:${deathCoords.x}, Y:${deathCoords.y}, Z:${deathCoords.z}` : 'Không rõ';
+    return this.sendAlert({
+      source: 'KingMC Game Survival',
+      event: 'bot_death_alert',
+      message: `Bot **${botName || botId}** (#${botId}) đã bị tiêu diệt tại tọa độ: \`${coordsStr}\`!`,
+      details: { botId, botName, deathCoords: coordsStr },
+      level: 'error'
+    });
+  }
+
+  notifyBotRecovered(botId, botName) {
+    return this.sendAlert({
+      source: 'BotWorker Fleet',
+      event: 'bot_recovered',
+      message: `Bot **${botName || botId}** (#${botId}) đã phục hồi kết nối thành công!`,
+      details: { botId, botName },
+      level: 'info'
+    });
+  }
+
   hookLogger(logger) {
     if (!logger || typeof logger !== 'object') return;
     try {
@@ -181,7 +242,6 @@ class AdminNotifier {
       if (typeof originalError === 'function') {
         logger.error = (event, fields = {}) => {
           originalError(event, fields);
-          // Dispatch alert without awaiting or crashing
           try {
             const strEvent = String(event || '').toLowerCase();
             const strMsg = String(fields?.message || fields?.error || '').toLowerCase();
