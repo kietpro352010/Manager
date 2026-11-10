@@ -13824,7 +13824,7 @@ function scheduleNextManagerPoll() {
   if (managerPollTimerId) clearTimeout(managerPollTimerId);
   if (!currentUser) return;
   const isIdle = Date.now() - lastUserActivityAt > 2 * 60 * 1000;
-  const delay = document.hidden ? 45000 : (isIdle ? 15000 : 3000); // 3s active poll for real-time responsiveness, 15s idle
+  const delay = document.hidden ? 15000 : (isIdle ? 10000 : 3000); // 3s active poll, 10s idle, 15s hidden tab
   managerPollTimerId = setTimeout(async () => {
     try {
       if (!routeResolving && currentUser) {
@@ -13842,6 +13842,7 @@ function scheduleNextManagerPoll() {
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
     lastUserActivityAt = Date.now();
+    lastHomeSig = ''; // Force immediate fresh reconciliation on tab focus
     if (selectedBotId === null) refreshHome();
     else refreshDetail(true);
   }

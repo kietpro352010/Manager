@@ -48,7 +48,7 @@ async function safeDeferUpdate(interaction) {
 
 async function handleStaleWorkerInteraction(interaction, services, role, customNotice) {
   await safeDeferUpdate(interaction);
-  const notice = customNotice || '⚠️ Bot này đã được xóa hoặc gán lại từ Web Dashboard. Đã tự động đồng bộ lại danh sách mới nhất!';
+  const notice = customNotice || '⚠️ Trạng thái bot đã được cập nhật từ phiên Web/Khác — Bảng điều khiển đã tự động đồng bộ!';
   const view = await botDashboard(services, interaction.user.id, role, notice);
   return safeUpdate(interaction, view);
 }
