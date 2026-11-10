@@ -165,6 +165,8 @@ class CommandBroker {
     const pending = {
       workerId: worker.workerId,
       commandId: actualCommandId,
+      action: command.action,
+      command,
       done: false,
       timer: null,
       finish: (result) => {
@@ -299,7 +301,21 @@ class CommandBroker {
       return { ok: false, error: 'COMMAND_OWNERSHIP_MISMATCH' };
     }
     const completed = await this.commandStore.complete(wid, cid, result);
-    if (pending && pending.workerId === wid) {
+
+    // RESET & LIFECYCLE PARITY: Polling transport parity with HTTP transport
+    const action = pending?.action || result?.action;
+    const isSuccess = result?.ok === true || result?.result?.ok === true;
+    if (action === 'reset' && isSuccess) {
+      await this.registry.resetData(wid).catch(() => {});
+      await this.commandStore.clearWorker(wid).catch(() => {});
+    }
+
+    const workerStatus = result?.worker || result?.result?.worker || result?.status;
+    if (workerStatus && typeof workerStatus === 'object') {
+      await this.registry.updateStatus(wid, workerStatus, 'manager-command-poll').catch(() => {});
+    }
+
+    if (pending && pending.workerId === wid && typeof pending.finish === 'function') {
       pending.finish(result);
     }
     return { ok: Boolean(completed || pending) };

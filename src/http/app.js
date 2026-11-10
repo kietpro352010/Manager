@@ -282,6 +282,8 @@ function createApp({
   app.use('/api/manager', userRouter);
   app.use('/api/rewards/link4m', userRouter); // Route alias for Link4m
   app.use('/api/public', userRouter); // Route alias for public stats
+  app.use('/api/user', userRouter); // Route alias for user discord & settings
+  app.use('/api', userRouter); // Route alias for generic API calls
 
   const adminRouter = createAdminApi({
     store,

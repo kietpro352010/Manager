@@ -99,10 +99,10 @@ class Link4mService {
     const member = await this.accessControl.memberFor(userId);
     const config = this.publicConfig();
     if (!member || member.role !== 'user' || member.status === 'disabled') {
-      return { ...config, eligible: false, reason: 'Link4M is available to user accounts only.' };
+      return { ok: true, ...config, eligible: false, reason: 'Link4M is available to user accounts only.' };
     }
     if (member.isPermanent) {
-      return { ...config, eligible: false, reason: 'Tài khoản vĩnh viễn không cần vượt link.' };
+      return { ok: true, ...config, eligible: false, reason: 'Tài khoản vĩnh viễn không cần vượt link.' };
     }
     const now = new Date();
     const usedToday = await this.store.countLinkRewards(userId, vietnamDayStart(now));
@@ -112,6 +112,7 @@ class Link4mService {
       : 0;
     const attempt = await this.store.getLatestLinkAttempt(userId);
     return {
+      ok: true,
       ...config,
       eligible: config.enabled && config.providerConfigured && config.callbackConfigured && usedToday < config.dailyLimit && cooldownRemainingMs === 0,
       usedToday,
@@ -122,12 +123,23 @@ class Link4mService {
     };
   }
 
-  async startAttempt(userId) {
-    const run = () => this.startAttemptLocked(String(userId));
+  // Backward-compatible alias
+  async getDailyQuotaStatus(userId) {
+    return this.status(userId);
+  }
+
+  async startAttempt(userId, clientIp) {
+    const run = () => this.startAttemptLocked(String(userId), clientIp);
     return this.userLock ? this.userLock.run(userId, run) : run();
   }
 
-  async startAttemptLocked(userId) {
+  // Backward-compatible alias
+  async createLinkAttempt(userId, clientIp) {
+    const res = await this.startAttempt(userId, clientIp);
+    return { ok: true, ...res };
+  }
+
+  async startAttemptLocked(userId, clientIp) {
     const member = await this.accessControl.memberFor(userId);
     if (!member || member.status === 'disabled') {
       throw new Error('Tài khoản đã bị khóa, không thể vượt link.');
@@ -254,13 +266,38 @@ class Link4mService {
     if (!safeEqual(suppliedHash, attempt.tokenHash)) {
       throw new Error('Mã token xác minh vượt link không hợp lệ.');
     }
-    if (attempt.status === 'rewarded') {
+    if (attempt.status === 'rewarded' || attempt.status === 'completed') {
       return { replayed: true, rewardHours: attempt.rewardHours };
     }
     if (Date.now() - new Date(attempt.createdAt).getTime() < MIN_SOLVE_MS) {
       throw new Error('Thời gian vượt link quá nhanh. Vui lòng hoàn thành lại liên kết.');
     }
     return this.completeVerifiedAttempt(attempt, attempt.tokenHash);
+  }
+
+  // Unified claim verification method called by Web API
+  async verifyAndClaimReward(token, attemptId) {
+    const cleanToken = String(token || '').trim();
+    if (!cleanToken) throw new Error('Thiếu token xác minh vượt link.');
+
+    let targetAttemptId = String(attemptId || '').trim();
+    if (!targetAttemptId) {
+      const hash = sha256(cleanToken);
+      const found = await this.store.getLinkAttemptByTokenHash?.(hash);
+      if (found?.attemptId) {
+        targetAttemptId = found.attemptId;
+      } else {
+        const direct = await this.store.getLinkAttempt?.(cleanToken);
+        if (direct?.attemptId) targetAttemptId = direct.attemptId;
+      }
+    }
+
+    if (!targetAttemptId) {
+      throw new Error('Phiên vượt link không tồn tại hoặc đã hết hạn.');
+    }
+
+    const res = await this.completeReturn(targetAttemptId, cleanToken);
+    return { ok: true, ...res };
   }
 
   async completeWebhook(req) {
@@ -336,16 +373,20 @@ class Link4mService {
 
         if (!completed) throw new Error('Không thể hoàn tất cộng thời gian thuê.');
 
-        await this.store.addAudit({
-          actorId: attempt.userId,
-          action: 'link4m.reward',
-          target: attempt.attemptId,
-          details: { rewardHours: addedHours, expiresAt }
-        }).catch(() => {});
+        if (typeof this.store.addAudit === 'function') {
+          await this.store.addAudit({
+            actorId: attempt.userId,
+            action: 'link4m.reward',
+            target: attempt.attemptId,
+            details: { rewardHours: addedHours, expiresAt }
+          }).catch(() => {});
+        }
 
         return { replayed: false, rewardHours: addedHours, expiresAt };
       } catch (error) {
-        await this.store.resetLinkAttempt(attempt.attemptId).catch(() => {});
+        if (typeof this.store.resetLinkAttempt === 'function') {
+          await this.store.resetLinkAttempt(attempt.attemptId).catch(() => {});
+        }
         throw error;
       }
     };

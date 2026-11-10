@@ -124,29 +124,64 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       const userId = `usr_${crypto.randomUUID().slice(0, 12)}`;
       const encryptedPass = encryptUserPassword(cleanPassword);
 
-      // Save user record
-      const newUser = {
-        id: userId,
-        userId,
-        username: cleanUsername,
-        password: encryptedPass,
-        role: 'user',
-        status: 'active',
-        isPermanent: false,
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // 1 day initial trial
-        planName: 'Gói dùng thử',
-        workerIds: [],
-        assignedBotIds: [],
-        note: 'Đăng ký tài khoản Web',
-        createdAt: new Date().toISOString()
-      };
+      // Register user with atomic Free Trial allocation
+      let registered;
+      try {
+        if (typeof store.registerTrialUser === 'function') {
+          registered = await store.registerTrialUser({
+            userId,
+            username: cleanUsername,
+            password: encryptedPass,
+            trialDays: config.trialDays || 1,
+            planName: 'FREE TRIAL'
+          });
+        } else {
+          const newUser = {
+            id: userId,
+            userId,
+            username: cleanUsername,
+            password: encryptedPass,
+            role: 'user',
+            status: 'active',
+            isPermanent: false,
+            isTrial: true,
+            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+            planName: 'FREE TRIAL',
+            workerIds: [],
+            assignedBotIds: [],
+            note: 'Đăng ký tài khoản Web',
+            createdAt: new Date().toISOString()
+          };
+          await store.setAccess(userId, newUser, 'system-register');
+          registered = { ok: true, userId, username: cleanUsername, planName: 'FREE TRIAL', workerId: null };
+        }
+      } catch (regErr) {
+        if (regErr.message && regErr.message.includes('NO_WORKERS_AVAILABLE')) {
+          return res.status(503).json({
+            ok: false,
+            error: 'Hiện tại hệ thống không còn Bot rảnh để cấp dùng thử. Vui lòng liên hệ Quản trị viên hoặc thử lại sau.'
+          });
+        }
+        if (regErr.message && regErr.message.includes('đã có người sử dụng')) {
+          return res.status(409).json({ ok: false, error: 'Tên đăng nhập này đã có người sử dụng.' });
+        }
+        throw regErr;
+      }
 
-      await store.setAccess(userId, newUser, 'system-register');
+      let assignedBotIds = registered?.workerId ? [registered.workerId] : [];
+      let planName = registered?.planName || 'FREE TRIAL';
+      let isPermanent = false;
 
       // If a giftcode/key was provided, redeem it
       if (providedKey) {
         try {
           await entitlementService.redeem(userId, providedKey, 'user');
+          const refreshed = await store.getUser(cleanUsername);
+          if (refreshed) {
+            assignedBotIds = refreshed.assignedBotIds || refreshed.workerIds || assignedBotIds;
+            planName = refreshed.planName || planName;
+            isPermanent = Boolean(refreshed.isPermanent);
+          }
         } catch (keyErr) {
           logger.warn('Key redemption on register failed', { error: keyErr.message, username: cleanUsername });
         }
@@ -162,12 +197,12 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         userId,
         username: cleanUsername,
         role: 'user',
-        assignedBotIds: newUser.assignedBotIds,
+        assignedBotIds,
         createdAt: Date.now(),
         expiresAt,
         status: 'active',
-        isPermanent: newUser.isPermanent,
-        planName: newUser.planName,
+        isPermanent,
+        planName,
         allowAccountChange: true
       };
 
@@ -191,9 +226,9 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
           id: userId,
           username: cleanUsername,
           role: 'user',
-          assignedBotIds: newUser.assignedBotIds,
-          isPermanent: newUser.isPermanent,
-          expiresAt: newUser.expiresAt
+          assignedBotIds,
+          isPermanent,
+          expiresAt: session.expiresAt
         },
         message: 'Đăng ký tài khoản thành công!'
       });

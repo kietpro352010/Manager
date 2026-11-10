@@ -4731,6 +4731,9 @@ body.theme-morning .cosmic-toggle-pill {
             <button type="button" class="profile-menu-item" onclick="openChangePasswordModal(); closeGlobalProfileDropdown();">
               <span>🔐 Đổi Mật Khẩu</span>
             </button>
+            <button type="button" class="profile-menu-item" onclick="openDiscordLinkModal(); closeGlobalProfileDropdown();">
+              <span>💬 Liên Kết Discord</span>
+            </button>
             <button id="globalRenewKeyBtn" type="button" class="profile-menu-item user-only" onclick="openRenewModal(); closeGlobalProfileDropdown();">
               <span>🎁 Gia Hạn Bằng Mã Key</span>
             </button>
@@ -6039,6 +6042,39 @@ body.theme-morning .cosmic-toggle-pill {
         <button id="changePassSubmitBtn" type="submit" class="primary">💾 Cập Nhật Mật Khẩu</button>
       </div>
     </form>
+  </div>
+</div>
+
+<div id="discordLinkModal" class="modal hidden">
+  <div class="modal-card" style="width:min(460px, 96vw);">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <h3 style="margin:0;display:flex;align-items:center;gap:8px;">💬 Liên Kết Tài Khoản Discord</h3>
+      <button class="small" onclick="closeDiscordLinkModal()">✕</button>
+    </div>
+    <div id="discordLinkContent" style="display:flex;flex-direction:column;gap:12px;">
+      <div id="discordLinkStatusBox" style="padding:12px;border-radius:8px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:4px;">TRẠNG THÁI LIÊN KẾT:</div>
+        <div id="discordLinkStatusText" style="font-weight:600;font-size:14px;display:flex;align-items:center;gap:6px;">
+          <span>Đang kiểm tra...</span>
+        </div>
+        <div id="discordLinkDetails" style="margin-top:8px;font-size:13px;display:none;">
+          <div><b>Discord ID:</b> <span id="discordLinkedId" style="font-family:monospace;color:#38bdf8;"></span></div>
+          <div style="margin-top:2px;"><b>Thời gian liên kết:</b> <span id="discordLinkedDate" style="color:var(--muted);"></span></div>
+        </div>
+      </div>
+      <div id="discordLinkInstruction" style="font-size:13px;color:var(--muted);line-height:1.5;">
+        <p style="margin:0 0 6px 0;">Để liên kết tài khoản Discord với Web Manager:</p>
+        <ol style="padding-left:18px;margin:0;">
+          <li>Vào server Discord KingMC hoặc chat trực tiếp với Bot.</li>
+          <li>Gõ lệnh <code>/login</code> trên Discord và điền username/password của tài khoản Web.</li>
+          <li>Hệ thống sẽ tự động xác thực và liên kết 1:1 ngay lập tức.</li>
+        </ol>
+      </div>
+      <div id="discordLinkActions" style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
+        <button type="button" onclick="closeDiscordLinkModal()">Đóng</button>
+        <button id="discordUnlinkBtn" type="button" class="danger hidden" onclick="unlinkDiscordAccount()">🗑 Hủy Liên Kết</button>
+      </div>
+    </div>
   </div>
 </div>
 <div id="changelogModal" class="modal hidden">
@@ -7975,6 +8011,65 @@ function openChangePasswordModal() {
 
 function closeChangePasswordModal() {
   document.getElementById('changePasswordModal')?.classList.add('hidden');
+}
+
+async function loadDiscordLinkStatus() {
+  try {
+    const res = await fetch('/api/user/discord-link');
+    const data = await res.json();
+    const statusText = document.getElementById('discordLinkStatusText');
+    const details = document.getElementById('discordLinkDetails');
+    const linkedId = document.getElementById('discordLinkedId');
+    const linkedDate = document.getElementById('discordLinkedDate');
+    const unlinkBtn = document.getElementById('discordUnlinkBtn');
+
+    if (data.ok && data.linked) {
+      if (statusText) statusText.innerHTML = '<span style="color:#10b981;">✅ Đã liên kết với Discord</span>';
+      if (details) details.style.display = 'block';
+      if (linkedId) linkedId.textContent = data.discordUserId || '---';
+      if (linkedDate) linkedDate.textContent = data.linkedAt ? new Date(data.linkedAt).toLocaleString('vi-VN') : 'Không rõ';
+      if (unlinkBtn) unlinkBtn.classList.remove('hidden');
+    } else {
+      if (statusText) statusText.innerHTML = '<span style="color:#f59e0b;">⚠️ Chưa liên kết Discord</span>';
+      if (details) details.style.display = 'none';
+      if (unlinkBtn) unlinkBtn.classList.add('hidden');
+    }
+  } catch (e) {
+    const statusText = document.getElementById('discordLinkStatusText');
+    if (statusText) statusText.innerHTML = '<span style="color:#ef4444;">❌ Lỗi kiểm tra trạng thái</span>';
+  }
+}
+
+function openDiscordLinkModal() {
+  closeUserProfileDropdown();
+  const modal = document.getElementById('discordLinkModal');
+  modal?.classList.remove('hidden');
+  loadDiscordLinkStatus();
+}
+
+function closeDiscordLinkModal() {
+  document.getElementById('discordLinkModal')?.classList.add('hidden');
+}
+
+async function unlinkDiscordAccount() {
+  if (!confirm('Bạn có chắc chắn muốn hủy liên kết tài khoản Discord này? Sau khi hủy, bạn sẽ không thể dùng Discord để điều khiển bot.')) {
+    return;
+  }
+  try {
+    const res = await fetch('/api/user/discord-unlink', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    const data = await res.json();
+    if (data.ok) {
+      showToast('Đã hủy liên kết Discord thành công!');
+      loadDiscordLinkStatus();
+    } else {
+      alert('Hủy liên kết thất bại: ' + (data.error || 'Lỗi không xác định'));
+    }
+  } catch (err) {
+    alert('Lỗi kết nối: ' + err.message);
+  }
 }
 
 function openChangelogModal() {
@@ -13693,6 +13788,10 @@ window.toggleUserProfileDropdown = toggleUserProfileDropdown;
 window.closeUserProfileDropdown = closeUserProfileDropdown;
 window.openChangePasswordModal = openChangePasswordModal;
 window.closeChangePasswordModal = closeChangePasswordModal;
+window.openDiscordLinkModal = openDiscordLinkModal;
+window.closeDiscordLinkModal = closeDiscordLinkModal;
+window.unlinkDiscordAccount = unlinkDiscordAccount;
+window.loadDiscordLinkStatus = loadDiscordLinkStatus;
 window.submitChangePassword = submitChangePassword;
 window.openChangelogModal = openChangelogModal;
 window.closeChangelogModal = closeChangelogModal;

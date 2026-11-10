@@ -182,7 +182,6 @@ class EntitlementService {
     }
 
     // 4. Gọi nạp nguyên tử qua Store
-    const transactionId = `tx_${crypto.randomUUID()}`;
     const redeemed = await this.store.redeemKeyWithAccess(codeHash, cleanUserId, {
       role: 'user',
       status: 'active',
@@ -192,18 +191,18 @@ class EntitlementService {
       planName: String(key.planName || member?.planName || 'Standard').slice(0, 64),
       note: member?.note || '',
       username: member?.username || cleanUserId,
-      botCount: targetCount
+      botCount: targetCount,
+      stopPendingWorkers: []
     }, `code:${key.keyId || key.id}`);
 
     if (!redeemed) {
-      // Fallback consume atomic
-      await this.store.redeemKeyAtomic(normalized, cleanUserId, transactionId);
+      throw new Error('Nạp mã thất bại: Giao dịch nguyên tử không thành công.');
     }
 
     // 5. Nếu thiếu bot so với hạn ngạch của key, đẩy vào hàng đợi cấp phát tự động
     const missingWorkers = Math.max(0, targetCount - desired.length);
     if (missingWorkers > 0) {
-      await this.store.client.from('manager_pending_allocations').insert({
+      await this.store.client?.from?.('manager_pending_allocations')?.insert?.({
         id: `alloc_${crypto.randomUUID()}`,
         user_id: cleanUserId,
         username: member?.username || cleanUserId,
@@ -247,34 +246,96 @@ class EntitlementService {
 
       for (const u of users) {
         if (u.isPermanent) continue;
-        if (u.status !== 'active') continue;
         if (!u.expiresAt) continue;
         const expiryTime = Date.parse(u.expiresAt);
-        if (Number.isFinite(expiryTime) && expiryTime <= now) {
-          this.logger?.info('user_expired_graceful_stop', { userId: u.userId, username: u.username, expiresAt: u.expiresAt });
+        if (!Number.isFinite(expiryTime) || expiryTime > now) continue;
 
-          // Cập nhật trạng thái thành 'expired' nhưng bảo toàn workerIds và cấu hình
+        // Skip permanently disabled accounts
+        if (u.status === 'disabled') continue;
+
+        // If already fully expired and has no pending unstopped bots, skip
+        if (u.status === 'expired' && (!u.stopPendingWorkers || u.stopPendingWorkers.length === 0)) {
+          continue;
+        }
+
+        const workerIds = (Array.isArray(u.workerIds) && u.workerIds.length)
+          ? u.workerIds
+          : ((Array.isArray(u.assignedBotIds) && u.assignedBotIds.length) ? u.assignedBotIds : []);
+
+        // Determine which bots still need to be stopped
+        const botsToStop = Array.isArray(u.stopPendingWorkers) && u.stopPendingWorkers.length
+          ? u.stopPendingWorkers
+          : workerIds;
+
+        if (botsToStop.length === 0) {
+          if (u.status !== 'expired') {
+            await this.store.setAccess(u.userId, { ...u, status: 'expired', stopPendingWorkers: [] }, 'system:expiration');
+            expiredCount++;
+          }
+          continue;
+        }
+
+        this.logger?.info('user_expiring_process_stops', {
+          userId: u.userId,
+          username: u.username,
+          status: u.status,
+          botsToStop
+        });
+
+        // Mark as expiring while waiting for STOP results
+        if (u.status === 'active') {
           await this.store.setAccess(u.userId, {
             ...u,
-            status: 'expired'
-          }, 'system:expiration');
+            status: 'expiring',
+            stopPendingWorkers: botsToStop
+          }, 'system:expiring');
+        }
 
-          // Dừng toàn bộ bot của user
-          const workerIds = (Array.isArray(u.workerIds) && u.workerIds.length) ? u.workerIds : (Array.isArray(u.assignedBotIds) ? u.assignedBotIds : []);
-          for (const workerId of workerIds) {
-            try {
-              if (fleetOperations && typeof fleetOperations.stopWorker === 'function') {
-                await fleetOperations.stopWorker(workerId, 'Gói thuê đã hết hạn');
-              } else if (broker && typeof broker.dispatch === 'function') {
-                await broker.dispatch(workerId, 'stop', { reason: 'Gói thuê đã hết hạn' });
-              }
-            } catch (stopErr) {
-              this.logger?.warn('failed_to_stop_expired_bot', { workerId, error: stopErr.message });
+        const remainingFailed = [];
+        for (const workerId of botsToStop) {
+          let stopped = false;
+          try {
+            const currentWorker = await this.registry?.find(workerId);
+            if (currentWorker && !currentWorker.status?.online && currentWorker.status?.state === 'offline') {
+              stopped = true;
+            } else if (fleetOperations && typeof fleetOperations.stopWorker === 'function') {
+              const res = await fleetOperations.stopWorker(workerId, 'Gói thuê đã hết hạn');
+              stopped = Boolean(res?.delivered || res?.ok !== false);
+            } else if (broker && typeof broker.dispatch === 'function') {
+              const res = await broker.dispatch(workerId, 'stop', { reason: 'Gói thuê đã hết hạn' });
+              stopped = Boolean(res?.delivered || res?.result?.ok !== false);
             }
+          } catch (stopErr) {
+            this.logger?.warn('failed_to_stop_expired_bot', { workerId, error: stopErr.message });
           }
+
+          if (!stopped) {
+            remainingFailed.push(workerId);
+          }
+        }
+
+        if (remainingFailed.length === 0) {
+          // All bots confirmed stopped: transition to terminal 'expired' state
+          await this.store.setAccess(u.userId, {
+            ...u,
+            status: 'expired',
+            stopPendingWorkers: []
+          }, 'system:expiration');
           expiredCount++;
+        } else {
+          // Some stops unconfirmed: retain in 'expiring' for automatic retry on next cycle
+          await this.store.setAccess(u.userId, {
+            ...u,
+            status: 'expiring',
+            stopPendingWorkers: remainingFailed
+          }, 'system:expiration_retry');
+          this.logger?.warn('user_expiration_partially_failed_will_retry', {
+            userId: u.userId,
+            remainingFailed
+          });
         }
       }
+
       return { checked: users.length, expired: expiredCount };
     } catch (err) {
       this.logger?.warn('check_expired_users_error', { error: err.message });

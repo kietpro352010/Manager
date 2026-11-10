@@ -374,46 +374,231 @@ class SupabaseDashboardStore {
   // --------------------------------------------------------------------------
   // DISCORD ACCOUNT LINKING (P0 / Dual-Engine Synchronization)
   // --------------------------------------------------------------------------
-  async linkDiscord(discordUserId, username) {
-    if (!discordUserId || !username) throw new Error('Missing discordUserId or username');
-    const dId = String(discordUserId).trim();
-    const cleanUser = String(username).trim().toLowerCase();
+  async registerTrialUser({ userId, username, password, trialDays = 1, planName = 'FREE TRIAL' }) {
+    this.invalidateCache();
+    const cleanUsername = String(username).toLowerCase().trim();
 
-    // 1. Unlink any prior user linked to this discord_user_id
+    // 1. Try Supabase RPC
     try {
-      await this.client.from(USERS).update({ discord_user_id: null }).eq('discord_user_id', dId);
-    } catch (_) {}
+      const { data, error } = await this.client.rpc('manager_register_trial_user', {
+        p_user_id: userId,
+        p_username: cleanUsername,
+        p_password: password,
+        p_trial_days: trialDays,
+        p_plan_name: planName
+      });
+      if (!error && data?.ok) return unwrapRpc(data);
+      if (error && error.message && error.message.includes('NO_WORKERS_AVAILABLE')) {
+        throw new Error('NO_WORKERS_AVAILABLE: Hiện tại hệ thống không còn Bot rảnh để cấp dùng thử.');
+      }
+      if (error && error.message && error.message.includes('Tên đăng nhập này đã có người sử dụng')) {
+        throw new Error('Tên đăng nhập này đã có người sử dụng.');
+      }
+    } catch (rpcErr) {
+      if (rpcErr.message && (rpcErr.message.includes('NO_WORKERS_AVAILABLE') || rpcErr.message.includes('Tên đăng nhập này đã có người sử dụng'))) {
+        throw rpcErr;
+      }
+    }
 
-    // 2. Link this specific user
+    // 2. Fallback: Local allocation
+    const existing = await this.getUser(cleanUsername);
+    if (existing) {
+      throw new Error('Tên đăng nhập này đã có người sử dụng.');
+    }
+
+    let freeWorkerId = null;
+    let botNumber = 1;
     try {
-      const { data, error } = await this.client.from(USERS)
-        .update({ discord_user_id: dId, updated_at: new Date().toISOString() })
-        .eq('username', cleanUser)
-        .select('*')
-        .maybeSingle();
-      if (!error && data) {
-        this.invalidateCache();
-        return true;
+      const { data: workers } = await this.client.from('manager_workers').select('worker_id, bot_number, enabled').order('bot_number');
+      if (Array.isArray(workers)) {
+        for (const w of workers) {
+          if (!w.enabled) continue;
+          const assigned = await this.assignedUser(w.worker_id);
+          if (!assigned) {
+            freeWorkerId = String(w.worker_id);
+            botNumber = w.bot_number || 1;
+            break;
+          }
+        }
       }
     } catch (_) {}
 
-    // Fallback: Lưu vào manager_settings nếu cột DB chưa reload
-    await this.setSetting(`discord_link:${dId}`, { username: cleanUser, linkedAt: new Date().toISOString() });
+    if (!freeWorkerId && this.workerStore && typeof this.workerStore.list === 'function') {
+      const workers = await this.workerStore.list();
+      for (const w of workers) {
+        if (!w.enabled) continue;
+        const assigned = await this.assignedUser(String(w.workerId));
+        if (!assigned) {
+          freeWorkerId = String(w.workerId);
+          botNumber = w.botNumber || 1;
+          break;
+        }
+      }
+    }
+
+    if (!freeWorkerId) {
+      throw new Error('NO_WORKERS_AVAILABLE: Hiện tại hệ thống không còn Bot rảnh để cấp dùng thử.');
+    }
+
+    const expiresAt = new Date(Date.now() + Math.max(1, trialDays) * 24 * 60 * 60 * 1000).toISOString();
+    const newUser = {
+      id: userId,
+      userId,
+      username: cleanUsername,
+      password,
+      role: 'user',
+      status: 'active',
+      isPermanent: false,
+      isTrial: true,
+      trialBotId: freeWorkerId,
+      expiresAt,
+      planName,
+      workerIds: [freeWorkerId],
+      assignedBotIds: [freeWorkerId],
+      botCount: 1,
+      note: 'Đăng ký mới (Free Trial 1 Bot)',
+      createdAt: new Date().toISOString()
+    };
+
+    await this.setAccess(userId, newUser, 'system:trial');
+    try {
+      await this.client.from(ASSIGNMENTS).insert({
+        worker_id: freeWorkerId,
+        user_id: cleanUsername,
+        assigned_by: 'system:trial',
+        assigned_at: new Date().toISOString()
+      });
+    } catch (_) {}
+
+    return {
+      ok: true,
+      userId,
+      username: cleanUsername,
+      workerId: freeWorkerId,
+      botNumber,
+      expiresAt,
+      planName
+    };
+  }
+
+  async linkDiscord(discordUserId, username, managerUserId = '') {
     this.invalidateCache();
+    const dId = String(discordUserId).trim();
+    const cleanUser = String(username).trim().toLowerCase();
+    const mId = String(managerUserId || `usr_${cleanUser}`).trim();
+
+    // 1. Try Supabase RPC
+    try {
+      const { data, error } = await this.client.rpc('manager_link_discord_account', {
+        p_discord_user_id: dId,
+        p_manager_user_id: mId,
+        p_username: cleanUser
+      });
+      if (!error && data?.ok) return unwrapRpc(data);
+    } catch (_) {}
+
+    // 2. Direct table update
+    try {
+      await this.client.from('manager_discord_links').upsert({
+        discord_user_id: dId,
+        manager_user_id: mId,
+        username: cleanUser,
+        linked_at: new Date().toISOString(),
+        last_verified_at: new Date().toISOString(),
+        status: 'active'
+      }, { onConflict: 'discord_user_id' });
+    } catch (_) {}
+
+    try {
+      await this.client.from(USERS).update({ discord_user_id: dId, updated_at: new Date().toISOString() }).eq('username', cleanUser);
+    } catch (_) {}
+
+    // 3. Fallback: manager_settings
+    try {
+      await this.setSetting(`discord_link:${dId}`, { username: cleanUser, linkedAt: new Date().toISOString() });
+    } catch (_) {}
+    return { ok: true, discordUserId: dId, username: cleanUser };
+  }
+
+  async unlinkDiscord(identifier) {
+    if (!identifier) return false;
+    const id = String(identifier).trim();
+    this.invalidateCache();
+
+    // 1. Try Supabase RPC
+    try {
+      const { data, error } = await this.client.rpc('manager_unlink_discord_account', {
+        p_identifier: id
+      });
+      if (!error && data?.ok) return true;
+    } catch (_) {}
+
+    // 2. Direct table cleanup
+    try {
+      await this.client.from('manager_discord_links').delete().eq('discord_user_id', id);
+    } catch (_) {}
+    try {
+      await this.client.from('manager_discord_links').delete().eq('username', id.toLowerCase());
+    } catch (_) {}
+    try {
+      await this.client.from(USERS).update({ discord_user_id: null, updated_at: new Date().toISOString() }).eq('discord_user_id', id);
+    } catch (_) {}
+    try {
+      await this.client.from(USERS).update({ discord_user_id: null, updated_at: new Date().toISOString() }).eq('username', id.toLowerCase());
+    } catch (_) {}
+    try {
+      await this.client.from(SETTINGS).delete().eq('key', `discord_link:${id}`);
+    } catch (_) {}
+
     return true;
   }
 
-  async unlinkDiscord(discordUserId) {
-    if (!discordUserId) return false;
-    const dId = String(discordUserId).trim();
+  async getDiscordLink(identifier) {
+    if (!identifier) return null;
+    const id = String(identifier).trim();
+
+    // 1. Check manager_discord_links table
     try {
-      await this.client.from(USERS).update({ discord_user_id: null }).eq('discord_user_id', dId);
+      const { data, error } = await this.client.from('manager_discord_links')
+        .select('*')
+        .or(`discord_user_id.eq.${id},manager_user_id.eq.${id},username.eq.${id.toLowerCase()}`)
+        .eq('status', 'active')
+        .maybeSingle();
+      if (!error && data) return data;
     } catch (_) {}
+
+    // 2. Check manager_users.discord_user_id
     try {
-      await this.client.from(SETTINGS).delete().eq('key', `discord_link:${dId}`);
+      const { data, error } = await this.client.from(USERS)
+        .select('discord_user_id, username, id, updated_at')
+        .or(`discord_user_id.eq.${id},username.eq.${id.toLowerCase()},id.eq.${id}`)
+        .maybeSingle();
+      if (!error && data?.discord_user_id) {
+        return {
+          discord_user_id: data.discord_user_id,
+          manager_user_id: data.id || data.username,
+          username: data.username,
+          linked_at: data.updated_at || new Date().toISOString(),
+          status: 'active'
+        };
+      }
     } catch (_) {}
-    this.invalidateCache();
-    return true;
+
+    // 3. Check manager_settings
+    try {
+      const setting = await this.getSetting(`discord_link:${id}`);
+      if (setting && setting.username) {
+        return {
+          discord_user_id: id,
+          manager_user_id: setting.username,
+          username: setting.username,
+          linked_at: setting.linkedAt || new Date().toISOString(),
+          status: 'active'
+        };
+      }
+    } catch (_) {}
+
+    return null;
   }
 
   async getUserByDiscordId(discordUserId) {
@@ -422,7 +607,19 @@ class SupabaseDashboardStore {
     const cached = this.getCached(`discord_user:${dId}`);
     if (cached) return cached;
 
-    // 1. Thử đọc từ manager_users.discord_user_id
+    // 1. Check manager_discord_links table
+    try {
+      const link = await this.getDiscordLink(dId);
+      if (link && link.username) {
+        const user = await this.getUser(link.username);
+        if (user) {
+          this.setCached(`discord_user:${dId}`, user, 5000);
+          return user;
+        }
+      }
+    } catch (_) {}
+
+    // 2. Fallback to manager_users.discord_user_id
     try {
       const { data, error } = await this.client.from(USERS)
         .select('*')
@@ -442,7 +639,7 @@ class SupabaseDashboardStore {
       }
     } catch (_) {}
 
-    // 2. Fallback: Đọc từ manager_settings
+    // 3. Fallback to manager_settings
     try {
       const setting = await this.getSetting(`discord_link:${dId}`);
       if (setting && setting.username) {
@@ -457,7 +654,7 @@ class SupabaseDashboardStore {
     return null;
   }
 
-  // --------------------------------------------------------------------------
+    // --------------------------------------------------------------------------
   // KEYS & GIFTCODES
   // --------------------------------------------------------------------------
   async createKey(record) {
@@ -473,12 +670,12 @@ class SupabaseDashboardStore {
     if (this.adapter && typeof this.adapter.fetchKeys === 'function') {
       const keys = await this.adapter.fetchKeys();
       if (keys) {
-        const found = keys.find((k) => String(k.code || k.key || '').toUpperCase() === String(code || '').toUpperCase());
+        const found = keys.find((k) => String(k.codeHash || k.code_hash || '').toLowerCase() === String(code || '').toLowerCase() || String(k.code || k.key || k.keyCode || '').toUpperCase() === String(code || '').toUpperCase() || String(k.id || k.keyId || '') === String(code || ''));
         if (found) return found;
       }
     }
     const { data, error } = await this.client.from(KEYS).select('*')
-      .or(`code.eq.${code},key_code.eq.${code},id.eq.${code}`)
+      .or(`code_hash.eq.${code},code.eq.${code},key_code.eq.${code},id.eq.${code}`)
       .maybeSingle();
     if (error) throw error;
     return mapFrom(data, KEY_FIELDS);

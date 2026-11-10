@@ -728,7 +728,9 @@ function createUserApi({
 
   router.get(['/rewards/link4m/return', '/return'], async (req, res) => {
     try {
-      const { token } = req.query;
+      const { token, attempt } = req.query;
+      const safeToken = encodeURIComponent(String(token || ''));
+      const safeAttempt = encodeURIComponent(String(attempt || ''));
       return res.send(`
         <!DOCTYPE html>
         <html>
@@ -740,7 +742,7 @@ function createUserApi({
             fetch('/api/rewards/link4m/verify', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ token: '${encodeURIComponent(String(token || ''))}' })
+              body: JSON.stringify({ token: '${safeToken}', attemptId: '${safeAttempt}' })
             }).then(r => r.json()).then(data => {
               if (data.ok) {
                 alert('Chúc mừng! Bạn đã nhận thêm ' + (data.addedHours || 4) + ' giờ sử dụng Bot thành công.');
@@ -763,12 +765,49 @@ function createUserApi({
 
   router.post(['/rewards/link4m/verify', '/verify'], async (req, res) => {
     try {
-      const token = req.body?.token;
-      if (!token) return res.status(400).json({ ok: false, error: 'Thiếu token xác nhận.' });
-      const result = await link4mService.verifyAndClaimReward(decodeURIComponent(token));
+      const rawToken = req.body?.token;
+      const rawAttempt = req.body?.attemptId || req.body?.attempt;
+      const token = rawToken ? decodeURIComponent(rawToken) : null;
+      const attemptId = rawAttempt ? decodeURIComponent(rawAttempt) : null;
+
+      if (!token && !attemptId) {
+        return res.status(400).json({ ok: false, error: 'Thiếu token hoặc mã phiên xác nhận.' });
+      }
+
+      const result = await link4mService.verifyAndClaimReward(token, attemptId);
       return res.json(result);
     } catch (error) {
       return res.status(400).json({ ok: false, error: error.message });
+    }
+  });
+
+  // 18b. DISCORD LINKING STATUS & UNLINK
+  router.get(['/user/discord-link', '/discord-link'], requireSession, async (req, res) => {
+    try {
+      const user = req.managerAuthSession;
+      const link = await store.getDiscordLink(user.userId || user.username);
+      if (!link) {
+        return res.json({ ok: true, linked: false });
+      }
+      return res.json({
+        ok: true,
+        linked: true,
+        discordUserId: link.discord_user_id || link.discordUserId,
+        username: link.username || user.username,
+        linkedAt: link.linked_at || link.linkedAt || null
+      });
+    } catch (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+  });
+
+  router.post(['/user/discord-unlink', '/discord-unlink'], requireSession, async (req, res) => {
+    try {
+      const user = req.managerAuthSession;
+      await store.unlinkDiscord(user.userId || user.username);
+      return res.json({ ok: true, message: 'Đã hủy liên kết tài khoản Discord thành công.' });
+    } catch (error) {
+      return res.status(500).json({ ok: false, error: error.message });
     }
   });
 
