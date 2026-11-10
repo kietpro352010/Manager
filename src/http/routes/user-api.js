@@ -3,6 +3,32 @@
 const express = require('express');
 const { validateProxyUrl } = require('../../services/proxy-validation');
 
+// Helper: Sanitize Bot DTO according to session permissions (Hiding IP/URL/Proxy for rental clients)
+function sanitizeBotForSession(botData, session) {
+  if (!botData) return botData;
+  const copy = { ...botData };
+  delete copy.secretKey;
+  delete copy.secretCiphertext;
+  if (session && session.role === 'admin') return copy;
+
+  copy.url = '';
+  copy.serviceUrl = '';
+  delete copy.sourceUrl;
+  delete copy.registryFile;
+  copy.ipAddress = '';
+  copy.host = '';
+  copy.proxy = null;
+  copy.proxyCiphertext = null;
+
+  if (session && session.allowAccountChange === false) {
+    if (copy.settings && typeof copy.settings === 'object') {
+      copy.settings = { ...copy.settings };
+      if (copy.settings.spawnCommands) copy.settings.spawnCommands = '********';
+    }
+  }
+  return copy;
+}
+
 function createUserApi({
   store,
   entitlementService,
@@ -65,7 +91,7 @@ function createUserApi({
       // Map to safe client format with real-time status summary
       const payload = visibleBots.map((bot) => {
         const summary = registry.summary(bot.workerId) || {};
-        return {
+        const safeBot = sanitizeBotForSession({
           id: bot.workerId,
           workerId: bot.workerId,
           name: bot.name || `Bot #${bot.workerId}`,
@@ -87,8 +113,11 @@ function createUserApi({
           lastSeen: bot.lastHeartbeat || null,
           manuallyStopped: Boolean(bot.status?.manuallyStopped),
           tags: bot.tags || [],
-          summary: summary.data || null
-        };
+          summary: summary.data || null,
+          url: bot.serviceUrl || '',
+          proxy: bot.proxy || null
+        }, session);
+        return safeBot;
       });
 
       return res.json({ ok: true, bots: payload });
@@ -108,16 +137,20 @@ function createUserApi({
     if (!worker) return res.status(404).json({ ok: false, error: 'Không tìm thấy bot.' });
 
     const summary = registry.summary(botId);
+    const safeBot = sanitizeBotForSession({
+      id: worker.workerId,
+      alias: worker.alias || worker.name || `Bot #${worker.workerId}`,
+      platform: worker.platform,
+      status: worker.status || {},
+      logs: registry.getLogs(botId),
+      summary: summary?.data || null,
+      url: worker.serviceUrl || '',
+      proxy: worker.proxy || null
+    }, req.managerAuthSession);
+
     return res.json({
       ok: true,
-      bot: {
-        id: worker.workerId,
-        alias: worker.alias || worker.name || `Bot #${worker.workerId}`,
-        platform: worker.platform,
-        status: worker.status || {},
-        logs: registry.getLogs(botId),
-        summary: summary?.data || null
-      }
+      bot: safeBot
     });
   });
 
