@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const AsyncKeyLock = require('../services/async-key-lock');
 
 const TABLE = 'manager_commands';
 const COALESCEABLE_ACTIONS = new Set(['status', 'set-afk-mode', 'set-proxy']);
@@ -29,6 +30,7 @@ class SupabaseCommandStore {
   constructor(client) {
     this.client = client;
     this.adapter = client.adapter || null;
+    this.coalesceLock = new AsyncKeyLock();
   }
 
   async initialize() {
@@ -58,36 +60,9 @@ class SupabaseCommandStore {
     const commandId = command.commandId || ('cmd_' + crypto.randomUUID());
     const createdAt = command.createdAt || new Date().toISOString();
     const expiresAt = command.expiresAt || new Date(Date.now() + 60000).toISOString();
+    const allowCoalesce = COALESCEABLE_ACTIONS.has(actionStr);
 
-    // 0. Command coalescing: chỉ áp dụng cho action mang tính idempotent trạng thái
-    // Tuyệt đối không gộp các lệnh rời rạc (chat, toss, window_click, respawn, v.v.)
-    if (COALESCEABLE_ACTIONS.has(actionStr)) {
-      try {
-        const { data: existing } = await this.client.from(TABLE)
-          .select('*')
-          .eq('worker_id', workerIdStr)
-          .eq('action', actionStr)
-          .eq('status', 'queued')
-          .gt('expires_at', new Date().toISOString())
-          .limit(1)
-          .maybeSingle();
-
-        if (existing) {
-          const { data: updated, error: updErr } = await this.client.from(TABLE)
-            .update({
-              payload: command.payload || {},
-              expires_at: expiresAt,
-              created_at: new Date().toISOString()
-            })
-            .eq('command_id', existing.command_id)
-            .select('*')
-            .maybeSingle();
-          if (!updErr && updated) return fromRow(updated);
-        }
-      } catch (_) {}
-    }
-
-    // 1. Thử gọi RPC manager_enqueue_worker_command
+    // 1. Thử gọi RPC manager_enqueue_worker_command: thực thi atomic advisory lock & transaction trong PostgreSQL
     try {
       const { data, error } = await this.client.rpc('manager_enqueue_worker_command', {
         p_command_id: commandId,
@@ -95,12 +70,60 @@ class SupabaseCommandStore {
         p_action: actionStr,
         p_payload: command.payload || {},
         p_created_at: createdAt,
-        p_expires_at: expiresAt
+        p_expires_at: expiresAt,
+        p_allow_coalesce: allowCoalesce
       });
-      if (!error && data) return fromRow(unwrap(data));
+      if (!error && data) {
+        const row = unwrap(data);
+        if (row) return fromRow(row);
+      }
     } catch (_) {}
 
-    // 2. Fallback: insert trực tiếp vào manager_commands
+    // 2. Fallback cho coalesceable action khi RPC chưa triển khai:
+    // Sử dụng AsyncKeyLock để đảm bảo tính nguyên tử tuyệt đối trong tiến trình Node.js
+    if (allowCoalesce) {
+      return await this.coalesceLock.run(`${workerIdStr}:${actionStr}`, async () => {
+        try {
+          const { data: existing } = await this.client.from(TABLE)
+            .select('*')
+            .eq('worker_id', workerIdStr)
+            .eq('action', actionStr)
+            .eq('status', 'queued')
+            .gt('expires_at', new Date().toISOString())
+            .limit(1)
+            .maybeSingle();
+
+          if (existing) {
+            const { data: updated, error: updErr } = await this.client.from(TABLE)
+              .update({
+                payload: command.payload || {},
+                expires_at: expiresAt,
+                created_at: new Date().toISOString()
+              })
+              .eq('command_id', existing.command_id)
+              .select('*')
+              .maybeSingle();
+            if (!updErr && updated) return fromRow(updated);
+          }
+        } catch (_) {}
+
+        const row = {
+          command_id: commandId,
+          worker_id: workerIdStr,
+          action: actionStr,
+          payload: command.payload || {},
+          status: 'queued',
+          created_at: createdAt,
+          expires_at: expiresAt
+        };
+        const { data: inserted, error: insErr } = await this.client.from(TABLE).insert(row).select('*').maybeSingle();
+        if (insErr && insErr.code !== '42P01') throw insErr;
+        if (inserted) return fromRow(inserted);
+        return fromRow(row);
+      });
+    }
+
+    // 3. Fallback cho non-coalesceable actions (chat, toss, window_click, v.v.): insert trực tiếp bản ghi riêng biệt
     const row = {
       command_id: commandId,
       worker_id: workerIdStr,
@@ -114,7 +137,7 @@ class SupabaseCommandStore {
     if (insErr && insErr.code !== '42P01') throw insErr;
     if (inserted) return fromRow(inserted);
 
-    // 3. Fallback: lưu vào manager_outbox_queue nếu manager_commands chưa có
+    // 4. Fallback: lưu vào manager_outbox_queue nếu manager_commands chưa có
     if (this.adapter && typeof this.adapter.saveOutboxItem === 'function') {
       await this.adapter.saveOutboxItem({
         id: commandId,

@@ -50,8 +50,8 @@ async function runTests() {
   assert.deepStrictEqual(executionOrder, [1, 2], 'Lock must serialize executions for the same key');
   console.log('✅ 3. AsyncKeyLock: Sequential serialization verified.');
 
-  // 4. Schema SQL definitions check
-  console.log('4. Checking Schema SQL & Missing RPCs...');
+  // 4. Schema SQL definitions & Atomic Numbering check
+  console.log('4. Checking Schema SQL, Atomic Numbering & Advisory Locks...');
   const sql = typeof schema === 'string' ? schema : schema.SCHEMA_SQL;
   const requiredRpcs = [
     'manager_next_bot_number',
@@ -64,13 +64,25 @@ async function runTests() {
   for (const rpc of requiredRpcs) {
     assert.ok(sql.includes(rpc), `Schema SQL must include ${rpc}`);
   }
-  console.log('✅ 4. Schema SQL: All 4 RPCs, atomic sequence, and functions verified.');
 
-  // 5. Command Coalescing Selectivity Check
-  console.log('5. Checking Command Coalescing Selectivity...');
+  // Ensure manager_next_bot_number is defined EXACTLY ONCE (no overriding duplicate)
+  const firstDef = sql.indexOf('CREATE OR REPLACE FUNCTION public.manager_next_bot_number()');
+  const lastDef = sql.lastIndexOf('CREATE OR REPLACE FUNCTION public.manager_next_bot_number()');
+  assert.strictEqual(firstDef, lastDef, 'manager_next_bot_number must be defined only ONCE in schema SQL');
+  assert.ok(sql.includes('EXIT WHEN NOT EXISTS'), 'manager_next_bot_number must use atomic loop with NOT EXISTS check');
+  assert.ok(sql.includes('manager_workers_bot_number_unique'), 'Schema must define UNIQUE constraint on bot_number');
+  assert.ok(sql.includes('pg_advisory_xact_lock'), 'Schema must use transaction advisory lock for atomic command coalescing');
+  console.log('✅ 4. Schema SQL: Atomic sequence, unique constraint & single definition verified.');
+
+  // 5. Command Coalescing Atomic & Selectivity Check
+  console.log('5. Checking Command Coalescing Atomic RPC & Fallback Concurrency...');
   const table = [];
+  const rpcCalls = [];
   const mockClient = {
-    rpc: async () => ({ data: null, error: { message: 'not implemented' } }),
+    rpc: async (fnName, params) => {
+      rpcCalls.push({ fnName, params });
+      return { data: null, error: { message: 'not implemented' } };
+    },
     from: (_tbl) => {
       let filters = {};
       return {
@@ -87,8 +99,9 @@ async function runTests() {
                       gt: () => ({
                         limit: () => ({
                           maybeSingle: async () => {
+                            await new Promise(r => setTimeout(r, 10));
                             const found = table.find(r => r.worker_id === filters.worker_id && r.action === filters.action && r.status === filters.status);
-                            return { data: found || null, error: null };
+                            return { data: found ? { ...found } : null, error: null };
                           }
                         })
                       })
@@ -103,9 +116,10 @@ async function runTests() {
           eq: (field, val) => ({
             select: () => ({
               maybeSingle: async () => {
+                await new Promise(r => setTimeout(r, 10));
                 const item = table.find(r => r[field] === val);
                 if (item) Object.assign(item, updates);
-                return { data: item || null, error: null };
+                return { data: item ? { ...item } : null, error: null };
               }
             })
           })
@@ -113,8 +127,9 @@ async function runTests() {
         insert: (row) => ({
           select: () => ({
             maybeSingle: async () => {
+              await new Promise(r => setTimeout(r, 10));
               table.push({ ...row });
-              return { data: row, error: null };
+              return { data: { ...row }, error: null };
             }
           })
         })
@@ -124,18 +139,30 @@ async function runTests() {
 
   const commandStore = new SupabaseCommandStore(mockClient);
 
-  // Discrete actions (chat, toss, window_click, etc.) must NEVER coalesce
-  const chat1 = await commandStore.enqueue({ workerId: 'w1', action: 'chat', payload: { message: 'msg1' } });
-  const chat2 = await commandStore.enqueue({ workerId: 'w1', action: 'chat', payload: { message: 'msg2' } });
+  // 5a. Discrete actions concurrently (chat): must NEVER coalesce
+  const [chat1, chat2] = await Promise.all([
+    commandStore.enqueue({ workerId: 'w1', action: 'chat', payload: { message: 'msg1' } }),
+    commandStore.enqueue({ workerId: 'w1', action: 'chat', payload: { message: 'msg2' } })
+  ]);
   assert.notStrictEqual(chat1.commandId, chat2.commandId, 'Discrete actions must NOT coalesce');
-  assert.strictEqual(table.filter(r => r.action === 'chat').length, 2, 'Must have 2 chat records');
+  assert.strictEqual(table.filter(r => r.action === 'chat').length, 2, 'Must have 2 distinct chat records');
 
-  // Idempotent state actions (status, set-afk-mode, set-proxy) MUST coalesce
-  const st1 = await commandStore.enqueue({ workerId: 'w1', action: 'status', payload: {} });
-  const st2 = await commandStore.enqueue({ workerId: 'w1', action: 'status', payload: {} });
-  assert.strictEqual(st1.commandId, st2.commandId, 'Idempotent actions MUST coalesce');
+  // Verify RPC was passed p_allow_coalesce: false for chat
+  const chatRpc = rpcCalls.find(c => c.params.p_action === 'chat');
+  assert.strictEqual(chatRpc.params.p_allow_coalesce, false, 'Chat RPC must have p_allow_coalesce: false');
+
+  // 5b. Idempotent state actions concurrently (status): MUST coalesce atomically into 1 record
+  const [st1, st2] = await Promise.all([
+    commandStore.enqueue({ workerId: 'w1', action: 'status', payload: {} }),
+    commandStore.enqueue({ workerId: 'w1', action: 'status', payload: {} })
+  ]);
+  assert.strictEqual(st1.commandId, st2.commandId, 'Idempotent actions MUST coalesce to same commandId');
   assert.strictEqual(table.filter(r => r.action === 'status').length, 1, 'Must have 1 status record');
-  console.log('✅ 5. Command Coalescing: Discrete actions preserved, idempotent state coalesced.');
+
+  // Verify RPC was passed p_allow_coalesce: true for status
+  const statusRpc = rpcCalls.find(c => c.params.p_action === 'status');
+  assert.strictEqual(statusRpc.params.p_allow_coalesce, true, 'Status RPC must have p_allow_coalesce: true');
+  console.log('✅ 5. Command Coalescing: Atomic RPC parameter & concurrent fallback serialization verified.');
 
   // 6. Readiness Probe HTTP 503 vs 200 Verification
   console.log('6. Checking Readiness Probe (Discord + Database dependencies)...');
