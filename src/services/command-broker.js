@@ -283,12 +283,17 @@ class CommandBroker {
   }
 
   async reportResult(workerId, commandId, result) {
-    await this.commandStore.complete(workerId, commandId, result);
-    const pending = this.pendingResults.get(commandId);
-    if (pending && pending.workerId === workerId) {
+    const wid = String(workerId || '').trim().toLowerCase();
+    const cid = String(commandId || '').trim();
+    const pending = this.pendingResults.get(cid);
+    if (pending && pending.workerId !== wid) {
+      return { ok: false, error: 'COMMAND_OWNERSHIP_MISMATCH' };
+    }
+    const completed = await this.commandStore.complete(wid, cid, result);
+    if (pending && pending.workerId === wid) {
       pending.finish(result);
     }
-    return { ok: true };
+    return { ok: Boolean(completed || pending) };
   }
 }
 

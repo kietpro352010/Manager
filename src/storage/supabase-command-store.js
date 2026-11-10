@@ -143,8 +143,15 @@ class SupabaseCommandStore {
         .maybeSingle();
 
       if (!error && data) {
-        await this.client.from(TABLE).update({ status: 'delivered', delivered_at: now }).eq('command_id', data.command_id);
-        return fromRow({ ...data, status: 'delivered', delivered_at: now });
+        const { data: updated, error: updErr } = await this.client.from(TABLE)
+          .update({ status: 'delivered', delivered_at: now })
+          .eq('command_id', data.command_id)
+          .eq('status', 'queued')
+          .select('*')
+          .maybeSingle();
+        if (!updErr && updated) {
+          return fromRow(updated);
+        }
       }
     } catch (_) {}
 
@@ -163,12 +170,18 @@ class SupabaseCommandStore {
 
     // Fallback: update status completed
     try {
-      const { error } = await this.client.from(TABLE).update({
+      const { data, error } = await this.client.from(TABLE).update({
         status: 'completed',
         result: result ?? {},
         completed_at: new Date().toISOString()
-      }).eq('command_id', String(commandId));
-      if (!error) return true;
+      })
+      .eq('command_id', String(commandId))
+      .eq('worker_id', String(workerId))
+      .in('status', ['delivered', 'queued'])
+      .select('command_id')
+      .maybeSingle();
+
+      if (!error && data) return true;
     } catch (_) {}
 
     return false;

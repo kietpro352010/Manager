@@ -5,6 +5,26 @@ const { isLocalOrPrivateHost } = require('./proxy-validation');
 const { encryptSecret, decryptSecret, generateWorkerSecret } = require('../utils/secrets');
 const { extractChatMessage } = require('../utils/text-format');
 
+function safeDecryptJson(ciphertext, key) {
+  if (!ciphertext) return null;
+  try {
+    const raw = decryptSecret(ciphertext, key);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (_) {
+    return null;
+  }
+}
+
+function safeDecryptText(ciphertext, key) {
+  if (!ciphertext) return '';
+  try {
+    return decryptSecret(ciphertext, key) || '';
+  } catch (_) {
+    return '';
+  }
+}
+
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{1,39}$/;
 const ACTIONS = new Set([
   'start', 'stop', 'restart', 'status', 'chat', 'reset', 'set-afk-mode', 'set-proxy'
@@ -142,12 +162,22 @@ class WorkerRegistry {
 
   async credential(workerId) {
     const id = String(workerId || '').trim().toLowerCase();
-    if (this.secretCache.has(id)) return this.secretCache.get(id);
+    const cached = this.secretCache.get(id);
+    if (cached) {
+      if (typeof cached === 'object') {
+        if (cached.enabled === false) return null;
+        return cached.secret;
+      }
+      return cached;
+    }
     const record = await this.find(id);
-    if (!record || !record.enabled) return null;
-    const secret = decryptSecret(record.secretCiphertext, this.encryptionKey);
-    if (secret) this.secretCache.set(id, secret);
-    return secret;
+    if (!record || record.enabled === false) {
+      this.secretCache.delete(id);
+      return null;
+    }
+    const secret = safeDecryptText(record.secretCiphertext, this.encryptionKey);
+    if (secret) this.secretCache.set(id, { secret, enabled: Boolean(record.enabled) });
+    return secret || null;
   }
 
   async rotateSecret(workerId) {
@@ -155,7 +185,7 @@ class WorkerRegistry {
     if (!record) throw new Error(`Worker ${workerId} is not registered.`);
     const secret = generateWorkerSecret();
     await this.store.update(record.workerId, { secretCiphertext: encryptSecret(secret, this.encryptionKey) });
-    this.secretCache.set(record.workerId, secret);
+    this.secretCache.set(record.workerId, { secret, enabled: Boolean(record.enabled) });
     return secret;
   }
 
@@ -179,7 +209,11 @@ class WorkerRegistry {
 
   verifyBotSecretSync(workerId, secret) {
     if (!workerId || typeof secret !== 'string') return false;
-    const expected = this.secretCache.get(String(workerId).trim().toLowerCase());
+    const id = String(workerId).trim().toLowerCase();
+    const cached = this.secretCache.get(id);
+    if (!cached) return false;
+    const expected = typeof cached === 'object' ? cached.secret : cached;
+    if (typeof cached === 'object' && cached.enabled === false) return false;
     if (!expected) return false;
     const left = Buffer.from(expected, 'utf8');
     const right = Buffer.from(secret, 'utf8');
@@ -193,9 +227,21 @@ class WorkerRegistry {
   async updateStatus(workerId, status, source) {
     const id = String(workerId || '').trim().toLowerCase();
 
-    // Sequence check chống ghi đè kết quả cũ
+    // 1. Kiểm tra worker tồn tại và đang enabled - không tự kích hoạt lại worker đã bị disable (Audit A-13)
+    const existing = await this.find(id);
+    if (!existing || existing.enabled === false) {
+      this.secretCache.delete(id);
+      return null;
+    }
+
+    // 2. Sequence check chống out-of-order race conditions ghi đè kết quả cũ (Audit A-08)
     const currentSeq = (this.summaryRequestSeq.get(id) || 0) + 1;
     this.summaryRequestSeq.set(id, currentSeq);
+
+    const lastApplied = this.summaryLastAppliedSeq.get(id) || 0;
+    if (currentSeq <= lastApplied) {
+      return this.publicView(existing);
+    }
 
     const asNumber = (value, max = Number.MAX_SAFE_INTEGER) =>
       value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
@@ -238,7 +284,15 @@ class WorkerRegistry {
       source
     };
 
-    const updated = await this.store.update(id, { status: safeStatus, lastHeartbeat: new Date(), enabled: true });
+    // Chống ghi đè nếu trạng thái trong payload cũ hơn trạng thái đang có
+    if (safeStatus.lastStateAt && existing.status?.lastStateAt) {
+      if (safeStatus.lastStateAt.getTime() < new Date(existing.status.lastStateAt).getTime()) {
+        return this.publicView(existing);
+      }
+    }
+
+    // Bảo tồn cờ enabled của admin, KHÔNG tự ý set enabled: true
+    const updated = await this.store.update(id, { status: safeStatus, lastHeartbeat: new Date() });
 
     this.summaryLastAppliedSeq.set(id, currentSeq);
     this.summaryCache.set(id, { timestamp: Date.now(), data: safeStatus });
@@ -323,11 +377,9 @@ class WorkerRegistry {
       restricted: Boolean(restriction),
       settings: {
         afkMode: 'still',
-        ...(settings.proxyManaged ? { proxyUrl: settings.proxyCiphertext ? decryptSecret(settings.proxyCiphertext, this.encryptionKey) : '' } : {})
+        ...(settings.proxyManaged ? { proxyUrl: settings.proxyCiphertext ? safeDecryptText(settings.proxyCiphertext, this.encryptionKey) : '' } : {})
       },
-      credentials: settings.mcCredentialsCiphertext
-        ? JSON.parse(decryptSecret(settings.mcCredentialsCiphertext, this.encryptionKey))
-        : null
+      credentials: safeDecryptJson(settings.mcCredentialsCiphertext, this.encryptionKey)
     };
   }
 
@@ -338,12 +390,10 @@ class WorkerRegistry {
     return {
       afkMode: 'still',
       afkManaged: settings.afkManaged === true,
-      proxyUrl: settings.proxyCiphertext ? decryptSecret(settings.proxyCiphertext, this.encryptionKey) : '',
+      proxyUrl: settings.proxyCiphertext ? safeDecryptText(settings.proxyCiphertext, this.encryptionKey) : '',
       proxyManaged: settings.proxyManaged === true,
       credentialsConfigured: Boolean(settings.mcCredentialsCiphertext),
-      username: settings.mcCredentialsCiphertext
-        ? JSON.parse(decryptSecret(settings.mcCredentialsCiphertext, this.encryptionKey)).username
-        : ''
+      username: safeDecryptJson(settings.mcCredentialsCiphertext, this.encryptionKey)?.username || ''
     };
   }
 
@@ -361,7 +411,7 @@ class WorkerRegistry {
     const current = worker.settings || {};
     let passwordValue = suppliedPassword;
     if (!passwordValue && current.mcCredentialsCiphertext) {
-      passwordValue = JSON.parse(decryptSecret(current.mcCredentialsCiphertext, this.encryptionKey)).password;
+      passwordValue = safeDecryptJson(current.mcCredentialsCiphertext, this.encryptionKey)?.password || '';
     }
     if (!passwordValue) throw new Error('Enter a Minecraft password before saving this account.');
     const mcCredentialsCiphertext = encryptSecret(JSON.stringify({ username: name, password: passwordValue }), this.encryptionKey);
@@ -430,6 +480,17 @@ class WorkerRegistry {
       afkMode: 'still',
       proxyEnabled: Boolean(updated?.proxyCiphertext || next.proxyCiphertext)
     };
+  }
+
+  async setEnabled(workerId, enabled) {
+    const id = String(workerId || '').trim().toLowerCase();
+    const isEnabled = Boolean(enabled);
+    const updated = await this.store.update(id, { enabled: isEnabled });
+    if (!isEnabled) {
+      this.secretCache.delete(id);
+      this.summaryCache.delete(id);
+    }
+    return updated;
   }
 
   // Ergonomic helper delegates

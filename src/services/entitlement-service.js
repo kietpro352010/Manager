@@ -103,7 +103,8 @@ class EntitlementService {
 
   async redeem(userId, rawCode, discordRole = 'user') {
     const run = () => this.redeemLocked(userId, rawCode, discordRole);
-    return this.userLock ? this.userLock.run(userId, run) : run();
+    if (!this.userLock) return run();
+    return this.userLock.run('global:bot_allocation', () => this.userLock.run(userId, run));
   }
 
   async redeemLocked(userId, rawCode, discordRole) {

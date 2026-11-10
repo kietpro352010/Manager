@@ -137,7 +137,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         planName: 'Gói dùng thử',
         workerIds: [],
         assignedBotIds: [],
-        note: `Đăng ký từ IP ${clientIp}`,
+        note: 'Đăng ký tài khoản Web',
         createdAt: new Date().toISOString()
       };
 
@@ -220,7 +220,10 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       // A. Check Admin Login
       const adminUsername = String(config.adminUsername || 'admin').trim();
       if (cleanUsername.toLowerCase() === adminUsername.toLowerCase()) {
-        const storedAdminPass = registry.getAdminPassword() || config.adminPassword || 'admin123';
+        const storedAdminPass = registry.getAdminPassword() || config.adminPassword;
+        if (!storedAdminPass) {
+          return res.status(403).json({ ok: false, error: 'Tài khoản Quản trị viên chưa được cấu hình mật khẩu hệ thống (ADMIN_PASSWORD).' });
+        }
         const isMatch = verifyAdminPassword(cleanPassword, storedAdminPass);
         if (isMatch) {
           resetRateLimit(clientIp, cleanUsername);

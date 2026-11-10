@@ -69,7 +69,7 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
   router.post('/report', async (req, res) => {
     try {
       const incomingSecret = req.headers['x-bot-secret'] || req.headers['x-worker-secret'] || '';
-      const workerId = String(req.body?.workerId || req.body?.id || req.headers['x-manager-bot-id'] || '').trim();
+      const workerId = String(req.body?.workerId || req.body?.id || req.headers['x-manager-bot-id'] || '').trim().toLowerCase();
       if (!workerId) return res.status(400).json({ ok: false, error: 'missing_worker_id' });
 
       const globalSecret = config.botSecretKey || '';
@@ -78,6 +78,11 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
 
       if (!isAuthed) {
         return res.status(401).json({ ok: false, error: 'unauthorized_worker_secret' });
+      }
+
+      const existingWorker = await registry.find(workerId);
+      if (!existingWorker || existingWorker.enabled === false) {
+        return res.status(404).json({ ok: false, error: 'worker_not_found_or_disabled' });
       }
 
       const status = req.body?.status || req.body || {};

@@ -81,6 +81,8 @@ function loadConfig(env = process.env) {
   const adminRoleId = String(env.ADMIN_ROLE_ID || '').trim();
   const userRoleId = String(env.USER_ROLE_ID || '').trim();
   const adminUserId = String(env.ADMIN_DISCORD_USER_ID || env.ADMIN_USER_ID || '').trim();
+  const adminUsername = String(env.ADMIN_USERNAME || 'admin').trim();
+  const adminPassword = String(env.ADMIN_PASSWORD || '').trim();
 
   if ((adminRoleId || userRoleId) && (![adminRoleId, userRoleId].every((id) => /^\d{17,20}$/.test(id)) || adminRoleId === userRoleId)) {
     throw new Error('If role IDs are set in the environment, ADMIN_ROLE_ID and USER_ROLE_ID must both be valid and different.');
@@ -114,6 +116,8 @@ function loadConfig(env = process.env) {
     adminRoleId,
     userRoleId,
     adminUserId,
+    adminUsername,
+    adminPassword,
     supabaseUrl,
     supabaseSecretKey,
     encryptionKey,
