@@ -29,6 +29,7 @@ function createApp({
   workerStore,
   fleetOperations,
   adminNotifier,
+  discordClient,
   config,
   logger
 }) {
@@ -204,12 +205,54 @@ function createApp({
     return res.type('html').send(PUBLIC_LOGIN_HTML);
   });
 
-  // Health and Ready endpoints
-  app.get(['/ready', '/api/ready', '/health'], (_req, res) => {
+  // 6.1 Liveness Probe (process health, uptime, memory)
+  app.get('/health', (_req, res) => {
+    const memory = process.memoryUsage();
     return res.json({
       ok: true,
       service: 'KingMC AFK Bot Cloud 24/7',
-      status: 'ready',
+      status: 'healthy',
+      uptime: Math.floor(process.uptime()),
+      memory: {
+        rssMb: Math.round(memory.rss / (1024 * 1024)),
+        heapUsedMb: Math.round(memory.heapUsed / (1024 * 1024))
+      },
+      time: new Date().toISOString()
+    });
+  });
+
+  // 6.2 Readiness Probe (validates Database connectivity and Discord Gateway)
+  app.get(['/ready', '/api/ready'], async (_req, res) => {
+    let dbOk = true;
+    let dbLatencyMs = 0;
+    if (store?.adapter && typeof store.adapter.testConnection === 'function') {
+      const start = Date.now();
+      try {
+        const testRes = await store.adapter.testConnection();
+        dbOk = Boolean(testRes?.ok);
+        dbLatencyMs = Date.now() - start;
+      } catch (_) {
+        dbOk = false;
+      }
+    }
+
+    let discordStatus = 'not_configured';
+    if (config?.discordToken) {
+      discordStatus = (discordClient && typeof discordClient.isReady === 'function' && discordClient.isReady())
+        ? 'ready'
+        : 'connecting';
+    }
+
+    const isReady = dbOk;
+    const statusCode = isReady ? 200 : 503;
+    return res.status(statusCode).json({
+      ok: isReady,
+      status: isReady ? 'ready' : 'not_ready',
+      service: 'KingMC AFK Bot Cloud 24/7',
+      checks: {
+        database: { ok: dbOk, latencyMs: dbLatencyMs },
+        discord: { status: discordStatus }
+      },
       time: new Date().toISOString()
     });
   });

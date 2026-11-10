@@ -185,6 +185,7 @@ async function main() {
     workerStore: store,
     fleetOperations,
     adminNotifier,
+    discordClient: client,
     config: runtimeConfig,
     logger
   });

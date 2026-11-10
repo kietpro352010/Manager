@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: kingmc-worker-manager
+    runtime: node
+    plan: starter
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: DISCORD_CLIENT_ID
+        sync: false
+      - key: DISCORD_GUILD_ID
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: MANAGER_ENCRYPTION_KEY
+        sync: false
+      - key: RENDER_API_BASE_URL
+        value: https://api.render.com/v1
+      - key: LINK4M_REWARD_ENABLED
+        value: "false"
+      - key: LINK4M_REWARD_HOURS
+        value: "12"
+      - key: LINK4M_DAILY_LIMIT
+        value: "2"

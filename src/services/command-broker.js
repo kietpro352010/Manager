@@ -154,40 +154,48 @@ class CommandBroker {
 
   async dispatchPoll(worker, command) {
     command.expiresAt = new Date(Date.now() + this.config.commandResultTimeoutMs).toISOString();
+
+    const queued = await this.commandStore.enqueue({ ...command, workerId: worker.workerId });
+    if (!queued) throw new Error('Worker command queue is full or the worker is disabled.');
+
+    const actualCommandId = String(queued.commandId || command.commandId);
+
     let resolveCompletion;
     const completion = new Promise((resolve) => { resolveCompletion = resolve; });
     const pending = {
       workerId: worker.workerId,
+      commandId: actualCommandId,
       done: false,
       timer: null,
       finish: (result) => {
         if (pending.done) return;
         pending.done = true;
         if (pending.timer) clearTimeout(pending.timer);
-        this.pendingResults.delete(command.commandId);
+        this.pendingResults.delete(actualCommandId);
         resolveCompletion({ delivered: true, result });
       }
     };
-    this.pendingResults.set(command.commandId, pending);
 
-    try {
-      const queued = await this.commandStore.enqueue({ ...command, workerId: worker.workerId });
-      if (!queued) throw new Error('Worker command queue is full or the worker is disabled.');
-    } catch (error) {
-      pending.done = true;
-      this.pendingResults.delete(command.commandId);
-      throw error;
+    const existing = this.pendingResults.get(actualCommandId);
+    if (existing) {
+      const origFinish = existing.finish;
+      existing.finish = (res) => {
+        try { origFinish(res); } catch (_) {}
+        try { pending.finish(res); } catch (_) {}
+      };
+    } else {
+      this.pendingResults.set(actualCommandId, pending);
     }
 
     if (!pending.done) {
       pending.timer = setTimeout(() => {
-        void this.commandStore.expire(command.commandId).catch((error) => {
-          this.logger.warn('worker_command_expire_failed', { commandId: command.commandId, message: error.message });
+        void this.commandStore.expire(actualCommandId).catch((error) => {
+          this.logger.warn('worker_command_expire_failed', { commandId: actualCommandId, message: error.message });
         });
         if (pending.done) return;
         pending.done = true;
-        this.pendingResults.delete(command.commandId);
-        resolveCompletion({ delivered: false, timedOut: true, commandId: command.commandId });
+        this.pendingResults.delete(actualCommandId);
+        resolveCompletion({ delivered: false, timedOut: true, commandId: actualCommandId });
       }, this.config.commandResultTimeoutMs);
       pending.timer.unref?.();
     }

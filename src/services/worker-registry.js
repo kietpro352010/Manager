@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const AsyncKeyLock = require('./async-key-lock');
 const { isLocalOrPrivateHost } = require('./proxy-validation');
 const { encryptSecret, decryptSecret, generateWorkerSecret } = require('../utils/secrets');
 const { extractChatMessage } = require('../utils/text-format');
@@ -48,6 +49,7 @@ class WorkerRegistry {
     this.summaryLastAppliedSeq = new Map();
     this.botLogsCache = new Map(); // botId -> Array max 100
     this.secretCache = new Map(); // botId -> decrypted secret
+    this.statusLock = new AsyncKeyLock();
   }
 
   pruneStaleMemory() {
@@ -227,99 +229,100 @@ class WorkerRegistry {
 
   async updateStatus(workerId, status, source) {
     const id = String(workerId || '').trim().toLowerCase();
+    return this.statusLock.run(id, async () => {
+      // 1. Kiểm tra worker tồn tại và đang enabled - không tự kích hoạt lại worker đã bị disable (Audit A-13)
+      const existing = await this.find(id);
+      if (!existing || existing.enabled === false) {
+        this.secretCache.delete(id);
+        return null;
+      }
 
-    // 1. Kiểm tra worker tồn tại và đang enabled - không tự kích hoạt lại worker đã bị disable (Audit A-13)
-    const existing = await this.find(id);
-    if (!existing || existing.enabled === false) {
-      this.secretCache.delete(id);
-      return null;
-    }
+      // 2. Sequence check chống out-of-order race conditions ghi đè kết quả cũ (Audit A-08)
+      const currentSeq = (this.summaryRequestSeq.get(id) || 0) + 1;
+      this.summaryRequestSeq.set(id, currentSeq);
 
-    // 2. Sequence check chống out-of-order race conditions ghi đè kết quả cũ (Audit A-08)
-    const currentSeq = (this.summaryRequestSeq.get(id) || 0) + 1;
-    this.summaryRequestSeq.set(id, currentSeq);
-
-    const lastApplied = this.summaryLastAppliedSeq.get(id) || 0;
-    if (currentSeq <= lastApplied) {
-      return this.publicView(existing);
-    }
-
-    const asNumber = (value, max = Number.MAX_SAFE_INTEGER) =>
-      value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
-        ? Math.max(0, Math.min(max, Number(value)))
-        : null;
-
-    const safeStatus = {
-      state: String(status?.state || 'unknown').slice(0, 40),
-      online: Boolean(status?.online ?? status?.connected),
-      username: String(status?.username || '').slice(0, 64),
-      uptimeSeconds: Number.isFinite(Number(status?.uptimeSeconds)) ? Math.max(0, Number(status.uptimeSeconds)) : null,
-      pingMs: asNumber(status?.pingMs, 600000),
-      managerLatencyMs: asNumber(status?.managerLatencyMs, 600000),
-      transport: String(status?.transport || '').slice(0, 24),
-      reconnectAttempts: Number.isFinite(Number(status?.reconnectAttempts)) ? Math.max(0, Number(status.reconnectAttempts)) : 0,
-      reconnectCount: Number.isFinite(Number(status?.reconnectCount)) ? Math.max(0, Number(status.reconnectCount)) : 0,
-      afkMode: 'still',
-      proxyEnabled: Boolean(status?.proxyEnabled),
-      lastError: String(status?.lastError || '').slice(0, 240),
-      lastKickReason: String(status?.lastKickReason || '').slice(0, 240),
-      restriction: String(status?.restriction || '').slice(0, 40) || null,
-      maintenanceWindow: Boolean(status?.maintenanceWindow),
-      maintenanceTimeZone: String(status?.maintenanceTimeZone || '').slice(0, 40),
-      maintenanceStart: String(status?.maintenanceStart || '').slice(0, 5),
-      maintenanceEnd: String(status?.maintenanceEnd || '').slice(0, 5),
-      tps: typeof status?.tps === 'number' && Number.isFinite(status.tps) ? Math.max(0, Math.min(20, status.tps)) : null,
-      cpuPercent: asNumber(status?.cpuPercent, 100),
-      rssMb: asNumber(status?.rssMb, 65536),
-      heapUsedMb: asNumber(status?.heapUsedMb, 65536),
-      health: asNumber(status?.health, 20),
-      food: asNumber(status?.food, 20),
-      totemCount: asNumber(status?.totemCount, 1000),
-      goldenAppleCount: asNumber(status?.goldenAppleCount, 1000),
-      position: status?.position && ['x', 'y', 'z'].every((axis) => Number.isFinite(Number(status.position[axis])))
-        ? { x: Number(status.position.x), y: Number(status.position.y), z: Number(status.position.z) }
-        : null,
-      dimension: String(status?.dimension || '').slice(0, 40),
-      lastStateAt: status?.lastStateAt ? new Date(status.lastStateAt) : null,
-      updatedAt: new Date(),
-      source
-    };
-
-    // Chống ghi đè nếu trạng thái trong payload cũ hơn trạng thái đang có
-    if (safeStatus.lastStateAt && existing.status?.lastStateAt) {
-      if (safeStatus.lastStateAt.getTime() < new Date(existing.status.lastStateAt).getTime()) {
+      const lastApplied = this.summaryLastAppliedSeq.get(id) || 0;
+      if (currentSeq <= lastApplied) {
         return this.publicView(existing);
       }
-    }
 
-    // Bảo tồn cờ enabled của admin, KHÔNG tự ý set enabled: true
-    const updated = await this.store.update(id, { status: safeStatus, lastHeartbeat: new Date() });
+      const asNumber = (value, max = Number.MAX_SAFE_INTEGER) =>
+        value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
+          ? Math.max(0, Math.min(max, Number(value)))
+          : null;
 
-    this.summaryLastAppliedSeq.set(id, currentSeq);
-    this.summaryCache.set(id, { timestamp: Date.now(), data: safeStatus });
+      const safeStatus = {
+        state: String(status?.state || 'unknown').slice(0, 40),
+        online: Boolean(status?.online ?? status?.connected),
+        username: String(status?.username || '').slice(0, 64),
+        uptimeSeconds: Number.isFinite(Number(status?.uptimeSeconds)) ? Math.max(0, Number(status.uptimeSeconds)) : null,
+        pingMs: asNumber(status?.pingMs, 600000),
+        managerLatencyMs: asNumber(status?.managerLatencyMs, 600000),
+        transport: String(status?.transport || '').slice(0, 24),
+        reconnectAttempts: Number.isFinite(Number(status?.reconnectAttempts)) ? Math.max(0, Number(status.reconnectAttempts)) : 0,
+        reconnectCount: Number.isFinite(Number(status?.reconnectCount)) ? Math.max(0, Number(status.reconnectCount)) : 0,
+        afkMode: 'still',
+        proxyEnabled: Boolean(status?.proxyEnabled),
+        lastError: String(status?.lastError || '').slice(0, 240),
+        lastKickReason: String(status?.lastKickReason || '').slice(0, 240),
+        restriction: String(status?.restriction || '').slice(0, 40) || null,
+        maintenanceWindow: Boolean(status?.maintenanceWindow),
+        maintenanceTimeZone: String(status?.maintenanceTimeZone || '').slice(0, 40),
+        maintenanceStart: String(status?.maintenanceStart || '').slice(0, 5),
+        maintenanceEnd: String(status?.maintenanceEnd || '').slice(0, 5),
+        tps: typeof status?.tps === 'number' && Number.isFinite(status.tps) ? Math.max(0, Math.min(20, status.tps)) : null,
+        cpuPercent: asNumber(status?.cpuPercent, 100),
+        rssMb: asNumber(status?.rssMb, 65536),
+        heapUsedMb: asNumber(status?.heapUsedMb, 65536),
+        health: asNumber(status?.health, 20),
+        food: asNumber(status?.food, 20),
+        totemCount: asNumber(status?.totemCount, 1000),
+        goldenAppleCount: asNumber(status?.goldenAppleCount, 1000),
+        position: status?.position && ['x', 'y', 'z'].every((axis) => Number.isFinite(Number(status.position[axis])))
+          ? { x: Number(status.position.x), y: Number(status.position.y), z: Number(status.position.z) }
+          : null,
+        dimension: String(status?.dimension || '').slice(0, 40),
+        lastStateAt: status?.lastStateAt ? new Date(status.lastStateAt) : null,
+        updatedAt: new Date(),
+        source
+      };
 
-    // Kiểm tra và gửi cảnh báo admin
-    if (this.adminNotifier && updated && safeStatus.state === 'error') {
-      const errText = safeStatus.lastError || '';
-      const isGameEvent = /kick|banned|ban\b|ip_limited|quitting|lobby/i.test(errText) || /kick|banned|ban\b|ip_limited/i.test(safeStatus.lastKickReason || '');
-      if (!isGameEvent && errText) {
-        void this.adminNotifier.sendAlert({
-          source: 'Worker System',
-          event: 'worker_system_error',
-          message: `Tiến trình Worker **${updated.name || id}** (#${updated.botNumber}) gặp lỗi: ${errText}`,
-          details: {
-            workerId: id,
-            botNumber: updated.botNumber,
-            botName: updated.name,
-            provider: updated.provider,
-            error: errText
-          },
-          level: 'error'
-        });
+      // Chống ghi đè nếu trạng thái trong payload cũ hơn trạng thái đang có
+      if (safeStatus.lastStateAt && existing.status?.lastStateAt) {
+        if (safeStatus.lastStateAt.getTime() < new Date(existing.status.lastStateAt).getTime()) {
+          return this.publicView(existing);
+        }
       }
-    }
 
-    return updated;
+      // Bảo tồn cờ enabled của admin, KHÔNG tự ý set enabled: true
+      const updated = await this.store.update(id, { status: safeStatus, lastHeartbeat: new Date() });
+
+      this.summaryLastAppliedSeq.set(id, currentSeq);
+      this.summaryCache.set(id, { timestamp: Date.now(), data: safeStatus });
+
+      // Kiểm tra và gửi cảnh báo admin
+      if (this.adminNotifier && updated && safeStatus.state === 'error') {
+        const errText = safeStatus.lastError || '';
+        const isGameEvent = /kick|banned|ban\b|ip_limited|quitting|lobby/i.test(errText) || /kick|banned|ban\b|ip_limited/i.test(safeStatus.lastKickReason || '');
+        if (!isGameEvent && errText) {
+          void this.adminNotifier.sendAlert({
+            source: 'Worker System',
+            event: 'worker_system_error',
+            message: `Tiến trình Worker **${updated.name || id}** (#${updated.botNumber}) gặp lỗi: ${errText}`,
+            details: {
+              workerId: id,
+              botNumber: updated.botNumber,
+              botName: updated.name,
+              provider: updated.provider,
+              error: errText
+            },
+            level: 'error'
+          });
+        }
+      }
+
+      return updated;
+    });
   }
 
   async addEvent(workerId, event) {

@@ -50,6 +50,7 @@ function parseEncryptionKey(env) {
 
   const fallback = String(env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_KEY || '').trim();
   if (fallback && !/replace-with|example|changeme/i.test(fallback)) {
+    console.warn('[SECURITY WARNING]: Running with SUPABASE_SECRET_KEY as encryption fallback. Setting a dedicated, static MANAGER_MASTER_KEY is strongly recommended to protect encrypted Minecraft credentials across Supabase key rotations.');
     return crypto.createHash('sha256').update('kbot-cred-v1:' + fallback).digest();
   }
 
