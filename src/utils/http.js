@@ -16,8 +16,17 @@ async function fetchWithRetry(url, options = {}, { maxRetries = 3, initialDelayM
   let attempt = 0;
   while (attempt < maxRetries) {
     attempt++;
+    const controller = new AbortController();
+    let timeoutId = null;
     try {
-      const signal = options.signal || AbortSignal.timeout(timeoutMs);
+      let signal = options.signal;
+      if (!signal) {
+        timeoutId = setTimeout(() => {
+          controller.abort(new Error(`HTTP request timeout after ${timeoutMs}ms`));
+        }, timeoutMs);
+        timeoutId.unref?.();
+        signal = controller.signal;
+      }
       const res = await fetch(url, { ...options, signal });
       if (attempt < maxRetries && [408, 429, 500, 502, 503, 504].includes(res.status)) {
         const delay = Math.min(maxDelayMs, initialDelayMs * Math.pow(2, attempt - 1)) + Math.floor(Math.random() * 200);
@@ -40,6 +49,8 @@ async function fetchWithRetry(url, options = {}, { maxRetries = 3, initialDelayM
         continue;
       }
       throw err;
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
     }
   }
 }

@@ -18,6 +18,44 @@ function requiredRole(interaction) {
 
 function roleAllows(role, required) { return role === 'admin' || (required === 'user' && role === 'user'); }
 
+function isIgnorableDiscordError(err) {
+  if (!err) return false;
+  const code = err.code || err.rawError?.code;
+  const msg = String(err.message || '').toLowerCase();
+  return (
+    code === 10062 || // Unknown interaction (token expired > 3s)
+    code === 40060 || // Interaction has already been acknowledged
+    msg.includes('unknown interaction') ||
+    msg.includes('already been acknowledged')
+  );
+}
+
+async function safeDeferReply(interaction, options = { ephemeral: true }) {
+  if (interaction.deferred || interaction.replied) return;
+  try {
+    await interaction.deferReply(options);
+  } catch (err) {
+    if (!isIgnorableDiscordError(err)) throw err;
+  }
+}
+
+async function safeEditReply(interaction, payload) {
+  try {
+    if (interaction.deferred || interaction.replied) {
+      return await interaction.editReply(payload);
+    }
+    return await interaction.reply(payload);
+  } catch (err) {
+    if (isIgnorableDiscordError(err)) return null;
+    try {
+      return await interaction.followUp({ ...payload, ephemeral: true });
+    } catch (fErr) {
+      if (!isIgnorableDiscordError(fErr)) throw fErr;
+      return null;
+    }
+  }
+}
+
 function commandReply(message) {
   if (typeof message === 'string') return { content: message };
   return message;
@@ -93,24 +131,24 @@ function attachInteractionHandler(client, { config, services, logger }) {
         const command = commandMap.get(interaction.commandName);
         if (!command) return;
 
-        // Acknowledge immediately to prevent Discord's 3-second timeout ("The application did not respond")
-        await interaction.deferReply({ ephemeral: true }).catch(() => {});
+        // SLA Guard < 1200ms: Acknowledge immediately to prevent Discord's 3-second timeout ("The application did not respond")
+        await safeDeferReply(interaction, { ephemeral: true });
 
         const role = services.accessControl.roleFor(interaction.member, interaction);
         if (interaction.commandName === 'setup') {
           const allowed = await isAuthorizedSetupUser(interaction, services);
           if (!allowed) {
-            return interaction.editReply({
+            return safeEditReply(interaction, {
               content: 'Chỉ Chủ sở hữu máy chủ Discord (Server Owner), Quản trị viên (Administrator), hoặc Admin được cấu hình mới có quyền chạy lệnh /setup.',
               allowedMentions: { parse: [] }
             });
           }
           const message = await command.execute(interaction, services);
-          await interaction.editReply({ ...commandReply(message), allowedMentions: { parse: [] } });
+          await safeEditReply(interaction, { ...commandReply(message), allowedMentions: { parse: [] } });
           return;
         }
         if (!services.accessControl.isConfigured()) {
-          return interaction.editReply({
+          return safeEditReply(interaction, {
             content: 'Manager chưa được cấu hình vai trò trên máy chủ này. Chủ sở hữu hoặc Quản trị viên hãy dùng `/setup` trước.',
             allowedMentions: { parse: [] }
           });
@@ -119,10 +157,10 @@ function attachInteractionHandler(client, { config, services, logger }) {
           const text = role
             ? 'Hành động này yêu cầu quyền Admin.'
             : 'Bạn cần được gán Role Admin hoặc Role User đã được cấu hình trong server này để sử dụng bot.';
-          return interaction.editReply({ content: text, allowedMentions: { parse: [] } });
+          return safeEditReply(interaction, { content: text, allowedMentions: { parse: [] } });
         }
         const message = await command.execute(interaction, services);
-        await interaction.editReply({ ...commandReply(message), allowedMentions: { parse: [] } });
+        await safeEditReply(interaction, { ...commandReply(message), allowedMentions: { parse: [] } });
         return;
       }
 
@@ -149,13 +187,7 @@ function attachInteractionHandler(client, { config, services, logger }) {
         });
       }
       const message = `Action failed: ${String(error.message || 'unknown error').slice(0, 800)}`;
-      if (interaction.deferred || interaction.replied) {
-        await interaction.editReply({ content: message, allowedMentions: { parse: [] } }).catch(() => {
-          return interaction.followUp({ content: message, ephemeral: true, allowedMentions: { parse: [] } }).catch(() => {});
-        });
-      } else {
-        await interaction.reply({ content: message, ephemeral: true, allowedMentions: { parse: [] } }).catch(() => {});
-      }
+      await safeEditReply(interaction, { content: message, allowedMentions: { parse: [] } });
     }
   });
 

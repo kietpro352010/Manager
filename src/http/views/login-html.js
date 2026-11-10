@@ -699,14 +699,22 @@ async function handlePublicLoginSubmit(e) {
     if (data.token) {
       try { localStorage.setItem('kingmc_session', data.token); } catch (_) {}
     }
-    alertEl.textContent = '✅ ' + (data.message || 'Đăng nhập thành công! Đang tải dashboard...');
+    alertEl.textContent = '✨ ' + (data.message || 'Đăng nhập thành công! Đang tải dashboard...');
     alertEl.className = 'login-alert success';
+    btn.textContent = '✨ ĐĂNG NHẬP THÀNH CÔNG!';
+    btn.style.background = 'linear-gradient(135deg, #10b981 0%, #059669 100%)';
+    btn.style.boxShadow = '0 0 24px rgba(16, 185, 129, 0.6)';
+    btn.style.transform = 'scale(1.02)';
+    btn.style.transition = 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)';
     setTimeout(() => { window.location.replace('/'); }, 300);
   } catch (err) {
     alertEl.textContent = '⚠️ ' + err.message;
     alertEl.className = 'login-alert error';
     btn.disabled = false;
     btn.textContent = '🚀 ĐĂNG NHẬP VÀO HỆ THỐNG';
+    btn.style.background = '';
+    btn.style.boxShadow = '';
+    btn.style.transform = '';
   }
 }
 async function handlePublicRegisterSubmit(e) {
@@ -718,6 +726,16 @@ async function handlePublicRegisterSubmit(e) {
   const alertEl = document.getElementById('publicLoginAlert');
   const btn = document.getElementById('publicRegSubmitBtn');
 
+  if (u.length < 3) {
+    alertEl.textContent = '⚠️ Tên đăng nhập phải có ít nhất 3 ký tự!';
+    alertEl.className = 'login-alert error';
+    return;
+  }
+  if (p.length < 6) {
+    alertEl.textContent = '⚠️ Mật khẩu phải có ít nhất 6 ký tự!';
+    alertEl.className = 'login-alert error';
+    return;
+  }
   if (p !== p2) {
     alertEl.textContent = '⚠️ Mật khẩu xác nhận không khớp!';
     alertEl.className = 'login-alert error';
@@ -741,14 +759,22 @@ async function handlePublicRegisterSubmit(e) {
     if (data.token) {
       try { localStorage.setItem('kingmc_session', data.token); } catch (_) {}
     }
-    alertEl.textContent = '✅ ' + (data.message || 'Đăng ký thành công! Đang chuyển hướng...');
+    alertEl.textContent = '✨ ' + (data.message || 'Đăng ký thành công! Đang chuyển hướng...');
     alertEl.className = 'login-alert success';
+    btn.textContent = '✨ ĐĂNG KÝ THÀNH CÔNG!';
+    btn.style.background = 'linear-gradient(135deg, #10b981 0%, #059669 100%)';
+    btn.style.boxShadow = '0 0 24px rgba(16, 185, 129, 0.6)';
+    btn.style.transform = 'scale(1.02)';
+    btn.style.transition = 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)';
     setTimeout(() => { window.location.replace('/'); }, 350);
   } catch (err) {
     alertEl.textContent = '⚠️ ' + err.message;
     alertEl.className = 'login-alert error';
     btn.disabled = false;
     btn.textContent = '✨ HOÀN TẤT ĐĂNG KÝ VÀ BẮT ĐẦU';
+    btn.style.background = '';
+    btn.style.boxShadow = '';
+    btn.style.transform = '';
   }
 }
 async function loadPublicSystemInfo() {
@@ -774,6 +800,67 @@ async function loadPublicSystemInfo() {
     }
   } catch (_) {}
 }
+
+function checkUrlSessionErrors() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const err = params.get('error') || params.get('reason');
+    const alertEl = document.getElementById('publicLoginAlert');
+    if (!alertEl) return;
+    if (err === 'session_expired' || err === 'expired' || params.has('expired')) {
+      alertEl.textContent = '⚠️ Phiên đăng nhập của bạn đã hết hạn. Vui lòng đăng nhập lại để tiếp tục quản lý bot.';
+      alertEl.className = 'login-alert error';
+    } else if (err === 'unauthorized' || err === 'forbidden') {
+      alertEl.textContent = '🔒 Bạn cần đăng nhập để truy cập Bảng điều khiển.';
+      alertEl.className = 'login-alert error';
+    } else if (err === 'logged_out' || params.has('logged_out')) {
+      alertEl.textContent = '👋 Bạn đã đăng xuất an toàn khỏi hệ thống.';
+      alertEl.className = 'login-alert success';
+    }
+  } catch (_) {}
+}
+
+function setupInlineValidation() {
+  const regU = document.getElementById('regUsername');
+  const regP = document.getElementById('regPassword');
+  const regP2 = document.getElementById('regPasswordConfirm');
+  const regK = document.getElementById('regLicenseKey');
+  const pubK = document.getElementById('publicLicenseKey');
+
+  function validateInput(el, isValid) {
+    if (!el) return;
+    if (isValid) {
+      el.style.borderColor = 'rgba(16, 185, 129, 0.6)';
+      el.style.boxShadow = '0 0 8px rgba(16, 185, 129, 0.2)';
+    } else {
+      el.style.borderColor = 'rgba(239, 68, 68, 0.7)';
+      el.style.boxShadow = '0 0 8px rgba(239, 68, 68, 0.25)';
+    }
+  }
+
+  if (regU) {
+    regU.addEventListener('input', () => {
+      const v = regU.value.trim();
+      validateInput(regU, v.length === 0 || /^[a-zA-Z0-9_]{3,32}$/.test(v));
+    });
+  }
+
+  if (regP && regP2) {
+    const checkMatch = () => {
+      if (!regP2.value) { regP2.style.borderColor = ''; regP2.style.boxShadow = ''; return; }
+      validateInput(regP2, regP.value === regP2.value);
+    };
+    regP.addEventListener('input', checkMatch);
+    regP2.addEventListener('input', checkMatch);
+  }
+
+  [regK, pubK].forEach(el => {
+    if (el) el.addEventListener('input', () => { el.value = el.value.toUpperCase(); });
+  });
+}
+
+checkUrlSessionErrors();
+setupInlineValidation();
 loadPublicSystemInfo();
 window.switchPublicAuthTab = switchPublicAuthTab;
 window.togglePublicPass = togglePublicPass;

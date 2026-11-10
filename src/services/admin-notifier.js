@@ -13,6 +13,9 @@ class AdminNotifier {
     this.cooldownMs = 60000; // 1 minute deduplication cooldown
     this.isSending = false;
     this.queue = [];
+    this.pendingBatch = [];
+    this.batchTimer = null;
+    this.batchWaitMs = 3500; // 3.5s debounced alert batching
   }
 
   setAdminUserId(id) {
@@ -65,8 +68,46 @@ class AdminNotifier {
       }
     }
 
-    const item = { source, event, message: `${message}${repeatNote}`, error, details, level };
-    this.queue.push(item);
+    const item = { source, event, message: `${message}${repeatNote}`, error, details, level, timestamp: now };
+    this.pendingBatch.push(item);
+
+    if (this.batchTimer) clearTimeout(this.batchTimer);
+    this.batchTimer = setTimeout(() => {
+      this.batchTimer = null;
+      void this.flushBatch();
+    }, this.batchWaitMs);
+    this.batchTimer.unref?.();
+  }
+
+  async flushBatch() {
+    if (this.pendingBatch.length === 0) return;
+    const items = this.pendingBatch.splice(0, this.pendingBatch.length);
+
+    if (items.length === 1) {
+      this.queue.push(items[0]);
+      return this.processQueue();
+    }
+
+    // Nhiều cảnh báo dồn dập -> Gom thành 1 thông báo tổng hợp duy nhất
+    const highestLevel = items.some((i) => i.level === 'error') ? 'error' : (items.some((i) => i.level === 'warn') ? 'warn' : 'info');
+    const sources = [...new Set(items.map((i) => i.source))].join(', ');
+    const events = [...new Set(items.map((i) => i.event))].join(', ');
+    const batchItem = {
+      isBatch: true,
+      batchCount: items.length,
+      items,
+      source: sources,
+      event: `Tổng hợp ${items.length} sự cố dồn dập`,
+      message: `Hệ thống ghi nhận ${items.length} sự cố xảy ra liên tiếp trong 3.5 giây vừa qua.`,
+      level: highestLevel,
+      details: {
+        totalAlerts: items.length,
+        sources,
+        events
+      }
+    };
+
+    this.queue.push(batchItem);
     return this.processQueue();
   }
 
@@ -88,8 +129,9 @@ class AdminNotifier {
     }
   }
 
-  async dispatchDm({ source, event, message, error, details, level }) {
+  async dispatchDm(item) {
     if (!this.adminUserId || !this.client) return;
+    const { source, event, message, error, details, level, isBatch, batchCount, items } = item;
 
     try {
       const user = await this.client.users.fetch(this.adminUserId).catch(() => null);
@@ -101,6 +143,29 @@ class AdminNotifier {
 
       const color = level === 'error' ? 0xef4444 : level === 'warn' ? 0xf59e0b : 0x3b82f6;
       const icon = level === 'error' ? '🚨' : level === 'warn' ? '⚠️' : 'ℹ️';
+
+      if (isBatch && Array.isArray(items)) {
+        const embed = new EmbedBuilder()
+          .setColor(color)
+          .setTitle(`${icon} [BÁO ĐỘNG HỆ THỐNG] Tổng hợp ${batchCount} sự cố dồn dập`)
+          .setDescription(`Hệ thống ghi nhận **${batchCount}** sự cố dồn dập trong 3.5 giây vừa qua:`)
+          .setTimestamp();
+
+        const lines = items.slice(0, 10).map((it, idx) => {
+          const itemIcon = it.level === 'error' ? '🚨' : it.level === 'warn' ? '⚠️' : 'ℹ️';
+          return `${idx + 1}. ${itemIcon} **[${it.source}]** \`${it.event}\`: ${String(it.message).slice(0, 80)}`;
+        });
+        if (items.length > 10) lines.push(`*...và ${items.length - 10} cảnh báo khác.*`);
+
+        embed.addFields([
+          { name: '📋 Danh sách sự cố', value: lines.join('\n').slice(0, 1024), inline: false },
+          { name: '⏰ Thời gian', value: `${timeStr}\n(<t:${unix}:R>)`, inline: true },
+          { name: '📍 Nguồn liên quan', value: `\`${String(source).slice(0, 500)}\``, inline: true }
+        ]);
+        embed.setFooter({ text: 'KingMC AFK System Monitor • Gom cảnh báo tự động' });
+        await user.send({ embeds: [embed] });
+        return;
+      }
 
       const embed = new EmbedBuilder()
         .setColor(color)
@@ -157,20 +222,33 @@ class AdminNotifier {
     }
   }
 
-  async dispatchTelegram({ source, event, message, details, level }) {
+  async dispatchTelegram(item) {
     if (!this.telegramBotToken || !this.telegramChatId) return;
+    const { source, event, message, details, level, isBatch, batchCount, items } = item;
 
     try {
       const icon = level === 'error' ? '🚨' : level === 'warn' ? '⚠️' : 'ℹ️';
-      let text = `${icon} <b>[KINGMC AFK ALERT: ${source.toUpperCase()}]</b>\n\n`;
-      text += `<b>Sự kiện:</b> <code>${event}</code>\n`;
-      if (message) text += `<b>Chi tiết:</b> ${message}\n`;
+      let text = '';
 
-      if (details && typeof details === 'object') {
-        text += `\n<b>Thông số:</b>\n`;
-        for (const [k, v] of Object.entries(details)) {
-          if (v !== undefined && v !== null && v !== '') {
-            text += `• <i>${k}:</i> <code>${String(v).slice(0, 80)}</code>\n`;
+      if (isBatch && Array.isArray(items)) {
+        text = `${icon} <b>[KINGMC AFK BATCH ALERT]</b>\n`;
+        text += `Tổng hợp <b>${batchCount}</b> sự cố dồn dập trong 3.5 giây:\n\n`;
+        items.slice(0, 10).forEach((it, idx) => {
+          const itemIcon = it.level === 'error' ? '🚨' : it.level === 'warn' ? '⚠️' : 'ℹ️';
+          text += `${idx + 1}. ${itemIcon} [${it.source}] <code>${it.event}</code>: ${String(it.message).slice(0, 70)}\n`;
+        });
+        if (items.length > 10) text += `<i>...và ${items.length - 10} cảnh báo khác.</i>\n`;
+      } else {
+        text = `${icon} <b>[KINGMC AFK ALERT: ${source.toUpperCase()}]</b>\n\n`;
+        text += `<b>Sự kiện:</b> <code>${event}</code>\n`;
+        if (message) text += `<b>Chi tiết:</b> ${message}\n`;
+
+        if (details && typeof details === 'object') {
+          text += `\n<b>Thông số:</b>\n`;
+          for (const [k, v] of Object.entries(details)) {
+            if (v !== undefined && v !== null && v !== '') {
+              text += `• <i>${k}:</i> <code>${String(v).slice(0, 80)}</code>\n`;
+            }
           }
         }
       }

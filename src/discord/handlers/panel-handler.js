@@ -20,14 +20,47 @@ function pagePayload(services, userId, role, page, notice = '') {
   return overview(services, userId, role, notice);
 }
 
+function isIgnorable(err) {
+  if (!err) return false;
+  const code = err.code || err.rawError?.code;
+  const msg = String(err.message || '').toLowerCase();
+  return code === 10062 || code === 40060 || msg.includes('unknown interaction') || msg.includes('already been acknowledged');
+}
+
 async function deny(interaction, content) {
   const payload = { content, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } };
-  if (interaction.deferred || interaction.replied) return interaction.followUp(payload).catch(() => {});
-  return interaction.reply(payload).catch(() => {});
+  try {
+    if (interaction.deferred || interaction.replied) return await interaction.followUp(payload);
+    return await interaction.reply(payload);
+  } catch (err) {
+    if (!isIgnorable(err)) throw err;
+  }
+}
+
+async function safeDeferUpdate(interaction) {
+  if (interaction.deferred || interaction.replied) return;
+  try {
+    await safeDeferUpdate(interaction);
+  } catch (err) {
+    if (!isIgnorable(err)) throw err;
+  }
 }
 
 async function safeUpdate(interaction, payload) {
-  return interaction.update({ ...payload, allowedMentions: { parse: [] } });
+  try {
+    if (interaction.deferred || interaction.replied) {
+      return await interaction.editReply({ ...payload, allowedMentions: { parse: [] } });
+    }
+    return await interaction.update({ ...payload, allowedMentions: { parse: [] } });
+  } catch (err) {
+    if (isIgnorable(err)) return null;
+    try {
+      return await interaction.followUp({ ...payload, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+    } catch (fErr) {
+      if (!isIgnorable(fErr)) throw fErr;
+      return null;
+    }
+  }
 }
 
 async function showWorker(interaction, services, role, workerId, notice = '') {
@@ -190,7 +223,7 @@ async function handlePanelInteraction(interaction, services) {
     }
     if (interaction.isModalSubmit()) {
       if (customId === 'km:modal:setup-secrets') {
-        await interaction.deferUpdate();
+        await safeDeferUpdate(interaction);
         const fields = [
           ['render_api_key', 'renderApiKey'],
           ['link4m_api_key', 'link4mApiToken'],
@@ -222,13 +255,13 @@ async function handlePanelInteraction(interaction, services) {
       }
       if (customId.startsWith('km:modal:member-')) {
         if (!isAdmin(role)) return deny(interaction, 'Only admins can manage users.'), true;
-        await interaction.deferUpdate();
+        await safeDeferUpdate(interaction);
         const notice = await submitMemberModal(interaction, services, role);
         return interaction.editReply({ ...await accessPage(services, role, notice), allowedMentions: { parse: [] } }), true;
       }
       if (customId.startsWith('km:modal:worker-add')) {
         if (!isAdmin(role)) return deny(interaction, 'Only admins can register workers.'), true;
-        await interaction.deferUpdate();
+        await safeDeferUpdate(interaction);
         let workerId = '';
         try { workerId = (interaction.fields.getTextInputValue('worker_id') || '').trim().toLowerCase(); } catch (_) {}
         const name = interaction.fields.getTextInputValue('name').trim();
@@ -247,7 +280,7 @@ async function handlePanelInteraction(interaction, services) {
         const [, mode, workerId] = credentialsSubmit;
         const worker = await services.registry.find(workerId);
         if (!worker || !(await hasWorkerAccess(services, interaction.user.id, worker, role))) return deny(interaction, 'You do not have access to this worker.'), true;
-        await interaction.deferUpdate();
+        await safeDeferUpdate(interaction);
         const username = interaction.fields.getTextInputValue('username').trim();
         const password = interaction.fields.getTextInputValue('password');
         const saved = await services.registry.updateCredentials(workerId, { username, password });
@@ -271,7 +304,7 @@ async function handlePanelInteraction(interaction, services) {
         const workerId = customId.slice('km:modal:chat:'.length);
         const worker = await services.registry.find(workerId);
         if (!worker || !(await hasWorkerAccess(services, interaction.user.id, worker, role))) return deny(interaction, 'You do not have access to this worker.'), true;
-        await interaction.deferUpdate();
+        await safeDeferUpdate(interaction);
         const message = interaction.fields.getTextInputValue('message').trim();
         const result = await services.broker.dispatch(workerId, 'chat', { message });
         await audit(services, interaction.user.id, 'worker.chat', workerId, { messageLength: message.length });
@@ -282,7 +315,7 @@ async function handlePanelInteraction(interaction, services) {
         const workerId = customId.slice('km:modal:worker-proxy:'.length);
         const worker = await services.registry.find(workerId);
         if (!worker || !(await hasWorkerAccess(services, interaction.user.id, worker, role))) return deny(interaction, 'You do not have access to this worker.'), true;
-        await interaction.deferUpdate();
+        await safeDeferUpdate(interaction);
         const proxyUrl = interaction.fields.getTextInputValue('proxy_url').trim();
         if (proxyUrl && worker.status?.restriction) throw new Error('Proxy changes are paused while this worker is on a server restriction hold.');
         const previous = await services.registry.privateSettings(workerId);
@@ -335,7 +368,7 @@ async function handlePanelInteraction(interaction, services) {
       if (!isAdmin(role)) return deny(interaction, 'Only admins can run fleet operations.'), true;
       const action = customId.slice('km:fleet:confirm:'.length);
       if (!Object.hasOwn(FLEET_CONFIRMATIONS, action)) return deny(interaction, 'Unknown fleet operation.'), true;
-      await interaction.deferUpdate();
+      await safeDeferUpdate(interaction);
       const result = action === 'stop-all' ? await services.fleetOperations.stopAll()
         : action === 'reconnect-errors' ? await services.fleetOperations.reconnectErrors() : await services.fleetOperations.cleanDead();
       const notice = fleetNotice(action, result);
@@ -391,7 +424,7 @@ async function handlePanelInteraction(interaction, services) {
           ])), true;
         }
       }
-      await interaction.deferUpdate();
+      await safeDeferUpdate(interaction);
       if (action === 'status') {
         if (worker.provider === 'render') await services.broker.status(worker);
         return interaction.editReply({ ...await workerDetail(services, interaction.user.id, workerId, role, '🔄 Đã làm mới trạng thái.'), allowedMentions: { parse: [] } }), true;
@@ -415,7 +448,7 @@ async function handlePanelInteraction(interaction, services) {
     if (resetConfirmMatch) {
       if (!isAdmin(role)) return deny(interaction, 'Only admins can reset worker data.'), true;
       const workerId = resetConfirmMatch[1];
-      await interaction.deferUpdate();
+      await safeDeferUpdate(interaction);
       const result = await services.broker.dispatch(workerId, 'reset');
       await audit(services, interaction.user.id, 'worker.reset', workerId, { timedOut: Boolean(result.timedOut) });
       const detail = result.result?.detail || result.result || {};
@@ -431,7 +464,7 @@ async function handlePanelInteraction(interaction, services) {
     if (rotateMatch) {
       if (!isAdmin(role)) return deny(interaction, 'Only admins can rotate worker secrets.'), true;
       const workerId = rotateMatch[1];
-      await interaction.deferUpdate();
+      await safeDeferUpdate(interaction);
       const secret = await services.registry.rotateSecret(workerId);
       await audit(services, interaction.user.id, 'worker.rotate-secret', workerId);
       const panel = new EmbedBuilder().setColor(0xd97706).setTitle('Worker secret rotated')
@@ -448,7 +481,7 @@ async function handlePanelInteraction(interaction, services) {
     if (confirmMatch) {
       if (!isAdmin(role)) return deny(interaction, 'Only admins can remove workers.'), true;
       const workerId = confirmMatch[1];
-      await interaction.deferUpdate();
+      await safeDeferUpdate(interaction);
       let stopConfirmed = false;
       try {
         const result = await services.broker.dispatch(workerId, 'stop');

@@ -7,7 +7,7 @@ const { escapeMarkdown } = require('discord.js');
 
 const COLOR = 0x0f766e;
 
-const { cleanText, extractChatMessage } = require('../../utils/text-format');
+const { cleanText, extractChatMessage, diagnoseErrorMessage } = require('../../utils/text-format');
 
 function padId(num) {
   const n = Number(num) || 0;
@@ -15,15 +15,20 @@ function padId(num) {
 }
 
 function safe(value, max = 180) {
-  return escapeMarkdown(String(value || '—').replace(/[\r\n\t]/g, ' ').slice(0, max)).replace(/@/g, '@\u200b');
+  const limit = Math.min(max, 1024);
+  return escapeMarkdown(String(value || '—').replace(/[\r\n\t]/g, ' ').slice(0, limit)).replace(/@/g, '@\u200b');
 }
 
 function can(role, required) { return required === 'user' ? ['user', 'admin'].includes(role) : role === 'admin'; }
 function button(label, customId, style = ButtonStyle.Secondary, disabled = false) {
-  return new ButtonBuilder().setLabel(label).setCustomId(customId).setStyle(style).setDisabled(disabled);
+  return new ButtonBuilder().setLabel(String(label).slice(0, 80)).setCustomId(customId).setStyle(style).setDisabled(disabled);
 }
 function embed(title, description = '', color = COLOR) {
-  return new EmbedBuilder().setColor(color).setTitle(title).setDescription(description).setTimestamp(new Date());
+  return new EmbedBuilder()
+    .setColor(color)
+    .setTitle(String(title || '').slice(0, 256))
+    .setDescription(String(description || '').slice(0, 4096))
+    .setTimestamp(new Date());
 }
 function pageNavigation(role, page = 'overview') {
   const row = new ActionRowBuilder().addComponents(
@@ -202,9 +207,20 @@ async function workerDetail({ registry, accessControl }, userId, workerId, role,
     { name: '👤 Tài khoản', value: `\`${accountText}\``, inline: true },
     { name: '⚡ Độ trễ', value: `Game: \`${pingText}\` · Host: \`${mgrLatency}\``, inline: true },
     { name: '⏱️ Hoạt động', value: `Uptime: \`${uptimeVal}\` · TPS: \`${tpsText}\``, inline: true },
-    { name: '📊 Tài nguyên Host', value: `RAM: \`${ramText}\` · CPU: \`${cpuText}\``, inline: true },
-    { name: '📜 Nhật ký gần đây', value: logLines.join('\n') || 'Chưa có sự kiện nào.', inline: false }
-  ).setFooter({ text: '🕒 Bảo trì server: 04:30 - 05:30 hàng ngày · Dùng /panel để mở lại' });
+    { name: '📊 Tài nguyên Host', value: `RAM: \`${ramText}\` · CPU: \`${cpuText}\``, inline: true }
+  );
+
+  const errorText = status.lastError || status.lastKickReason;
+  if (errorText) {
+    panel.addFields({
+      name: '⚠️ Chẩn đoán lỗi & gợi ý',
+      value: safe(diagnoseErrorMessage(errorText), 500),
+      inline: false
+    });
+  }
+
+  panel.addFields({ name: '📜 Nhật ký gần đây', value: (logLines.join('\n') || 'Chưa có sự kiện nào.').slice(0, 1024), inline: false });
+  panel.setFooter({ text: '🕒 Bảo trì server: 04:30 - 05:30 hàng ngày · Dùng /panel để mở lại' });
 
   const rows = [];
   rows.push(new ActionRowBuilder().addComponents(

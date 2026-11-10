@@ -518,6 +518,8 @@ input:focus, select:focus, textarea:focus {
   transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.28s, box-shadow 0.28s;
   overflow: hidden;
   min-height: 250px;
+  contain: layout style;
+  font-variant-numeric: tabular-nums;
   animation: fadeUpIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
@@ -13828,6 +13830,43 @@ document.addEventListener('visibilitychange', () => {
   }
   scheduleNextManagerPoll();
 });
+
+// Network-Aware Sync Engine (Online / Offline non-intrusive banner)
+window.addEventListener('offline', () => {
+  let banner = document.getElementById('offlineBanner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'offlineBanner';
+    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:rgba(239,68,68,0.92);color:#fff;text-align:center;padding:9px 16px;font-size:13px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.4);backdrop-filter:blur(8px);';
+    banner.innerHTML = '⚠️ <strong>Mất kết nối mạng cục bộ</strong> — Đang chờ tự động đồng bộ lại...';
+    document.body.prepend(banner);
+  } else {
+    banner.style.display = 'block';
+  }
+});
+
+window.addEventListener('online', () => {
+  const banner = document.getElementById('offlineBanner');
+  if (banner) banner.style.display = 'none';
+  showToast('✅ Đã kết nối lại mạng — Đồng bộ thành công!');
+  lastUserActivityAt = Date.now();
+  if (selectedBotId === null) refreshHome();
+  else refreshDetail(true);
+  scheduleNextManagerPoll();
+});
+
+// Dirty-Form & Active Focus Guard (bảo vệ ô đang nhập không bị đồng bộ ngầm ghi đè)
+document.addEventListener('input', (e) => {
+  if (e.target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) {
+    e.target.setAttribute('data-dirty', 'true');
+  }
+}, { passive: true });
+
+document.addEventListener('change', (e) => {
+  if (e.target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) {
+    e.target.setAttribute('data-dirty', 'true');
+  }
+}, { passive: true });
 
 setInterval(updateDetailUptime, 1000);
 setInterval(updateUserHeaderCountdown, 5000);
