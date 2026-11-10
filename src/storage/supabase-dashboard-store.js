@@ -372,6 +372,92 @@ class SupabaseDashboardStore {
   }
 
   // --------------------------------------------------------------------------
+  // DISCORD ACCOUNT LINKING (P0 / Dual-Engine Synchronization)
+  // --------------------------------------------------------------------------
+  async linkDiscord(discordUserId, username) {
+    if (!discordUserId || !username) throw new Error('Missing discordUserId or username');
+    const dId = String(discordUserId).trim();
+    const cleanUser = String(username).trim().toLowerCase();
+
+    // 1. Unlink any prior user linked to this discord_user_id
+    try {
+      await this.client.from(USERS).update({ discord_user_id: null }).eq('discord_user_id', dId);
+    } catch (_) {}
+
+    // 2. Link this specific user
+    try {
+      const { data, error } = await this.client.from(USERS)
+        .update({ discord_user_id: dId, updated_at: new Date().toISOString() })
+        .eq('username', cleanUser)
+        .select('*')
+        .maybeSingle();
+      if (!error && data) {
+        this.invalidateCache();
+        return true;
+      }
+    } catch (_) {}
+
+    // Fallback: Lưu vào manager_settings nếu cột DB chưa reload
+    await this.setSetting(`discord_link:${dId}`, { username: cleanUser, linkedAt: new Date().toISOString() });
+    this.invalidateCache();
+    return true;
+  }
+
+  async unlinkDiscord(discordUserId) {
+    if (!discordUserId) return false;
+    const dId = String(discordUserId).trim();
+    try {
+      await this.client.from(USERS).update({ discord_user_id: null }).eq('discord_user_id', dId);
+    } catch (_) {}
+    try {
+      await this.client.from(SETTINGS).delete().eq('key', `discord_link:${dId}`);
+    } catch (_) {}
+    this.invalidateCache();
+    return true;
+  }
+
+  async getUserByDiscordId(discordUserId) {
+    if (!discordUserId) return null;
+    const dId = String(discordUserId).trim();
+    const cached = this.getCached(`discord_user:${dId}`);
+    if (cached) return cached;
+
+    // 1. Thử đọc từ manager_users.discord_user_id
+    try {
+      const { data, error } = await this.client.from(USERS)
+        .select('*')
+        .eq('discord_user_id', dId)
+        .maybeSingle();
+      if (!error && data) {
+        const assignedIds = Array.isArray(data.assigned_bot_ids)
+          ? data.assigned_bot_ids
+          : (typeof data.assigned_bot_ids === 'string' ? JSON.parse(data.assigned_bot_ids || '[]') : []);
+        const user = {
+          ...data,
+          userId: data.id || data.username,
+          assignedBotIds: assignedIds
+        };
+        this.setCached(`discord_user:${dId}`, user, 5000);
+        return user;
+      }
+    } catch (_) {}
+
+    // 2. Fallback: Đọc từ manager_settings
+    try {
+      const setting = await this.getSetting(`discord_link:${dId}`);
+      if (setting && setting.username) {
+        const user = await this.getUser(setting.username);
+        if (user) {
+          this.setCached(`discord_user:${dId}`, user, 5000);
+          return user;
+        }
+      }
+    } catch (_) {}
+
+    return null;
+  }
+
+  // --------------------------------------------------------------------------
   // KEYS & GIFTCODES
   // --------------------------------------------------------------------------
   async createKey(record) {

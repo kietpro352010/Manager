@@ -209,6 +209,154 @@ async function runTests() {
 
   console.log('✅ 6. Readiness Probe: Strict 503/200 gating validated.');
 
+  // 7. Discord Simplified Commands Check
+  console.log('7. Checking Discord Simplified Commands...');
+  const { loadCommands } = require('../src/discord/command-registry');
+  const commands = loadCommands();
+  const registeredNames = commands.map(c => c.data.name).sort();
+  assert.deepStrictEqual(
+    registeredNames,
+    ['admin', 'bots', 'help', 'login', 'logout', 'logs'],
+    'Discord commands must strictly contain only: admin, bots, help, login, logout, logs'
+  );
+
+  const bannedCommands = ['status', 'info', 'start', 'stop', 'restart', 'ping', 'uptime', 'reconnect', 'panel', 'bot', 'render', 'wispbyte', 'user', 'setup', 'system'];
+  for (const banned of bannedCommands) {
+    assert.strictEqual(registeredNames.includes(banned), false, `Banned standalone command /${banned} must NOT be registered`);
+  }
+  console.log('✅ 7. Discord Commands: Strictly 6 allowed commands, all legacy individual commands removed.');
+
+  // 8. Discord Full Bot ID & Panel Rendering Verification
+  console.log('8. Checking Discord Panel Rendering & Full Bot ID...');
+  const { renderBotsList, renderBotDetail, renderBotLogs } = require('../src/discord/panels/renderer');
+  const mockUser = { username: 'testuser', assignedBotIds: ['bot-test-10001'] };
+  const mockOnlineWorker = {
+    workerId: 'bot-test-10001',
+    botNumber: 1,
+    name: 'King Bot Alpha',
+    provider: 'wispbyte',
+    status: {
+      online: true,
+      state: 'online',
+      username: 'MinecraftHero',
+      pingMs: 42,
+      uptimeSeconds: 7200,
+      reconnectCount: 3
+    }
+  };
+
+  // 8a. Bots list rendering
+  const listResult = renderBotsList({ user: mockUser, workers: [mockOnlineWorker] });
+  const listDesc = listResult.embeds[0].data.description;
+  assert.ok(listDesc.includes('bot-test-10001'), 'List must display exact full Bot ID');
+  assert.ok(listDesc.includes('MinecraftHero'), 'List must display Minecraft username');
+  assert.ok(listDesc.includes('ONLINE'), 'List must display ONLINE status');
+
+  // 8b. Bot detail rendering
+  const detailResult = renderBotDetail({
+    user: mockUser,
+    worker: mockOnlineWorker,
+    logs: [{ time: new Date().toISOString(), type: 'info', message: 'Connected to KingMC server' }]
+  });
+  const detailDesc = detailResult.embeds[0].data.description;
+  assert.ok(detailDesc.includes('bot-test-10001'), 'Detail must display exact full Bot ID');
+  assert.ok(detailDesc.includes('MinecraftHero'), 'Detail must display Minecraft username');
+  assert.ok(detailDesc.includes('42 ms'), 'Detail must display Ping');
+  assert.ok(detailDesc.includes('02h 00m'), 'Detail must display Uptime');
+  assert.ok(detailDesc.includes('3'), 'Detail must display Reconnects count');
+
+  // 8c. Control buttons states for online bot
+  const controlRow = detailResult.components[0];
+  const startBtn = controlRow.components.find(b => b.data.custom_id.startsWith('bot:start:'));
+  const stopBtn = controlRow.components.find(b => b.data.custom_id.startsWith('bot:stop:'));
+  const restartBtn = controlRow.components.find(b => b.data.custom_id.startsWith('bot:restart:'));
+  assert.strictEqual(startBtn.data.disabled, true, 'START button must be disabled when bot is ONLINE');
+  assert.strictEqual(stopBtn.data.disabled, false, 'STOP button must be enabled when bot is ONLINE');
+  assert.strictEqual(restartBtn.data.disabled, false, 'RESTART button must be enabled when bot is ONLINE');
+
+  // 8d. Control buttons states for offline bot
+  const mockOfflineWorker = { ...mockOnlineWorker, status: { online: false, state: 'offline' } };
+  const offlineDetail = renderBotDetail({ user: mockUser, worker: mockOfflineWorker });
+  const offlineRow = offlineDetail.components[0];
+  const offlineStart = offlineRow.components.find(b => b.data.custom_id.startsWith('bot:start:'));
+  const offlineStop = offlineRow.components.find(b => b.data.custom_id.startsWith('bot:stop:'));
+  assert.strictEqual(offlineStart.data.disabled, false, 'START button must be enabled when bot is OFFLINE');
+  assert.strictEqual(offlineStop.data.disabled, true, 'STOP button must be disabled when bot is OFFLINE');
+
+  // 8e. Logs panel rendering
+  const logsResult = renderBotLogs({
+    user: mockUser,
+    worker: mockOnlineWorker,
+    logs: [{ time: new Date().toISOString(), type: 'info', message: 'Secret password=SecretPass should be masked' }]
+  });
+  const logsDesc = logsResult.embeds[0].data.description;
+  assert.ok(logsDesc.includes('bot-test-10001'), 'Logs must display exact full Bot ID');
+  assert.ok(!logsDesc.includes('SecretPass'), 'Logs must sanitize sensitive secrets');
+  console.log('✅ 8. Discord Panels: Full Bot ID, performance metrics & button state gating verified.');
+
+  // 9. Discord Data Isolation & Cross-Tenant Ownership Security
+  console.log('9. Checking Discord Data Isolation & Ownership Authorization Guard...');
+  const { checkBotOwnership } = require('../src/discord/handlers/panel-handler');
+  const userAlice = { username: 'alice', role: 'user', assignedBotIds: ['bot-01'] };
+  const userBob = { username: 'bob', role: 'user', assignedBotIds: ['bot-02'] };
+  const adminAccount = { username: 'admin', role: 'admin', assignedBotIds: null };
+
+  assert.strictEqual(checkBotOwnership(userAlice, 'bot-01'), true, 'Alice must own bot-01');
+  assert.strictEqual(checkBotOwnership(userAlice, 'bot-02'), false, 'Alice must NOT access Bob bot-02');
+  assert.strictEqual(checkBotOwnership(userBob, 'bot-01'), false, 'Bob must NOT access Alice bot-01');
+  assert.strictEqual(checkBotOwnership(userBob, 'bot-02'), true, 'Bob must own bot-02');
+  assert.strictEqual(checkBotOwnership(adminAccount, 'bot-01'), true, 'Admin can manage bot-01');
+  assert.strictEqual(checkBotOwnership(adminAccount, 'bot-02'), true, 'Admin can manage bot-02');
+  console.log('✅ 9. Discord Data Isolation: Strict multi-tenant authorization confirmed.');
+
+  // 10. Discord Account Linking Storage
+  console.log('10. Checking Discord Account Linking Store...');
+  const mockDbUsers = [
+    { id: 'usr_1', username: 'alice', discord_user_id: null, assigned_bot_ids: ['bot-01'] }
+  ];
+  const mockDashboardClient = {
+    from: (_tbl) => ({
+      update: (fields) => ({
+        eq: (col, val) => {
+          const u = mockDbUsers.find(x => x[col] === val || x.username === val);
+          if (u) Object.assign(u, fields);
+          return {
+            select: () => ({
+              maybeSingle: async () => ({ data: u || null, error: null })
+            }),
+            then: (resolve) => resolve({ data: u || null, error: null })
+          };
+        }
+      }),
+      select: () => ({
+        eq: (col, val) => ({
+          maybeSingle: async () => {
+            const u = mockDbUsers.find(x => x[col] === val);
+            return { data: u ? { ...u } : null, error: null };
+          }
+        })
+      }),
+      delete: () => ({
+        eq: () => Promise.resolve({ error: null })
+      })
+    })
+  };
+  const SupabaseDashboardStore = require('../src/storage/supabase-dashboard-store');
+  const dashStore = new SupabaseDashboardStore(mockDashboardClient);
+
+  // Link discord user
+  await dashStore.linkDiscord('123456789012345678', 'alice');
+  const linked = await dashStore.getUserByDiscordId('123456789012345678');
+  assert.ok(linked, 'Linked user must be found');
+  assert.strictEqual(linked.username, 'alice', 'Linked username must match');
+  assert.deepStrictEqual(linked.assignedBotIds, ['bot-01'], 'Assigned bot IDs must be populated');
+
+  // Unlink discord user
+  await dashStore.unlinkDiscord('123456789012345678');
+  const afterUnlink = await dashStore.getUserByDiscordId('123456789012345678');
+  assert.strictEqual(afterUnlink, null, 'Unlinked user must not be found');
+  console.log('✅ 10. Discord Account Linking: Link and unlink roundtrip verified.');
+
   console.log('🎉 ALL MANAGER INTEGRATION TESTS PASSED 100%!');
 }
 

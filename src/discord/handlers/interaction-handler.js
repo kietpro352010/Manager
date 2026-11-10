@@ -6,18 +6,6 @@ const { handlePanelInteraction } = require('./panel-handler');
 const commands = loadCommands();
 const commandMap = new Map(commands.map((command) => [command.data.name, command]));
 
-function requiredRole(interaction) {
-  if (interaction.commandName === 'setup') return 'setup';
-  if (interaction.commandName === 'bot') {
-    const subcommand = interaction.options.getSubcommand(false);
-    return ['add', 'remove', 'rotate-secret', 'reset', 'stop-all', 'reconnect-errors', 'clean-dead'].includes(subcommand) ? 'admin' : 'user';
-  }
-  if (['user', 'wispbyte', 'render'].includes(interaction.commandName)) return 'admin';
-  return 'user';
-}
-
-function roleAllows(role, required) { return role === 'admin' || (required === 'user' && role === 'user'); }
-
 function isIgnorableDiscordError(err) {
   if (!err) return false;
   const code = err.code || err.rawError?.code;
@@ -77,25 +65,19 @@ async function rejectOutsideGuild(interaction, logger, allowedGuildId) {
   return true;
 }
 
-async function isAuthorizedSetupUser(interaction, services) {
+function isUserAdmin(interaction, services) {
   const userId = interaction.user?.id;
   if (!userId) return false;
 
-  // 1. Configured Admin User ID (from Render environment or saved settings)
+  // 1. Configured Admin User ID
   if (services.config.adminUserId && services.config.adminUserId === userId) return true;
-  if (services.accessControl.adminUserId && services.accessControl.adminUserId === userId) return true;
+  if (services.accessControl?.adminUserId && services.accessControl.adminUserId === userId) return true;
 
-  // 2. Discord Server Owner
-  let ownerId = interaction.guild?.ownerId;
-  if (!ownerId && interaction.guild?.fetch) {
-    try {
-      const g = await interaction.guild.fetch();
-      ownerId = g?.ownerId;
-    } catch (_) {}
-  }
+  // 2. Server Owner
+  const ownerId = interaction.guild?.ownerId;
   if (ownerId && ownerId === userId) return true;
 
-  // 3. User with Administrator permission in this Discord server
+  // 3. Discord Administrator Permission
   try {
     if (interaction.memberPermissions?.has('Administrator') || interaction.memberPermissions?.has(8n)) {
       return true;
@@ -111,8 +93,8 @@ async function isAuthorizedSetupUser(interaction, services) {
     }
   } catch (_) {}
 
-  // 4. Configured Manager Admin role
-  const role = services.accessControl.roleFor(interaction.member, interaction);
+  // 4. Configured Manager Admin Role
+  const role = services.accessControl?.roleFor?.(interaction.member, interaction);
   if (role === 'admin') return true;
 
   return false;
@@ -131,36 +113,29 @@ function attachInteractionHandler(client, { config, services, logger }) {
         const command = commandMap.get(interaction.commandName);
         if (!command) return;
 
-        // SLA Guard < 1200ms: Acknowledge immediately to prevent Discord's 3-second timeout ("The application did not respond")
+        // Commands that open modals (e.g. /login) MUST NOT be deferred!
+        if (command.skipDefer) {
+          return await command.execute(interaction, services);
+        }
+
+        // SLA Guard < 1200ms: Acknowledge immediately to prevent Discord's 3-second timeout
         await safeDeferReply(interaction, { ephemeral: true });
 
-        const role = services.accessControl.roleFor(interaction.member, interaction);
-        if (interaction.commandName === 'setup') {
-          const allowed = await isAuthorizedSetupUser(interaction, services);
+        // Admin command authorization check
+        if (interaction.commandName === 'admin') {
+          const allowed = isUserAdmin(interaction, services);
           if (!allowed) {
             return safeEditReply(interaction, {
-              content: 'Chỉ Chủ sở hữu máy chủ Discord (Server Owner), Quản trị viên (Administrator), hoặc Admin được cấu hình mới có quyền chạy lệnh /setup.',
+              content: '⛔ Bạn không có quyền truy cập lệnh Quản trị viên (Admin).',
               allowedMentions: { parse: [] }
             });
           }
-          const message = await command.execute(interaction, services);
-          await safeEditReply(interaction, { ...commandReply(message), allowedMentions: { parse: [] } });
-          return;
         }
-        if (!services.accessControl.isConfigured()) {
-          return safeEditReply(interaction, {
-            content: 'Manager chưa được cấu hình vai trò trên máy chủ này. Chủ sở hữu hoặc Quản trị viên hãy dùng `/setup` trước.',
-            allowedMentions: { parse: [] }
-          });
-        }
-        if (!roleAllows(role, requiredRole(interaction))) {
-          const text = role
-            ? 'Hành động này yêu cầu quyền Admin.'
-            : 'Bạn cần được gán Role Admin hoặc Role User đã được cấu hình trong server này để sử dụng bot.';
-          return safeEditReply(interaction, { content: text, allowedMentions: { parse: [] } });
-        }
+
         const message = await command.execute(interaction, services);
-        await safeEditReply(interaction, { ...commandReply(message), allowedMentions: { parse: [] } });
+        if (message) {
+          await safeEditReply(interaction, { ...commandReply(message), allowedMentions: { parse: [] } });
+        }
         return;
       }
 
@@ -175,24 +150,28 @@ function attachInteractionHandler(client, { config, services, logger }) {
       });
       if (services.adminNotifier) {
         void services.adminNotifier.sendAlert({
-          source: 'Discord Interaction',
+          type: 'discord_interaction_error',
+          severity: 'warn',
           event: interaction.commandName || interaction.customId || 'interaction_failed',
-          message: `Lệnh/Thao tác Discord thất bại: ${error.message}`,
-          error,
           details: {
             command: interaction.commandName || interaction.customId || 'component',
-            user: `<@${interaction.user?.id}> (\`${interaction.user?.id}\`)`
-          },
-          level: 'warn'
+            user: `<@${interaction.user?.id}> (\`${interaction.user?.id}\`)`,
+            error: error.message
+          }
         });
       }
-      const message = `Action failed: ${String(error.message || 'unknown error').slice(0, 800)}`;
-      await safeEditReply(interaction, { content: message, allowedMentions: { parse: [] } });
+      try {
+        await safeEditReply(interaction, {
+          content: '❌ Đã có lỗi xảy ra khi thực hiện yêu cầu. Vui lòng thử lại sau hoặc liên hệ Admin.',
+          allowedMentions: { parse: [] }
+        });
+      } catch (_) {}
     }
   });
-
-  client.on('error', (error) => logger.error('discord_client_error', { message: error.message }));
-  return commands;
 }
 
-module.exports = { attachInteractionHandler, rejectOutsideGuild };
+module.exports = {
+  attachInteractionHandler,
+  requiredRole: () => 'user',
+  roleAllows: () => true
+};
