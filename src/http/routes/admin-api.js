@@ -251,7 +251,7 @@ function createAdminApi({
         timestamp: new Date().toISOString()
       };
       await store.saveBackup(name, payload);
-      return res.json({ ok: true, message: 'Đã tạo bản sao lưu thành công.', filename: name });
+      return res.json({ ok: true, message: 'Đã tạo bản sao lưu thành công.', filename: name, backup: { filename: name } });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }
@@ -275,8 +275,24 @@ function createAdminApi({
   });
 
   // 6. FLEET BULK CONTROLS
-  router.post('/all/:action', async (req, res) => {
+  router.post('/all/send', async (req, res) => {
+    const message = String(req.body?.message || '').trim();
+    if (!message) return res.status(400).json({ ok: false, error: 'Tin nhắn không được để trống.' });
+
+    try {
+      const workers = (await registry.list()).filter(w => w.status?.state === 'online');
+      const results = await Promise.allSettled(
+        workers.map(w => broker.dispatch(w.workerId, 'chat', { message }))
+      );
+      return res.json({ ok: true, message: `Đã phát tin nhắn tới ${workers.length} bot đang online.` });
+    } catch (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+  });
+
+  router.post('/all/:action', async (req, res, next) => {
     const { action } = req.params;
+    if (action === 'send') return next();
     try {
       if (action === 'start') {
         const result = await fleetOperations.startAll({ respectManuallyStopped: false });
@@ -289,21 +305,6 @@ function createAdminApi({
         return res.json({ ok: true, message: 'Đã gửi lệnh kết nối lại các bot bị lỗi.', result });
       }
       return res.status(400).json({ ok: false, error: 'Hành động không hợp lệ.' });
-    } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
-    }
-  });
-
-  router.post('/all/send', async (req, res) => {
-    const message = String(req.body?.message || '').trim();
-    if (!message) return res.status(400).json({ ok: false, error: 'Tin nhắn không được để trống.' });
-
-    try {
-      const workers = (await registry.list()).filter(w => w.status?.state === 'online');
-      const results = await Promise.allSettled(
-        workers.map(w => broker.dispatch(w.workerId, 'chat', { message }))
-      );
-      return res.json({ ok: true, message: `Đã phát tin nhắn tới ${workers.length} bot đang online.` });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }

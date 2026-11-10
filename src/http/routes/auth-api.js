@@ -365,8 +365,11 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       if (token) {
         const tokenHash = hashSessionToken(token);
         activeSessions.delete(tokenHash);
-        if (store.adapter?.deleteSession) {
+        if (typeof store.adapter?.deleteSession === 'function') {
           await store.adapter.deleteSession(tokenHash).catch(() => false);
+        }
+        if (typeof store.adapter?.deleteManagerSession === 'function') {
+          await store.adapter.deleteManagerSession(tokenHash).catch(() => false);
         }
       }
       res.setHeader('Set-Cookie', clearCookieHeader('kingmc_mgr_session', isHttps(req)));

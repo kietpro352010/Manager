@@ -373,13 +373,27 @@ class WorkerRegistry {
     const worker = await this.find(workerId);
     if (!worker || !worker.enabled) throw new Error('Worker is not registered or is disabled.');
     const next = {};
+    if (Object.hasOwn(patch, 'alias')) {
+      const alias = String(patch.alias || '').trim().slice(0, 64);
+      next.alias = alias;
+      if (typeof this.store.update === 'function') {
+        await this.store.update(worker.workerId, { alias });
+      }
+    }
+    if (Object.hasOwn(patch, 'tags')) {
+      const tags = Array.isArray(patch.tags) ? patch.tags.map(t => String(t).slice(0, 32)) : [];
+      next.tags = tags;
+      if (typeof this.store.update === 'function') {
+        await this.store.update(worker.workerId, { tags });
+      }
+    }
     if (Object.hasOwn(patch, 'afkMode')) {
       next.afkMode = 'still';
       next.afkManaged = true;
     }
     if (Object.hasOwn(patch, 'afkManaged')) next.afkManaged = Boolean(patch.afkManaged);
-    if (Object.hasOwn(patch, 'proxyUrl')) {
-      const raw = String(patch.proxyUrl || '').trim();
+    if (Object.hasOwn(patch, 'proxyUrl') || Object.hasOwn(patch, 'proxy')) {
+      const raw = String(patch.proxyUrl || patch.proxy || '').trim();
       if (raw) {
         let url;
         try {
@@ -409,10 +423,12 @@ class WorkerRegistry {
       next.proxyManaged = true;
     }
     if (Object.hasOwn(patch, 'proxyManaged')) next.proxyManaged = Boolean(patch.proxyManaged);
-    const updated = await this.store.patchSettings(worker.workerId, next);
+    const updated = typeof this.store.patchSettings === 'function'
+      ? await this.store.patchSettings(worker.workerId, next)
+      : await this.store.update(worker.workerId, { settings: { ...(worker.settings || {}), ...next } });
     return {
       afkMode: 'still',
-      proxyEnabled: Boolean(updated.proxyCiphertext)
+      proxyEnabled: Boolean(updated?.proxyCiphertext || next.proxyCiphertext)
     };
   }
 
@@ -438,7 +454,7 @@ class WorkerRegistry {
   }
 
   async updateProxy(workerId, proxy) {
-    return this.updateSettings(workerId, { proxy });
+    return this.updateSettings(workerId, { proxyUrl: proxy });
   }
 
   async saveConfig(workerId, config) {

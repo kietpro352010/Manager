@@ -113,7 +113,9 @@ class EntitlementService {
     }
 
     const cleanUserId = String(userId || '').trim();
-    const member = await this.accessControl.memberFor(cleanUserId);
+    const member = this.accessControl
+      ? await this.accessControl.memberFor(cleanUserId)
+      : (this.store && typeof this.store.getAccess === 'function' ? await this.store.getAccess(cleanUserId) : null);
     if (member?.status === 'disabled') {
       throw new Error('Tài khoản này đã bị khóa quyền nạp mã.');
     }

@@ -155,8 +155,11 @@ function createUserApi({
   });
 
   // 3. EXECUTE ACTION ON BOT (start, stop, restart, reconnect, inventory, respawn, look, toss)
-  router.post('/bot/:id/:action', requireSession, async (req, res) => {
+  router.post('/bot/:id/:action', requireSession, async (req, res, next) => {
     const { id, action } = req.params;
+    if (['send', 'settings', 'alias', 'tags', 'proxy'].includes(action)) {
+      return next();
+    }
     const perm = checkBotPermission(req, id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
 
@@ -307,9 +310,10 @@ function createUserApi({
 
     const proxyUrl = String(req.body?.proxy || '').trim();
     if (proxyUrl) {
-      const validation = await validateProxyUrl(proxyUrl);
-      if (!validation.ok) {
-        return res.status(400).json({ ok: false, error: 'Proxy không hợp lệ hoặc bị từ chối: ' + validation.error });
+      try {
+        validateProxyUrl(proxyUrl);
+      } catch (validationErr) {
+        return res.status(400).json({ ok: false, error: 'Proxy không hợp lệ hoặc bị từ chối: ' + validationErr.message });
       }
     }
 

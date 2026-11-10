@@ -176,6 +176,20 @@ function createApp({
       if (Number(session.expiresAt) <= Date.now()) {
         activeSessions.delete(tokenHash);
       } else {
+        if (session.userId && session.role !== 'admin' && typeof store.getAccess === 'function') {
+          try {
+            const userRec = await store.getAccess(session.userId);
+            if (userRec) {
+              const freshAssigned = Array.isArray(userRec.workerIds) && userRec.workerIds.length
+                ? userRec.workerIds
+                : (Array.isArray(userRec.assignedBotIds) ? userRec.assignedBotIds : []);
+              session.assignedBotIds = freshAssigned.map(String);
+              if (userRec.status) session.status = userRec.status;
+              if (userRec.expiresAt) session.expiresAtRental = userRec.expiresAt;
+              if (userRec.role) session.role = userRec.role;
+            }
+          } catch (_) {}
+        }
         req.managerAuthSession = session;
       }
     }

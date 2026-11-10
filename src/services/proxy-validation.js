@@ -67,8 +67,18 @@ function isPrivateOrBlockedIp(ipStr) {
 }
 
 function isLocalOrPrivateHost(hostname) {
-  const host = String(hostname || '').replace(/^\[|\]$/g, '').toLowerCase();
-  if (['localhost', 'localhost.localdomain', '127.0.0.1', '::1'].includes(host) || /\.(?:localhost|local|internal|lan)$/.test(host)) return true;
+  let host = String(hostname || '').replace(/^\[|\]$/g, '').toLowerCase();
+  try {
+    if (host.includes('://')) {
+      host = new URL(host).hostname.toLowerCase();
+    } else if (host.includes(':') && !host.includes('.')) {
+      // not IPv4 with port, might be IPv6
+    } else if (host.includes(':') && host.includes('.')) {
+      // IPv4:port
+      host = host.split(':')[0];
+    }
+  } catch (_) {}
+  if (['localhost', 'localhost.localdomain', '127.0.0.1', '::1', '0.0.0.0'].includes(host) || /\.(?:localhost|local|internal|lan)$/.test(host)) return true;
   return isPrivateOrBlockedIp(host);
 }
 
