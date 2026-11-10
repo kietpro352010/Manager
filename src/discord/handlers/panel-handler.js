@@ -1,7 +1,7 @@
 'use strict';
 
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, MessageFlags } = require('discord.js');
-const { overview, workersPage, workerDetail, accessPage, auditPage, textModal, safe, padId } = require('../panels/renderer');
+const { overview, workersPage, workerDetail, accessPage, auditPage, textModal, safe, padId, botDashboard } = require('../panels/renderer');
 
 const PANEL_PREFIX = 'km:';
 
@@ -515,4 +515,4 @@ async function handlePanelInteraction(interaction, services) {
   }
 }
 
-module.exports = { handlePanelInteraction };
+module.exports = { handlePanelInteraction, handleStaleWorkerInteraction, safeDeferUpdate };

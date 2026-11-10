@@ -26,6 +26,7 @@ class WorkerRegistry {
     this.summaryRequestSeq = new Map();
     this.summaryLastAppliedSeq = new Map();
     this.botLogsCache = new Map(); // botId -> Array max 100
+    this.secretCache = new Map(); // botId -> decrypted secret
   }
 
   pruneStaleMemory() {
@@ -87,6 +88,7 @@ class WorkerRegistry {
     };
 
     await this.store.create(record);
+    this.secretCache.set(id, secret);
     return { worker: this.publicView(record), secret };
   }
 
@@ -98,6 +100,7 @@ class WorkerRegistry {
       await this.accessStore?.removeWorkerAssignments?.(id);
       this.summaryCache.delete(id);
       this.botLogsCache.delete(id);
+      this.secretCache.delete(id);
       if (existing && Number.isInteger(existing.botNumber)) {
         await this.reindexAfterRemoval(existing.botNumber);
       }
@@ -138,9 +141,13 @@ class WorkerRegistry {
   }
 
   async credential(workerId) {
-    const record = await this.find(workerId);
+    const id = String(workerId || '').trim().toLowerCase();
+    if (this.secretCache.has(id)) return this.secretCache.get(id);
+    const record = await this.find(id);
     if (!record || !record.enabled) return null;
-    return decryptSecret(record.secretCiphertext, this.encryptionKey);
+    const secret = decryptSecret(record.secretCiphertext, this.encryptionKey);
+    if (secret) this.secretCache.set(id, secret);
+    return secret;
   }
 
   async rotateSecret(workerId) {
@@ -148,6 +155,7 @@ class WorkerRegistry {
     if (!record) throw new Error(`Worker ${workerId} is not registered.`);
     const secret = generateWorkerSecret();
     await this.store.update(record.workerId, { secretCiphertext: encryptSecret(secret, this.encryptionKey) });
+    this.secretCache.set(record.workerId, secret);
     return secret;
   }
 
@@ -157,6 +165,7 @@ class WorkerRegistry {
     await this.store.resetData(record.workerId);
     this.summaryCache.delete(record.workerId);
     this.botLogsCache.delete(record.workerId);
+    this.secretCache.delete(record.workerId);
     return this.publicView(await this.find(record.workerId));
   }
 
@@ -165,6 +174,15 @@ class WorkerRegistry {
     if (!expected || typeof presentedSecret !== 'string') return false;
     const left = Buffer.from(expected, 'utf8');
     const right = Buffer.from(presentedSecret, 'utf8');
+    return left.length === right.length && crypto.timingSafeEqual(left, right);
+  }
+
+  verifyBotSecretSync(workerId, secret) {
+    if (!workerId || typeof secret !== 'string') return false;
+    const expected = this.secretCache.get(String(workerId).trim().toLowerCase());
+    if (!expected) return false;
+    const left = Buffer.from(expected, 'utf8');
+    const right = Buffer.from(secret, 'utf8');
     return left.length === right.length && crypto.timingSafeEqual(left, right);
   }
 

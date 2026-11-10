@@ -247,6 +247,41 @@ class CommandBroker {
     return this.commandStore.take(workerId);
   }
 
+  async status(worker) {
+    const workerId = typeof worker === 'object' && worker ? (worker.workerId || worker.id) : worker;
+    const res = await this.dispatch(workerId, 'status');
+    return res?.result?.worker || res?.result?.detail || res?.result || {};
+  }
+
+  async acceptResult(workerId, payload = {}) {
+    const commandId = String(payload.commandId || '');
+    const result = payload.result || {};
+    return this.reportResult(workerId, commandId, result);
+  }
+
+  cancelWorker(workerId) {
+    const id = String(workerId);
+    const waiters = this.pollWaiters.get(id);
+    if (waiters && waiters.length) {
+      for (const waiter of waiters.splice(0, waiters.length)) {
+        try { waiter(); } catch {}
+      }
+    }
+    this.pollWaiters.delete(id);
+    this.wakeVersions.delete(id);
+
+    for (const [commandId, pending] of this.pendingResults.entries()) {
+      if (pending && pending.workerId === id) {
+        try {
+          pending.finish({ ok: false, error: 'worker_cancelled' });
+        } catch {}
+      }
+    }
+    if (typeof this.commandStore.clearWorker === 'function') {
+      void this.commandStore.clearWorker(id).catch(() => {});
+    }
+  }
+
   async reportResult(workerId, commandId, result) {
     await this.commandStore.complete(workerId, commandId, result);
     const pending = this.pendingResults.get(commandId);

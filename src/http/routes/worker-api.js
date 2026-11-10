@@ -74,7 +74,7 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
 
       const globalSecret = config.botSecretKey || '';
       const isAuthed = (globalSecret && timingSafeStringEquals(incomingSecret, globalSecret)) ||
-                       registry.verifyBotSecret(workerId, incomingSecret);
+                       (await registry.authenticate(workerId, incomingSecret));
 
       if (!isAuthed) {
         return res.status(401).json({ ok: false, error: 'unauthorized_worker_secret' });

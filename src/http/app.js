@@ -45,7 +45,9 @@ function createApp({
     const globalSecret = String(config.botSecretKey || '').trim();
     if (globalSecret && timingSafeStringEquals(incoming, globalSecret)) return true;
     const botId = String(req?.headers?.['x-manager-bot-id'] || req?.body?.workerId || req?.body?.botId || req?.query?.botId || req?.params?.workerId || '').trim();
-    if (botId && registry.verifyBotSecret(botId, incoming)) return true;
+    if (botId && typeof registry.verifyBotSecretSync === 'function') {
+      return registry.verifyBotSecretSync(botId, incoming);
+    }
     return false;
   }
 
@@ -119,7 +121,8 @@ function createApp({
           req.path === '/api/auth/verify-bot-access' ||
           req.path === '/api/rewards/link4m/return' ||
           req.path === '/api/rewards/link4m/verify' ||
-          req.path.startsWith('/api/worker/')) {
+          req.path.startsWith('/api/worker/') ||
+          req.path.startsWith('/api/v1/workers/')) {
         return next();
       }
 

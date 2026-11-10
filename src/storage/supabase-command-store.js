@@ -192,6 +192,12 @@ class SupabaseCommandStore {
     } catch (_) {}
     return null;
   }
+
+  async clearWorker(workerId) {
+    try {
+      await this.client.from(TABLE).delete().eq('worker_id', String(workerId));
+    } catch (_) {}
+  }
 }
 
 module.exports = SupabaseCommandStore;

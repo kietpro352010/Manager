@@ -257,7 +257,7 @@ class EntitlementService {
           }, 'system:expiration');
 
           // Dừng toàn bộ bot của user
-          const workerIds = Array.isArray(u.workerIds) ? u.workerIds : [];
+          const workerIds = (Array.isArray(u.workerIds) && u.workerIds.length) ? u.workerIds : (Array.isArray(u.assignedBotIds) ? u.assignedBotIds : []);
           for (const workerId of workerIds) {
             try {
               if (fleetOperations && typeof fleetOperations.stopWorker === 'function') {
@@ -277,6 +277,16 @@ class EntitlementService {
       this.logger?.warn('check_expired_users_error', { error: err.message });
       return { error: err.message };
     }
+  }
+
+  async checkExpiredUsers(fleetOpsOrOpts, brokerArg) {
+    if (fleetOpsOrOpts && typeof fleetOpsOrOpts.stopAll === 'function') {
+      return this.checkExpiredUsersAndGracefulStop({ fleetOperations: fleetOpsOrOpts, broker: brokerArg || fleetOpsOrOpts.broker });
+    }
+    if (fleetOpsOrOpts && (fleetOpsOrOpts.fleetOperations || fleetOpsOrOpts.broker)) {
+      return this.checkExpiredUsersAndGracefulStop(fleetOpsOrOpts);
+    }
+    return this.checkExpiredUsersAndGracefulStop({ fleetOperations: fleetOpsOrOpts, broker: brokerArg });
   }
 }
 

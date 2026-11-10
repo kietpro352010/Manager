@@ -124,6 +124,10 @@ class FleetOperations {
       return { checked: workers.length, removed, retained };
     });
   }
+
+  async stopWorker(workerId, reason) {
+    return this.broker.dispatch(workerId, 'stop', { reason });
+  }
 }
 
 module.exports = FleetOperations;
