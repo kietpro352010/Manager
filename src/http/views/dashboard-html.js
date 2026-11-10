@@ -9871,7 +9871,12 @@ function reconcileBotCards(filtered) {
       const fresh = temp.firstElementChild;
       if (fresh) {
         if (existing.innerHTML !== fresh.innerHTML) {
-          existing.innerHTML = fresh.innerHTML;
+          const activeEl = document.activeElement;
+          const hasFocusInside = activeEl && existing.contains(activeEl);
+          const hasDirtyInput = existing.querySelector && existing.querySelector('[data-dirty="true"]');
+          if (!hasFocusInside && !hasDirtyInput) {
+            existing.innerHTML = fresh.innerHTML;
+          }
         }
         if (existing.className !== fresh.className) {
           existing.className = fresh.className;
@@ -10278,29 +10283,41 @@ async function testWebhookSettings() {
 }
 
 function generateSparklineSvg(points, strokeColor = '#38bdf8', width = 44, height = 14) {
-  if (!Array.isArray(points)) return '';
+  const w = Number(width) || 44;
+  const h = Number(height) || 14;
+  const cleanColor = String(strokeColor || '#38bdf8').replace(/[^a-zA-Z0-9#(),. -]/g, '');
+  const midY = Math.round((h / 2) * 10) / 10;
+
+  if (!Array.isArray(points)) {
+    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="display:inline-block;vertical-align:middle;margin-left:3px;opacity:0.35;"><line x1="0" y1="' + midY + '" x2="' + w + '" y2="' + midY + '" stroke="' + cleanColor + '" stroke-dasharray="2,2" stroke-width="1"/></svg>';
+  }
   const validPts = points.filter(v => typeof v === 'number' && Number.isFinite(v) && v >= 0);
-  if (validPts.length < 2) return '';
+  if (validPts.length === 0) {
+    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="display:inline-block;vertical-align:middle;margin-left:3px;opacity:0.35;"><line x1="0" y1="' + midY + '" x2="' + w + '" y2="' + midY + '" stroke="' + cleanColor + '" stroke-dasharray="2,2" stroke-width="1"/></svg>';
+  }
+  if (validPts.length === 1) {
+    const singleVal = Math.round(validPts[0]);
+    const cx = Math.round(w / 2);
+    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="display:inline-block;vertical-align:middle;margin-left:3px;opacity:0.85;" title="Điểm đo: ' + singleVal + '"><line x1="0" y1="' + midY + '" x2="' + w + '" y2="' + midY + '" stroke="' + cleanColor + '" stroke-width="1.2" stroke-dasharray="3,2"/><circle cx="' + cx + '" cy="' + midY + '" r="2" fill="' + cleanColor + '"/></svg>';
+  }
 
   const min = Math.min(...validPts);
   const max = Math.max(...validPts);
   const isFlat = min === max;
-  const range = isFlat ? 1 : (max - min);
-  const step = width / (validPts.length - 1);
-  const midY = Math.round((height / 2) * 10) / 10;
+  const range = isFlat ? 1 : Math.max(1e-6, max - min);
+  const step = w / Math.max(1, validPts.length - 1);
 
   const ptsArr = validPts.map((v, i) => {
     const x = Math.round(i * step * 10) / 10;
-    const y = isFlat ? midY : Math.round((height - 2 - ((v - min) / range) * (height - 4)) * 10) / 10;
+    const y = isFlat ? midY : Math.round((h - 2 - ((v - min) / range) * (h - 4)) * 10) / 10;
     return x + ',' + y;
   });
 
   const pts = ptsArr.join(' ');
-  const areaPts = '0,' + height + ' ' + pts + ' ' + width + ',' + height;
-  const cleanColor = String(strokeColor || '#38bdf8').replace(/[^a-zA-Z0-9#(),. -]/g, '');
+  const areaPts = '0,' + h + ' ' + pts + ' ' + w + ',' + h;
   const titleValues = validPts.map(v => Math.round(v)).join(' → ');
 
-  return '<svg width="' + width + '" height="' + height + '" viewBox="0 0 ' + width + ' ' + height + '" style="display:inline-block;vertical-align:middle;margin-left:3px;opacity:0.95;overflow:visible;" title="Lịch sử: ' + titleValues + '">' +
+  return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="display:inline-block;vertical-align:middle;margin-left:3px;opacity:0.95;overflow:visible;" title="Lịch sử: ' + titleValues + '">' +
     '<polygon fill="' + cleanColor + '" fill-opacity="0.18" points="' + areaPts + '"/>' +
     '<polyline fill="none" stroke="' + cleanColor + '" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" points="' + pts + '"/>' +
   '</svg>';
