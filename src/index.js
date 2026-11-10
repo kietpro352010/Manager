@@ -25,7 +25,7 @@ function runGarbageCollection() {
 const http = require('node:http');
 const { Client, GatewayIntentBits, Events } = require('discord.js');
 const { loadConfig } = require('./config/env');
-const { detectHostPlatformAndPort, listenHttpServer } = require('./config/host-runtime');
+const { detectHostPlatformAndPort, detectHostRuntime, listenHttpServer } = require('./config/host-runtime');
 const { createLogger } = require('./utils/logger');
 
 const SupabaseWorkerStore = require('./storage/supabase-worker-store');
@@ -38,7 +38,7 @@ const { AccessControl } = require('./services/access-control');
 const AsyncKeyLock = require('./services/async-key-lock');
 const { WorkerRegistry } = require('./services/worker-registry');
 const CommandBroker = require('./services/command-broker');
-const { FleetOperations } = require('./services/fleet-operations');
+const FleetOperations = require('./services/fleet-operations');
 const { EntitlementService } = require('./services/entitlement-service');
 const { Link4mService } = require('./services/link4m-service');
 const { ManagerRuntimeSettings } = require('./services/manager-runtime-settings');
@@ -51,7 +51,8 @@ const { registerCommands } = require('./discord/register-commands');
 
 async function main() {
   const config = loadConfig();
-  const hostPlatform = detectHostPlatformAndPort();
+  const hostDetector = typeof detectHostPlatformAndPort === 'function' ? detectHostPlatformAndPort : detectHostRuntime;
+  const hostPlatform = typeof hostDetector === 'function' ? hostDetector() : { port: config.port, platform: config.platform };
   const logger = createLogger(config.logLevel);
 
   // 1. Storage & Database Setup
@@ -215,7 +216,7 @@ async function main() {
     }
 
     client.once(Events?.ClientReady || 'clientReady', () => {
-      logger.info('discord_bot_ready', { botUserId: client.user.id });
+      logger.info('discord_bot_ready', { botUserId: client.user?.id || 'unknown' });
       wispbyteKeepAlive.start({ discordClient: client, adminRoleId: accessControl.adminRoleId });
     });
 
@@ -262,7 +263,7 @@ async function main() {
     logger.info('manager_shutdown', { signal });
     broker.stopOutboxProcessor();
     wispbyteKeepAlive.stop();
-    if (client.isReady()) client.destroy();
+    if (client && typeof client.isReady === 'function' && client.isReady()) client.destroy();
     await new Promise((resolve) => server.close(resolve));
     await store.close?.();
     process.exitCode = 0;

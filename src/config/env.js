@@ -92,7 +92,10 @@ function loadConfig(env = process.env) {
   if (!/^\d{17,20}$/.test(discordGuildId)) throw new Error('DISCORD_GUILD_ID must be the Discord server ID where this manager is allowed to operate.');
 
   const supabaseUrl = required(env, 'SUPABASE_URL').replace(/\/+$/, '');
-  if (!/^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(supabaseUrl)) throw new Error('SUPABASE_URL must be a valid HTTPS project URL.');
+  const isLocalOrTest = (env.NODE_ENV !== 'production') || /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(supabaseUrl);
+  if (!/^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(supabaseUrl) && !isLocalOrTest) {
+    throw new Error('SUPABASE_URL must be a valid HTTPS project URL.');
+  }
 
   const supabaseSecretKey = required(env, 'SUPABASE_SECRET_KEY', ['SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_KEY']);
   if (!isServerSupabaseKey(supabaseSecretKey) && process.env.NODE_ENV === 'production' && !env.KBOT_ALLOW_ANON_KEY) {

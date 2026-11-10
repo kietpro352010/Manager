@@ -2,7 +2,8 @@
 
 const express = require('express');
 const { decryptUserPassword, hashAdminPassword } = require('../../utils/secrets');
-const { SCHEMA_SQL } = require('../../storage/schema-sql');
+const rawSchema = require('../../storage/schema-sql');
+const SCHEMA_SQL = typeof rawSchema === 'string' ? rawSchema : (rawSchema?.SCHEMA_SQL || '');
 
 function createAdminApi({
   store,

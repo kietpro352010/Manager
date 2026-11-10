@@ -131,3 +131,4 @@ class FleetOperations {
 }
 
 module.exports = FleetOperations;
+module.exports.FleetOperations = FleetOperations;
