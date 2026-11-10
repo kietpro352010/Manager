@@ -237,13 +237,14 @@ function createApp({
     }
 
     let discordStatus = 'not_configured';
+    let discordOk = true;
     if (config?.discordToken) {
-      discordStatus = (discordClient && typeof discordClient.isReady === 'function' && discordClient.isReady())
-        ? 'ready'
-        : 'connecting';
+      const isDiscordReady = Boolean(discordClient && typeof discordClient.isReady === 'function' && discordClient.isReady());
+      discordStatus = isDiscordReady ? 'ready' : 'connecting';
+      discordOk = isDiscordReady;
     }
 
-    const isReady = dbOk;
+    const isReady = dbOk && discordOk;
     const statusCode = isReady ? 200 : 503;
     return res.status(statusCode).json({
       ok: isReady,
@@ -251,7 +252,7 @@ function createApp({
       service: 'KingMC AFK Bot Cloud 24/7',
       checks: {
         database: { ok: dbOk, latencyMs: dbLatencyMs },
-        discord: { status: discordStatus }
+        discord: { status: discordStatus, ok: discordOk }
       },
       time: new Date().toISOString()
     });

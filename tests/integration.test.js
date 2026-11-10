@@ -1,10 +1,13 @@
 'use strict';
 
 const assert = require('node:assert');
+const http = require('node:http');
 const { ACTIONS } = require('../src/services/worker-registry');
 const AsyncKeyLock = require('../src/services/async-key-lock');
 const schema = require('../src/storage/schema-sql');
 const { encryptSecret, decryptSecret } = require('../src/utils/secrets');
+const SupabaseCommandStore = require('../src/storage/supabase-command-store');
+const { createApp } = require('../src/http/app');
 
 async function runTests() {
   console.log('--- [MANAGER INTEGRATION TESTS] ---');
@@ -62,6 +65,122 @@ async function runTests() {
     assert.ok(sql.includes(rpc), `Schema SQL must include ${rpc}`);
   }
   console.log('✅ 4. Schema SQL: All 4 RPCs, atomic sequence, and functions verified.');
+
+  // 5. Command Coalescing Selectivity Check
+  console.log('5. Checking Command Coalescing Selectivity...');
+  const table = [];
+  const mockClient = {
+    rpc: async () => ({ data: null, error: { message: 'not implemented' } }),
+    from: (_tbl) => {
+      let filters = {};
+      return {
+        select: () => ({
+          eq: (f, v) => {
+            filters[f] = v;
+            return {
+              eq: (f2, v2) => {
+                filters[f2] = v2;
+                return {
+                  eq: (f3, v3) => {
+                    filters[f3] = v3;
+                    return {
+                      gt: () => ({
+                        limit: () => ({
+                          maybeSingle: async () => {
+                            const found = table.find(r => r.worker_id === filters.worker_id && r.action === filters.action && r.status === filters.status);
+                            return { data: found || null, error: null };
+                          }
+                        })
+                      })
+                    };
+                  }
+                };
+              }
+            };
+          }
+        }),
+        update: (updates) => ({
+          eq: (field, val) => ({
+            select: () => ({
+              maybeSingle: async () => {
+                const item = table.find(r => r[field] === val);
+                if (item) Object.assign(item, updates);
+                return { data: item || null, error: null };
+              }
+            })
+          })
+        }),
+        insert: (row) => ({
+          select: () => ({
+            maybeSingle: async () => {
+              table.push({ ...row });
+              return { data: row, error: null };
+            }
+          })
+        })
+      };
+    }
+  };
+
+  const commandStore = new SupabaseCommandStore(mockClient);
+
+  // Discrete actions (chat, toss, window_click, etc.) must NEVER coalesce
+  const chat1 = await commandStore.enqueue({ workerId: 'w1', action: 'chat', payload: { message: 'msg1' } });
+  const chat2 = await commandStore.enqueue({ workerId: 'w1', action: 'chat', payload: { message: 'msg2' } });
+  assert.notStrictEqual(chat1.commandId, chat2.commandId, 'Discrete actions must NOT coalesce');
+  assert.strictEqual(table.filter(r => r.action === 'chat').length, 2, 'Must have 2 chat records');
+
+  // Idempotent state actions (status, set-afk-mode, set-proxy) MUST coalesce
+  const st1 = await commandStore.enqueue({ workerId: 'w1', action: 'status', payload: {} });
+  const st2 = await commandStore.enqueue({ workerId: 'w1', action: 'status', payload: {} });
+  assert.strictEqual(st1.commandId, st2.commandId, 'Idempotent actions MUST coalesce');
+  assert.strictEqual(table.filter(r => r.action === 'status').length, 1, 'Must have 1 status record');
+  console.log('✅ 5. Command Coalescing: Discrete actions preserved, idempotent state coalesced.');
+
+  // 6. Readiness Probe HTTP 503 vs 200 Verification
+  console.log('6. Checking Readiness Probe (Discord + Database dependencies)...');
+  const store = { adapter: { testConnection: async () => ({ ok: true }) } };
+
+  // 6a. Discord configured but not ready -> 503
+  const appUnready = createApp({
+    store,
+    registry: { store: {} },
+    config: { discordToken: 'test_token' },
+    discordClient: { isReady: () => false }
+  });
+  const server1 = http.createServer(appUnready);
+  await new Promise(r => server1.listen(0, r));
+  const res1 = await fetch(`http://127.0.0.1:${server1.address().port}/ready`);
+  assert.strictEqual(res1.status, 503, 'Readiness must return 503 if Discord client is not ready');
+  server1.close();
+
+  // 6b. Discord configured and ready -> 200
+  const appReady = createApp({
+    store,
+    registry: { store: {} },
+    config: { discordToken: 'test_token' },
+    discordClient: { isReady: () => true }
+  });
+  const server2 = http.createServer(appReady);
+  await new Promise(r => server2.listen(0, r));
+  const res2 = await fetch(`http://127.0.0.1:${server2.address().port}/ready`);
+  assert.strictEqual(res2.status, 200, 'Readiness must return 200 when DB and Discord are ready');
+  server2.close();
+
+  // 6c. Discord not configured (web-only mode) -> 200
+  const appNoDiscord = createApp({
+    store,
+    registry: { store: {} },
+    config: { discordToken: '' },
+    discordClient: null
+  });
+  const server3 = http.createServer(appNoDiscord);
+  await new Promise(r => server3.listen(0, r));
+  const res3 = await fetch(`http://127.0.0.1:${server3.address().port}/ready`);
+  assert.strictEqual(res3.status, 200, 'Readiness must return 200 when Discord is not configured and DB is ok');
+  server3.close();
+
+  console.log('✅ 6. Readiness Probe: Strict 503/200 gating validated.');
 
   console.log('🎉 ALL MANAGER INTEGRATION TESTS PASSED 100%!');
 }

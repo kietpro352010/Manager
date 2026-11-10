@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 
 const TABLE = 'manager_commands';
+const COALESCEABLE_ACTIONS = new Set(['status', 'set-afk-mode', 'set-proxy']);
 
 function fromRow(row) {
   if (!row) return null;
@@ -58,30 +59,33 @@ class SupabaseCommandStore {
     const createdAt = command.createdAt || new Date().toISOString();
     const expiresAt = command.expiresAt || new Date(Date.now() + 60000).toISOString();
 
-    // 0. Command coalescing: nếu đã có lệnh cùng worker_id và action đang queued, cập nhật payload
-    try {
-      const { data: existing } = await this.client.from(TABLE)
-        .select('*')
-        .eq('worker_id', workerIdStr)
-        .eq('action', actionStr)
-        .eq('status', 'queued')
-        .gt('expires_at', new Date().toISOString())
-        .limit(1)
-        .maybeSingle();
-
-      if (existing) {
-        const { data: updated, error: updErr } = await this.client.from(TABLE)
-          .update({
-            payload: command.payload || {},
-            expires_at: expiresAt,
-            created_at: new Date().toISOString()
-          })
-          .eq('command_id', existing.command_id)
+    // 0. Command coalescing: chỉ áp dụng cho action mang tính idempotent trạng thái
+    // Tuyệt đối không gộp các lệnh rời rạc (chat, toss, window_click, respawn, v.v.)
+    if (COALESCEABLE_ACTIONS.has(actionStr)) {
+      try {
+        const { data: existing } = await this.client.from(TABLE)
           .select('*')
+          .eq('worker_id', workerIdStr)
+          .eq('action', actionStr)
+          .eq('status', 'queued')
+          .gt('expires_at', new Date().toISOString())
+          .limit(1)
           .maybeSingle();
-        if (!updErr && updated) return fromRow(updated);
-      }
-    } catch (_) {}
+
+        if (existing) {
+          const { data: updated, error: updErr } = await this.client.from(TABLE)
+            .update({
+              payload: command.payload || {},
+              expires_at: expiresAt,
+              created_at: new Date().toISOString()
+            })
+            .eq('command_id', existing.command_id)
+            .select('*')
+            .maybeSingle();
+          if (!updErr && updated) return fromRow(updated);
+        }
+      } catch (_) {}
+    }
 
     // 1. Thử gọi RPC manager_enqueue_worker_command
     try {
