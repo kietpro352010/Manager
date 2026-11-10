@@ -130,6 +130,16 @@ async function main() {
   // Start background workers
   broker.startOutboxProcessor({ intervalMs: 5000 });
 
+  // Định kỳ kiểm tra khách hết hạn và dừng bot êm ái (Graceful Expire Stop)
+  const expiredCheckInterval = setInterval(async () => {
+    try {
+      await entitlementService.checkExpiredUsersAndGracefulStop({ broker, fleetOperations });
+    } catch (err) {
+      logger.warn('expired_users_check_failed', { error: err.message });
+    }
+  }, 60000);
+  expiredCheckInterval.unref();
+
   // 5. Adaptive Memory Sweeper (Trụ cột 1.1)
   const memorySweepInterval = setInterval(() => {
     const memory = process.memoryUsage();

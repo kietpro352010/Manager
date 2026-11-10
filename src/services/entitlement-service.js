@@ -234,6 +234,50 @@ class EntitlementService {
       planName: key.planName
     };
   }
+
+  async checkExpiredUsersAndGracefulStop({ broker, fleetOperations } = {}) {
+    try {
+      const users = await this.store.listAccess();
+      if (!Array.isArray(users) || users.length === 0) return { checked: 0, expired: 0 };
+      const now = Date.now();
+      let expiredCount = 0;
+
+      for (const u of users) {
+        if (u.isPermanent) continue;
+        if (u.status !== 'active') continue;
+        if (!u.expiresAt) continue;
+        const expiryTime = Date.parse(u.expiresAt);
+        if (Number.isFinite(expiryTime) && expiryTime <= now) {
+          this.logger?.info('user_expired_graceful_stop', { userId: u.userId, username: u.username, expiresAt: u.expiresAt });
+
+          // Cập nhật trạng thái thành 'expired' nhưng bảo toàn workerIds và cấu hình
+          await this.store.setAccess(u.userId, {
+            ...u,
+            status: 'expired'
+          }, 'system:expiration');
+
+          // Dừng toàn bộ bot của user
+          const workerIds = Array.isArray(u.workerIds) ? u.workerIds : [];
+          for (const workerId of workerIds) {
+            try {
+              if (fleetOperations && typeof fleetOperations.stopWorker === 'function') {
+                await fleetOperations.stopWorker(workerId, 'Gói thuê đã hết hạn');
+              } else if (broker && typeof broker.dispatch === 'function') {
+                await broker.dispatch(workerId, 'stop', { reason: 'Gói thuê đã hết hạn' });
+              }
+            } catch (stopErr) {
+              this.logger?.warn('failed_to_stop_expired_bot', { workerId, error: stopErr.message });
+            }
+          }
+          expiredCount++;
+        }
+      }
+      return { checked: users.length, expired: expiredCount };
+    } catch (err) {
+      this.logger?.warn('check_expired_users_error', { error: err.message });
+      return { error: err.message };
+    }
+  }
 }
 
 module.exports = { EntitlementService, normalizeCode, hashCode };

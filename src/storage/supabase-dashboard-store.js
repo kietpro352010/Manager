@@ -64,6 +64,25 @@ class SupabaseDashboardStore {
   constructor(client) {
     this.client = client;
     this.adapter = client.adapter || null;
+    this.cache = new Map();
+  }
+
+  getCached(key) {
+    const entry = this.cache.get(key);
+    if (!entry) return null;
+    if (Date.now() > entry.expiresAt) {
+      this.cache.delete(key);
+      return null;
+    }
+    return entry.data;
+  }
+
+  setCached(key, data, ttlMs = 2500) {
+    this.cache.set(key, { data, expiresAt: Date.now() + ttlMs });
+  }
+
+  invalidateCache() {
+    this.cache.clear();
   }
 
   async initialize() {
@@ -121,17 +140,23 @@ class SupabaseDashboardStore {
   }
 
   async replaceAssignments(userId, workerIds, actorId) {
+    this.invalidateCache();
     const access = await this.getAccess(userId);
     return this.setAccess(userId, { ...(access || { role: 'user', status: 'active', isPermanent: false }), workerIds }, actorId);
   }
 
   async getAccess(userId) {
     if (!userId) return null;
+    const cached = this.getCached(`access:${userId}`);
+    if (cached) return cached;
+
     // 1. Thử đọc từ manager_access
     try {
       const { data, error } = await this.client.from(ACCESS).select('*').eq('user_id', userId).maybeSingle();
       if (!error && data) {
-        return { ...mapFrom(data, ACCESS_FIELDS), workerIds: await this.assignedWorkerIds(userId) };
+        const result = { ...mapFrom(data, ACCESS_FIELDS), workerIds: await this.assignedWorkerIds(userId) };
+        this.setCached(`access:${userId}`, result);
+        return result;
       }
     } catch (_) {}
 
@@ -142,7 +167,7 @@ class SupabaseDashboardStore {
         .maybeSingle();
       if (!error && data) {
         const assigned = Array.isArray(data.assigned_bot_ids) ? data.assigned_bot_ids.map(String) : [];
-        return {
+        const result = {
           userId: data.id || ('usr_' + data.username),
           username: data.username,
           role: data.role || 'user',
@@ -159,6 +184,8 @@ class SupabaseDashboardStore {
           createdAt: data.created_at,
           updatedAt: data.updated_at
         };
+        this.setCached(`access:${userId}`, result);
+        return result;
       }
     } catch (_) {}
 
@@ -166,11 +193,14 @@ class SupabaseDashboardStore {
   }
 
   async listAccess() {
+    const cached = this.getCached('access:all');
+    if (cached) return cached;
+
     // 1. Thử đọc từ manager_users
     try {
       const { data: users, error } = await this.client.from(USERS).select('*').order('created_at', { ascending: false });
       if (!error && Array.isArray(users) && users.length > 0) {
-        return users.map((u) => ({
+        const result = users.map((u) => ({
           userId: u.id || ('usr_' + u.username),
           username: u.username,
           role: u.role || 'user',
@@ -187,6 +217,8 @@ class SupabaseDashboardStore {
           createdAt: u.created_at,
           updatedAt: u.updated_at
         }));
+        this.setCached('access:all', result);
+        return result;
       }
     } catch (_) {}
 
@@ -199,13 +231,16 @@ class SupabaseDashboardStore {
       if (usersError) throw usersError;
       const grouped = new Map();
       for (const row of assignments || []) grouped.set(row.user_id, [...(grouped.get(row.user_id) || []), row.worker_id]);
-      return (users || []).map((row) => ({ ...mapFrom(row, ACCESS_FIELDS), workerIds: grouped.get(row.user_id) || [] }));
+      const result = (users || []).map((row) => ({ ...mapFrom(row, ACCESS_FIELDS), workerIds: grouped.get(row.user_id) || [] }));
+      this.setCached('access:all', result);
+      return result;
     } catch (_) {
       return [];
     }
   }
 
   async setAccess(userId, values, actorId) {
+    this.invalidateCache();
     const { workerIds = [], ...fields } = values;
 
     // 1. Thử lưu vào manager_users nếu có bảng
@@ -258,6 +293,7 @@ class SupabaseDashboardStore {
   }
 
   async removeAccess(userId) {
+    this.invalidateCache();
     try {
       await this.client.from(USERS).delete().or(`id.eq.${userId},username.eq.${userId}`);
     } catch (_) {}
@@ -300,6 +336,7 @@ class SupabaseDashboardStore {
   }
 
   async saveUsersSnapshot(users, expectedRevision, options = {}) {
+    this.invalidateCache();
     if (this.adapter && typeof this.adapter.saveUsersSnapshot === 'function') {
       return await this.adapter.saveUsersSnapshot(users, expectedRevision, options);
     }
@@ -307,11 +344,23 @@ class SupabaseDashboardStore {
   }
 
   async getUser(username) {
+    if (!username) return null;
+    const cacheKey = `user:${String(username).toLowerCase()}`;
+    const cached = this.getCached(cacheKey);
+    if (cached) return cached;
+
+    let user = null;
     if (this.adapter && typeof this.adapter.fetchUserAuthorization === 'function') {
       const res = await this.adapter.fetchUserAuthorization(null, username);
-      if (res.ok && res.user) return res.user;
+      if (res.ok && res.user) user = res.user;
     }
-    return await this.getAccess(username);
+    if (!user) {
+      user = await this.getAccess(username);
+    }
+    if (user) {
+      this.setCached(cacheKey, user);
+    }
+    return user;
   }
 
   async listUsers() {
@@ -326,6 +375,7 @@ class SupabaseDashboardStore {
   // KEYS & GIFTCODES
   // --------------------------------------------------------------------------
   async createKey(record) {
+    this.invalidateCache();
     if (this.adapter && typeof this.adapter.insertKeys === 'function') {
       return await this.adapter.insertKeys([record]);
     }
@@ -359,6 +409,7 @@ class SupabaseDashboardStore {
   }
 
   async deleteKey(keyId) {
+    this.invalidateCache();
     if (this.adapter && typeof this.adapter.deleteKey === 'function') {
       return await this.adapter.deleteKey(keyId);
     }
@@ -368,6 +419,7 @@ class SupabaseDashboardStore {
   }
 
   async redeemKeyAtomic(code, username, transactionId = crypto.randomUUID()) {
+    this.invalidateCache();
     if (this.adapter && typeof this.adapter.consumeKeyUsageAtomic === 'function') {
       return await this.adapter.consumeKeyUsageAtomic(code, username, transactionId);
     }
@@ -379,6 +431,7 @@ class SupabaseDashboardStore {
   }
 
   async redeemKeyWithAccess(codeHash, userId, values, actorId) {
+    this.invalidateCache();
     const { workerIds = [], ...accessValues } = values;
     const { data, error } = await this.client.rpc('manager_redeem_code_with_access', {
       p_code_hash: codeHash,

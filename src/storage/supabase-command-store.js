@@ -38,28 +38,57 @@ class SupabaseCommandStore {
       }
     } catch (_) {}
 
-    // Dọn dẹp lệnh cũ hết hạn
+    // Dọn dẹp lệnh cũ hết hạn và rác > 300s
     try {
       const now = new Date().toISOString();
-      const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      const cutoff300s = new Date(Date.now() - 300 * 1000).toISOString();
+      const cutoff30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
       await Promise.allSettled([
         this.client.from(TABLE).update({ status: 'expired' }).in('status', ['queued', 'delivered']).lte('expires_at', now),
-        this.client.from(TABLE).delete().in('status', ['completed', 'failed', 'expired']).lt('created_at', cutoff)
+        this.client.from(TABLE).delete().in('status', ['completed', 'failed', 'expired']).lt('created_at', cutoff300s),
+        this.client.from(TABLE).delete().lt('created_at', cutoff30d)
       ]);
     } catch (_) {}
   }
 
   async enqueue(command) {
+    const workerIdStr = String(command.workerId);
+    const actionStr = String(command.action);
     const commandId = command.commandId || ('cmd_' + crypto.randomUUID());
     const createdAt = command.createdAt || new Date().toISOString();
     const expiresAt = command.expiresAt || new Date(Date.now() + 60000).toISOString();
+
+    // 0. Command coalescing: nếu đã có lệnh cùng worker_id và action đang queued, cập nhật payload
+    try {
+      const { data: existing } = await this.client.from(TABLE)
+        .select('*')
+        .eq('worker_id', workerIdStr)
+        .eq('action', actionStr)
+        .eq('status', 'queued')
+        .gt('expires_at', new Date().toISOString())
+        .limit(1)
+        .maybeSingle();
+
+      if (existing) {
+        const { data: updated, error: updErr } = await this.client.from(TABLE)
+          .update({
+            payload: command.payload || {},
+            expires_at: expiresAt,
+            created_at: new Date().toISOString()
+          })
+          .eq('command_id', existing.command_id)
+          .select('*')
+          .maybeSingle();
+        if (!updErr && updated) return fromRow(updated);
+      }
+    } catch (_) {}
 
     // 1. Thử gọi RPC manager_enqueue_worker_command
     try {
       const { data, error } = await this.client.rpc('manager_enqueue_worker_command', {
         p_command_id: commandId,
-        p_worker_id: String(command.workerId),
-        p_action: command.action,
+        p_worker_id: workerIdStr,
+        p_action: actionStr,
         p_payload: command.payload || {},
         p_created_at: createdAt,
         p_expires_at: expiresAt
@@ -70,8 +99,8 @@ class SupabaseCommandStore {
     // 2. Fallback: insert trực tiếp vào manager_commands
     const row = {
       command_id: commandId,
-      worker_id: String(command.workerId),
-      action: command.action,
+      worker_id: workerIdStr,
+      action: actionStr,
       payload: command.payload || {},
       status: 'queued',
       created_at: createdAt,

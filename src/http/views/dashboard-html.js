@@ -9835,44 +9835,53 @@ function filterBots() {
     return;
   }
   if (draggedBotId !== null) return;
+  reconcileBotCards(filtered);
+}
+
+function reconcileBotCards(filtered) {
+  const grid = document.getElementById('botGrid');
+  if (!grid || draggedBotId !== null) return;
 
   const currentCards = Array.from(grid.querySelectorAll('.bot-card'));
-  const currentIds = currentCards.map(c => c.getAttribute('data-bot-id')).filter(Boolean);
-  const nextIds = filtered.map(b => String(b.id));
-  const isSameOrder = currentIds.length === nextIds.length && currentIds.every((id, idx) => id === nextIds[idx]);
+  const currentMap = new Map();
+  currentCards.forEach(c => {
+    const id = c.getAttribute('data-bot-id');
+    if (id) currentMap.set(id, c);
+  });
 
-  if (isSameOrder) {
-    filtered.forEach(b => {
-      const card = grid.querySelector('.bot-card[data-bot-id="' + b.id + '"]');
-      if (card) {
-        try {
-          const newHtml = botCardHtml(b);
-          const temp = document.createElement('div');
-          temp.innerHTML = newHtml;
-          const fresh = temp.firstElementChild;
-          if (fresh) {
-            if (card.innerHTML !== fresh.innerHTML) {
-              card.innerHTML = fresh.innerHTML;
-            }
-            if (card.className !== fresh.className) {
-              card.className = fresh.className;
-            }
-          }
-        } catch(e){}
-      }
-    });
-  } else {
-    const nextHtml = filtered.map(b => {
-      try {
-        return botCardHtml(b);
-      } catch (e) {
-        return '';
-      }
-    }).join('');
-    if (grid.innerHTML !== nextHtml) {
-      grid.innerHTML = nextHtml;
-    }
+  const nextIds = new Set(filtered.map(b => String(b.id)));
+
+  // Remove cards that no longer exist
+  for (const [id, card] of currentMap.entries()) {
+    if (!nextIds.has(id)) card.remove();
   }
+
+  // Update existing cards or append new cards in order
+  filtered.forEach((b, idx) => {
+    const id = String(b.id);
+    const existing = currentMap.get(id);
+    let newHtml = '';
+    try { newHtml = botCardHtml(b); } catch (_) { return; }
+
+    if (existing) {
+      const temp = document.createElement('div');
+      temp.innerHTML = newHtml;
+      const fresh = temp.firstElementChild;
+      if (fresh) {
+        if (existing.innerHTML !== fresh.innerHTML) {
+          existing.innerHTML = fresh.innerHTML;
+        }
+        if (existing.className !== fresh.className) {
+          existing.className = fresh.className;
+        }
+      }
+    } else {
+      const temp = document.createElement('div');
+      temp.innerHTML = newHtml;
+      const fresh = temp.firstElementChild;
+      if (fresh) grid.appendChild(fresh);
+    }
+  });
 }
 
 function renderHome() {
