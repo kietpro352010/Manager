@@ -102,6 +102,27 @@ class FleetOperations {
     });
   }
 
+  async restartAll() {
+    return this.runExclusive(async () => {
+      const workers = (await this.registry.list()).filter((w) => w.enabled);
+      const results = await this.runInParallel(workers, async (worker) => {
+        try {
+          const result = await this.broker.dispatch(worker.workerId, 'restart');
+          const detail = result.result?.detail || result.result || {};
+          return {
+            workerId: worker.workerId,
+            ok: !result.timedOut && result.result?.ok !== false && detail.ok !== false,
+            pending: Boolean(result.timedOut)
+          };
+        } catch (error) {
+          this.logger.warn('fleet_restart_failed', { workerId: worker.workerId, error: error.message });
+          return { workerId: worker.workerId, ok: false, error: error.message };
+        }
+      });
+      return { total: workers.length, results };
+    });
+  }
+
   async cleanDead() {
     return this.runExclusive(async () => {
       const workers = (await this.registry.list()).filter((w) => w.enabled && w.provider === 'render' && w.renderServiceId);

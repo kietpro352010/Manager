@@ -107,9 +107,10 @@ class CommandBroker {
     if (!worker || !worker.enabled) throw new Error(`Worker ${workerId} is not registered or is disabled.`);
 
     this.logger.info('worker_command_dispatch', { workerId, provider: worker.provider, action });
+    const resolvedAction = action === 'reconnect' ? 'restart' : action;
     const command = {
       commandId: randomUUID(),
-      action,
+      action: resolvedAction,
       payload: safePayload,
       createdAt: new Date().toISOString()
     };

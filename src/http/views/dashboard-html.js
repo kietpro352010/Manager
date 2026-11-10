@@ -6748,7 +6748,7 @@ function botCardHtml(bot) {
   const pos = posObj && Number.isFinite(Number(posObj.x)) && Number.isFinite(Number(posObj.y)) && Number.isFinite(Number(posObj.z))
     ? (Math.round(Number(posObj.x)) + ' ' + Math.round(Number(posObj.y)) + ' ' + Math.round(Number(posObj.z)))
     : '-';
-  const id = Number(bot.id);
+  const id = Number.isFinite(Number(bot.id)) ? Number(bot.id) : String(bot.id);
   const totems = Number(bot.totemCount || 0);
   const isEco = bot.settings?.ecoMode !== false && bot.ecoMode !== false;
   const hw = bot.hostHardware;
@@ -9360,7 +9360,7 @@ window.submitCreateKeysFromMgmt = submitCreateKeysFromMgmt;
 
 async function quickBotAction(event, id, action) {
   event.stopPropagation();
-  var targetBot = bots.find(function(b) { return Number(b.id) === Number(id); });
+  var targetBot = bots.find(function(b) { return String(b.id) === String(id) || String(b.workerId) === String(id) || (Number(b.id) === Number(id) && !isNaN(Number(id))); });
   if (action === 'start' && (!targetBot?.username || targetBot.username === 'Chưa đặt')) {
     showToast('⚠️ Bot chưa cài đặt tài khoản Minecraft! Đang mở bảng Chi tiết để cài đặt...', 'warning', 4000);
     openBot(id);
@@ -10633,7 +10633,7 @@ function toggleEditSecretKeyVisibility() {
 }
 
 function openBot(id) {
-  selectedBotId=Number(id);
+  selectedBotId=Number.isFinite(Number(id)) ? Number(id) : String(id);
   invalidateDetailReads();
   // Reset all detail UI fields to prevent stale ghost data
   const dChat = document.getElementById('detailChatLogs'); if (dChat) dChat.innerHTML = '<div style="color:var(--muted);padding:8px;">Đang tải lịch sử chat...</div>';
@@ -10645,7 +10645,7 @@ function openBot(id) {
   const dStat = document.getElementById('detailStatus'); if (dStat) dStat.innerHTML = '<span class="dot yellow"></span> Đang tải...';
   const dInv = document.getElementById('detailInventory'); if (dInv) dInv.innerHTML = '';
   const dHot = document.getElementById('detailHotbar'); if (dHot) dHot.innerHTML = '';
-  const selected=bots.find(item=>Number(item.id)===selectedBotId);
+  const selected=bots.find(item=>String(item.id)===String(selectedBotId) || String(item.workerId)===String(selectedBotId) || (Number(item.id)===Number(selectedBotId) && !isNaN(Number(selectedBotId))));
   const url=new URL(window.location.href);
   url.searchParams.set('bot',String(selectedBotId));
   url.searchParams.delete('botUrl');

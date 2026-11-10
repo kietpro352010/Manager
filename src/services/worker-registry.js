@@ -27,7 +27,8 @@ function safeDecryptText(ciphertext, key) {
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{1,39}$/;
 const ACTIONS = new Set([
-  'start', 'stop', 'restart', 'status', 'chat', 'reset', 'set-afk-mode', 'set-proxy'
+  'start', 'stop', 'restart', 'status', 'chat', 'reset', 'set-afk-mode', 'set-proxy',
+  'reconnect', 'respawn', 'inventory', 'look', 'toss', 'window_click', 'window_close'
 ]);
 
 const BOT_SUMMARY_CACHE_MS = 2000;

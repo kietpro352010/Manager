@@ -2021,7 +2021,7 @@ class SupabaseAdapter {
     }
 
     async claimOutboxBatch(workerId, limit = 10, leaseSeconds = 60) {
-        if (!this.isEnabled()) return [];
+        if (!this.isEnabled() || this.outboxRpcUnavailable) return [];
         try {
             const data = await this.callRpc('claim_manager_outbox_batch', {
                 p_worker_id: String(workerId),
@@ -2030,6 +2030,12 @@ class SupabaseAdapter {
             });
             return Array.isArray(data) ? data : [];
         } catch (err) {
+            const msg = String(err.message || '');
+            if (msg.includes('404') || msg.includes('not found') || msg.includes('does not exist')) {
+                this.outboxRpcUnavailable = true;
+                console.warn('[SUPABASE] RPC claim_manager_outbox_batch chưa được tạo trên Supabase. Tạm dừng outbox processor để tránh spam log.');
+                return [];
+            }
             console.error('[SUPABASE] claimOutboxBatch error:', err.message);
             return [];
         }
@@ -2145,7 +2151,7 @@ class SupabaseAdapter {
 
     // --- DISTRIBUTED PENDING ALLOCATIONS METHODS (P1-01) ---
     async claimPendingAllocations(workerId, limit = 10, leaseSeconds = 60) {
-        if (!this.isEnabled()) return [];
+        if (!this.isEnabled() || this.pendingAllocRpcUnavailable) return [];
         try {
             const data = await this.callRpc('claim_manager_pending_allocations', {
                 p_worker_id: String(workerId),
@@ -2154,6 +2160,12 @@ class SupabaseAdapter {
             });
             return Array.isArray(data) ? data : [];
         } catch (err) {
+            const msg = String(err.message || '');
+            if (msg.includes('404') || msg.includes('not found') || msg.includes('does not exist')) {
+                this.pendingAllocRpcUnavailable = true;
+                console.warn('[SUPABASE] RPC claim_manager_pending_allocations chưa được tạo trên Supabase. Tạm dừng worker để tránh spam log.');
+                return [];
+            }
             console.error('[SUPABASE] claimPendingAllocations error:', err.message);
             return [];
         }
