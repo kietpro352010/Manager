@@ -5,13 +5,34 @@ set status = 'expired', completed_at = now()
 where status in ('queued', 'delivered')
   and action in ('inventory', 'container-open', 'container-click', 'container-close');
 
+do $$
+begin
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'manager_commands'
+      and column_name = 'command_id'
+      and data_type <> 'text'
+  ) then
+    alter table public.manager_commands
+      alter column command_id type text
+      using command_id::text;
+  end if;
+end
+$$;
+
 alter table public.manager_commands drop constraint if exists manager_commands_action_check;
 alter table public.manager_commands add constraint manager_commands_action_check
-  check (action in ('start', 'stop', 'restart', 'resume', 'status', 'chat', 'reset', 'set-afk-mode', 'set-proxy'))
+  check (action in (
+    'start', 'stop', 'restart', 'resume', 'status', 'chat', 'reset', 'set-afk-mode', 'set-proxy',
+    'reconnect', 'respawn', 'inventory', 'look', 'toss', 'window_click', 'window_close'
+  ))
   not valid;
 
+drop function if exists public.manager_complete_worker_command(text, uuid, jsonb);
 create or replace function public.manager_complete_worker_command(
-  p_worker_id text, p_command_id uuid, p_result jsonb
+  p_worker_id text, p_command_id text, p_result jsonb default null
 )
 returns boolean
 language plpgsql
@@ -25,7 +46,7 @@ begin
   update public.manager_commands
   set status = case when p_result->>'ok' = 'false' then 'failed' else 'completed' end,
       result = p_result, completed_at = now()
-  where worker_id = p_worker_id and command_id = p_command_id and status = 'delivered'
+  where worker_id = p_worker_id and command_id = p_command_id and status in ('delivered', 'queued')
   returning action into completed_action;
   get diagnostics changed = row_count;
 
@@ -62,9 +83,9 @@ begin
 end;
 $$;
 
-revoke all on function public.manager_complete_worker_command(text, uuid, jsonb) from public, anon, authenticated;
+revoke all on function public.manager_complete_worker_command(text, text, jsonb) from public, anon, authenticated;
 revoke all on function public.manager_reset_worker_data(text) from public, anon, authenticated;
-grant execute on function public.manager_complete_worker_command(text, uuid, jsonb) to service_role;
+grant execute on function public.manager_complete_worker_command(text, text, jsonb) to service_role;
 grant execute on function public.manager_reset_worker_data(text) to service_role;
 
 insert into public.manager_schema_migrations(version)

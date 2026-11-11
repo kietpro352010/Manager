@@ -203,11 +203,21 @@ async function testSqlSchemaStructure() {
   const migrationPath = path.join(__dirname, '../supabase/migrations/20261111120000_command_two_phase_sync.sql');
   assert.ok(fs.existsSync(migrationPath), 'Expected supabase/migrations/20261111120000_command_two_phase_sync.sql');
   const migrationSql = fs.readFileSync(migrationPath, 'utf8');
+  assert.match(migrationSql, /alter\s+column\s+command_id\s+type\s+text\s+using\s+command_id::text/i);
+  assert.match(migrationSql, /manager_commands_action_check/i);
   assert.match(migrationSql, /manager_commands_status_check/i);
   assert.match(migrationSql, /'execution_completed'/);
   assert.match(migrationSql, /'state_sync_pending'/);
   assert.match(migrationSql, /'state_sync_failed'/);
+  assert.match(migrationSql, /notify\s+pgrst,\s*'reload schema'/i);
+  const { ACTIONS } = require('../src/services/worker-registry');
+  for (const act of ACTIONS) {
+    assert.ok(migrationSql.includes(`'${act}'`), `Migration 20261111120000 action check must allow '${act}'`);
+  }
   for (const rpcName of [
+    'manager_enqueue_worker_command',
+    'manager_complete_worker_command',
+    'manager_expire_worker_command',
     'manager_record_command_execution',
     'manager_renew_command_sync_lease',
     'manager_verify_command_sync_lease',
@@ -217,6 +227,7 @@ async function testSqlSchemaStructure() {
   ]) {
     assert.ok(migrationSql.includes(`function public.${rpcName}(`), `Expected ${rpcName} in migration SQL`);
     assert.match(migrationSql, new RegExp(`grant execute on function public\\.${rpcName}\\([^)]*\\) to service_role`, 'i'));
+    assert.match(migrationSql, new RegExp(`revoke all on function public\\.${rpcName}\\([^)]*\\) from public, anon, authenticated`, 'i'));
   }
   assert.ok(migrationSql.includes("'20261111120000_command_two_phase_sync'"), 'Migration must record version in manager_schema_migrations');
 
@@ -234,6 +245,63 @@ async function testSqlSchemaStructure() {
   assert.match(resetSetupSql, /CREATE OR REPLACE VIEW public\.manager_audit/);
   assert.match(resetSetupSql, /CREATE OR REPLACE FUNCTION public\.manager_claim_pending_command_syncs/);
   assert.match(resetSetupSql, /NOTIFY pgrst,\s*'reload schema'/i);
+
+  // 1n. Enforce text (cmd_<UUID>) command_id contract across ALL SQL sources (migrations, setup.sql, reset_and_setup.sql, schema-sql.js)
+  const mig20261108Sql = fs.readFileSync(path.join(__dirname, '../supabase/migrations/20261108000000_durable_worker_commands.sql'), 'utf8');
+  const mig2026111100Sql = fs.readFileSync(path.join(__dirname, '../supabase/migrations/20261111000000_worker_reset_data.sql'), 'utf8');
+  const setupSql = fs.readFileSync(path.join(__dirname, '../supabase/setup.sql'), 'utf8');
+  const allCommandSqlFiles = [
+    ['src/storage/schema-sql.js', schemaSql],
+    ['supabase/migrations/20261108000000_durable_worker_commands.sql', mig20261108Sql],
+    ['supabase/migrations/20261111000000_worker_reset_data.sql', mig2026111100Sql],
+    ['supabase/migrations/20261111120000_command_two_phase_sync.sql', migrationSql],
+    ['supabase/setup.sql', setupSql],
+    ['supabase/reset_and_setup.sql', resetSetupSql]
+  ];
+  const commandIdRpcs = [
+    'manager_enqueue_worker_command',
+    'manager_complete_worker_command',
+    'manager_expire_worker_command',
+    'manager_record_command_execution',
+    'manager_renew_command_sync_lease',
+    'manager_verify_command_sync_lease',
+    'manager_mark_command_sync_pending',
+    'manager_finalize_command_sync'
+  ];
+  for (const [label, sqlText] of allCommandSqlFiles) {
+    assert.ok(!/\bcommand_id\s+uuid\b/i.test(sqlText), `${label} must NOT declare command_id as uuid`);
+    assert.ok(!/\bp_command_id\s+uuid\b/i.test(sqlText), `${label} must NOT declare p_command_id as uuid`);
+    for (const line of sqlText.split(/\r?\n/)) {
+      if (/^(?:REVOKE|GRANT)\b.*\bFUNCTION\b/i.test(line.trim()) && /manager_(?:enqueue|complete|expire|record|renew|verify|mark|finalize).*command/i.test(line)) {
+        assert.ok(!/\buuid\b/i.test(line), `${label} REVOKE/GRANT signature must use text instead of uuid: ${line.trim()}`);
+      }
+    }
+    if (!label.includes('20261111')) {
+      assert.match(sqlText, /\bcommand_id\s+text\s+primary\s+key\b/i, `${label} must declare manager_commands.command_id as text primary key`);
+    } else if (label.includes('20261111120000')) {
+      assert.match(sqlText, /\balter\s+column\s+command_id\s+type\s+text\b/i, `${label} must convert command_id column to text`);
+    }
+    const expectedRpcsForFile = label === 'supabase/migrations/20261111000000_worker_reset_data.sql'
+      ? ['manager_complete_worker_command']
+      : (label === 'supabase/migrations/20261108000000_durable_worker_commands.sql'
+        ? ['manager_enqueue_worker_command', 'manager_complete_worker_command', 'manager_expire_worker_command']
+        : commandIdRpcs);
+    for (const fnName of expectedRpcsForFile) {
+      const fnMatches = [...sqlText.matchAll(new RegExp(`CREATE\\s+(?:OR\\s+REPLACE\\s+)?FUNCTION\\s+public\\.${fnName}\\s*\\(([\\s\\S]*?)\\)\\s*RETURNS\\b`, 'gi'))];
+      assert.ok(fnMatches.length >= 1, `${label} missing CREATE FUNCTION for ${fnName}`);
+      for (const m of fnMatches) {
+        assert.match(m[1], /\bp_command_id\s+text\b/i, `${label} ${fnName} parameter p_command_id must be text`);
+      }
+    }
+  }
+  assert.match(migrationSql, /drop function if exists public\.manager_record_command_execution\(text,\s*uuid,/i);
+  assert.match(migrationSql, /drop function if exists public\.manager_renew_command_sync_lease\(text,\s*uuid,/i);
+  assert.match(migrationSql, /drop function if exists public\.manager_verify_command_sync_lease\(text,\s*uuid,/i);
+  assert.match(migrationSql, /drop function if exists public\.manager_mark_command_sync_pending\(text,\s*uuid,/i);
+  assert.match(migrationSql, /drop function if exists public\.manager_finalize_command_sync\(text,\s*uuid,/i);
+  assert.match(migrationSql, /drop function if exists public\.manager_enqueue_worker_command\(uuid,/i);
+  assert.match(migrationSql, /drop function if exists public\.manager_complete_worker_command\(text,\s*uuid,/i);
+  assert.match(migrationSql, /drop function if exists public\.manager_expire_worker_command\(uuid\)/i);
 
   console.log('✅ 1. SQL DDL & RPC structural validation passed.');
 }
@@ -998,6 +1066,271 @@ async function testCommandStoreTwoPhaseSyncPersistence() {
   console.log('✅ 5. SupabaseCommandStore two-phase RESET states, fencing & fail-closed RPC enforcement verified.');
 }
 
+async function testCommandStoreCmdUuidEndToEndContract() {
+  console.log('6. Checking cmd_<UUID> end-to-end RPC parameter contract against SQL definitions...');
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const CMD_UUID_RE = /^cmd_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  function parseSqlSignatures(sqlText) {
+    const map = new Map();
+    const fnRe = /create\s+(?:or\s+replace\s+)?function\s+public\.([a-z0-9_]+)\s*\(([\s\S]*?)\)\s*returns\b/gi;
+    let m;
+    while ((m = fnRe.exec(sqlText)) !== null) {
+      const fnName = m[1];
+      const rawParams = m[2].trim();
+      const params = rawParams
+        ? rawParams.split(',').map((part) => {
+            const cleaned = part.trim().replace(/\s+default\s+[\s\S]+$/i, '');
+            const hasDefault = /\s+default\s+/i.test(part);
+            const parts = cleaned.split(/\s+/);
+            const name = parts[0];
+            const type = parts.slice(1).join(' ').toLowerCase();
+            return { name, type, hasDefault };
+          })
+        : [];
+      map.set(fnName, params);
+    }
+    return map;
+  }
+
+  const mig08Sql = fs.readFileSync(path.join(__dirname, '../supabase/migrations/20261108000000_durable_worker_commands.sql'), 'utf8');
+  const mig1100Sql = fs.readFileSync(path.join(__dirname, '../supabase/migrations/20261111000000_worker_reset_data.sql'), 'utf8');
+  const mig1112Sql = fs.readFileSync(path.join(__dirname, '../supabase/migrations/20261111120000_command_two_phase_sync.sql'), 'utf8');
+  const setupSql = fs.readFileSync(path.join(__dirname, '../supabase/setup.sql'), 'utf8');
+  const orderedMigSigs = new Map([
+    ...parseSqlSignatures(mig08Sql),
+    ...parseSqlSignatures(mig1100Sql),
+    ...parseSqlSignatures(mig1112Sql)
+  ]);
+  const setupSigs = parseSqlSignatures(setupSql);
+
+  const cmdRows = new Map();
+  const seenCmdUuidRpcs = new Map();
+  const contractErrors = [];
+  let fallbackTriggered = false;
+
+  function validateParamsAgainstSql(sigs, label, fnName, params) {
+    const def = sigs.get(fnName);
+    if (!def) {
+      const msg = `[${label}] Missing RPC ${fnName} in parsed SQL contract`;
+      contractErrors.push(msg);
+      return { code: 'PGRST202', message: msg };
+    }
+    const defByName = new Map(def.map((d) => [d.name, d]));
+    for (const [k, v] of Object.entries(params || {})) {
+      const paramDef = defByName.get(k);
+      if (!paramDef) {
+        const msg = `[${label}] Unexpected parameter ${k} for ${fnName}`;
+        contractErrors.push(msg);
+        return { code: 'PGRST202', message: msg };
+      }
+      if (paramDef.type === 'uuid' && v !== null && v !== undefined && !UUID_RE.test(String(v))) {
+        const msg = `[${label}] invalid input syntax for type uuid for ${fnName}.${k}: "${v}"`;
+        contractErrors.push(msg);
+        return { code: '22P02', message: msg };
+      }
+      if (k === 'p_command_id' && paramDef.type !== 'text') {
+        const msg = `[${label}] ${fnName}.p_command_id must be text, got ${paramDef.type}`;
+        contractErrors.push(msg);
+        return { code: '42883', message: msg };
+      }
+    }
+    for (const paramDef of def) {
+      if (!paramDef.hasDefault && !(paramDef.name in (params || {}))) {
+        const msg = `[${label}] Missing required parameter ${paramDef.name} for ${fnName}`;
+        contractErrors.push(msg);
+        return { code: 'PGRST202', message: msg };
+      }
+    }
+    return null;
+  }
+
+  const client = {
+    async rpc(fnName, params = {}) {
+      for (const [label, sigs] of [['migrations', orderedMigSigs], ['setup.sql', setupSigs]]) {
+        const validationErr = validateParamsAgainstSql(sigs, label, fnName, params);
+        if (validationErr) {
+          return { data: null, error: validationErr };
+        }
+      }
+      if ('p_command_id' in params) {
+        assert.match(String(params.p_command_id), CMD_UUID_RE, `${fnName} must receive cmd_<UUID>`);
+        seenCmdUuidRpcs.set(fnName, String(params.p_command_id));
+      }
+
+      const nowIso = new Date().toISOString();
+      if (fnName === 'manager_enqueue_worker_command') {
+        const row = {
+          command_id: params.p_command_id,
+          worker_id: params.p_worker_id,
+          action: params.p_action,
+          payload: params.p_payload || {},
+          status: 'queued',
+          result: null,
+          created_at: params.p_created_at,
+          expires_at: params.p_expires_at,
+          delivered_at: null,
+          completed_at: null
+        };
+        cmdRows.set(row.command_id, row);
+        return { data: [{ ...row }], error: null };
+      }
+      if (fnName === 'manager_take_worker_command') {
+        for (const row of cmdRows.values()) {
+          if (row.worker_id === params.p_worker_id && row.status === 'queued') {
+            row.status = 'delivered';
+            row.delivered_at = nowIso;
+            return { data: { ...row }, error: null };
+          }
+        }
+        return { data: null, error: null };
+      }
+      if (fnName === 'manager_record_command_execution') {
+        const row = cmdRows.get(params.p_command_id);
+        assert.ok(row && row.worker_id === params.p_worker_id);
+        const token = Number(row.result?._stateSync?.fencingToken || 0) + 1;
+        row.status = 'execution_completed';
+        row.completed_at = null;
+        row.result = {
+          ...(params.p_result || {}),
+          _stateSync: {
+            pending: true,
+            executionCompleted: true,
+            leaseOwner: params.p_lease_owner,
+            leaseUntil: new Date(Date.now() + (params.p_lease_seconds || 60) * 1000).toISOString(),
+            fencingToken: token
+          }
+        };
+        return { data: { ok: true, alreadyCompleted: false, status: 'execution_completed', fencingToken: token, command: { ...row } }, error: null };
+      }
+      if (fnName === 'manager_verify_command_sync_lease') {
+        const row = cmdRows.get(params.p_command_id);
+        const held = Boolean(row && row.result?._stateSync?.leaseOwner === params.p_lease_owner);
+        return { data: { ok: held, held, leaseOwner: row?.result?._stateSync?.leaseOwner || null, fencingToken: row?.result?._stateSync?.fencingToken || 0 }, error: null };
+      }
+      if (fnName === 'manager_renew_command_sync_lease') {
+        const row = cmdRows.get(params.p_command_id);
+        const nextLease = new Date(Date.now() + (params.p_lease_seconds || 60) * 1000).toISOString();
+        row.result._stateSync.leaseUntil = nextLease;
+        return { data: { ok: true, lost: false, leaseOwner: params.p_lease_owner, leaseUntil: nextLease, fencingToken: row.result._stateSync.fencingToken }, error: null };
+      }
+      if (fnName === 'manager_mark_command_sync_pending') {
+        const row = cmdRows.get(params.p_command_id);
+        row.status = params.p_terminal_failed ? 'state_sync_failed' : 'state_sync_pending';
+        row.completed_at = null;
+        row.result = {
+          ...(row.result || {}),
+          _stateSync: { ...(params.p_sync_state || {}), fencingToken: row.result?._stateSync?.fencingToken || 1 }
+        };
+        return { data: true, error: null };
+      }
+      if (fnName === 'manager_claim_pending_command_syncs') {
+        const claimed = [];
+        for (const row of cmdRows.values()) {
+          if (row.status === 'state_sync_pending' || row.status === 'execution_completed') {
+            row.status = 'state_sync_pending';
+            row.result._stateSync = {
+              ...(row.result._stateSync || {}),
+              pending: true,
+              leaseOwner: params.p_lease_owner,
+              leaseUntil: new Date(Date.now() + (params.p_lease_seconds || 60) * 1000).toISOString(),
+              fencingToken: Number(row.result?._stateSync?.fencingToken || 0) + 1
+            };
+            claimed.push({ ...row, result: { ...row.result, _stateSync: { ...row.result._stateSync } } });
+          }
+        }
+        return { data: claimed, error: null };
+      }
+      if (fnName === 'manager_finalize_command_sync') {
+        const row = cmdRows.get(params.p_command_id);
+        row.status = 'completed';
+        row.completed_at = nowIso;
+        const cleanResult = { ...(params.p_result || row.result || {}) };
+        delete cleanResult._stateSync;
+        row.result = cleanResult;
+        return { data: true, error: null };
+      }
+      if (fnName === 'manager_complete_worker_command') {
+        const row = cmdRows.get(params.p_command_id);
+        row.status = params.p_result?.ok === false ? 'failed' : 'completed';
+        row.completed_at = nowIso;
+        row.result = params.p_result;
+        return { data: true, error: null };
+      }
+      if (fnName === 'manager_expire_worker_command') {
+        const row = cmdRows.get(params.p_command_id);
+        row.status = 'expired';
+        return { data: true, error: null };
+      }
+      return { data: null, error: { code: 'PGRST202', message: `Unknown RPC ${fnName}` } };
+    },
+    from: () => {
+      fallbackTriggered = true;
+      throw new Error('Test 6 must execute purely through RPC signatures without falling back to raw table operations');
+    }
+  };
+
+  const store = new SupabaseCommandStore(client);
+
+  // Two-phase RESET lifecycle using generated cmd_<UUID>
+  const enqReset = await store.enqueue({ workerId: '01', action: 'reset', payload: {} });
+  assert.match(enqReset.commandId, CMD_UUID_RE);
+  const takenReset = await store.take('01');
+  assert.strictEqual(takenReset.commandId, enqReset.commandId);
+  const rec = await store.recordExecutionCompleted('01', enqReset.commandId, { ok: true, state: 'stopped' }, { leaseOwner: 'mgr_1', leaseSeconds: 60 });
+  assert.strictEqual(rec.ok, true);
+  assert.strictEqual(rec.fencingToken, 1);
+  const ver = await store.verifyStateSyncLease('01', enqReset.commandId, 'mgr_1', { fencingToken: 1 });
+  assert.strictEqual(ver.held, true);
+  const ren = await store.renewStateSyncLease('01', enqReset.commandId, 'mgr_1', 60, { fencingToken: 1 });
+  assert.strictEqual(ren.ok, true);
+  const pendingOk = await store.markStateSyncPending('01', enqReset.commandId, {
+    result: { ok: true, state: 'stopped' },
+    leaseOwner: 'mgr_1',
+    fencingToken: 1,
+    syncState: { pending: true, attempts: 1, nextRetryAt: new Date(Date.now() - 1000).toISOString(), leaseOwner: null, leaseUntil: null }
+  });
+  assert.strictEqual(pendingOk, true);
+  const claimed = await store.claimPendingStateSyncBatch('mgr_2', 10, 60);
+  assert.strictEqual(claimed.length, 1);
+  assert.strictEqual(claimed[0].commandId, enqReset.commandId);
+  assert.strictEqual(claimed[0].result._stateSync.fencingToken, 2);
+  const finOk = await store.finalizeCompleted('01', enqReset.commandId, { ok: true, state: 'stopped' }, { leaseOwner: 'mgr_2', fencingToken: 2 });
+  assert.strictEqual(finOk, true);
+
+  // Standard completion lifecycle using generated cmd_<UUID>
+  const enqStatus = await store.enqueue({ workerId: '01', action: 'status', payload: {} });
+  assert.match(enqStatus.commandId, CMD_UUID_RE);
+  const takenStatus = await store.take('01');
+  assert.strictEqual(takenStatus.commandId, enqStatus.commandId);
+  assert.strictEqual(await store.complete('01', enqStatus.commandId, { ok: true }), true);
+
+  // Expiration lifecycle using generated cmd_<UUID>
+  const enqChat = await store.enqueue({ workerId: '01', action: 'chat', payload: { message: 'hi' } });
+  assert.match(enqChat.commandId, CMD_UUID_RE);
+  await store.expire(enqChat.commandId);
+
+  assert.deepStrictEqual(contractErrors, [], `SQL contract validation errors: ${contractErrors.join('; ')}`);
+  assert.strictEqual(fallbackTriggered, false, 'Raw table fallback must NOT be reached when SQL RPC signatures match');
+
+  for (const rpcName of [
+    'manager_enqueue_worker_command',
+    'manager_complete_worker_command',
+    'manager_expire_worker_command',
+    'manager_record_command_execution',
+    'manager_renew_command_sync_lease',
+    'manager_verify_command_sync_lease',
+    'manager_mark_command_sync_pending',
+    'manager_finalize_command_sync'
+  ]) {
+    assert.ok(seenCmdUuidRpcs.has(rpcName), `Expected ${rpcName} to receive a cmd_<UUID> command_id`);
+  }
+
+  console.log('✅ 6. cmd_<UUID> end-to-end RPC contract across SQL signatures verified.');
+}
+
 (async () => {
   try {
     console.log('--- [STORAGE & SQL STRUCTURAL TESTS] ---');
@@ -1006,6 +1339,7 @@ async function testCommandStoreTwoPhaseSyncPersistence() {
     await testDiscordLinkingFailClosedAndConflicts();
     await testLink4mAndSettingsParity();
     await testCommandStoreTwoPhaseSyncPersistence();
+    await testCommandStoreCmdUuidEndToEndContract();
     console.log('🎉 ALL STORAGE & SQL TESTS PASSED 100%!');
   } catch (err) {
     console.error('❌ TEST FAILED:', err);

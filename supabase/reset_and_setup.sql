@@ -2224,6 +2224,22 @@ CREATE TABLE IF NOT EXISTS public.manager_commands (
   delivered_at timestamptz,
   completed_at timestamptz
 );
+DO 
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'manager_commands'
+      AND column_name = 'command_id'
+      AND data_type <> 'text'
+  ) THEN
+    ALTER TABLE public.manager_commands
+      ALTER COLUMN command_id TYPE text
+      USING command_id::text;
+  END IF;
+END
+;
 CREATE INDEX IF NOT EXISTS idx_manager_commands_worker_status ON public.manager_commands(worker_id, status);
 CREATE INDEX IF NOT EXISTS idx_manager_commands_expires ON public.manager_commands(expires_at);
 CREATE INDEX IF NOT EXISTS idx_manager_commands_state_sync ON public.manager_commands(created_at ASC) WHERE status IN ('execution_completed', 'state_sync_pending');
@@ -2358,6 +2374,7 @@ $take_cmd$;
 REVOKE ALL ON FUNCTION public.manager_take_worker_command(text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.manager_take_worker_command(text) TO service_role;
 
+DROP FUNCTION IF EXISTS public.manager_enqueue_worker_command(uuid, text, text, jsonb, timestamptz, timestamptz);
 DROP FUNCTION IF EXISTS public.manager_enqueue_worker_command(text, text, text, jsonb, timestamptz, timestamptz);
 
 CREATE OR REPLACE FUNCTION public.manager_enqueue_worker_command(
@@ -2417,6 +2434,7 @@ $enqueue_cmd$;
 REVOKE ALL ON FUNCTION public.manager_enqueue_worker_command(text, text, text, jsonb, timestamptz, timestamptz, boolean) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.manager_enqueue_worker_command(text, text, text, jsonb, timestamptz, timestamptz, boolean) TO service_role;
 
+DROP FUNCTION IF EXISTS public.manager_complete_worker_command(text, uuid, jsonb);
 CREATE OR REPLACE FUNCTION public.manager_complete_worker_command(
   p_worker_id text,
   p_command_id text,
@@ -2444,6 +2462,7 @@ $complete_cmd$;
 REVOKE ALL ON FUNCTION public.manager_complete_worker_command(text, text, jsonb) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.manager_complete_worker_command(text, text, jsonb) TO service_role;
 
+DROP FUNCTION IF EXISTS public.manager_expire_worker_command(uuid);
 CREATE OR REPLACE FUNCTION public.manager_expire_worker_command(
   p_command_id text
 )
@@ -2468,6 +2487,7 @@ GRANT EXECUTE ON FUNCTION public.manager_expire_worker_command(text) TO service_
 
 CREATE INDEX IF NOT EXISTS idx_manager_commands_status_created ON public.manager_commands(status, created_at);
 
+DROP FUNCTION IF EXISTS public.manager_record_command_execution(text, uuid, jsonb, text, integer);
 DROP FUNCTION IF EXISTS public.manager_record_command_execution(text, text, jsonb, text, integer);
 CREATE OR REPLACE FUNCTION public.manager_record_command_execution(
   p_worker_id text,
@@ -2577,6 +2597,7 @@ BEGIN
 END;
 $record_exec$;
 
+DROP FUNCTION IF EXISTS public.manager_renew_command_sync_lease(text, uuid, text, integer, bigint);
 DROP FUNCTION IF EXISTS public.manager_renew_command_sync_lease(text, text, text, integer, bigint);
 CREATE OR REPLACE FUNCTION public.manager_renew_command_sync_lease(
   p_worker_id text,
@@ -2667,6 +2688,7 @@ BEGIN
 END;
 $renew_sync$;
 
+DROP FUNCTION IF EXISTS public.manager_verify_command_sync_lease(text, uuid, text, bigint);
 DROP FUNCTION IF EXISTS public.manager_verify_command_sync_lease(text, text, text, bigint);
 CREATE OR REPLACE FUNCTION public.manager_verify_command_sync_lease(
   p_worker_id text,
@@ -2739,6 +2761,8 @@ BEGIN
 END;
 $verify_sync$;
 
+DROP FUNCTION IF EXISTS public.manager_mark_command_sync_pending(text, uuid, jsonb, boolean);
+DROP FUNCTION IF EXISTS public.manager_mark_command_sync_pending(text, uuid, jsonb, boolean, text, bigint);
 DROP FUNCTION IF EXISTS public.manager_mark_command_sync_pending(text, text, jsonb, boolean);
 DROP FUNCTION IF EXISTS public.manager_mark_command_sync_pending(text, text, jsonb, boolean, text, bigint);
 CREATE OR REPLACE FUNCTION public.manager_mark_command_sync_pending(
@@ -2811,6 +2835,8 @@ BEGIN
 END;
 $mark_sync$;
 
+DROP FUNCTION IF EXISTS public.manager_finalize_command_sync(text, uuid, jsonb, text);
+DROP FUNCTION IF EXISTS public.manager_finalize_command_sync(text, uuid, jsonb, text, bigint);
 DROP FUNCTION IF EXISTS public.manager_finalize_command_sync(text, text, jsonb, text);
 DROP FUNCTION IF EXISTS public.manager_finalize_command_sync(text, text, jsonb, text, bigint);
 CREATE OR REPLACE FUNCTION public.manager_finalize_command_sync(
