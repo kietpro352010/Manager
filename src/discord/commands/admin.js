@@ -52,10 +52,12 @@ async function execute(interaction, services) {
     services.accessControl.setRoleIds(adminRole.id, userRole.id);
     if (adminUser) services.accessControl.setAdminUserId(adminUser.id);
 
-    await services.accessStore.setSetting('discord_roles', {
+    await services.accessStore.setSetting('discord_access', {
+      guildId: interaction.guildId || services.config?.discordGuildId || '',
       adminRoleId: adminRole.id,
       userRoleId: userRole.id,
-      adminUserId: adminUser ? adminUser.id : (services.config.adminUserId || '')
+      adminUserId: adminUser ? adminUser.id : (services.config.adminUserId || ''),
+      configuredBy: interaction.user?.id || 'discord-setup'
     });
 
     return {

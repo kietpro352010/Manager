@@ -745,7 +745,7 @@ function createUserApi({
               body: JSON.stringify({ token: '${safeToken}', attemptId: '${safeAttempt}' })
             }).then(r => r.json()).then(data => {
               if (data.ok) {
-                alert('Chúc mừng! Bạn đã nhận thêm ' + (data.addedHours || 4) + ' giờ sử dụng Bot thành công.');
+                alert('Chúc mừng! Bạn đã nhận thêm ' + (data.addedHours || data.rewardHours || 12) + ' giờ sử dụng Bot thành công.');
                 window.location.href = '/';
               } else {
                 alert('Xác thực thất bại: ' + (data.error || 'Token không hợp lệ.'));

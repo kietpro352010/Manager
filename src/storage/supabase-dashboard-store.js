@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const AsyncKeyLock = require('../services/async-key-lock');
 const {
   encryptUserPassword,
   decryptUserPassword,
@@ -11,7 +12,7 @@ const {
 
 const ACCESS = 'manager_access';
 const USERS = 'manager_users';
-const ASSIGNMENTS = 'manager_worker_assignments';
+const ASSIGNMENTS = 'manager_assignments';
 const KEYS = 'manager_keys';
 const AUDIT = 'manager_audit';
 const AUDIT_LOGS = 'audit_logs';
@@ -36,10 +37,90 @@ const KEY_FIELDS = {
 };
 
 const LINK_FIELDS = {
-  attemptId: 'attempt_id', userId: 'user_id', tokenHash: 'token_hash', rewardHours: 'reward_hours', status: 'status',
-  createdAt: 'created_at', expiresAt: 'expires_at', providerUrl: 'provider_url', purgeAt: 'purge_at', dailyDate: 'daily_date',
-  processingAt: 'processing_at', rewardedAt: 'rewarded_at'
+  attemptId: 'attempt_id', userId: 'user_id', username: 'username', tokenHash: 'token_hash',
+  rewardHours: 'reward_hours', status: 'status', createdAt: 'created_at', expiresAt: 'expires_at',
+  providerUrl: 'provider_url', providerShortUrl: 'provider_short_url', purgeAt: 'purge_at',
+  dailyDate: 'daily_date', vietnamDate: 'vietnam_date', processingAt: 'processing_at',
+  verifiedAt: 'verified_at', rewardedAt: 'rewarded_at', completedAt: 'completed_at', updatedAt: 'updated_at'
 };
+
+function toIso(value) {
+  if (!value) return value === null ? null : undefined;
+  if (value instanceof Date) return value.toISOString();
+  return String(value);
+}
+
+function isMissingRpcError(error) {
+  if (!error) return false;
+  if (error.missingRpc === true) return true;
+  const code = String(error.code || '').toUpperCase();
+  const msg = String(error.message || '').toLowerCase();
+  const details = String(error.details || error.responseText || '').toLowerCase();
+  return (
+    code === 'PGRST202' ||
+    code === '42883' ||
+    msg.includes('does not exist') ||
+    msg.includes('could not find the function') ||
+    msg.includes('unknown rpc') ||
+    msg.includes('not implemented') ||
+    details.includes('pgrst202') ||
+    details.includes('could not find the function')
+  );
+}
+
+function isMissingSchemaError(error) {
+  if (!error) return false;
+  const code = String(error.code || '').toUpperCase();
+  const msg = String(error.message || '').toLowerCase();
+  return (
+    code === '42P01' ||
+    code === '42703' ||
+    code === 'PGRST204' ||
+    code === 'PGRST205' ||
+    (msg.includes('relation') && msg.includes('does not exist')) ||
+    (msg.includes('column') && msg.includes('does not exist')) ||
+    msg.includes('could not find the table') ||
+    msg.includes('schema cache')
+  );
+}
+
+function mapLinkFrom(row) {
+  if (!row) return null;
+  return {
+    attemptId: row.attempt_id,
+    userId: row.user_id || row.username || '',
+    username: row.username || row.user_id || '',
+    tokenHash: row.token_hash,
+    rewardHours: row.reward_hours,
+    status: row.status,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    providerUrl: row.provider_url || row.provider_short_url || '',
+    providerShortUrl: row.provider_short_url || row.provider_url || '',
+    purgeAt: row.purge_at ?? null,
+    dailyDate: row.daily_date || row.vietnam_date || '',
+    vietnamDate: row.vietnam_date || row.daily_date || '',
+    processingAt: row.processing_at ?? null,
+    verifiedAt: row.verified_at ?? null,
+    rewardedAt: row.rewarded_at || row.completed_at || null,
+    completedAt: row.completed_at || row.rewarded_at || null,
+    updatedAt: row.updated_at ?? null
+  };
+}
+
+function applyLinkUserFilter(query, userId) {
+  const clean = String(userId || '').trim();
+  const lower = clean.toLowerCase();
+  const bare = lower.replace(/^usr_/, '');
+  const filters = [`user_id.eq.${clean}`];
+  if (lower && lower !== clean) filters.push(`user_id.eq.${lower}`);
+  if (lower) filters.push(`username.eq.${lower}`);
+  if (bare && bare !== lower) filters.push(`username.eq.${bare}`);
+  if (typeof query?.or === 'function' && filters.length > 1) {
+    return query.or(filters.join(','));
+  }
+  return query.eq('user_id', clean);
+}
 
 function mapFrom(row, fields) {
   if (!row) return null;
@@ -65,6 +146,7 @@ class SupabaseDashboardStore {
     this.client = client;
     this.adapter = client.adapter || null;
     this.cache = new Map();
+    this._fallbackLock = new AsyncKeyLock();
   }
 
   getCached(key) {
@@ -121,20 +203,60 @@ class SupabaseDashboardStore {
   // --------------------------------------------------------------------------
   // USER ENTITLEMENT & ACCESS
   // --------------------------------------------------------------------------
-  async assignedWorkerIds(userId) {
-    // Thử đọc từ manager_worker_assignments trước
+  async resolveUserRow(userId) {
+    const clean = String(userId || '').trim();
+    if (!clean) return null;
+    const lower = clean.toLowerCase();
+    const bare = lower.startsWith('usr_') ? lower.slice(4) : lower;
     try {
-      const { data, error } = await this.client.from(ASSIGNMENTS).select('worker_id').eq('user_id', userId).order('assigned_at');
-      if (!error && data) return data.map((row) => row.worker_id);
-    } catch (_) {}
-
-    // Fallback: đọc từ manager_users.assigned_bot_ids
-    try {
-      const { data, error } = await this.client.from(USERS).select('assigned_bot_ids').eq('id', userId).maybeSingle();
-      if (!error && data?.assigned_bot_ids) {
-        return Array.isArray(data.assigned_bot_ids) ? data.assigned_bot_ids.map(String) : [];
+      const q = this.client.from(USERS).select('*');
+      if (typeof q.or === 'function') {
+        const filters = [`id.eq.${clean}`, `username.eq.${lower}`];
+        if (bare && bare !== lower) filters.push(`username.eq.${bare}`);
+        const { data, error } = await q.or(filters.join(',')).maybeSingle();
+        if (!error && data) return data;
       }
     } catch (_) {}
+
+    const lookups = [['id', clean], ['username', lower]];
+    if (bare && bare !== lower) lookups.push(['username', bare]);
+    for (const [col, val] of lookups) {
+      try {
+        const { data, error } = await this.client.from(USERS).select('*').eq(col, val).maybeSingle();
+        if (!error && data) return data;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  async assignedWorkerIds(userId) {
+    const clean = String(userId || '').trim();
+    if (!clean) return [];
+    const lower = clean.toLowerCase();
+    const bare = lower.startsWith('usr_') ? lower.slice(4) : lower;
+    const userRow = await this.resolveUserRow(clean);
+    const candidates = [...new Set([clean, userRow?.id, userRow?.username, lower, bare].filter(Boolean))];
+
+    try {
+      const q = this.client.from(ASSIGNMENTS).select('worker_id');
+      if (candidates.length > 1 && typeof q.in === 'function') {
+        const { data, error } = await q.in('user_id', candidates).order('assigned_at');
+        if (!error && Array.isArray(data) && data.length > 0) {
+          return [...new Set(data.map((row) => String(row.worker_id)))];
+        }
+      } else {
+        for (const candidate of candidates) {
+          const { data, error } = await this.client.from(ASSIGNMENTS).select('worker_id').eq('user_id', candidate).order('assigned_at');
+          if (!error && Array.isArray(data) && data.length > 0) {
+            return [...new Set(data.map((row) => String(row.worker_id)))];
+          }
+        }
+      }
+    } catch (_) {}
+
+    if (Array.isArray(userRow?.assigned_bot_ids)) {
+      return userRow.assigned_bot_ids.map(String);
+    }
 
     return [];
   }
@@ -150,40 +272,37 @@ class SupabaseDashboardStore {
     const cached = this.getCached(`access:${userId}`);
     if (cached) return cached;
 
-    // 1. Thử đọc từ manager_access
+    // 1. Thử đọc từ manager_users (id hoặc username)
+    const userData = await this.resolveUserRow(userId);
+    if (userData) {
+      const rawAssigned = Array.isArray(userData.assigned_bot_ids) ? userData.assigned_bot_ids.map(String) : [];
+      const assigned = rawAssigned.length > 0 ? rawAssigned : await this.assignedWorkerIds(userData.id || userId);
+      const result = {
+        userId: userData.id || ('usr_' + userData.username),
+        username: userData.username,
+        role: userData.role || 'user',
+        status: userData.status || 'active',
+        isPermanent: Boolean(userData.is_permanent),
+        expiresAt: userData.expires_at,
+        planName: userData.plan_name || 'Gói mặc định',
+        note: userData.note || '',
+        allowAccountChange: userData.allow_account_change !== false,
+        lockReason: userData.lock_reason || '',
+        botCount: userData.bot_count || 1,
+        botAliases: userData.bot_aliases || {},
+        workerIds: assigned,
+        createdAt: userData.created_at,
+        updatedAt: userData.updated_at
+      };
+      this.setCached(`access:${userId}`, result);
+      return result;
+    }
+
+    // 2. Fallback đọc từ manager_access
     try {
       const { data, error } = await this.client.from(ACCESS).select('*').eq('user_id', userId).maybeSingle();
       if (!error && data) {
         const result = { ...mapFrom(data, ACCESS_FIELDS), workerIds: await this.assignedWorkerIds(userId) };
-        this.setCached(`access:${userId}`, result);
-        return result;
-      }
-    } catch (_) {}
-
-    // 2. Thử đọc từ manager_users
-    try {
-      const { data, error } = await this.client.from(USERS).select('*')
-        .or(`id.eq.${userId},username.eq.${userId}`)
-        .maybeSingle();
-      if (!error && data) {
-        const assigned = Array.isArray(data.assigned_bot_ids) ? data.assigned_bot_ids.map(String) : [];
-        const result = {
-          userId: data.id || ('usr_' + data.username),
-          username: data.username,
-          role: data.role || 'user',
-          status: data.status || 'active',
-          isPermanent: Boolean(data.is_permanent),
-          expiresAt: data.expires_at,
-          planName: data.plan_name || 'Gói mặc định',
-          note: data.note || '',
-          allowAccountChange: data.allow_account_change !== false,
-          lockReason: data.lock_reason || '',
-          botCount: data.bot_count || 1,
-          botAliases: data.bot_aliases || {},
-          workerIds: assigned,
-          createdAt: data.created_at,
-          updatedAt: data.updated_at
-        };
         this.setCached(`access:${userId}`, result);
         return result;
       }
@@ -242,10 +361,13 @@ class SupabaseDashboardStore {
   async setAccess(userId, values, actorId) {
     this.invalidateCache();
     const { workerIds = [], ...fields } = values;
+    let directUsersErr = null;
 
     // 1. Thử lưu vào manager_users nếu có bảng
     try {
-      const cleanUsername = String(fields.username || userId).replace(/^usr_/, '');
+      const cleanUsername = fields.username
+        ? String(fields.username).trim().toLowerCase()
+        : String(userId).trim().toLowerCase().replace(/^usr_/, '');
       const assigned = [...new Set(workerIds)].map(String);
       const userRow = {
         id: userId,
@@ -262,8 +384,12 @@ class SupabaseDashboardStore {
         note: String(fields.note || ''),
         updated_at: new Date().toISOString()
       };
+      if (fields.isTrial !== undefined) userRow.is_trial = Boolean(fields.isTrial);
+      if (fields.trialBotId !== undefined) userRow.trial_bot_id = fields.trialBotId || null;
       if (fields.password) {
-        userRow.password = encryptUserPassword(fields.password);
+        userRow.password = isStoredCredentialCiphertext(fields.password)
+          ? fields.password
+          : encryptUserPassword(fields.password);
       }
       const { data, error } = await this.client.from(USERS).upsert(userRow, { onConflict: 'username' }).select('*').maybeSingle();
       if (!error && data) {
@@ -279,7 +405,15 @@ class SupabaseDashboardStore {
           updatedAt: data.updated_at
         };
       }
-    } catch (_) {}
+      directUsersErr = error || null;
+    } catch (err) {
+      directUsersErr = err;
+    }
+
+    if (typeof this.client?.rpc !== 'function') {
+      if (directUsersErr) throw directUsersErr;
+      throw new Error('Không thể lưu quyền truy cập người dùng.');
+    }
 
     // 2. Fallback gọi RPC manager_set_user_access
     const { data, error } = await this.client.rpc('manager_set_user_access', {
@@ -289,17 +423,45 @@ class SupabaseDashboardStore {
       p_actor_id: String(actorId || '')
     });
     if (error) throw error;
-    return { ...mapFrom(unwrapRpc(data), ACCESS_FIELDS), workerIds: await this.assignedWorkerIds(userId) };
+    const rpcRow = unwrapRpc(data);
+    return {
+      ...(rpcRow ? mapFrom(rpcRow, ACCESS_FIELDS) : {}),
+      userId: rpcRow?.id || rpcRow?.user_id || userId,
+      username: rpcRow?.username || fields.username || String(userId).replace(/^usr_/, ''),
+      workerIds: await this.assignedWorkerIds(rpcRow?.id || userId)
+    };
   }
 
   async removeAccess(userId) {
     this.invalidateCache();
+    const clean = String(userId || '').trim();
+    const lower = clean.toLowerCase();
+    const bare = lower.startsWith('usr_') ? lower.slice(4) : lower;
     try {
-      await this.client.from(USERS).delete().or(`id.eq.${userId},username.eq.${userId}`);
+      const q = this.client.from(USERS).delete();
+      if (typeof q.or === 'function') {
+        await q.or(`id.eq.${clean},username.eq.${lower},username.eq.${bare}`);
+      } else {
+        await q.eq('id', clean);
+      }
     } catch (_) {}
-    const { data, error } = await this.client.from(ACCESS).delete().eq('user_id', userId).select('user_id');
-    if (error && error.code !== '42P01') throw error;
-    return Boolean(data?.length);
+    try {
+      const q = this.client.from(ASSIGNMENTS).delete();
+      const candidates = [...new Set([clean, lower, bare].filter(Boolean))];
+      if (candidates.length > 1 && typeof q.in === 'function') {
+        await q.in('user_id', candidates);
+      } else {
+        await q.eq('user_id', clean);
+      }
+    } catch (_) {}
+    try {
+      const { data, error } = await this.client.from(ACCESS).delete().eq('user_id', userId).select('user_id');
+      if (error && !isMissingSchemaError(error) && String(error.code || '') !== '42501') throw error;
+      return Boolean(data?.length);
+    } catch (err) {
+      if (!isMissingSchemaError(err) && String(err.code || '') !== '42501') throw err;
+      return false;
+    }
   }
 
   async assignedUser(workerId) {
@@ -376,147 +538,310 @@ class SupabaseDashboardStore {
   // --------------------------------------------------------------------------
   async registerTrialUser({ userId, username, password, trialDays = 1, planName = 'FREE TRIAL' }) {
     this.invalidateCache();
-    const cleanUsername = String(username).toLowerCase().trim();
+    const cleanUsername = String(username || '').toLowerCase().trim();
+    if (!cleanUsername) {
+      throw new Error('Tên đăng nhập không hợp lệ.');
+    }
+    const safePassword = password
+      ? (isStoredCredentialCiphertext(password) ? password : encryptUserPassword(password))
+      : '';
 
-    // 1. Try Supabase RPC
-    try {
-      const { data, error } = await this.client.rpc('manager_register_trial_user', {
-        p_user_id: userId,
-        p_username: cleanUsername,
-        p_password: password,
-        p_trial_days: trialDays,
-        p_plan_name: planName
-      });
-      if (!error && data?.ok) return unwrapRpc(data);
-      if (error && error.message && error.message.includes('NO_WORKERS_AVAILABLE')) {
-        throw new Error('NO_WORKERS_AVAILABLE: Hiện tại hệ thống không còn Bot rảnh để cấp dùng thử.');
+    // 1. Try Supabase RPC (fail closed on DB/business errors; fallback only if RPC is absent)
+    if (typeof this.client?.rpc === 'function') {
+      try {
+        const { data, error } = await this.client.rpc('manager_register_trial_user', {
+          p_user_id: userId,
+          p_username: cleanUsername,
+          p_password: safePassword,
+          p_trial_days: trialDays,
+          p_plan_name: planName
+        });
+        if (!error && data?.ok) return unwrapRpc(data);
+        if (error) {
+          if (error.message && error.message.includes('NO_WORKERS_AVAILABLE')) {
+            throw new Error('NO_WORKERS_AVAILABLE: Hiện tại hệ thống không còn Bot rảnh để cấp dùng thử.');
+          }
+          if (error.message && error.message.includes('Tên đăng nhập này đã có người sử dụng')) {
+            throw new Error('Tên đăng nhập này đã có người sử dụng.');
+          }
+          if (!isMissingRpcError(error)) {
+            throw error instanceof Error ? error : new Error(error.message || 'Đăng ký dùng thử thất bại.');
+          }
+        } else {
+          throw new Error(data?.message || data?.error || 'Đăng ký dùng thử thất bại.');
+        }
+      } catch (rpcErr) {
+        if (rpcErr?.message?.includes('NO_WORKERS_AVAILABLE')) {
+          throw new Error('NO_WORKERS_AVAILABLE: Hiện tại hệ thống không còn Bot rảnh để cấp dùng thử.');
+        }
+        if (rpcErr?.message?.includes('Tên đăng nhập này đã có người sử dụng')) {
+          throw new Error('Tên đăng nhập này đã có người sử dụng.');
+        }
+        if (!isMissingRpcError(rpcErr)) {
+          throw rpcErr;
+        }
       }
-      if (error && error.message && error.message.includes('Tên đăng nhập này đã có người sử dụng')) {
+    }
+
+    // 2. Fallback: Serialized local allocation with atomic cleanup on 23505/insert failure
+    return this._fallbackLock.run('trial:alloc', async () => {
+      const existing = await this.getUser(cleanUsername);
+      if (existing) {
         throw new Error('Tên đăng nhập này đã có người sử dụng.');
       }
-    } catch (rpcErr) {
-      if (rpcErr.message && (rpcErr.message.includes('NO_WORKERS_AVAILABLE') || rpcErr.message.includes('Tên đăng nhập này đã có người sử dụng'))) {
-        throw rpcErr;
+
+      let candidateWorkers = [];
+      try {
+        const { data: workers, error: workersErr } = await this.client
+          .from('manager_workers')
+          .select('worker_id, bot_number, enabled')
+          .order('bot_number');
+        if (workersErr && !isMissingSchemaError(workersErr)) {
+          throw workersErr instanceof Error ? workersErr : new Error(workersErr.message || 'Lỗi đọc danh sách Bot.');
+        }
+        if (Array.isArray(workers) && workers.length > 0) {
+          candidateWorkers = workers.map((w) => ({
+            workerId: String(w.worker_id),
+            botNumber: w.bot_number || 1,
+            enabled: Boolean(w.enabled)
+          }));
+        }
+      } catch (err) {
+        if (!isMissingSchemaError(err) && (!this.workerStore || typeof this.workerStore.list !== 'function')) {
+          throw err;
+        }
       }
-    }
 
-    // 2. Fallback: Local allocation
-    const existing = await this.getUser(cleanUsername);
-    if (existing) {
-      throw new Error('Tên đăng nhập này đã có người sử dụng.');
-    }
+      if (candidateWorkers.length === 0 && this.workerStore && typeof this.workerStore.list === 'function') {
+        const workers = await this.workerStore.list();
+        candidateWorkers = (workers || []).map((w) => ({
+          workerId: String(w.workerId),
+          botNumber: w.botNumber || 1,
+          enabled: Boolean(w.enabled)
+        }));
+      }
 
-    let freeWorkerId = null;
-    let botNumber = 1;
-    try {
-      const { data: workers } = await this.client.from('manager_workers').select('worker_id, bot_number, enabled').order('bot_number');
-      if (Array.isArray(workers)) {
-        for (const w of workers) {
-          if (!w.enabled) continue;
-          const assigned = await this.assignedUser(w.worker_id);
+      const excludedWorkers = new Set();
+      let lastConflictError = null;
+
+      while (true) {
+        let freeWorkerId = null;
+        let botNumber = 1;
+
+        for (const w of candidateWorkers) {
+          if (!w.enabled || excludedWorkers.has(w.workerId)) continue;
+          const assigned = await this.assignedUser(w.workerId);
           if (!assigned) {
-            freeWorkerId = String(w.worker_id);
-            botNumber = w.bot_number || 1;
+            freeWorkerId = w.workerId;
+            botNumber = w.botNumber || 1;
             break;
           }
         }
-      }
-    } catch (_) {}
 
-    if (!freeWorkerId && this.workerStore && typeof this.workerStore.list === 'function') {
-      const workers = await this.workerStore.list();
-      for (const w of workers) {
-        if (!w.enabled) continue;
-        const assigned = await this.assignedUser(String(w.workerId));
-        if (!assigned) {
-          freeWorkerId = String(w.workerId);
-          botNumber = w.botNumber || 1;
-          break;
+        if (!freeWorkerId) {
+          if (lastConflictError) {
+            throw new Error('NO_WORKERS_AVAILABLE: Hiện tại hệ thống không còn Bot rảnh để cấp dùng thử.');
+          }
+          throw new Error('NO_WORKERS_AVAILABLE: Hiện tại hệ thống không còn Bot rảnh để cấp dùng thử.');
         }
+
+        const expiresAt = new Date(Date.now() + Math.max(1, trialDays) * 24 * 60 * 60 * 1000).toISOString();
+        const assignedUserId = userId || `usr_${cleanUsername}`;
+        const newUser = {
+          id: assignedUserId,
+          userId: assignedUserId,
+          username: cleanUsername,
+          password: safePassword,
+          role: 'user',
+          status: 'active',
+          isPermanent: false,
+          isTrial: true,
+          trialBotId: freeWorkerId,
+          expiresAt,
+          planName,
+          workerIds: [freeWorkerId],
+          assignedBotIds: [freeWorkerId],
+          botCount: 1,
+          note: 'Đăng ký mới (Free Trial 1 Bot)',
+          createdAt: new Date().toISOString()
+        };
+
+        await this.setAccess(assignedUserId, newUser, 'system:trial');
+
+        let assignErr = null;
+        try {
+          const assignRes = await this.client.from(ASSIGNMENTS).insert({
+            worker_id: freeWorkerId,
+            user_id: assignedUserId,
+            assigned_by: 'system:trial',
+            assigned_at: new Date().toISOString()
+          });
+          assignErr = assignRes?.error || null;
+        } catch (err) {
+          assignErr = err;
+        }
+
+        if (assignErr) {
+          await this.removeAccess(assignedUserId).catch(() => {});
+          if (String(assignErr.code || '') === '23505') {
+            excludedWorkers.add(freeWorkerId);
+            lastConflictError = assignErr;
+            continue;
+          }
+          throw assignErr instanceof Error ? assignErr : new Error(assignErr.message || 'Không thể gán Bot dùng thử.');
+        }
+
+        const verified = await this.assignedUser(freeWorkerId);
+        if (verified && verified.userId && verified.userId !== assignedUserId && verified.userId !== cleanUsername) {
+          await this.removeAccess(assignedUserId).catch(() => {});
+          excludedWorkers.add(freeWorkerId);
+          lastConflictError = new Error('Worker assignment conflict detected.');
+          continue;
+        }
+
+        return {
+          ok: true,
+          userId: assignedUserId,
+          username: cleanUsername,
+          workerId: freeWorkerId,
+          botNumber,
+          expiresAt,
+          planName
+        };
       }
-    }
+    });
+  }
 
-    if (!freeWorkerId) {
-      throw new Error('NO_WORKERS_AVAILABLE: Hiện tại hệ thống không còn Bot rảnh để cấp dùng thử.');
-    }
-
-    const expiresAt = new Date(Date.now() + Math.max(1, trialDays) * 24 * 60 * 60 * 1000).toISOString();
-    const newUser = {
-      id: userId,
-      userId,
-      username: cleanUsername,
-      password,
-      role: 'user',
-      status: 'active',
-      isPermanent: false,
-      isTrial: true,
-      trialBotId: freeWorkerId,
-      expiresAt,
-      planName,
-      workerIds: [freeWorkerId],
-      assignedBotIds: [freeWorkerId],
-      botCount: 1,
-      note: 'Đăng ký mới (Free Trial 1 Bot)',
-      createdAt: new Date().toISOString()
-    };
-
-    await this.setAccess(userId, newUser, 'system:trial');
+  async _querySingleOptional(table, column, value) {
     try {
-      await this.client.from(ASSIGNMENTS).insert({
-        worker_id: freeWorkerId,
-        user_id: cleanUsername,
-        assigned_by: 'system:trial',
-        assigned_at: new Date().toISOString()
-      });
-    } catch (_) {}
+      const res = await this.client.from(table).select('*').eq(column, value).maybeSingle();
+      if (res?.error) {
+        if (isMissingSchemaError(res.error)) return null;
+        throw res.error instanceof Error ? res.error : new Error(res.error.message || `Lỗi truy vấn bảng ${table}.`);
+      }
+      return res?.data || null;
+    } catch (err) {
+      if (isMissingSchemaError(err)) return null;
+      throw err;
+    }
+  }
 
-    return {
-      ok: true,
-      userId,
-      username: cleanUsername,
-      workerId: freeWorkerId,
-      botNumber,
-      expiresAt,
-      planName
+  async _checkDiscordLinkConflicts(dId, mId, cleanUser) {
+    const isSameAccount = (row) => {
+      if (!row) return false;
+      const rowUser = String(row.username || '').trim().toLowerCase();
+      const rowId = String(row.manager_user_id || row.id || '').trim();
+      return (rowUser && rowUser === cleanUser) || (rowId && rowId === mId);
     };
+
+    const byDiscordInLinks = await this._querySingleOptional('manager_discord_links', 'discord_user_id', dId);
+    if (byDiscordInLinks && byDiscordInLinks.status !== 'revoked' && !isSameAccount(byDiscordInLinks)) {
+      throw new Error('Tài khoản Discord này đã được liên kết với một tài khoản Web khác.');
+    }
+
+    const byManagerInLinks = await this._querySingleOptional('manager_discord_links', 'manager_user_id', mId);
+    if (byManagerInLinks && byManagerInLinks.status !== 'revoked' && byManagerInLinks.discord_user_id && String(byManagerInLinks.discord_user_id) !== dId) {
+      throw new Error('Tài khoản Web này đã được liên kết với một tài khoản Discord khác.');
+    }
+
+    const byUsernameInLinks = await this._querySingleOptional('manager_discord_links', 'username', cleanUser);
+    if (byUsernameInLinks && byUsernameInLinks.status !== 'revoked' && byUsernameInLinks.discord_user_id && String(byUsernameInLinks.discord_user_id) !== dId) {
+      throw new Error('Tài khoản Web này đã được liên kết với một tài khoản Discord khác.');
+    }
+
+    const byDiscordInUsers = await this._querySingleOptional(USERS, 'discord_user_id', dId);
+    if (byDiscordInUsers && !isSameAccount(byDiscordInUsers)) {
+      throw new Error('Tài khoản Discord này đã được liên kết với một tài khoản Web khác.');
+    }
+
+    const byUsernameInUsers = await this._querySingleOptional(USERS, 'username', cleanUser);
+    if (byUsernameInUsers && byUsernameInUsers.discord_user_id && String(byUsernameInUsers.discord_user_id) !== dId) {
+      throw new Error('Tài khoản Web này đã được liên kết với một tài khoản Discord khác.');
+    }
   }
 
   async linkDiscord(discordUserId, username, managerUserId = '') {
     this.invalidateCache();
-    const dId = String(discordUserId).trim();
-    const cleanUser = String(username).trim().toLowerCase();
+    const dId = String(discordUserId || '').trim();
+    const cleanUser = String(username || '').trim().toLowerCase();
     const mId = String(managerUserId || `usr_${cleanUser}`).trim();
+    if (!dId || !cleanUser) {
+      throw new Error('Thiếu thông tin Discord ID hoặc tài khoản Web để liên kết.');
+    }
 
-    // 1. Try Supabase RPC
-    try {
-      const { data, error } = await this.client.rpc('manager_link_discord_account', {
-        p_discord_user_id: dId,
-        p_manager_user_id: mId,
-        p_username: cleanUser
-      });
-      if (!error && data?.ok) return unwrapRpc(data);
-    } catch (_) {}
+    // 1. Try Supabase RPC (fail closed on conflicts/real errors; fallback ONLY on missing RPC)
+    if (typeof this.client?.rpc === 'function') {
+      try {
+        const { data, error } = await this.client.rpc('manager_link_discord_account', {
+          p_discord_user_id: dId,
+          p_manager_user_id: mId,
+          p_username: cleanUser
+        });
+        if (!error && data?.ok) return unwrapRpc(data);
+        if (error) {
+          if (!isMissingRpcError(error)) {
+            throw error instanceof Error ? error : new Error(error.message || 'Không thể liên kết tài khoản Discord.');
+          }
+        } else {
+          throw new Error(data?.message || data?.error || 'Không thể liên kết tài khoản Discord.');
+        }
+      } catch (rpcErr) {
+        if (!isMissingRpcError(rpcErr)) throw rpcErr;
+      }
+    }
 
-    // 2. Direct table update
+    // 2. Fallback: Verify 1:1 conflicts before writing
+    await this._checkDiscordLinkConflicts(dId, mId, cleanUser);
+
+    // 3. Direct table + settings writes (ignore ONLY missing-schema errors; throw if zero writes persisted)
+    const nowIso = new Date().toISOString();
+    let persistedWrites = 0;
+
     try {
-      await this.client.from('manager_discord_links').upsert({
+      const res = await this.client.from('manager_discord_links').upsert({
         discord_user_id: dId,
         manager_user_id: mId,
         username: cleanUser,
-        linked_at: new Date().toISOString(),
-        last_verified_at: new Date().toISOString(),
-        status: 'active'
+        linked_at: nowIso,
+        last_verified_at: nowIso,
+        status: 'active',
+        revoked_at: null
       }, { onConflict: 'discord_user_id' });
-    } catch (_) {}
+      const err = res?.error || null;
+      if (err) {
+        if (!isMissingSchemaError(err)) throw err instanceof Error ? err : new Error(err.message || 'Lỗi lưu manager_discord_links.');
+      } else {
+        persistedWrites++;
+      }
+    } catch (err) {
+      if (!isMissingSchemaError(err)) throw err;
+    }
 
     try {
-      await this.client.from(USERS).update({ discord_user_id: dId, updated_at: new Date().toISOString() }).eq('username', cleanUser);
-    } catch (_) {}
+      const res = await this.client.from(USERS)
+        .update({ discord_user_id: dId, updated_at: nowIso })
+        .eq('username', cleanUser);
+      const err = res?.error || null;
+      if (err) {
+        if (!isMissingSchemaError(err)) throw err instanceof Error ? err : new Error(err.message || 'Lỗi cập nhật manager_users.');
+      } else {
+        persistedWrites++;
+      }
+    } catch (err) {
+      if (!isMissingSchemaError(err)) throw err;
+    }
 
-    // 3. Fallback: manager_settings
     try {
-      await this.setSetting(`discord_link:${dId}`, { username: cleanUser, linkedAt: new Date().toISOString() });
-    } catch (_) {}
+      await this.setSetting(`discord_link:${dId}`, { username: cleanUser, linkedAt: nowIso });
+      persistedWrites++;
+    } catch (err) {
+      if (!isMissingSchemaError(err)) throw err;
+    }
+
+    if (persistedWrites === 0) {
+      throw new Error('Không thể lưu liên kết Discord vào cơ sở dữ liệu.');
+    }
+
     return { ok: true, discordUserId: dId, username: cleanUser };
   }
 
@@ -525,30 +850,55 @@ class SupabaseDashboardStore {
     const id = String(identifier).trim();
     this.invalidateCache();
 
-    // 1. Try Supabase RPC
-    try {
-      const { data, error } = await this.client.rpc('manager_unlink_discord_account', {
-        p_identifier: id
-      });
-      if (!error && data?.ok) return true;
-    } catch (_) {}
+    // 1. Try Supabase RPC (fail closed on real errors; fallback ONLY on missing RPC)
+    if (typeof this.client?.rpc === 'function') {
+      try {
+        const { data, error } = await this.client.rpc('manager_unlink_discord_account', {
+          p_identifier: id
+        });
+        if (!error && data?.ok) return true;
+        if (error) {
+          if (!isMissingRpcError(error)) {
+            throw error instanceof Error ? error : new Error(error.message || 'Không thể hủy liên kết Discord.');
+          }
+        } else {
+          throw new Error(data?.message || data?.error || 'Không thể hủy liên kết Discord.');
+        }
+      } catch (rpcErr) {
+        if (!isMissingRpcError(rpcErr)) throw rpcErr;
+      }
+    }
 
-    // 2. Direct table cleanup
-    try {
-      await this.client.from('manager_discord_links').delete().eq('discord_user_id', id);
-    } catch (_) {}
-    try {
-      await this.client.from('manager_discord_links').delete().eq('username', id.toLowerCase());
-    } catch (_) {}
-    try {
-      await this.client.from(USERS).update({ discord_user_id: null, updated_at: new Date().toISOString() }).eq('discord_user_id', id);
-    } catch (_) {}
-    try {
-      await this.client.from(USERS).update({ discord_user_id: null, updated_at: new Date().toISOString() }).eq('username', id.toLowerCase());
-    } catch (_) {}
-    try {
-      await this.client.from(SETTINGS).delete().eq('key', `discord_link:${id}`);
-    } catch (_) {}
+    // 2. Direct table + settings cleanup (ignore ONLY missing-schema errors; throw if zero ops succeeded)
+    const nowIso = new Date().toISOString();
+    const ops = [
+      () => this.client.from('manager_discord_links').delete().eq('discord_user_id', id),
+      () => this.client.from('manager_discord_links').delete().eq('username', id.toLowerCase()),
+      () => this.client.from(USERS).update({ discord_user_id: null, updated_at: nowIso }).eq('discord_user_id', id),
+      () => this.client.from(USERS).update({ discord_user_id: null, updated_at: nowIso }).eq('username', id.toLowerCase()),
+      () => this.client.from(SETTINGS).delete().eq('key', `discord_link:${id}`)
+    ];
+    let completedOps = 0;
+
+    for (const op of ops) {
+      try {
+        const res = await op();
+        const err = res?.error || null;
+        if (err) {
+          if (!isMissingSchemaError(err)) {
+            throw err instanceof Error ? err : new Error(err.message || 'Không thể hủy liên kết Discord.');
+          }
+        } else {
+          completedOps++;
+        }
+      } catch (err) {
+        if (!isMissingSchemaError(err)) throw err;
+      }
+    }
+
+    if (completedOps === 0) {
+      throw new Error('Không thể hủy liên kết Discord khỏi cơ sở dữ liệu.');
+    }
 
     return true;
   }
@@ -616,6 +966,20 @@ class SupabaseDashboardStore {
           this.setCached(`discord_user:${dId}`, user, 5000);
           return user;
         }
+        if (String(link.username).toLowerCase() === 'admin') {
+          const adminUser = {
+            id: 'admin',
+            userId: 'admin',
+            username: 'admin',
+            role: 'admin',
+            status: 'active',
+            isPermanent: true,
+            assignedBotIds: null,
+            discordUserId: dId
+          };
+          this.setCached(`discord_user:${dId}`, adminUser, 5000);
+          return adminUser;
+        }
       }
     } catch (_) {}
 
@@ -647,6 +1011,20 @@ class SupabaseDashboardStore {
         if (user) {
           this.setCached(`discord_user:${dId}`, user, 5000);
           return user;
+        }
+        if (String(setting.username).toLowerCase() === 'admin') {
+          const adminUser = {
+            id: 'admin',
+            userId: 'admin',
+            username: 'admin',
+            role: 'admin',
+            status: 'active',
+            isPermanent: true,
+            assignedBotIds: null,
+            discordUserId: dId
+          };
+          this.setCached(`discord_user:${dId}`, adminUser, 5000);
+          return adminUser;
         }
       }
     } catch (_) {}
@@ -734,7 +1112,10 @@ class SupabaseDashboardStore {
   async getSetting(key) {
     const { data, error } = await this.client.from(SETTINGS).select('value,updated_at').eq('key', key).maybeSingle();
     if (error && error.code !== 'PGRST116') throw error;
-    return data ? { ...(data.value || {}), updatedAt: data.updated_at } : null;
+    if (!data) return null;
+    if (Array.isArray(data.value)) return data.value;
+    if (data.value && typeof data.value === 'object') return { ...data.value, updatedAt: data.updated_at };
+    return data.value ?? null;
   }
 
   async setSetting(key, value) {
@@ -893,61 +1274,97 @@ class SupabaseDashboardStore {
   // LINK4M ATTEMPTS (Full Backward & Forward Compatibility)
   // --------------------------------------------------------------------------
   async findActiveLinkAttempt(userId, now = new Date()) {
-    const { data, error } = await this.client.from(LINK_ATTEMPTS).select('*').eq('user_id', userId).eq('status', 'pending')
+    const query = applyLinkUserFilter(this.client.from(LINK_ATTEMPTS).select('*'), userId);
+    const { data, error } = await query.eq('status', 'pending')
       .gt('expires_at', now.toISOString()).order('created_at', { ascending: false }).limit(1).maybeSingle();
     if (error && error.code !== 'PGRST116') throw error;
-    return mapFrom(data, LINK_FIELDS);
+    return mapLinkFrom(data);
   }
 
   async getLinkAttempt(attemptId) {
     const { data, error } = await this.client.from(LINK_ATTEMPTS).select('*').eq('attempt_id', attemptId).maybeSingle();
     if (error && error.code !== 'PGRST116') throw error;
-    return mapFrom(data, LINK_FIELDS);
+    return mapLinkFrom(data);
+  }
+
+  async getLinkAttemptByTokenHash(tokenHash) {
+    const { data, error } = await this.client.from(LINK_ATTEMPTS).select('*')
+      .eq('token_hash', String(tokenHash || '').trim())
+      .order('created_at', { ascending: false }).limit(1).maybeSingle();
+    if (error && error.code !== 'PGRST116') throw error;
+    return mapLinkFrom(data);
   }
 
   async getLatestLinkAttempt(userId) {
-    const { data, error } = await this.client.from(LINK_ATTEMPTS).select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(1).maybeSingle();
+    const query = applyLinkUserFilter(this.client.from(LINK_ATTEMPTS).select('*'), userId);
+    const { data, error } = await query.order('created_at', { ascending: false }).limit(1).maybeSingle();
     if (error && error.code !== 'PGRST116') throw error;
-    return mapFrom(data, LINK_FIELDS);
+    return mapLinkFrom(data);
   }
 
   async countLinkRewards(userId, since) {
-    const { count, error } = await this.client.from(LINK_ATTEMPTS).select('attempt_id', { count: 'exact', head: true })
-      .eq('user_id', userId).eq('status', 'rewarded').gte('rewarded_at', new Date(since).toISOString());
+    const query = applyLinkUserFilter(this.client.from(LINK_ATTEMPTS).select('attempt_id', { count: 'exact', head: true }), userId);
+    const { count, error } = await query.eq('status', 'rewarded').gte('rewarded_at', new Date(since).toISOString());
     if (error) throw error;
     return count || 0;
   }
 
   async countLinkAttempts(userId, since) {
-    const { count, error } = await this.client.from(LINK_ATTEMPTS).select('attempt_id', { count: 'exact', head: true })
-      .eq('user_id', userId).gte('created_at', new Date(since).toISOString());
+    const query = applyLinkUserFilter(this.client.from(LINK_ATTEMPTS).select('attempt_id', { count: 'exact', head: true }), userId);
+    const { count, error } = await query.gte('created_at', new Date(since).toISOString());
     if (error) throw error;
     return count || 0;
   }
 
   async lastLinkReward(userId) {
-    const { data, error } = await this.client.from(LINK_ATTEMPTS).select('*').eq('user_id', userId).eq('status', 'rewarded')
+    const query = applyLinkUserFilter(this.client.from(LINK_ATTEMPTS).select('*'), userId);
+    const { data, error } = await query.eq('status', 'rewarded')
       .order('rewarded_at', { ascending: false }).limit(1).maybeSingle();
     if (error && error.code !== 'PGRST116') throw error;
-    return mapFrom(data, LINK_FIELDS);
+    return mapLinkFrom(data);
   }
 
   async createLinkAttempt(record) {
-    const { error } = await this.client.from(LINK_ATTEMPTS).insert(mapTo(record, LINK_FIELDS));
+    const nowIso = new Date().toISOString();
+    const userIdVal = String(record.userId || record.username || '').trim();
+    const usernameVal = String(record.username || userIdVal).trim().toLowerCase();
+    const providerUrlVal = String(record.providerUrl || record.providerShortUrl || '');
+    const dailyDateVal = String(record.dailyDate || record.vietnamDate || '');
+    const payload = {
+      ...mapTo(record, LINK_FIELDS),
+      attempt_id: record.attemptId,
+      user_id: userIdVal,
+      username: usernameVal,
+      provider_url: providerUrlVal,
+      provider_short_url: providerUrlVal,
+      daily_date: dailyDateVal,
+      vietnam_date: dailyDateVal,
+      created_at: toIso(record.createdAt) || nowIso,
+      expires_at: toIso(record.expiresAt),
+      purge_at: toIso(record.purgeAt) || null,
+      updated_at: nowIso
+    };
+    const { error } = await this.client.from(LINK_ATTEMPTS).insert(payload);
     if (error) throw error;
     return record;
   }
 
   async setLinkAttemptProviderUrl(attemptId, providerUrl) {
-    const { data, error } = await this.client.from(LINK_ATTEMPTS).update({ provider_url: providerUrl })
-      .eq('attempt_id', attemptId).eq('status', 'pending').select('attempt_id');
+    const cleanUrl = String(providerUrl || '');
+    const { data, error } = await this.client.from(LINK_ATTEMPTS).update({
+      provider_url: cleanUrl,
+      provider_short_url: cleanUrl,
+      updated_at: new Date().toISOString()
+    }).eq('attempt_id', attemptId).eq('status', 'pending').select('attempt_id');
     if (error) throw error;
     return Boolean(data?.length);
   }
 
   async expireLinkAttempt(attemptId) {
-    const { error } = await this.client.from(LINK_ATTEMPTS).update({ status: 'expired' })
-      .eq('attempt_id', attemptId).eq('status', 'pending');
+    const { error } = await this.client.from(LINK_ATTEMPTS).update({
+      status: 'expired',
+      updated_at: new Date().toISOString()
+    }).eq('attempt_id', attemptId).eq('status', 'pending');
     if (error) throw error;
   }
 
@@ -956,7 +1373,7 @@ class SupabaseDashboardStore {
       p_attempt_id: attemptId, p_token_hash: tokenHash, p_now: now.toISOString()
     });
     if (error) throw error;
-    return mapFrom(unwrapRpc(data), LINK_FIELDS);
+    return mapLinkFrom(unwrapRpc(data));
   }
 
   async completeLink4mReward(attemptId, userId, values, actorId) {
@@ -970,25 +1387,35 @@ class SupabaseDashboardStore {
     });
     if (error?.code === '23505') throw new Error('Worker assignments changed while the Link4M reward was processing.');
     if (error) throw error;
-    return mapFrom(unwrapRpc(data), LINK_FIELDS);
+    return mapLinkFrom(unwrapRpc(data));
   }
 
   async finishLinkAttempt(attemptId, patch) {
-    const { data, error } = await this.client.from(LINK_ATTEMPTS).update(mapTo(patch, LINK_FIELDS))
+    const payload = {
+      ...mapTo(patch, LINK_FIELDS),
+      updated_at: new Date().toISOString()
+    };
+    const { data, error } = await this.client.from(LINK_ATTEMPTS).update(payload)
       .eq('attempt_id', attemptId).eq('status', 'processing').select('*').maybeSingle();
     if (error) throw error;
-    return mapFrom(data, LINK_FIELDS);
+    return mapLinkFrom(data);
   }
 
   async resetLinkAttempt(attemptId) {
-    const { error } = await this.client.from(LINK_ATTEMPTS).update({ status: 'pending', processing_at: null })
-      .eq('attempt_id', attemptId).eq('status', 'processing');
+    const { error } = await this.client.from(LINK_ATTEMPTS).update({
+      status: 'pending',
+      processing_at: null,
+      updated_at: new Date().toISOString()
+    }).eq('attempt_id', attemptId).eq('status', 'processing');
     if (error) throw error;
   }
 
   async expireLinkAttempts(userId, now = new Date()) {
-    const { error } = await this.client.from(LINK_ATTEMPTS).update({ status: 'expired' })
-      .eq('user_id', userId).eq('status', 'pending').lte('expires_at', now.toISOString());
+    const query = applyLinkUserFilter(
+      this.client.from(LINK_ATTEMPTS).update({ status: 'expired', updated_at: new Date().toISOString() }),
+      userId
+    );
+    const { error } = await query.eq('status', 'pending').lte('expires_at', now.toISOString());
     if (error) throw error;
   }
 }

@@ -16,6 +16,81 @@ function formatCode() {
   return `KM-${raw.match(/.{1,4}/g).join('-')}`;
 }
 
+const STOP_CONFIRMED_STATES = new Set(['stopped', 'offline']);
+
+function hasUnconfirmedFlag(obj) {
+  if (!obj || typeof obj !== 'object') return false;
+  return obj.timedOut === true ||
+    obj.queued === true ||
+    obj.pending === true ||
+    obj.ok === false ||
+    (typeof obj.error === 'string' && obj.error.trim() !== '' && obj.ok !== true);
+}
+
+function isCachedWorkerStopped(worker) {
+  const status = worker?.status;
+  if (!status || typeof status !== 'object') return false;
+  if (status.online === true || status.connected === true) return false;
+  const state = typeof status.state === 'string' ? status.state.trim().toLowerCase() : '';
+  return STOP_CONFIRMED_STATES.has(state);
+}
+
+function extractStopWorkerStatus(res, detail) {
+  const candidates = [
+    detail?.result?.worker,
+    detail?.worker,
+    detail?.result,
+    detail?.status,
+    detail,
+    res.worker,
+    res.status
+  ];
+  return candidates.find((candidate) => candidate && typeof candidate === 'object') || null;
+}
+
+/**
+ * Confirm that a worker stop dispatch actually reached a stopped/offline state
+ * rather than timing out, queueing, or leaving the worker connected.
+ */
+function isWorkerStopConfirmed(res) {
+  if (!res || typeof res !== 'object') return false;
+  if (res.delivered === false) return false;
+  if (hasUnconfirmedFlag(res)) return false;
+
+  const detail = res.result && typeof res.result === 'object' ? res.result : null;
+  if (hasUnconfirmedFlag(detail)) return false;
+
+  const nestedResult = detail?.result && typeof detail.result === 'object' ? detail.result : null;
+  if (hasUnconfirmedFlag(nestedResult)) return false;
+
+  if (res.connected === true || res.online === true) return false;
+  if (detail && (detail.connected === true || detail.online === true)) return false;
+
+  const workerStatus = extractStopWorkerStatus(res, detail);
+  if (workerStatus) {
+    if (hasUnconfirmedFlag(workerStatus)) return false;
+    if (workerStatus.connected === true || workerStatus.online === true) return false;
+
+    if (typeof workerStatus.state === 'string' && workerStatus.state.trim() !== '') {
+      const normalizedState = workerStatus.state.trim().toLowerCase();
+      if (!STOP_CONFIRMED_STATES.has(normalizedState)) return false;
+      return res.delivered === true || res.ok === true;
+    }
+  }
+
+  const fallbackState = (typeof detail?.state === 'string' && detail.state.trim() !== '')
+    ? detail.state
+    : (typeof res.state === 'string' && res.state.trim() !== '' ? res.state : '');
+
+  if (fallbackState) {
+    const normalizedFallback = fallbackState.trim().toLowerCase();
+    if (!STOP_CONFIRMED_STATES.has(normalizedFallback)) return false;
+    return res.delivered === true || res.ok === true;
+  }
+
+  return res.delivered === true || (res.ok === true && (res.stopped === true || detail?.stopped === true));
+}
+
 class EntitlementService {
   constructor({ store, registry, accessControl, logger, userLock }) {
     this.store = store;
@@ -296,14 +371,14 @@ class EntitlementService {
           let stopped = false;
           try {
             const currentWorker = await this.registry?.find(workerId);
-            if (currentWorker && !currentWorker.status?.online && currentWorker.status?.state === 'offline') {
+            if (isCachedWorkerStopped(currentWorker)) {
               stopped = true;
             } else if (fleetOperations && typeof fleetOperations.stopWorker === 'function') {
               const res = await fleetOperations.stopWorker(workerId, 'Gói thuê đã hết hạn');
-              stopped = Boolean(res?.delivered || res?.ok !== false);
+              stopped = isWorkerStopConfirmed(res);
             } else if (broker && typeof broker.dispatch === 'function') {
               const res = await broker.dispatch(workerId, 'stop', { reason: 'Gói thuê đã hết hạn' });
-              stopped = Boolean(res?.delivered || res?.result?.ok !== false);
+              stopped = isWorkerStopConfirmed(res);
             }
           } catch (stopErr) {
             this.logger?.warn('failed_to_stop_expired_bot', { workerId, error: stopErr.message });
@@ -354,4 +429,4 @@ class EntitlementService {
   }
 }
 
-module.exports = { EntitlementService, normalizeCode, hashCode };
+module.exports = { EntitlementService, isWorkerStopConfirmed, normalizeCode, hashCode };

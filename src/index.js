@@ -114,7 +114,9 @@ async function main() {
     userRoleId: accessControl.userRoleId,
     adminUserId: adminNotifier.getAdminUserId(),
     publicBaseUrl: integrationSettings.publicBaseUrl,
-    renderApiKey: integrationSettings.renderApiKey
+    renderApiKey: integrationSettings.renderApiKey,
+    link4mApiToken: integrationSettings.link4mApiToken || config.link4mApiToken || '',
+    link4mSecretKey: integrationSettings.link4mSecretKey || config.link4mSecretKey || ''
   };
 
   const userLock = new AsyncKeyLock();
@@ -125,7 +127,10 @@ async function main() {
   const broker = new CommandBroker({ registry, commandStore, config: runtimeConfig, logger });
   const fleetOperations = new FleetOperations({ registry, broker, renderApi, logger });
   const entitlementService = new EntitlementService({ store: accessStore, registry, accessControl, userLock });
-  const link4mService = new Link4mService({ store: accessStore, entitlementService, config: runtimeConfig, logger });
+  const link4mService = new Link4mService({ store: accessStore, accessControl, userLock, config: runtimeConfig, logger });
+  await link4mService.initialize().catch((err) => {
+    logger?.warn?.('Link4M initialization failed', { error: err?.message || String(err) });
+  });
   const wispbyteKeepAlive = new WispbyteKeepAliveManager({ store: accessStore, config: runtimeConfig, logger, adminNotifier });
 
   // Start background workers

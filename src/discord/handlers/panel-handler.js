@@ -110,7 +110,10 @@ async function resolveLinkedUser(interaction, services) {
   if (linked) return linked;
 
   // 2. Check if user qualifies as server admin / configured admin
-  const isConfiguredAdmin = services.config?.adminUserId && services.config.adminUserId === discordUserId;
+  const isConfiguredAdmin = Boolean(
+    (services.config?.adminUserId && services.config.adminUserId === discordUserId) ||
+    (services.accessControl?.adminUserId && services.accessControl.adminUserId === discordUserId)
+  );
   const isOwner = interaction.guild?.ownerId === discordUserId;
   const hasAdminPerm = Boolean(
     interaction.memberPermissions?.has?.('Administrator') ||
@@ -118,8 +121,9 @@ async function resolveLinkedUser(interaction, services) {
     interaction.member?.permissions?.has?.('Administrator') ||
     interaction.member?.permissions?.has?.(8n)
   );
+  const hasAdminRole = services.accessControl?.roleFor?.(interaction.member, interaction) === 'admin';
 
-  if (isConfiguredAdmin || isOwner || hasAdminPerm) {
+  if (isConfiguredAdmin || isOwner || hasAdminPerm || hasAdminRole) {
     return {
       userId: 'admin',
       username: 'Enterprise Admin',
@@ -139,11 +143,11 @@ function checkBotOwnership(user, workerId, worker = null) {
 
   const targetId = String(workerId).trim().toLowerCase();
   const assigned = Array.isArray(user.assignedBotIds)
-    ? user.assignedBotIds.map(String)
+    ? user.assignedBotIds.map((id) => String(id).trim().toLowerCase()).filter(Boolean)
     : [];
 
   if (assigned.includes(targetId)) return true;
-  if (worker?.botNumber && assigned.includes(String(worker.botNumber))) return true;
+  if (worker?.botNumber && assigned.includes(String(worker.botNumber).trim().toLowerCase())) return true;
 
   return false;
 }
@@ -154,12 +158,12 @@ async function getUserBots(user, services) {
   if (user.role === 'admin') return allWorkers;
 
   const assigned = Array.isArray(user.assignedBotIds)
-    ? user.assignedBotIds.map(String)
+    ? user.assignedBotIds.map((id) => String(id).trim().toLowerCase()).filter(Boolean)
     : [];
 
   return allWorkers.filter((w) =>
-    assigned.includes(String(w.workerId).toLowerCase()) ||
-    (w.botNumber && assigned.includes(String(w.botNumber)))
+    assigned.includes(String(w.workerId).trim().toLowerCase()) ||
+    (w.botNumber && assigned.includes(String(w.botNumber).trim().toLowerCase()))
   );
 }
 
@@ -281,6 +285,13 @@ async function handlePanelInteraction(interaction, services) {
     return safeUpdate(interaction, { embeds: [errorEmbed], components: [] });
   }
 
+  if (user.role !== 'admin' && String(user.status || 'active').toLowerCase() === 'disabled') {
+    return safeUpdate(interaction, {
+      embeds: [embed('⛔ TÀI KHOẢN BỊ KHÓA', 'Tài khoản của bạn đã bị vô hiệu hóa bởi Quản trị viên.', 0xef4444)],
+      components: []
+    });
+  }
+
   // 1. Back to / Refresh Bots list: bots:list, bots:refresh, bots:page:{num}
   if (customId === 'bots:list' || customId === 'bots:refresh' || customId.startsWith('bots:page:')) {
     let page = 0;
@@ -320,15 +331,37 @@ async function handlePanelInteraction(interaction, services) {
       });
     }
 
-    // Immediate optimistic state update
+    if (user.role !== 'admin') {
+      const normalizedUser = { ...user, expiresAt: user.expiresAt || user.expiresAtRental || null };
+      const statusStr = String(normalizedUser.status || 'active').toLowerCase();
+      const expiryMs = normalizedUser.expiresAt ? Date.parse(normalizedUser.expiresAt) : NaN;
+      const isEntitled = services.accessControl?.isEntitled
+        ? services.accessControl.isEntitled(normalizedUser)
+        : (statusStr === 'active' && (normalizedUser.isPermanent === true || !normalizedUser.expiresAt || (Number.isFinite(expiryMs) && expiryMs > Date.now())));
+
+      if (!isEntitled) {
+        return safeUpdate(interaction, {
+          embeds: [embed(
+            '⛔ TÀI KHOẢN HẾT HẠN HOẶC BỊ KHÓA',
+            'Tài khoản của bạn đã hết hạn thuê bot hoặc bị vô hiệu hóa. Vui lòng gia hạn trên Web Manager để tiếp tục điều khiển bot.',
+            0xef4444
+          )]
+        });
+      }
+    }
+
+    // Dispatch command and verify actual delivery & non-timeout result
     let notice = '';
     try {
       const dispatchRes = await services.broker.dispatch(workerId, action);
-      if (dispatchRes?.delivered || dispatchRes?.result?.ok !== false) {
+      if (dispatchRes?.delivered === true && !dispatchRes?.timedOut && dispatchRes?.result?.ok !== false) {
         const actionLabels = { start: 'BẬT (START)', stop: 'TẮT (STOP)', restart: 'KHỞI ĐỘNG LẠI (RESTART)' };
         notice = `✅ Đã thực thi lệnh **${actionLabels[action] || action}** thành công cho bot \`${workerId}\`!`;
       } else {
-        notice = `⚠️ Worker đã nhận lệnh nhưng phản hồi trạng thái: ${dispatchRes?.result?.error || 'Chờ hoàn tất'}`;
+        const reason = dispatchRes?.timedOut
+          ? 'Worker phản hồi quá thời gian chờ (timeout)'
+          : (dispatchRes?.result?.error || dispatchRes?.error || 'Worker chưa xác nhận hoàn tất');
+        notice = `⚠️ Chưa xác nhận hoàn tất lệnh ${action}: ${reason}`;
       }
     } catch (err) {
       notice = `❌ Lỗi khi gửi lệnh ${action}: ${err.message}`;

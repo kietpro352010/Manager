@@ -266,7 +266,10 @@ class CommandBroker {
 
   async acceptResult(workerId, payload = {}) {
     const commandId = String(payload.commandId || '');
-    const result = payload.result || {};
+    const result = (payload.result && typeof payload.result === 'object') ? { ...payload.result } : {};
+    if (payload.action && !result.action) {
+      result.action = payload.action;
+    }
     return this.reportResult(workerId, commandId, result);
   }
 
@@ -303,16 +306,27 @@ class CommandBroker {
     const completed = await this.commandStore.complete(wid, cid, result);
 
     // RESET & LIFECYCLE PARITY: Polling transport parity with HTTP transport
-    const action = pending?.action || result?.action;
+    let storedCommand = null;
+    if (!pending && !result?.action && completed && typeof this.commandStore.get === 'function') {
+      try { storedCommand = await this.commandStore.get(cid); } catch (_) {}
+    }
+    const action = pending?.action || result?.action || storedCommand?.action;
     const isSuccess = result?.ok === true || result?.result?.ok === true;
     if (action === 'reset' && isSuccess) {
-      await this.registry.resetData(wid).catch(() => {});
-      await this.commandStore.clearWorker(wid).catch(() => {});
+      if (typeof this.registry?.resetData === 'function') {
+        try { await this.registry.resetData(wid); } catch (_) {}
+      }
+      if (typeof this.commandStore?.clearWorker === 'function') {
+        try { await this.commandStore.clearWorker(wid); } catch (_) {}
+      }
     }
 
-    const workerStatus = result?.worker || result?.result?.worker || result?.status;
-    if (workerStatus && typeof workerStatus === 'object') {
-      await this.registry.updateStatus(wid, workerStatus, 'manager-command-poll').catch(() => {});
+    const candidateStatus = result?.worker || result?.result?.worker || result?.status ||
+      (result && typeof result === 'object' && ('state' in result || 'online' in result || 'connected' in result)
+        ? result
+        : null);
+    if (candidateStatus && typeof candidateStatus === 'object' && typeof this.registry?.updateStatus === 'function') {
+      try { await this.registry.updateStatus(wid, candidateStatus, 'manager-command-poll'); } catch (_) {}
     }
 
     if (pending && pending.workerId === wid && typeof pending.finish === 'function') {

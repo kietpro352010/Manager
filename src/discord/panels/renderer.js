@@ -216,11 +216,15 @@ function renderBotDetail({ user, worker, logs = [], notice = '', isExecuting = f
 
   // Buttons
   // ONLINE: Disable START, Enable STOP & RESTART
-  // OFFLINE: Enable START, Disable STOP
-  // CONNECTING/RECONNECTING/STARTING/STOPPING: Disable conflicting controls
+  // OFFLINE: Enable START, Disable STOP & RESTART
+  // ERROR: Allow START, STOP (halt reconnect loop), and RESTART
+  // CONNECTING/RECONNECTING/STARTING: Disable START & RESTART, allow STOP to cancel
+  // STOPPING: Disable all
+  const isStopping = state.rawState === 'stopping';
+  const canStopState = state.isOnline || ['error', 'connecting', 'reconnecting', 'starting'].includes(state.rawState);
   const disableStart = state.isOnline || state.isBusy || isExecuting;
-  const disableStop = !state.isOnline || state.isBusy || isExecuting;
-  const disableRestart = !state.isOnline || state.isBusy || isExecuting;
+  const disableStop = !canStopState || isStopping || isExecuting;
+  const disableRestart = (!state.isOnline && state.rawState !== 'error') || state.isBusy || isExecuting;
 
   const controlRow = new ActionRowBuilder().addComponents(
     button('BẬT (START)', `bot:start:${fullBotId}`, ButtonStyle.Success, disableStart, '▶️'),

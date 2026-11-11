@@ -51,7 +51,7 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
         ? Math.max(0, Math.min(config.workerPollWaitMs || 15000, requestedWait))
         : (config.workerPollWaitMs || 15000);
 
-      const command = await broker.poll(req.workerId, waitMs);
+      const command = await broker.poll(req.workerId, { waitMs });
       return res.json({ ok: true, command });
     } catch (error) { return next(error); }
   });
@@ -59,7 +59,7 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
   router.post('/result', auth, async (req, res, next) => {
     try {
       const commandId = String(req.body?.commandId || '');
-      if (!/^[0-9a-f-]{36}$/i.test(commandId)) return res.status(400).json({ ok: false, error: 'invalid_command_id' });
+      if (!/^(?:cmd_)?[0-9a-f-]{36}$/i.test(commandId)) return res.status(400).json({ ok: false, error: 'invalid_command_id' });
       const accepted = await broker.acceptResult(req.workerId, req.body || {});
       return res.json({ ok: true, accepted });
     } catch (error) { return next(error); }
@@ -89,8 +89,20 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
       await registry.updateStatus(workerId, status, 'worker-report');
 
       // Record position change telemetry to Cloud if coordinates provided
-      if (workerStore && status.position && Number.isFinite(status.position.x)) {
-        await workerStore.recordPositionChange(workerId, status.position).catch(() => false);
+      const telemetryBotId = String(existingWorker.botNumber || (/^[1-9][0-9]{0,8}$/.test(workerId) ? workerId : '')).trim();
+      if (workerStore && telemetryBotId && status.position && Number.isFinite(Number(status.position.x))) {
+        const pos = status.position;
+        const eventKey = status.eventKey || `move:${telemetryBotId}:${Math.round(Number(pos.x))}:${Math.round(Number(pos.y ?? 0))}:${Math.round(Number(pos.z ?? 0))}:${Math.floor(Date.now() / 5000)}`;
+        await workerStore.recordPositionChange({
+          botId: telemetryBotId,
+          changedAt: status.changedAt || new Date().toISOString(),
+          position: pos,
+          dimension: status.dimension || 'unknown',
+          locationState: status.locationState || status.state || 'Unknown',
+          reason: status.positionReason || 'MOVE',
+          eventKey,
+          minDistance: Number.isFinite(Number(status.minDistance)) ? Number(status.minDistance) : 5.0
+        }).catch(() => false);
       }
 
       return res.json({ ok: true, ack: true, time: new Date().toISOString() });

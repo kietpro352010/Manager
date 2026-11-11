@@ -47,7 +47,18 @@ class Link4mService {
     this.store = store;
     this.accessControl = accessControl;
     this.userLock = userLock;
-    this.config = { ...config };
+    const rawConfig = config || {};
+    const resolvedEnabled = rawConfig.enabled !== undefined
+      ? Boolean(rawConfig.enabled)
+      : rawConfig.link4mRewardEnabled !== undefined
+        ? Boolean(rawConfig.link4mRewardEnabled)
+        : false;
+    this.config = {
+      ...rawConfig,
+      enabled: resolvedEnabled,
+      rewardHours: Number(rawConfig.rewardHours || rawConfig.link4mRewardHours || 12),
+      dailyLimit: Number(rawConfig.dailyLimit || rawConfig.link4mDailyLimit || 2)
+    };
     this.logger = logger;
     this.fetch = fetchImpl;
   }
@@ -60,16 +71,20 @@ class Link4mService {
       this.config.dailyLimit = Number(stored.dailyLimit) || this.config.dailyLimit || 2;
       return;
     }
-    await this.store.setSetting('link4m_runtime', {
-      enabled: this.config.link4mRewardEnabled === true,
-      rewardHours: this.config.link4mRewardHours || 12,
-      dailyLimit: this.config.link4mDailyLimit || 2
-    });
+    const defaults = {
+      enabled: this.config.enabled === true,
+      rewardHours: Number(this.config.rewardHours || 12),
+      dailyLimit: Number(this.config.dailyLimit || 2)
+    };
+    this.config.enabled = defaults.enabled;
+    this.config.rewardHours = defaults.rewardHours;
+    this.config.dailyLimit = defaults.dailyLimit;
+    await this.store.setSetting('link4m_runtime', defaults);
   }
 
   publicConfig() {
     return {
-      enabled: this.config.enabled !== false,
+      enabled: this.config.enabled === true,
       rewardHours: Number(this.config.rewardHours || 12),
       dailyLimit: Number(this.config.dailyLimit || 2),
       providerConfigured: Boolean(this.config.link4mApiToken || this.config.apiToken),
