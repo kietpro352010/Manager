@@ -4,6 +4,9 @@ const { randomUUID } = require('node:crypto');
 const { readJson } = require('../utils/http');
 const { ACTIONS } = require('./worker-registry');
 
+const ALL_RESET_SYNC_STEPS = Object.freeze(['registry.resetData', 'commandStore.clearWorker', 'registry.updateStatus']);
+const DEFAULT_MAX_STATE_SYNC_ATTEMPTS = 8;
+
 class CommandBroker {
   constructor({ registry, commandStore, config, logger, fetchImpl = global.fetch }) {
     this.registry = registry;
@@ -11,11 +14,13 @@ class CommandBroker {
     this.config = config;
     this.logger = logger;
     this.fetch = fetchImpl;
+    this.instanceId = `mgr_${process.pid}_${randomUUID().slice(0, 8)}`;
     this.pollWaiters = new Map();
     this.wakeVersions = new Map();
     this.pendingResults = new Map();
     this.outboxTimer = null;
     this.outboxRunning = false;
+    this.stateSyncRunning = false;
   }
 
   startOutboxProcessor({ intervalMs = 5000 } = {}) {
@@ -34,10 +39,14 @@ class CommandBroker {
   }
 
   async processOutboxBatch() {
+    await this.processPendingStateSyncs().catch((err) => {
+      this.logger?.warn?.('pending_state_sync_batch_error', { message: err.message });
+    });
+
     if (this.outboxRunning) return;
     this.outboxRunning = true;
     try {
-      const store = this.commandStore.adapter || this.registry.store.adapter;
+      const store = this.commandStore?.adapter || this.registry?.store?.adapter;
       if (!store || typeof store.claimOutboxBatch !== 'function') return;
 
       const batch = await store.claimOutboxBatch(`mgr_${process.pid}`, 10, 60);
@@ -145,17 +154,23 @@ class CommandBroker {
     const workerStatus = body.result?.worker || body.result || {};
     const isSuccess = body.result ? body.result.ok === true : body.ok === true;
     if (command.action === 'reset' && isSuccess) {
-      const resetFailures = await this.syncResetState(worker.workerId, workerStatus, 'manager-command', command.commandId);
-      if (resetFailures.length > 0) {
-        const detail = resetFailures.map((f) => `${f.step}: ${f.error}`).join('; ');
+      const { partialResetFailures } = await this.syncResetState(
+        worker.workerId,
+        workerStatus,
+        'manager-command',
+        command.commandId,
+        { excludeCommandIds: command.commandId ? [command.commandId] : [] }
+      );
+      if (partialResetFailures.length > 0) {
+        const detail = partialResetFailures.map((f) => `${f.step}: ${f.error}`).join('; ');
         this.logger?.error?.('command_reset_partial_sync_failed', {
           workerId: worker.workerId,
           commandId: command.commandId,
-          failures: resetFailures
+          failures: partialResetFailures
         });
         const syncErr = new Error(`RESET_STATE_SYNC_FAILED: ${detail}`);
         syncErr.code = 'RESET_STATE_SYNC_FAILED';
-        syncErr.partialResetFailures = resetFailures;
+        syncErr.partialResetFailures = partialResetFailures;
         throw syncErr;
       }
     } else if (['start', 'stop', 'restart', 'status', 'reset'].includes(command.action)) {
@@ -317,15 +332,26 @@ class CommandBroker {
     }
   }
 
-  async syncResetState(workerId, candidateStatus, statusSource, commandId = null) {
+  async syncResetState(workerId, candidateStatus, statusSource, commandId = null, {
+    excludeCommandIds = null,
+    steps = null
+  } = {}) {
     const partialResetFailures = [];
+    const remainingSteps = [];
+    const stepSet = (Array.isArray(steps) && steps.length > 0)
+      ? new Set(steps)
+      : new Set(ALL_RESET_SYNC_STEPS);
+    const excluded = Array.isArray(excludeCommandIds)
+      ? excludeCommandIds
+      : (commandId ? [commandId] : []);
 
-    if (typeof this.registry?.resetData === 'function') {
+    if (stepSet.has('registry.resetData') && typeof this.registry?.resetData === 'function') {
       try {
         await this.registry.resetData(workerId);
       } catch (err) {
         const message = err?.message || String(err);
         partialResetFailures.push({ step: 'registry.resetData', error: message });
+        remainingSteps.push('registry.resetData');
         this.logger?.error?.('command_reset_registry_sync_failed', {
           workerId,
           commandId,
@@ -334,12 +360,13 @@ class CommandBroker {
       }
     }
 
-    if (typeof this.commandStore?.clearWorker === 'function') {
+    if (stepSet.has('commandStore.clearWorker') && typeof this.commandStore?.clearWorker === 'function') {
       try {
-        await this.commandStore.clearWorker(workerId);
+        await this.commandStore.clearWorker(workerId, { excludeCommandIds: excluded });
       } catch (err) {
         const message = err?.message || String(err);
         partialResetFailures.push({ step: 'commandStore.clearWorker', error: message });
+        remainingSteps.push('commandStore.clearWorker');
         this.logger?.error?.('command_reset_queue_clear_failed', {
           workerId,
           commandId,
@@ -348,12 +375,13 @@ class CommandBroker {
       }
     }
 
-    if (candidateStatus && typeof candidateStatus === 'object' && typeof this.registry?.updateStatus === 'function') {
+    if (stepSet.has('registry.updateStatus') && candidateStatus && typeof candidateStatus === 'object' && typeof this.registry?.updateStatus === 'function') {
       try {
         await this.registry.updateStatus(workerId, candidateStatus, statusSource);
       } catch (err) {
         const message = err?.message || String(err);
         partialResetFailures.push({ step: 'registry.updateStatus', error: message });
+        remainingSteps.push('registry.updateStatus');
         this.logger?.error?.('command_reset_status_sync_failed', {
           workerId,
           commandId,
@@ -362,7 +390,145 @@ class CommandBroker {
       }
     }
 
-    return partialResetFailures;
+    return { partialResetFailures, remainingSteps };
+  }
+
+  async scheduleResetStateSyncRetry(workerId, commandId, result, existingSyncState, {
+    candidateStatus = null,
+    statusSource = 'manager-command-poll',
+    remainingSteps = ALL_RESET_SYNC_STEPS,
+    partialResetFailures = []
+  } = {}) {
+    const attempts = Number(existingSyncState?.attempts || 0) + 1;
+    const maxAttempts = Number(this.config?.maxStateSyncAttempts || DEFAULT_MAX_STATE_SYNC_ATTEMPTS);
+    const terminalFailed = attempts >= maxAttempts;
+    const backoffMs = Math.min(300000, 5000 * (2 ** Math.min(attempts - 1, 6)));
+    const nextRetryAt = terminalFailed ? null : new Date(Date.now() + backoffMs).toISOString();
+    const detail = partialResetFailures.map((f) => `${f.step}: ${f.error}`).join('; ');
+
+    const nextSyncState = {
+      ...(existingSyncState && typeof existingSyncState === 'object' ? existingSyncState : {}),
+      pending: !terminalFailed,
+      executionCompleted: true,
+      status: terminalFailed ? 'state_sync_failed' : 'state_sync_pending',
+      attempts,
+      nextRetryAt,
+      leaseOwner: null,
+      leaseUntil: null,
+      candidateStatus: candidateStatus ?? existingSyncState?.candidateStatus ?? null,
+      statusSource: statusSource || existingSyncState?.statusSource || 'manager-command-poll',
+      pendingSteps: remainingSteps.length > 0 ? remainingSteps : [...ALL_RESET_SYNC_STEPS],
+      partialResetFailures,
+      lastError: detail,
+      updatedAt: new Date().toISOString()
+    };
+
+    if (typeof this.commandStore?.markStateSyncPending === 'function') {
+      try {
+        await this.commandStore.markStateSyncPending(workerId, commandId, {
+          result,
+          syncState: nextSyncState,
+          terminalFailed
+        });
+      } catch (markErr) {
+        this.logger?.error?.('command_reset_mark_sync_pending_failed', {
+          workerId,
+          commandId,
+          error: markErr?.message || String(markErr)
+        });
+      }
+    }
+
+    this.logger?.error?.(
+      terminalFailed ? 'command_reset_state_sync_exhausted' : 'command_reset_partial_sync_failed',
+      {
+        workerId,
+        commandId,
+        attempts,
+        terminalFailed,
+        nextRetryAt,
+        failures: partialResetFailures
+      }
+    );
+
+    return { detail, terminalFailed, attempts, nextRetryAt };
+  }
+
+  async processPendingStateSyncs({ limit = 10 } = {}) {
+    const summary = { processed: 0, completed: 0, rescheduled: 0, failed: 0 };
+    if (this.stateSyncRunning) return summary;
+    if (typeof this.commandStore?.claimPendingStateSyncBatch !== 'function') return summary;
+
+    this.stateSyncRunning = true;
+    try {
+      const batch = await this.commandStore.claimPendingStateSyncBatch(this.instanceId, limit, 60);
+      if (!Array.isArray(batch) || batch.length === 0) return summary;
+
+      for (const cmd of batch) {
+        summary.processed += 1;
+        const wid = String(cmd.workerId || '').trim().toLowerCase();
+        const cid = String(cmd.commandId || '').trim();
+        const syncMeta = (cmd.result && typeof cmd.result === 'object' && cmd.result._stateSync)
+          ? cmd.result._stateSync
+          : {};
+        const candidateStatus = syncMeta.candidateStatus ||
+          cmd.result?.worker ||
+          cmd.result?.result?.worker ||
+          cmd.result?.status ||
+          null;
+        const statusSource = syncMeta.statusSource || 'manager-command-poll';
+        const steps = Array.isArray(syncMeta.pendingSteps) && syncMeta.pendingSteps.length > 0
+          ? syncMeta.pendingSteps
+          : ALL_RESET_SYNC_STEPS;
+
+        const { partialResetFailures, remainingSteps } = await this.syncResetState(
+          wid,
+          candidateStatus,
+          statusSource,
+          cid,
+          { excludeCommandIds: [cid], steps }
+        );
+
+        if (partialResetFailures.length === 0) {
+          let finalized = false;
+          try {
+            if (typeof this.commandStore?.finalizeCompleted === 'function') {
+              finalized = await this.commandStore.finalizeCompleted(wid, cid, cmd.result, { leaseOwner: this.instanceId });
+            } else {
+              finalized = await this.commandStore.complete(wid, cid, cmd.result);
+            }
+          } catch (finErr) {
+            partialResetFailures.push({ step: 'commandStore.finalizeCompleted', error: finErr?.message || String(finErr) });
+          }
+
+          if (finalized) {
+            summary.completed += 1;
+            this.logger?.info?.('command_reset_state_sync_recovered', {
+              workerId: wid,
+              commandId: cid,
+              previousAttempts: Number(syncMeta.attempts || 0)
+            });
+            continue;
+          }
+          if (partialResetFailures.length === 0) {
+            partialResetFailures.push({ step: 'commandStore.finalizeCompleted', error: 'finalize_returned_false' });
+          }
+        }
+
+        const outcome = await this.scheduleResetStateSyncRetry(wid, cid, cmd.result, syncMeta, {
+          candidateStatus,
+          statusSource,
+          remainingSteps: remainingSteps.length > 0 ? remainingSteps : steps,
+          partialResetFailures
+        });
+        if (outcome.terminalFailed) summary.failed += 1;
+        else summary.rescheduled += 1;
+      }
+
+      return summary;
+    } finally {
+      this.stateSyncRunning = false;
+    }
   }
 
   async reportResult(workerId, commandId, result) {
@@ -372,11 +538,10 @@ class CommandBroker {
     if (pending && pending.workerId !== wid) {
       return { ok: false, error: 'COMMAND_OWNERSHIP_MISMATCH' };
     }
-    const completed = await this.commandStore.complete(wid, cid, result);
 
-    // RESET & LIFECYCLE PARITY: Polling transport parity with HTTP transport
+    // Look up command metadata BEFORE transitioning state so RESET is detected reliably
     let storedCommand = null;
-    if (!pending && !result?.action && completed && typeof this.commandStore.get === 'function') {
+    if ((!pending || !pending.action) && !result?.action && typeof this.commandStore?.get === 'function') {
       try {
         storedCommand = await this.commandStore.get(cid);
       } catch (err) {
@@ -387,6 +552,7 @@ class CommandBroker {
         });
       }
     }
+
     const action = pending?.action || result?.action || storedCommand?.action;
     const isSuccess = result?.ok === true || result?.result?.ok === true;
     const candidateStatus = result?.worker || result?.result?.worker || result?.status ||
@@ -394,34 +560,154 @@ class CommandBroker {
         ? result
         : null);
 
+    // Two-phase durable execution + state sync for RESET commands:
+    // Never mark a reset command terminally 'completed' before state sync succeeds.
     if (action === 'reset' && isSuccess) {
-      const partialResetFailures = await this.syncResetState(wid, candidateStatus, 'manager-command-poll', cid);
-      if (partialResetFailures.length > 0) {
-        const detail = partialResetFailures.map((f) => `${f.step}: ${f.error}`).join('; ');
-        this.logger?.error?.('command_reset_partial_sync_failed', {
-          workerId: wid,
-          commandId: cid,
-          failures: partialResetFailures
+      const hasTwoPhaseStore = typeof this.commandStore?.recordExecutionCompleted === 'function';
+      let execRec = null;
+
+      if (hasTwoPhaseStore) {
+        execRec = await this.commandStore.recordExecutionCompleted(wid, cid, result, {
+          leaseOwner: this.instanceId,
+          leaseSeconds: 15,
+          candidateStatus,
+          statusSource: 'manager-command-poll',
+          pendingSteps: [...ALL_RESET_SYNC_STEPS]
         });
-        const failedResult = {
-          ...(result && typeof result === 'object' ? result : {}),
-          ok: false,
-          error: 'RESET_STATE_SYNC_FAILED',
-          detail,
-          partialResetFailures
-        };
-        if (pending && pending.workerId === wid && typeof pending.finish === 'function') {
-          pending.finish(failedResult);
+
+        if (execRec?.error === 'STATE_SYNC_IN_PROGRESS') {
+          return {
+            ok: false,
+            error: 'STATE_SYNC_IN_PROGRESS',
+            stateSyncPending: true,
+            executionCompleted: true
+          };
         }
-        return {
-          ok: false,
-          error: 'RESET_STATE_SYNC_FAILED',
-          detail,
-          partialResetFailures,
-          completed: Boolean(completed || pending)
-        };
+        if (execRec?.alreadyCompleted) {
+          if (pending && pending.workerId === wid && typeof pending.finish === 'function') {
+            pending.finish(result);
+          }
+          return { ok: true, alreadyCompleted: true };
+        }
+        if (execRec?.reason === 'state_sync_failed') {
+          const failedResult = {
+            ...(result && typeof result === 'object' ? result : {}),
+            ok: false,
+            error: 'RESET_STATE_SYNC_FAILED',
+            stateSyncFailed: true
+          };
+          if (pending && pending.workerId === wid && typeof pending.finish === 'function') {
+            pending.finish(failedResult);
+          }
+          return { ok: false, error: 'RESET_STATE_SYNC_FAILED', stateSyncFailed: true };
+        }
+        if (!execRec?.ok && !pending) {
+          return { ok: false };
+        }
       }
-    } else if (candidateStatus && typeof candidateStatus === 'object' && typeof this.registry?.updateStatus === 'function') {
+
+      const { partialResetFailures, remainingSteps } = await this.syncResetState(
+        wid,
+        candidateStatus,
+        'manager-command-poll',
+        cid,
+        { excludeCommandIds: cid ? [cid] : [] }
+      );
+
+      if (partialResetFailures.length === 0) {
+        let finalized = false;
+        let finalizeError = null;
+        try {
+          finalized = typeof this.commandStore?.finalizeCompleted === 'function'
+            ? await this.commandStore.finalizeCompleted(wid, cid, result, { leaseOwner: this.instanceId })
+            : await this.commandStore.complete(wid, cid, result);
+        } catch (err) {
+          finalizeError = err;
+        }
+
+        if (finalizeError || (hasTwoPhaseStore && !finalized)) {
+          const finalizeFailure = [{
+            step: 'commandStore.finalizeCompleted',
+            error: finalizeError?.message || 'finalize_returned_false'
+          }];
+          const { detail, terminalFailed } = await this.scheduleResetStateSyncRetry(
+            wid,
+            cid,
+            result,
+            execRec?.command?.result?._stateSync,
+            {
+              candidateStatus,
+              statusSource: 'manager-command-poll',
+              remainingSteps: [],
+              partialResetFailures: finalizeFailure
+            }
+          );
+          const failedResult = {
+            ...(result && typeof result === 'object' ? result : {}),
+            ok: false,
+            error: 'RESET_STATE_SYNC_FAILED',
+            stateSyncPending: !terminalFailed,
+            executionCompleted: true,
+            detail,
+            partialResetFailures: finalizeFailure
+          };
+          if (pending && pending.workerId === wid && typeof pending.finish === 'function') {
+            pending.finish(failedResult);
+          }
+          return {
+            ok: false,
+            error: 'RESET_STATE_SYNC_FAILED',
+            stateSyncPending: !terminalFailed,
+            executionCompleted: true,
+            detail,
+            partialResetFailures: finalizeFailure,
+            completed: false
+          };
+        }
+
+        if (pending && pending.workerId === wid && typeof pending.finish === 'function') {
+          pending.finish(result);
+        }
+        return { ok: Boolean(finalized || pending) };
+      }
+
+      const { detail, terminalFailed } = await this.scheduleResetStateSyncRetry(
+        wid,
+        cid,
+        result,
+        execRec?.command?.result?._stateSync,
+        {
+          candidateStatus,
+          statusSource: 'manager-command-poll',
+          remainingSteps,
+          partialResetFailures
+        }
+      );
+      const failedResult = {
+        ...(result && typeof result === 'object' ? result : {}),
+        ok: false,
+        error: 'RESET_STATE_SYNC_FAILED',
+        stateSyncPending: !terminalFailed,
+        executionCompleted: true,
+        detail,
+        partialResetFailures
+      };
+      if (pending && pending.workerId === wid && typeof pending.finish === 'function') {
+        pending.finish(failedResult);
+      }
+      return {
+        ok: false,
+        error: 'RESET_STATE_SYNC_FAILED',
+        stateSyncPending: !terminalFailed,
+        executionCompleted: true,
+        detail,
+        partialResetFailures,
+        completed: false
+      };
+    }
+
+    const completed = await this.commandStore.complete(wid, cid, result);
+    if (candidateStatus && typeof candidateStatus === 'object' && typeof this.registry?.updateStatus === 'function') {
       try {
         await this.registry.updateStatus(wid, candidateStatus, 'manager-command-poll');
       } catch (err) {

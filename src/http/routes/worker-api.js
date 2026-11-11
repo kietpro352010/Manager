@@ -62,11 +62,15 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
       if (!/^(?:cmd_)?[0-9a-f-]{36}$/i.test(commandId)) return res.status(400).json({ ok: false, error: 'invalid_command_id' });
       const accepted = await broker.acceptResult(req.workerId, req.body || {});
       if (accepted && typeof accepted === 'object' && accepted.ok === false && accepted.error) {
-        const status = accepted.error === 'COMMAND_OWNERSHIP_MISMATCH' ? 403 : 500;
+        const status = accepted.error === 'COMMAND_OWNERSHIP_MISMATCH'
+          ? 403
+          : (accepted.error === 'STATE_SYNC_IN_PROGRESS' ? 409 : 500);
         return res.status(status).json({
           ok: false,
           accepted: false,
           error: accepted.error,
+          ...(accepted.executionCompleted !== undefined ? { executionCompleted: Boolean(accepted.executionCompleted) } : {}),
+          ...(accepted.stateSyncPending !== undefined ? { stateSyncPending: Boolean(accepted.stateSyncPending) } : {}),
           ...(accepted.detail ? { detail: accepted.detail } : {}),
           ...(accepted.partialResetFailures ? { partialResetFailures: accepted.partialResetFailures } : {})
         });

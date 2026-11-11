@@ -1165,13 +1165,17 @@ async function testCommandResetErrorVisibility() {
 
   // 8a. Polling transport + worker-api /result + pending.finish + user-api /bot/:id/reset
   const pollErrors = [];
+  let completeCalledOnSyncFail = false;
   const brokerPoll = new CommandBroker({
     registry: {
       resetData: async () => { throw new Error('db_reset_write_failed'); },
       updateStatus: async () => {}
     },
     commandStore: {
-      complete: async () => ({ commandId: 'cmd_reset_fail', action: 'reset' }),
+      complete: async () => {
+        completeCalledOnSyncFail = true;
+        return { commandId: 'cmd_reset_fail', action: 'reset' };
+      },
       clearWorker: async () => { throw new Error('queue_clear_failed'); }
     },
     config: { commandResultTimeoutMs: 5000 },
@@ -1222,7 +1226,10 @@ async function testCommandResetErrorVisibility() {
     assert.strictEqual(resultRes.status, 500, '/result must return HTTP 500 when reset state sync fails');
     assert.strictEqual(resultBody.ok, false);
     assert.strictEqual(resultBody.error, 'RESET_STATE_SYNC_FAILED');
+    assert.strictEqual(resultBody.stateSyncPending, true);
+    assert.strictEqual(resultBody.executionCompleted, true);
     assert.strictEqual(resultBody.partialResetFailures.length, 2);
+    assert.strictEqual(completeCalledOnSyncFail, false, 'complete() must NOT run when reset state sync fails');
     assert.strictEqual(pendingOutcome?.ok, false, 'pending waiter must receive ok:false when reset sync fails');
     assert.strictEqual(pendingOutcome?.error, 'RESET_STATE_SYNC_FAILED');
     assert.ok(pollErrors.some((e) => e.msg === 'command_reset_partial_sync_failed'));
@@ -1304,6 +1311,228 @@ async function testCommandResetErrorVisibility() {
   console.log('✅ 8. CommandBroker Reset Error Visibility verified.');
 }
 
+async function testResetTwoPhaseExecutionAndIndependentRetry() {
+  console.log('9. Testing Two-Phase Polling RESET (execution_completed -> state_sync_pending -> independent retry)...');
+
+  const commands = new Map([
+    ['cmd_22222222-2222-4222-8222-222222222222', {
+      commandId: 'cmd_22222222-2222-4222-8222-222222222222',
+      workerId: 'bot-two-phase',
+      action: 'reset',
+      status: 'delivered',
+      result: null,
+      completedAt: null
+    }],
+    ['cmd_queued_other', {
+      commandId: 'cmd_queued_other',
+      workerId: 'bot-two-phase',
+      action: 'status',
+      status: 'queued',
+      result: null,
+      completedAt: null
+    }]
+  ]);
+
+  const callOrder = [];
+  let shouldFailResetData = true;
+  let resetDataCalls = 0;
+  let clearWorkerCalls = 0;
+  let updateStatusCalls = 0;
+  const infoLogs = [];
+  const errorLogs = [];
+
+  const twoPhaseStore = {
+    async get(cid) {
+      const row = commands.get(cid);
+      return row ? { ...row, result: row.result ? { ...row.result } : null } : null;
+    },
+    async complete() {
+      throw new Error('complete() must not be called directly for reset command');
+    },
+    async clearWorker(wid, { excludeCommandIds = [] } = {}) {
+      callOrder.push('clearWorker');
+      clearWorkerCalls += 1;
+      for (const [id, row] of commands.entries()) {
+        if (row.workerId !== wid) continue;
+        if (excludeCommandIds.includes(id)) continue;
+        if (['execution_completed', 'state_sync_pending', 'state_sync_failed'].includes(row.status)) continue;
+        commands.delete(id);
+      }
+    },
+    async recordExecutionCompleted(wid, cid, result, opts = {}) {
+      callOrder.push('recordExecutionCompleted');
+      const row = commands.get(cid);
+      if (!row || row.workerId !== wid) return { ok: false, reason: 'not_found' };
+      if (row.status === 'completed') return { ok: true, alreadyCompleted: true, status: 'completed', command: row };
+      row.status = 'execution_completed';
+      row.completedAt = null;
+      row.result = {
+        ...(result || {}),
+        _stateSync: {
+          ...(row.result?._stateSync || {}),
+          pending: true,
+          executionCompleted: true,
+          candidateStatus: opts.candidateStatus || null,
+          statusSource: opts.statusSource || 'manager-command-poll',
+          pendingSteps: opts.pendingSteps || null,
+          leaseOwner: opts.leaseOwner || null,
+          leaseUntil: opts.leaseOwner ? new Date(Date.now() + 15000).toISOString() : null
+        }
+      };
+      return { ok: true, alreadyCompleted: false, status: 'execution_completed', command: { ...row } };
+    },
+    async markStateSyncPending(wid, cid, { result, syncState, terminalFailed = false } = {}) {
+      callOrder.push(terminalFailed ? 'markStateSyncFailed' : 'markStateSyncPending');
+      const row = commands.get(cid);
+      if (!row || row.workerId !== wid) return false;
+      row.status = terminalFailed ? 'state_sync_failed' : 'state_sync_pending';
+      row.completedAt = null;
+      const base = (result && typeof result === 'object') ? { ...result } : { ...(row.result || {}) };
+      delete base._stateSync;
+      row.result = { ...base, _stateSync: { ...syncState } };
+      return true;
+    },
+    async finalizeCompleted(wid, cid, result, { leaseOwner = null } = {}) {
+      callOrder.push('finalizeCompleted');
+      const row = commands.get(cid);
+      if (!row || row.workerId !== wid) return false;
+      if (row.status === 'completed') return true;
+      const currentOwner = row.result?._stateSync?.leaseOwner;
+      if (leaseOwner && currentOwner && currentOwner !== leaseOwner) return false;
+      row.status = 'completed';
+      row.completedAt = new Date().toISOString();
+      const base = (result && typeof result === 'object') ? { ...result } : { ...(row.result || {}) };
+      delete base._stateSync;
+      row.result = base;
+      return true;
+    },
+    async claimPendingStateSyncBatch(leaseOwner, limit = 10, leaseSeconds = 60) {
+      const now = Date.now();
+      const claimed = [];
+      for (const row of commands.values()) {
+        if (claimed.length >= limit) break;
+        if (!['state_sync_pending', 'execution_completed'].includes(row.status)) continue;
+        const sync = row.result?._stateSync || {};
+        if (sync.nextRetryAt && Date.parse(sync.nextRetryAt) > now) continue;
+        if (sync.leaseUntil && Date.parse(sync.leaseUntil) > now) continue;
+        row.status = 'state_sync_pending';
+        row.result = {
+          ...(row.result || {}),
+          _stateSync: {
+            ...sync,
+            leaseOwner,
+            leaseUntil: new Date(now + leaseSeconds * 1000).toISOString()
+          }
+        };
+        claimed.push({ ...row, result: { ...row.result, _stateSync: { ...row.result._stateSync } } });
+      }
+      return claimed;
+    }
+  };
+
+  const broker = new CommandBroker({
+    registry: {
+      async resetData() {
+        callOrder.push('resetData');
+        resetDataCalls += 1;
+        if (shouldFailResetData) throw new Error('transient_supabase_timeout');
+        return { ok: true };
+      },
+      async updateStatus() {
+        callOrder.push('updateStatus');
+        updateStatusCalls += 1;
+        return { ok: true };
+      }
+    },
+    commandStore: twoPhaseStore,
+    config: { commandResultTimeoutMs: 5000, maxStateSyncAttempts: 3 },
+    logger: {
+      info: (msg, meta) => infoLogs.push({ msg, meta }),
+      warn: () => {},
+      error: (msg, meta) => errorLogs.push({ msg, meta })
+    }
+  });
+
+  // Step 1: Worker posts /result (note: omitting action forces storedCommand.get() lookup BEFORE transition)
+  const firstOutcome = await broker.reportResult('bot-two-phase', 'cmd_22222222-2222-4222-8222-222222222222', {
+    ok: true,
+    state: 'stopped',
+    connected: false
+  });
+  assert.strictEqual(firstOutcome.ok, false);
+  assert.strictEqual(firstOutcome.error, 'RESET_STATE_SYNC_FAILED');
+  assert.strictEqual(firstOutcome.executionCompleted, true);
+  assert.strictEqual(firstOutcome.stateSyncPending, true);
+
+  // Verify execution_completed ran BEFORE sync, and row transitioned to state_sync_pending (NOT completed)
+  assert.deepStrictEqual(callOrder, [
+    'recordExecutionCompleted',
+    'resetData',
+    'clearWorker',
+    'updateStatus',
+    'markStateSyncPending'
+  ]);
+  const pendingRow = commands.get('cmd_22222222-2222-4222-8222-222222222222');
+  assert.strictEqual(pendingRow.status, 'state_sync_pending');
+  assert.strictEqual(pendingRow.completedAt, null);
+  assert.deepStrictEqual(pendingRow.result._stateSync.pendingSteps, ['registry.resetData']);
+  assert.strictEqual(commands.has('cmd_queued_other'), false, 'Other queued command was still cleared by clearWorker');
+  assert.strictEqual(clearWorkerCalls, 1);
+  assert.strictEqual(updateStatusCalls, 1);
+
+  // Before nextRetryAt arrives, poller skips without duplicating work
+  const earlyTick = await broker.processPendingStateSyncs();
+  assert.strictEqual(earlyTick.processed, 0);
+
+  // Step 2: DB recovers; make retry due and invoke processOutboxBatch (Worker NEVER sends /result again)
+  shouldFailResetData = false;
+  pendingRow.result._stateSync.nextRetryAt = new Date(Date.now() - 1000).toISOString();
+  await broker.processOutboxBatch();
+
+  const recoveredRow = commands.get('cmd_22222222-2222-4222-8222-222222222222');
+  assert.strictEqual(recoveredRow.status, 'completed', 'Independent background retry must finalize command as completed');
+  assert.ok(recoveredRow.completedAt, 'completedAt must be set once state sync finishes');
+  assert.strictEqual(recoveredRow.result._stateSync, undefined, 'Internal _stateSync metadata must be stripped on completion');
+  assert.strictEqual(resetDataCalls, 2, 'Only failed step resetData was retried once');
+  assert.strictEqual(clearWorkerCalls, 1, 'Already-succeeded clearWorker was NOT redundantly re-run');
+  assert.strictEqual(updateStatusCalls, 1, 'Already-succeeded updateStatus was NOT redundantly re-run');
+  assert.ok(infoLogs.some((l) => l.msg === 'command_reset_state_sync_recovered'));
+
+  // Step 3: Duplicate /result replay after terminal completion is idempotent without re-running resetData
+  const replay = await broker.reportResult('bot-two-phase', 'cmd_22222222-2222-4222-8222-222222222222', {
+    ok: true,
+    state: 'stopped'
+  });
+  assert.strictEqual(replay.ok, true);
+  assert.strictEqual(replay.alreadyCompleted, true);
+  assert.strictEqual(resetDataCalls, 2);
+
+  // Step 4: Exhaustion transitions state_sync_pending -> state_sync_failed after maxStateSyncAttempts
+  const cidExhaust = 'cmd_33333333-3333-4333-8333-333333333333';
+  commands.set(cidExhaust, {
+    commandId: cidExhaust,
+    workerId: 'bot-two-phase',
+    action: 'reset',
+    status: 'delivered',
+    result: null,
+    completedAt: null
+  });
+  shouldFailResetData = true;
+  await broker.reportResult('bot-two-phase', cidExhaust, { ok: true, state: 'stopped' });
+  commands.get(cidExhaust).result._stateSync.nextRetryAt = new Date(Date.now() - 1000).toISOString();
+  await broker.processPendingStateSyncs();
+  commands.get(cidExhaust).result._stateSync.nextRetryAt = new Date(Date.now() - 1000).toISOString();
+  const thirdAttempt = await broker.processPendingStateSyncs();
+  assert.strictEqual(thirdAttempt.failed, 1);
+  assert.strictEqual(commands.get(cidExhaust).status, 'state_sync_failed');
+  assert.ok(errorLogs.some((l) => l.msg === 'command_reset_state_sync_exhausted'));
+
+  const noopAfterExhaust = await broker.processPendingStateSyncs();
+  assert.strictEqual(noopAfterExhaust.processed, 0);
+
+  console.log('✅ 9. Two-Phase Polling RESET & Independent Retry verified.');
+}
+
 let completedAll = false;
 process.on('beforeExit', (code) => {
   if (code === 0 && !completedAll) {
@@ -1322,6 +1551,7 @@ async function runTests() {
   await testCoordinatorCrossCuttingContracts();
   await testLink4mInitFailureDegradedVisibility();
   await testCommandResetErrorVisibility();
+  await testResetTwoPhaseExecutionAndIndependentRetry();
   completedAll = true;
   console.log('🎉 ALL MANAGER SERVICES WIRING TESTS PASSED 100%!');
 }
