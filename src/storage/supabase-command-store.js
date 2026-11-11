@@ -10,6 +10,42 @@ const STATE_SYNC_PENDING_STATUS = 'state_sync_pending';
 const STATE_SYNC_FAILED_STATUS = 'state_sync_failed';
 const ACTIVE_SYNC_STATUSES = [EXECUTION_COMPLETED_STATUS, STATE_SYNC_PENDING_STATUS];
 const CLEARABLE_STATUSES = ['queued', 'delivered', 'completed', 'failed', 'expired'];
+const REQUIRED_STATE_SYNC_RPCS = [
+  'manager_record_command_execution',
+  'manager_renew_command_sync_lease',
+  'manager_verify_command_sync_lease',
+  'manager_mark_command_sync_pending',
+  'manager_finalize_command_sync',
+  'manager_claim_pending_command_syncs'
+];
+
+function createAtomicRpcRequiredError(rpcName, missingRpcs = [], detail = '') {
+  const missingList = Array.isArray(missingRpcs) && missingRpcs.length > 0
+    ? missingRpcs
+    : (rpcName ? [rpcName] : REQUIRED_STATE_SYNC_RPCS);
+  const err = new Error(
+    `Atomic Postgres RPC(s) required before enabling two-phase RESET sync/retry: ${missingList.join(', ')}` +
+    (detail ? ` (${detail})` : '')
+  );
+  err.code = 'ATOMIC_STATE_SYNC_RPC_REQUIRED';
+  err.missingRpcs = [...missingList];
+  return err;
+}
+
+function computeLeaseMs(leaseSeconds, leaseMs = null, defaultMs = 60000) {
+  if (leaseMs !== null && leaseMs !== undefined && Number.isFinite(Number(leaseMs))) {
+    return Math.max(50, Number(leaseMs));
+  }
+  const sec = Number(leaseSeconds);
+  if (Number.isFinite(sec) && sec > 0) {
+    return Math.max(50, sec * 1000);
+  }
+  return Math.max(50, defaultMs);
+}
+
+function computeRpcLeaseSeconds(leaseMsValue) {
+  return Math.max(1, Math.min(3600, Math.ceil(Math.max(50, Number(leaseMsValue) || 60000) / 1000)));
+}
 
 function isRpcUnavailableError(error) {
   const msg = String(error?.message || '').toLowerCase();
@@ -65,10 +101,130 @@ function unwrap(data) {
 }
 
 class SupabaseCommandStore {
-  constructor(client) {
+  constructor(client, options = {}) {
     this.client = client;
-    this.adapter = client.adapter || null;
+    this.adapter = client?.adapter || null;
     this.coalesceLock = new AsyncKeyLock();
+    this.allowUnsafeSingleInstanceFallback = Boolean(options?.allowUnsafeSingleInstanceFallback);
+    this.stateSyncRpcState = {
+      ok: true,
+      checked: false,
+      rpcVerified: false,
+      missingRpcs: [],
+      error: null,
+      message: null,
+      probeError: null,
+      updatedAt: null
+    };
+  }
+
+  markRpcVerified(rpcName) {
+    const missing = (this.stateSyncRpcState.missingRpcs || []).filter((r) => r !== rpcName);
+    this.stateSyncRpcState = {
+      ...this.stateSyncRpcState,
+      ok: missing.length === 0,
+      checked: true,
+      missingRpcs: missing,
+      error: missing.length > 0 ? 'ATOMIC_STATE_SYNC_RPC_REQUIRED' : null,
+      message: missing.length > 0 ? `Missing atomic state-sync RPC(s): ${missing.join(', ')}` : null,
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  markRpcMissing(rpcName, detail = '') {
+    const missing = Array.from(new Set([...(this.stateSyncRpcState.missingRpcs || []), rpcName].filter(Boolean)));
+    const message = `Missing atomic Postgres RPC(s): ${missing.join(', ')}` + (detail ? ` (${detail})` : '');
+    this.stateSyncRpcState = {
+      ok: false,
+      checked: true,
+      rpcVerified: true,
+      missingRpcs: missing,
+      error: 'ATOMIC_STATE_SYNC_RPC_REQUIRED',
+      message,
+      probeError: null,
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  assertFallbackAllowed(rpcName, detail = '') {
+    this.markRpcMissing(rpcName, detail);
+    if (!this.allowUnsafeSingleInstanceFallback) {
+      throw createAtomicRpcRequiredError(rpcName, this.stateSyncRpcState.missingRpcs, detail);
+    }
+  }
+
+  async probeStateSyncRpcs() {
+    if (!this.adapter || typeof this.adapter.isEnabled !== 'function' || !this.adapter.isEnabled() || typeof this.adapter.fetchWithRetry !== 'function') {
+      return this.health();
+    }
+
+    try {
+      const specRes = await this.adapter.fetchWithRetry(`${this.adapter.url}/rest/v1/`, {
+        headers: typeof this.adapter.getHeaders === 'function' ? this.adapter.getHeaders() : {}
+      }, { timeoutMs: 8000, maxRetries: 1 });
+      if (!specRes || !specRes.ok) {
+        this.stateSyncRpcState = {
+          ...this.stateSyncRpcState,
+          checked: true,
+          rpcVerified: false,
+          probeError: specRes ? `HTTP ${specRes.status}` : 'spec_fetch_failed',
+          updatedAt: new Date().toISOString()
+        };
+        return this.health();
+      }
+      const spec = await specRes.json().catch(() => null);
+      const paths = (spec && spec.paths && typeof spec.paths === 'object') ? Object.keys(spec.paths) : null;
+      if (!paths) {
+        this.stateSyncRpcState = {
+          ...this.stateSyncRpcState,
+          checked: true,
+          rpcVerified: false,
+          probeError: 'invalid_openapi_spec',
+          updatedAt: new Date().toISOString()
+        };
+        return this.health();
+      }
+      const pathSet = new Set(paths.map((p) => String(p).replace(/\/+$/, '')));
+      const missing = REQUIRED_STATE_SYNC_RPCS.filter((rpcName) => !pathSet.has(`/rpc/${rpcName}`));
+      this.stateSyncRpcState = {
+        ok: missing.length === 0,
+        checked: true,
+        rpcVerified: true,
+        missingRpcs: missing,
+        error: missing.length > 0 ? 'ATOMIC_STATE_SYNC_RPC_REQUIRED' : null,
+        message: missing.length > 0 ? `Missing atomic Postgres RPC(s): ${missing.join(', ')}` : null,
+        probeError: null,
+        updatedAt: new Date().toISOString()
+      };
+    } catch (err) {
+      this.stateSyncRpcState = {
+        ...this.stateSyncRpcState,
+        checked: true,
+        rpcVerified: false,
+        probeError: err?.message || String(err),
+        updatedAt: new Date().toISOString()
+      };
+    }
+
+    return this.health();
+  }
+
+  health() {
+    const missingRpcs = [...(this.stateSyncRpcState.missingRpcs || [])];
+    const degraded = Boolean(missingRpcs.length > 0 && !this.allowUnsafeSingleInstanceFallback);
+    return {
+      ok: !degraded,
+      degraded,
+      status: degraded ? 'degraded' : (this.stateSyncRpcState.checked ? 'ready' : 'unknown'),
+      checked: Boolean(this.stateSyncRpcState.checked),
+      rpcVerified: Boolean(this.stateSyncRpcState.rpcVerified),
+      retryEnabled: !degraded,
+      allowUnsafeSingleInstanceFallback: this.allowUnsafeSingleInstanceFallback,
+      missingRpcs,
+      error: degraded ? (this.stateSyncRpcState.error || 'ATOMIC_STATE_SYNC_RPC_REQUIRED') : null,
+      message: degraded ? this.stateSyncRpcState.message : null,
+      probeError: this.stateSyncRpcState.probeError || null
+    };
   }
 
   async initialize() {
@@ -90,6 +246,14 @@ class SupabaseCommandStore {
         this.client.from(TABLE).delete().lt('created_at', cutoff30d)
       ]);
     } catch (_) {}
+
+    await this.probeStateSyncRpcs();
+    if (this.stateSyncRpcState.missingRpcs.length > 0 && !this.allowUnsafeSingleInstanceFallback) {
+      console.error(
+        `[COMMAND_STORE] Degraded: ${this.stateSyncRpcState.message}. ` +
+        'Two-phase RESET background retry is disabled until the Postgres migration is applied.'
+      );
+    }
   }
 
   async enqueue(command) {
@@ -254,7 +418,8 @@ class SupabaseCommandStore {
 
   async recordExecutionCompleted(workerId, commandId, result, {
     leaseOwner = null,
-    leaseSeconds = 15,
+    leaseSeconds = 60,
+    leaseMs = null,
     candidateStatus = null,
     statusSource = 'manager-command-poll',
     pendingSteps = null
@@ -262,8 +427,9 @@ class SupabaseCommandStore {
     const wid = String(workerId);
     const cid = String(commandId);
     const nowIso = new Date().toISOString();
-    const safeLeaseSec = Math.max(5, Number(leaseSeconds) || 15);
-    const leaseUntil = leaseOwner ? new Date(Date.now() + safeLeaseSec * 1000).toISOString() : null;
+    const effectiveLeaseMs = computeLeaseMs(leaseSeconds, leaseMs, 60000);
+    const rpcLeaseSec = computeRpcLeaseSeconds(effectiveLeaseMs);
+    const leaseUntil = leaseOwner ? new Date(Date.now() + effectiveLeaseMs).toISOString() : null;
     const incomingSync = {
       pending: true,
       executionCompleted: true,
@@ -283,29 +449,38 @@ class SupabaseCommandStore {
         p_command_id: cid,
         p_result: rpcResultPayload,
         p_lease_owner: leaseOwner,
-        p_lease_seconds: safeLeaseSec
+        p_lease_seconds: rpcLeaseSec
       });
       if (!error && data && typeof data === 'object') {
+        this.markRpcVerified('manager_record_command_execution');
         if (data.ok === false) {
           return {
             ok: false,
             error: data.reason === 'state_sync_in_progress' ? 'STATE_SYNC_IN_PROGRESS' : null,
             reason: data.reason || 'not_found',
-            status: data.status || null
+            status: data.status || null,
+            fencingToken: data.fencingToken ?? null
           };
         }
+        const cmd = data.command ? fromRow(data.command) : null;
         return {
           ok: true,
           alreadyCompleted: Boolean(data.alreadyCompleted),
           status: data.status || EXECUTION_COMPLETED_STATUS,
-          command: data.command ? fromRow(data.command) : null
+          fencingToken: data.fencingToken ?? cmd?.result?._stateSync?.fencingToken ?? null,
+          leaseUntil: data.leaseUntil || cmd?.result?._stateSync?.leaseUntil || leaseUntil,
+          command: cmd
         };
       }
       if (error && !isRpcUnavailableError(error)) {
         throw new Error(error.message || 'manager_record_command_execution failed');
       }
+      if (error) {
+        this.assertFallbackAllowed('manager_record_command_execution', error.message);
+      }
     } catch (rpcErr) {
       if (!isRpcUnavailableError(rpcErr)) throw rpcErr;
+      this.assertFallbackAllowed('manager_record_command_execution', rpcErr.message);
     }
 
     const { data: existing, error: selErr } = await this.client.from(TABLE)
@@ -334,12 +509,20 @@ class SupabaseCommandStore {
       existingLeaseUntilMs > Date.now() &&
       (!leaseOwner || existingSync.leaseOwner !== leaseOwner)
     ) {
-      return { ok: false, error: 'STATE_SYNC_IN_PROGRESS', status: existing.status };
+      return {
+        ok: false,
+        error: 'STATE_SYNC_IN_PROGRESS',
+        status: existing.status,
+        fencingToken: Number(existingSync.fencingToken || 0)
+      };
     }
 
+    const prevToken = Number(existingSync.fencingToken || 0);
+    const nextToken = leaseOwner ? prevToken + 1 : prevToken;
     const mergedSync = {
       ...existingSync,
       ...incomingSync,
+      fencingToken: nextToken,
       attempts: Number(existingSync.attempts || 0)
     };
     const mergedPayload = attachStateSync(
@@ -364,11 +547,190 @@ class SupabaseCommandStore {
       ok: Boolean(updated),
       alreadyCompleted: false,
       status: updated ? EXECUTION_COMPLETED_STATUS : null,
+      fencingToken: updated ? nextToken : null,
+      leaseUntil: updated ? leaseUntil : null,
       command: updated ? fromRow(updated) : null
     };
   }
 
-  async markStateSyncPending(workerId, commandId, { result = null, syncState = {}, terminalFailed = false } = {}) {
+  async renewStateSyncLease(workerId, commandId, leaseOwner, leaseSeconds = 60, {
+    leaseMs = null,
+    fencingToken = null
+  } = {}) {
+    const wid = String(workerId);
+    const cid = String(commandId);
+    const cleanOwner = String(leaseOwner || '').trim();
+    if (!cleanOwner) {
+      return { ok: false, lost: true, reason: 'invalid_lease_owner' };
+    }
+    const effectiveLeaseMs = computeLeaseMs(leaseSeconds, leaseMs, 60000);
+    const rpcLeaseSec = computeRpcLeaseSeconds(effectiveLeaseMs);
+
+    try {
+      const { data, error } = await this.client.rpc('manager_renew_command_sync_lease', {
+        p_worker_id: wid,
+        p_command_id: cid,
+        p_lease_owner: cleanOwner,
+        p_lease_seconds: rpcLeaseSec,
+        p_fencing_token: fencingToken ?? null
+      });
+      if (!error && data && typeof data === 'object') {
+        this.markRpcVerified('manager_renew_command_sync_lease');
+        return {
+          ok: Boolean(data.ok),
+          lost: Boolean(data.lost),
+          reason: data.reason || null,
+          leaseOwner: data.leaseOwner || null,
+          leaseUntil: data.leaseUntil || null,
+          fencingToken: data.fencingToken ?? null,
+          currentOwner: data.currentOwner || null,
+          currentFencingToken: data.currentFencingToken ?? null
+        };
+      }
+      if (error && !isRpcUnavailableError(error)) {
+        throw new Error(error.message || 'manager_renew_command_sync_lease failed');
+      }
+      if (error) {
+        this.assertFallbackAllowed('manager_renew_command_sync_lease', error.message);
+      }
+    } catch (rpcErr) {
+      if (!isRpcUnavailableError(rpcErr)) throw rpcErr;
+      this.assertFallbackAllowed('manager_renew_command_sync_lease', rpcErr.message);
+    }
+
+    const { data: existing, error: selErr } = await this.client.from(TABLE)
+      .select('*')
+      .eq('command_id', cid)
+      .eq('worker_id', wid)
+      .maybeSingle();
+    if (selErr) throw new Error(selErr.message || 'renewStateSyncLease lookup failed');
+    if (!existing) return { ok: false, lost: true, reason: 'not_found' };
+    if (!ACTIVE_SYNC_STATUSES.includes(existing.status)) {
+      return { ok: false, lost: true, reason: 'invalid_status', status: existing.status };
+    }
+
+    const existingSync = cloneObj(existing.result?._stateSync);
+    const currentOwner = existingSync.leaseOwner || null;
+    const currentToken = Number(existingSync.fencingToken || 0);
+    const existingLeaseUntilMs = parseIsoTime(existingSync.leaseUntil);
+
+    if (currentOwner !== cleanOwner) {
+      return { ok: false, lost: true, reason: 'lease_owner_mismatch', currentOwner, currentFencingToken: currentToken };
+    }
+    if (fencingToken !== null && fencingToken !== undefined && currentToken !== Number(fencingToken)) {
+      return { ok: false, lost: true, reason: 'fencing_token_mismatch', currentOwner, currentFencingToken: currentToken };
+    }
+    if (existingLeaseUntilMs === null || existingLeaseUntilMs <= Date.now()) {
+      return { ok: false, lost: true, reason: 'lease_expired', currentOwner, currentFencingToken: currentToken };
+    }
+
+    const nextLeaseUntil = new Date(Date.now() + effectiveLeaseMs).toISOString();
+    const updatedPayload = attachStateSync(stripStateSync(existing.result), {
+      ...existingSync,
+      leaseUntil: nextLeaseUntil,
+      updatedAt: new Date().toISOString()
+    });
+
+    const { data: updated, error: updErr } = await this.client.from(TABLE)
+      .update({ result: updatedPayload })
+      .eq('command_id', cid)
+      .eq('worker_id', wid)
+      .eq('status', existing.status)
+      .select('command_id')
+      .maybeSingle();
+    if (updErr) throw new Error(updErr.message || 'renewStateSyncLease update failed');
+    if (!updated) return { ok: false, lost: true, reason: 'concurrent_update' };
+
+    return {
+      ok: true,
+      lost: false,
+      leaseOwner: cleanOwner,
+      leaseUntil: nextLeaseUntil,
+      fencingToken: currentToken
+    };
+  }
+
+  async verifyStateSyncLease(workerId, commandId, leaseOwner, { fencingToken = null } = {}) {
+    const wid = String(workerId);
+    const cid = String(commandId);
+    const cleanOwner = String(leaseOwner || '').trim();
+    if (!cleanOwner) {
+      return { ok: false, held: false, reason: 'invalid_lease_owner' };
+    }
+
+    try {
+      const { data, error } = await this.client.rpc('manager_verify_command_sync_lease', {
+        p_worker_id: wid,
+        p_command_id: cid,
+        p_lease_owner: cleanOwner,
+        p_fencing_token: fencingToken ?? null
+      });
+      if (!error && data && typeof data === 'object') {
+        this.markRpcVerified('manager_verify_command_sync_lease');
+        return {
+          ok: Boolean(data.ok),
+          held: Boolean(data.held),
+          reason: data.reason || null,
+          leaseOwner: data.leaseOwner || null,
+          leaseUntil: data.leaseUntil || null,
+          fencingToken: data.fencingToken ?? null,
+          currentOwner: data.currentOwner || null,
+          currentFencingToken: data.currentFencingToken ?? null
+        };
+      }
+      if (error && !isRpcUnavailableError(error)) {
+        throw new Error(error.message || 'manager_verify_command_sync_lease failed');
+      }
+      if (error) {
+        this.assertFallbackAllowed('manager_verify_command_sync_lease', error.message);
+      }
+    } catch (rpcErr) {
+      if (!isRpcUnavailableError(rpcErr)) throw rpcErr;
+      this.assertFallbackAllowed('manager_verify_command_sync_lease', rpcErr.message);
+    }
+
+    const { data: existing, error: selErr } = await this.client.from(TABLE)
+      .select('*')
+      .eq('command_id', cid)
+      .eq('worker_id', wid)
+      .maybeSingle();
+    if (selErr) throw new Error(selErr.message || 'verifyStateSyncLease lookup failed');
+    if (!existing) return { ok: false, held: false, reason: 'not_found' };
+    if (!ACTIVE_SYNC_STATUSES.includes(existing.status)) {
+      return { ok: false, held: false, reason: 'invalid_status', status: existing.status };
+    }
+
+    const existingSync = cloneObj(existing.result?._stateSync);
+    const currentOwner = existingSync.leaseOwner || null;
+    const currentToken = Number(existingSync.fencingToken || 0);
+    const existingLeaseUntilMs = parseIsoTime(existingSync.leaseUntil);
+
+    if (currentOwner !== cleanOwner) {
+      return { ok: false, held: false, reason: 'lease_owner_mismatch', currentOwner, currentFencingToken: currentToken };
+    }
+    if (fencingToken !== null && fencingToken !== undefined && currentToken !== Number(fencingToken)) {
+      return { ok: false, held: false, reason: 'fencing_token_mismatch', currentOwner, currentFencingToken: currentToken };
+    }
+    if (existingLeaseUntilMs === null || existingLeaseUntilMs <= Date.now()) {
+      return { ok: false, held: false, reason: 'lease_expired', currentOwner, currentFencingToken: currentToken };
+    }
+
+    return {
+      ok: true,
+      held: true,
+      leaseOwner: currentOwner,
+      leaseUntil: existingSync.leaseUntil,
+      fencingToken: currentToken
+    };
+  }
+
+  async markStateSyncPending(workerId, commandId, {
+    result = null,
+    syncState = {},
+    terminalFailed = false,
+    leaseOwner = null,
+    fencingToken = null
+  } = {}) {
     const wid = String(workerId);
     const cid = String(commandId);
     const safeSyncState = cloneObj(syncState);
@@ -378,14 +740,21 @@ class SupabaseCommandStore {
         p_worker_id: wid,
         p_command_id: cid,
         p_sync_state: safeSyncState,
-        p_terminal_failed: Boolean(terminalFailed)
+        p_terminal_failed: Boolean(terminalFailed),
+        p_lease_owner: leaseOwner ?? null,
+        p_fencing_token: fencingToken ?? null
       });
-      if (!error) return Boolean(data);
+      if (!error) {
+        this.markRpcVerified('manager_mark_command_sync_pending');
+        return Boolean(data);
+      }
       if (!isRpcUnavailableError(error)) {
         throw new Error(error.message || 'manager_mark_command_sync_pending failed');
       }
+      this.assertFallbackAllowed('manager_mark_command_sync_pending', error.message);
     } catch (rpcErr) {
       if (!isRpcUnavailableError(rpcErr)) throw rpcErr;
+      this.assertFallbackAllowed('manager_mark_command_sync_pending', rpcErr.message);
     }
 
     const { data: existing, error: selErr } = await this.client.from(TABLE)
@@ -399,9 +768,23 @@ class SupabaseCommandStore {
       return false;
     }
 
+    const existingSync = cloneObj(existing.result?._stateSync);
+    const existingOwner = existingSync.leaseOwner || null;
+    const existingToken = Number(existingSync.fencingToken || 0);
+    if (leaseOwner && existingOwner && existingOwner !== leaseOwner) {
+      return false;
+    }
+    if (fencingToken !== null && fencingToken !== undefined && existingToken > 0 && existingToken !== Number(fencingToken)) {
+      return false;
+    }
+
+    const mergedSyncState = {
+      ...safeSyncState,
+      fencingToken: Math.max(existingToken, Number(safeSyncState.fencingToken || 0), Number(fencingToken || 0))
+    };
     const mergedPayload = attachStateSync(
       stripStateSync(result !== null && result !== undefined ? result : existing.result),
-      safeSyncState
+      mergedSyncState
     );
     const nextStatus = terminalFailed ? STATE_SYNC_FAILED_STATUS : STATE_SYNC_PENDING_STATUS;
     const { data: updated, error: updErr } = await this.client.from(TABLE)
@@ -419,7 +802,7 @@ class SupabaseCommandStore {
     return Boolean(updated);
   }
 
-  async finalizeCompleted(workerId, commandId, result = null, { leaseOwner = null } = {}) {
+  async finalizeCompleted(workerId, commandId, result = null, { leaseOwner = null, fencingToken = null } = {}) {
     const wid = String(workerId);
     const cid = String(commandId);
     const cleanParamResult = (result !== null && result !== undefined) ? stripStateSync(result) : null;
@@ -429,14 +812,20 @@ class SupabaseCommandStore {
         p_worker_id: wid,
         p_command_id: cid,
         p_result: cleanParamResult,
-        p_lease_owner: leaseOwner
+        p_lease_owner: leaseOwner ?? null,
+        p_fencing_token: fencingToken ?? null
       });
-      if (!error) return Boolean(data);
+      if (!error) {
+        this.markRpcVerified('manager_finalize_command_sync');
+        return Boolean(data);
+      }
       if (!isRpcUnavailableError(error)) {
         throw new Error(error.message || 'manager_finalize_command_sync failed');
       }
+      this.assertFallbackAllowed('manager_finalize_command_sync', error.message);
     } catch (rpcErr) {
       if (!isRpcUnavailableError(rpcErr)) throw rpcErr;
+      this.assertFallbackAllowed('manager_finalize_command_sync', rpcErr.message);
     }
 
     const { data: existing, error: selErr } = await this.client.from(TABLE)
@@ -452,14 +841,11 @@ class SupabaseCommandStore {
     }
 
     const existingSync = cloneObj(existing.result?._stateSync);
-    const existingLeaseUntilMs = parseIsoTime(existingSync.leaseUntil);
-    if (
-      leaseOwner &&
-      existingSync.leaseOwner &&
-      existingSync.leaseOwner !== leaseOwner &&
-      existingLeaseUntilMs !== null &&
-      existingLeaseUntilMs > Date.now()
-    ) {
+    const existingToken = Number(existingSync.fencingToken || 0);
+    if (leaseOwner && existingSync.leaseOwner && existingSync.leaseOwner !== leaseOwner) {
+      return false;
+    }
+    if (fencingToken !== null && fencingToken !== undefined && existingToken > 0 && existingToken !== Number(fencingToken)) {
       return false;
     }
 
@@ -479,27 +865,34 @@ class SupabaseCommandStore {
     return Boolean(updated);
   }
 
-  async claimPendingStateSyncBatch(leaseOwner, limit = 10, leaseSeconds = 60) {
+  async claimPendingStateSyncBatch(leaseOwner, limit = 10, leaseSeconds = 60, { leaseMs = null } = {}) {
     const cleanOwner = String(leaseOwner || `mgr_${process.pid}`);
     const safeLimit = Math.max(1, Math.min(100, Number(limit) || 10));
-    const safeLeaseSec = Math.max(5, Number(leaseSeconds) || 60);
+    const effectiveLeaseMs = computeLeaseMs(leaseSeconds, leaseMs, 60000);
+    const rpcLeaseSec = computeRpcLeaseSeconds(effectiveLeaseMs);
 
     try {
       const { data, error } = await this.client.rpc('manager_claim_pending_command_syncs', {
         p_lease_owner: cleanOwner,
         p_limit: safeLimit,
-        p_lease_seconds: safeLeaseSec
+        p_lease_seconds: rpcLeaseSec
       });
       if (!error && Array.isArray(data)) {
+        this.markRpcVerified('manager_claim_pending_command_syncs');
         return data.map(fromRow);
       }
       if (error && !isRpcUnavailableError(error)) {
         throw new Error(error.message || 'manager_claim_pending_command_syncs failed');
       }
+      if (error) {
+        this.assertFallbackAllowed('manager_claim_pending_command_syncs', error.message);
+      }
     } catch (rpcErr) {
       if (!isRpcUnavailableError(rpcErr)) throw rpcErr;
+      this.assertFallbackAllowed('manager_claim_pending_command_syncs', rpcErr.message);
     }
 
+    // Only reachable when allowUnsafeSingleInstanceFallback === true (explicitly opted in for tests).
     const { data: candidates, error: selErr } = await this.client.from(TABLE)
       .select('*')
       .in('status', ACTIVE_SYNC_STATUSES)
@@ -509,7 +902,7 @@ class SupabaseCommandStore {
     if (!Array.isArray(candidates) || candidates.length === 0) return [];
 
     const nowMs = Date.now();
-    const newLeaseUntil = new Date(nowMs + safeLeaseSec * 1000).toISOString();
+    const newLeaseUntil = new Date(nowMs + effectiveLeaseMs).toISOString();
     const claimed = [];
 
     for (const row of candidates) {
@@ -520,11 +913,14 @@ class SupabaseCommandStore {
       if (nextRetryMs !== null && nextRetryMs > nowMs) continue;
       if (leaseUntilMs !== null && leaseUntilMs > nowMs) continue;
 
+      const nextToken = Number(syncMeta.fencingToken || 0) + 1;
       const updatedPayload = attachStateSync(stripStateSync(row.result), {
         ...syncMeta,
         pending: true,
         leaseOwner: cleanOwner,
-        leaseUntil: newLeaseUntil
+        leaseUntil: newLeaseUntil,
+        fencingToken: nextToken,
+        updatedAt: new Date(nowMs).toISOString()
       });
       const { data: updated, error: updErr } = await this.client.from(TABLE)
         .update({

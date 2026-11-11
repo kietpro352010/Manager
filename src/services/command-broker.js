@@ -21,6 +21,25 @@ class CommandBroker {
     this.outboxTimer = null;
     this.outboxRunning = false;
     this.stateSyncRunning = false;
+    this.stateSyncBlockedReason = null;
+    this.missingAtomicRpcLogged = false;
+  }
+
+  getStateSyncLeaseConfig() {
+    const explicitMs = Number(this.config?.stateSyncLeaseMs);
+    const explicitSec = Number(this.config?.stateSyncLeaseSeconds);
+    let leaseMs;
+    if (Number.isFinite(explicitMs) && explicitMs > 0) {
+      leaseMs = Math.max(50, explicitMs);
+    } else if (Number.isFinite(explicitSec) && explicitSec > 0) {
+      leaseMs = Math.max(50, explicitSec * 1000);
+    } else {
+      const baseTimeoutMs = Math.max(10000, Number(this.config?.commandResultTimeoutMs) || 30000);
+      leaseMs = Math.max(45000, baseTimeoutMs * 2);
+    }
+    const leaseSeconds = Math.max(1, Math.ceil(leaseMs / 1000));
+    const renewIntervalMs = Math.max(20, Math.min(Math.floor(leaseMs / 3), 20000));
+    return { leaseMs, leaseSeconds, renewIntervalMs };
   }
 
   startOutboxProcessor({ intervalMs = 5000 } = {}) {
@@ -334,7 +353,8 @@ class CommandBroker {
 
   async syncResetState(workerId, candidateStatus, statusSource, commandId = null, {
     excludeCommandIds = null,
-    steps = null
+    steps = null,
+    ensureLeaseHeld = null
   } = {}) {
     const partialResetFailures = [];
     const remainingSteps = [];
@@ -345,14 +365,53 @@ class CommandBroker {
       ? excludeCommandIds
       : (commandId ? [commandId] : []);
 
-    if (stepSet.has('registry.resetData') && typeof this.registry?.resetData === 'function') {
+    let abortedDueToLeaseLoss = false;
+    let leaseLossReason = null;
+
+    const plannedSteps = [
+      {
+        name: 'registry.resetData',
+        shouldRun: () => stepSet.has('registry.resetData') && typeof this.registry?.resetData === 'function',
+        logEvent: 'command_reset_registry_sync_failed',
+        exec: () => this.registry.resetData(workerId)
+      },
+      {
+        name: 'commandStore.clearWorker',
+        shouldRun: () => stepSet.has('commandStore.clearWorker') && typeof this.commandStore?.clearWorker === 'function',
+        logEvent: 'command_reset_queue_clear_failed',
+        exec: () => this.commandStore.clearWorker(workerId, { excludeCommandIds: excluded })
+      },
+      {
+        name: 'registry.updateStatus',
+        shouldRun: () => stepSet.has('registry.updateStatus') && candidateStatus && typeof candidateStatus === 'object' && typeof this.registry?.updateStatus === 'function',
+        logEvent: 'command_reset_status_sync_failed',
+        exec: () => this.registry.updateStatus(workerId, candidateStatus, statusSource)
+      }
+    ];
+
+    for (let i = 0; i < plannedSteps.length; i += 1) {
+      const step = plannedSteps[i];
+      if (!step.shouldRun()) continue;
+
+      if (typeof ensureLeaseHeld === 'function') {
+        const gate = await ensureLeaseHeld(`before:${step.name}`);
+        if (!gate || !gate.held) {
+          abortedDueToLeaseLoss = true;
+          leaseLossReason = gate?.reason || 'lease_lost';
+          for (let j = i; j < plannedSteps.length; j += 1) {
+            if (plannedSteps[j].shouldRun()) remainingSteps.push(plannedSteps[j].name);
+          }
+          break;
+        }
+      }
+
       try {
-        await this.registry.resetData(workerId);
+        await step.exec();
       } catch (err) {
         const message = err?.message || String(err);
-        partialResetFailures.push({ step: 'registry.resetData', error: message });
-        remainingSteps.push('registry.resetData');
-        this.logger?.error?.('command_reset_registry_sync_failed', {
+        partialResetFailures.push({ step: step.name, error: message });
+        remainingSteps.push(step.name);
+        this.logger?.error?.(step.logEvent, {
           workerId,
           commandId,
           error: message
@@ -360,44 +419,16 @@ class CommandBroker {
       }
     }
 
-    if (stepSet.has('commandStore.clearWorker') && typeof this.commandStore?.clearWorker === 'function') {
-      try {
-        await this.commandStore.clearWorker(workerId, { excludeCommandIds: excluded });
-      } catch (err) {
-        const message = err?.message || String(err);
-        partialResetFailures.push({ step: 'commandStore.clearWorker', error: message });
-        remainingSteps.push('commandStore.clearWorker');
-        this.logger?.error?.('command_reset_queue_clear_failed', {
-          workerId,
-          commandId,
-          error: message
-        });
-      }
-    }
-
-    if (stepSet.has('registry.updateStatus') && candidateStatus && typeof candidateStatus === 'object' && typeof this.registry?.updateStatus === 'function') {
-      try {
-        await this.registry.updateStatus(workerId, candidateStatus, statusSource);
-      } catch (err) {
-        const message = err?.message || String(err);
-        partialResetFailures.push({ step: 'registry.updateStatus', error: message });
-        remainingSteps.push('registry.updateStatus');
-        this.logger?.error?.('command_reset_status_sync_failed', {
-          workerId,
-          commandId,
-          error: message
-        });
-      }
-    }
-
-    return { partialResetFailures, remainingSteps };
+    return { partialResetFailures, remainingSteps, abortedDueToLeaseLoss, leaseLossReason };
   }
 
   async scheduleResetStateSyncRetry(workerId, commandId, result, existingSyncState, {
     candidateStatus = null,
     statusSource = 'manager-command-poll',
     remainingSteps = ALL_RESET_SYNC_STEPS,
-    partialResetFailures = []
+    partialResetFailures = [],
+    expectedLeaseOwner = null,
+    fencingToken = null
   } = {}) {
     const attempts = Number(existingSyncState?.attempts || 0) + 1;
     const maxAttempts = Number(this.config?.maxStateSyncAttempts || DEFAULT_MAX_STATE_SYNC_ATTEMPTS);
@@ -415,6 +446,7 @@ class CommandBroker {
       nextRetryAt,
       leaseOwner: null,
       leaseUntil: null,
+      fencingToken: fencingToken ?? existingSyncState?.fencingToken ?? 0,
       candidateStatus: candidateStatus ?? existingSyncState?.candidateStatus ?? null,
       statusSource: statusSource || existingSyncState?.statusSource || 'manager-command-poll',
       pendingSteps: remainingSteps.length > 0 ? remainingSteps : [...ALL_RESET_SYNC_STEPS],
@@ -423,13 +455,19 @@ class CommandBroker {
       updatedAt: new Date().toISOString()
     };
 
+    let markRejected = false;
     if (typeof this.commandStore?.markStateSyncPending === 'function') {
       try {
-        await this.commandStore.markStateSyncPending(workerId, commandId, {
+        const marked = await this.commandStore.markStateSyncPending(workerId, commandId, {
           result,
           syncState: nextSyncState,
-          terminalFailed
+          terminalFailed,
+          leaseOwner: expectedLeaseOwner,
+          fencingToken
         });
+        if (!marked && expectedLeaseOwner) {
+          markRejected = true;
+        }
       } catch (markErr) {
         this.logger?.error?.('command_reset_mark_sync_pending_failed', {
           workerId,
@@ -437,6 +475,17 @@ class CommandBroker {
           error: markErr?.message || String(markErr)
         });
       }
+    }
+
+    if (markRejected) {
+      this.logger?.error?.('command_reset_lease_lost', {
+        workerId,
+        commandId,
+        leaseOwner: expectedLeaseOwner,
+        fencingToken,
+        phase: 'mark_sync_pending_rejected'
+      });
+      return { detail, terminalFailed, attempts, nextRetryAt, leaseLost: true };
     }
 
     this.logger?.error?.(
@@ -451,17 +500,296 @@ class CommandBroker {
       }
     );
 
-    return { detail, terminalFailed, attempts, nextRetryAt };
+    return { detail, terminalFailed, attempts, nextRetryAt, leaseLost: false };
+  }
+
+  async executeLeasedResetSync({
+    workerId,
+    commandId,
+    candidateStatus,
+    statusSource,
+    steps = null,
+    result,
+    existingSyncState = null,
+    fencingToken = null,
+    hasTwoPhaseStore = false,
+    isRecovery = false
+  }) {
+    const wid = String(workerId || '').trim().toLowerCase();
+    const cid = String(commandId || '').trim();
+    const hasRenew = typeof this.commandStore?.renewStateSyncLease === 'function';
+    const hasVerify = typeof this.commandStore?.verifyStateSyncLease === 'function';
+    const { leaseMs, leaseSeconds, renewIntervalMs } = this.getStateSyncLeaseConfig();
+
+    let leaseLost = false;
+    let leaseLossReason = null;
+    let timerStopped = false;
+    let activeRenewal = null;
+    let renewTimer = null;
+
+    const triggerRenewal = () => {
+      if (timerStopped || leaseLost || activeRenewal) return;
+      activeRenewal = (async () => {
+        try {
+          const res = await this.commandStore.renewStateSyncLease(wid, cid, this.instanceId, leaseSeconds, {
+            leaseMs,
+            fencingToken
+          });
+          const ok = typeof res === 'boolean' ? res : Boolean(res && res.ok);
+          if (!ok) {
+            leaseLost = true;
+            leaseLossReason = (res && (res.reason || res.error)) || 'lease_renewal_rejected';
+          }
+        } catch (err) {
+          if (err?.code === 'ATOMIC_STATE_SYNC_RPC_REQUIRED') {
+            leaseLost = true;
+            leaseLossReason = err.code;
+          } else {
+            this.logger?.warn?.('command_reset_lease_renew_error', {
+              workerId: wid,
+              commandId: cid,
+              leaseOwner: this.instanceId,
+              error: err?.message || String(err)
+            });
+          }
+        } finally {
+          activeRenewal = null;
+        }
+      })();
+    };
+
+    const ensureLeaseHeld = async (_phase) => {
+      if (leaseLost) return { held: false, reason: leaseLossReason || 'lease_lost' };
+      if (activeRenewal) {
+        await activeRenewal;
+        if (leaseLost) return { held: false, reason: leaseLossReason || 'lease_lost' };
+      }
+      if (!hasVerify) return { held: true };
+
+      try {
+        const check = await this.commandStore.verifyStateSyncLease(wid, cid, this.instanceId, {
+          fencingToken
+        });
+        const held = typeof check === 'boolean' ? check : Boolean(check && (check.held === true || check.ok === true));
+        if (!held) {
+          leaseLost = true;
+          leaseLossReason = (check && (check.reason || check.error)) || 'lease_verification_failed';
+          return { held: false, reason: leaseLossReason };
+        }
+        return { held: true };
+      } catch (err) {
+        leaseLost = true;
+        leaseLossReason = err?.code || err?.message || 'lease_verification_error';
+        return { held: false, reason: leaseLossReason };
+      }
+    };
+
+    if (hasRenew) {
+      renewTimer = setInterval(triggerRenewal, renewIntervalMs);
+      renewTimer.unref?.();
+    }
+
+    try {
+      const { partialResetFailures, remainingSteps, abortedDueToLeaseLoss, leaseLossReason: stepLossReason } = await this.syncResetState(
+        wid,
+        candidateStatus,
+        statusSource,
+        cid,
+        {
+          excludeCommandIds: cid ? [cid] : [],
+          steps,
+          ensureLeaseHeld: hasVerify || hasRenew ? ensureLeaseHeld : null
+        }
+      );
+
+      if (abortedDueToLeaseLoss) {
+        const reason = stepLossReason || leaseLossReason || 'lease_lost';
+        this.logger?.error?.('command_reset_lease_lost', {
+          workerId: wid,
+          commandId: cid,
+          leaseOwner: this.instanceId,
+          fencingToken,
+          phase: 'sync_step',
+          reason
+        });
+        return {
+          ok: false,
+          error: 'STATE_SYNC_LEASE_LOST',
+          leaseLost: true,
+          reason,
+          completed: false
+        };
+      }
+
+      const preWriteGate = await ensureLeaseHeld(
+        partialResetFailures.length === 0 ? 'before:finalizeCompleted' : 'before:markStateSyncPending'
+      );
+      if (!preWriteGate.held) {
+        this.logger?.error?.('command_reset_lease_lost', {
+          workerId: wid,
+          commandId: cid,
+          leaseOwner: this.instanceId,
+          fencingToken,
+          phase: 'before_write',
+          reason: preWriteGate.reason
+        });
+        return {
+          ok: false,
+          error: 'STATE_SYNC_LEASE_LOST',
+          leaseLost: true,
+          reason: preWriteGate.reason,
+          completed: false
+        };
+      }
+
+      if (partialResetFailures.length === 0) {
+        let finalized = false;
+        let finalizeError = null;
+        try {
+          finalized = typeof this.commandStore?.finalizeCompleted === 'function'
+            ? await this.commandStore.finalizeCompleted(wid, cid, result, {
+              leaseOwner: this.instanceId,
+              fencingToken
+            })
+            : await this.commandStore.complete(wid, cid, result);
+        } catch (err) {
+          finalizeError = err;
+        }
+
+        if (finalizeError || (hasTwoPhaseStore && !finalized)) {
+          if (!finalizeError && !finalized && hasVerify) {
+            const postCheck = await ensureLeaseHeld('after:finalize_rejected');
+            if (!postCheck.held) {
+              this.logger?.error?.('command_reset_lease_lost', {
+                workerId: wid,
+                commandId: cid,
+                leaseOwner: this.instanceId,
+                fencingToken,
+                phase: 'finalize_rejected',
+                reason: postCheck.reason
+              });
+              return {
+                ok: false,
+                error: 'STATE_SYNC_LEASE_LOST',
+                leaseLost: true,
+                reason: postCheck.reason,
+                completed: false
+              };
+            }
+          }
+
+          const finalizeFailure = [{
+            step: 'commandStore.finalizeCompleted',
+            error: finalizeError?.message || 'finalize_returned_false'
+          }];
+          const outcome = await this.scheduleResetStateSyncRetry(wid, cid, result, existingSyncState, {
+            candidateStatus,
+            statusSource,
+            remainingSteps: [],
+            partialResetFailures: finalizeFailure,
+            expectedLeaseOwner: hasTwoPhaseStore ? this.instanceId : null,
+            fencingToken
+          });
+          if (outcome.leaseLost) {
+            return {
+              ok: false,
+              error: 'STATE_SYNC_LEASE_LOST',
+              leaseLost: true,
+              reason: 'mark_sync_pending_rejected',
+              completed: false
+            };
+          }
+          return {
+            ok: false,
+            error: 'RESET_STATE_SYNC_FAILED',
+            stateSyncPending: !outcome.terminalFailed,
+            terminalFailed: outcome.terminalFailed,
+            executionCompleted: true,
+            detail: outcome.detail,
+            partialResetFailures: finalizeFailure,
+            completed: false
+          };
+        }
+
+        if (isRecovery) {
+          this.logger?.info?.('command_reset_state_sync_recovered', {
+            workerId: wid,
+            commandId: cid,
+            previousAttempts: Number(existingSyncState?.attempts || 0)
+          });
+        }
+        return { ok: true, completed: Boolean(finalized), leaseLost: false };
+      }
+
+      const fallbackSteps = remainingSteps.length > 0
+        ? remainingSteps
+        : (Array.isArray(steps) && steps.length > 0 ? steps : [...ALL_RESET_SYNC_STEPS]);
+      const outcome = await this.scheduleResetStateSyncRetry(wid, cid, result, existingSyncState, {
+        candidateStatus,
+        statusSource,
+        remainingSteps: fallbackSteps,
+        partialResetFailures,
+        expectedLeaseOwner: hasTwoPhaseStore ? this.instanceId : null,
+        fencingToken
+      });
+      if (outcome.leaseLost) {
+        return {
+          ok: false,
+          error: 'STATE_SYNC_LEASE_LOST',
+          leaseLost: true,
+          reason: 'mark_sync_pending_rejected',
+          completed: false
+        };
+      }
+      return {
+        ok: false,
+        error: 'RESET_STATE_SYNC_FAILED',
+        stateSyncPending: !outcome.terminalFailed,
+        terminalFailed: outcome.terminalFailed,
+        executionCompleted: true,
+        detail: outcome.detail,
+        partialResetFailures,
+        completed: false
+      };
+    } finally {
+      timerStopped = true;
+      if (renewTimer) clearInterval(renewTimer);
+      if (activeRenewal) {
+        await activeRenewal.catch(() => {});
+      }
+    }
   }
 
   async processPendingStateSyncs({ limit = 10 } = {}) {
-    const summary = { processed: 0, completed: 0, rescheduled: 0, failed: 0 };
+    const summary = { processed: 0, completed: 0, rescheduled: 0, failed: 0, leaseLost: 0, blocked: false, error: null };
     if (this.stateSyncRunning) return summary;
     if (typeof this.commandStore?.claimPendingStateSyncBatch !== 'function') return summary;
 
+    const { leaseMs, leaseSeconds } = this.getStateSyncLeaseConfig();
     this.stateSyncRunning = true;
     try {
-      const batch = await this.commandStore.claimPendingStateSyncBatch(this.instanceId, limit, 60);
+      let batch;
+      try {
+        batch = await this.commandStore.claimPendingStateSyncBatch(this.instanceId, limit, leaseSeconds, { leaseMs });
+        this.stateSyncBlockedReason = null;
+        this.missingAtomicRpcLogged = false;
+      } catch (claimErr) {
+        if (claimErr?.code === 'ATOMIC_STATE_SYNC_RPC_REQUIRED') {
+          this.stateSyncBlockedReason = claimErr.code;
+          summary.blocked = true;
+          summary.error = claimErr.code;
+          if (!this.missingAtomicRpcLogged) {
+            this.missingAtomicRpcLogged = true;
+            this.logger?.error?.('command_reset_atomic_rpc_missing', {
+              error: claimErr.message,
+              missingRpcs: claimErr.missingRpcs || []
+            });
+          }
+          return summary;
+        }
+        throw claimErr;
+      }
+
       if (!Array.isArray(batch) || batch.length === 0) return summary;
 
       for (const cmd of batch) {
@@ -481,47 +809,22 @@ class CommandBroker {
           ? syncMeta.pendingSteps
           : ALL_RESET_SYNC_STEPS;
 
-        const { partialResetFailures, remainingSteps } = await this.syncResetState(
-          wid,
+        const outcome = await this.executeLeasedResetSync({
+          workerId: wid,
+          commandId: cid,
           candidateStatus,
           statusSource,
-          cid,
-          { excludeCommandIds: [cid], steps }
-        );
-
-        if (partialResetFailures.length === 0) {
-          let finalized = false;
-          try {
-            if (typeof this.commandStore?.finalizeCompleted === 'function') {
-              finalized = await this.commandStore.finalizeCompleted(wid, cid, cmd.result, { leaseOwner: this.instanceId });
-            } else {
-              finalized = await this.commandStore.complete(wid, cid, cmd.result);
-            }
-          } catch (finErr) {
-            partialResetFailures.push({ step: 'commandStore.finalizeCompleted', error: finErr?.message || String(finErr) });
-          }
-
-          if (finalized) {
-            summary.completed += 1;
-            this.logger?.info?.('command_reset_state_sync_recovered', {
-              workerId: wid,
-              commandId: cid,
-              previousAttempts: Number(syncMeta.attempts || 0)
-            });
-            continue;
-          }
-          if (partialResetFailures.length === 0) {
-            partialResetFailures.push({ step: 'commandStore.finalizeCompleted', error: 'finalize_returned_false' });
-          }
-        }
-
-        const outcome = await this.scheduleResetStateSyncRetry(wid, cid, cmd.result, syncMeta, {
-          candidateStatus,
-          statusSource,
-          remainingSteps: remainingSteps.length > 0 ? remainingSteps : steps,
-          partialResetFailures
+          steps,
+          result: cmd.result,
+          existingSyncState: syncMeta,
+          fencingToken: syncMeta.fencingToken ?? null,
+          hasTwoPhaseStore: true,
+          isRecovery: true
         });
-        if (outcome.terminalFailed) summary.failed += 1;
+
+        if (outcome.completed) summary.completed += 1;
+        else if (outcome.leaseLost) summary.leaseLost += 1;
+        else if (outcome.terminalFailed) summary.failed += 1;
         else summary.rescheduled += 1;
       }
 
@@ -564,16 +867,48 @@ class CommandBroker {
     // Never mark a reset command terminally 'completed' before state sync succeeds.
     if (action === 'reset' && isSuccess) {
       const hasTwoPhaseStore = typeof this.commandStore?.recordExecutionCompleted === 'function';
+      const { leaseMs, leaseSeconds } = this.getStateSyncLeaseConfig();
       let execRec = null;
 
       if (hasTwoPhaseStore) {
-        execRec = await this.commandStore.recordExecutionCompleted(wid, cid, result, {
-          leaseOwner: this.instanceId,
-          leaseSeconds: 15,
-          candidateStatus,
-          statusSource: 'manager-command-poll',
-          pendingSteps: [...ALL_RESET_SYNC_STEPS]
-        });
+        try {
+          execRec = await this.commandStore.recordExecutionCompleted(wid, cid, result, {
+            leaseOwner: this.instanceId,
+            leaseSeconds,
+            leaseMs,
+            candidateStatus,
+            statusSource: 'manager-command-poll',
+            pendingSteps: [...ALL_RESET_SYNC_STEPS]
+          });
+        } catch (recErr) {
+          if (recErr?.code === 'ATOMIC_STATE_SYNC_RPC_REQUIRED') {
+            this.stateSyncBlockedReason = recErr.code;
+            if (!this.missingAtomicRpcLogged) {
+              this.missingAtomicRpcLogged = true;
+              this.logger?.error?.('command_reset_atomic_rpc_missing', {
+                error: recErr.message,
+                missingRpcs: recErr.missingRpcs || []
+              });
+            }
+            const failedResult = {
+              ...(result && typeof result === 'object' ? result : {}),
+              ok: false,
+              error: 'RESET_STATE_SYNC_FAILED',
+              atomicRpcRequired: true,
+              detail: recErr.message
+            };
+            if (pending && pending.workerId === wid && typeof pending.finish === 'function') {
+              pending.finish(failedResult);
+            }
+            return {
+              ok: false,
+              error: 'RESET_STATE_SYNC_FAILED',
+              atomicRpcRequired: true,
+              detail: recErr.message
+            };
+          }
+          throw recErr;
+        }
 
         if (execRec?.error === 'STATE_SYNC_IN_PROGRESS') {
           return {
@@ -606,102 +941,40 @@ class CommandBroker {
         }
       }
 
-      const { partialResetFailures, remainingSteps } = await this.syncResetState(
-        wid,
+      const outcome = await this.executeLeasedResetSync({
+        workerId: wid,
+        commandId: cid,
         candidateStatus,
-        'manager-command-poll',
-        cid,
-        { excludeCommandIds: cid ? [cid] : [] }
-      );
+        statusSource: 'manager-command-poll',
+        result,
+        existingSyncState: execRec?.command?.result?._stateSync,
+        fencingToken: execRec?.fencingToken ?? execRec?.command?.result?._stateSync?.fencingToken ?? null,
+        hasTwoPhaseStore,
+        isRecovery: false
+      });
 
-      if (partialResetFailures.length === 0) {
-        let finalized = false;
-        let finalizeError = null;
-        try {
-          finalized = typeof this.commandStore?.finalizeCompleted === 'function'
-            ? await this.commandStore.finalizeCompleted(wid, cid, result, { leaseOwner: this.instanceId })
-            : await this.commandStore.complete(wid, cid, result);
-        } catch (err) {
-          finalizeError = err;
-        }
-
-        if (finalizeError || (hasTwoPhaseStore && !finalized)) {
-          const finalizeFailure = [{
-            step: 'commandStore.finalizeCompleted',
-            error: finalizeError?.message || 'finalize_returned_false'
-          }];
-          const { detail, terminalFailed } = await this.scheduleResetStateSyncRetry(
-            wid,
-            cid,
-            result,
-            execRec?.command?.result?._stateSync,
-            {
-              candidateStatus,
-              statusSource: 'manager-command-poll',
-              remainingSteps: [],
-              partialResetFailures: finalizeFailure
-            }
-          );
-          const failedResult = {
-            ...(result && typeof result === 'object' ? result : {}),
-            ok: false,
-            error: 'RESET_STATE_SYNC_FAILED',
-            stateSyncPending: !terminalFailed,
-            executionCompleted: true,
-            detail,
-            partialResetFailures: finalizeFailure
-          };
-          if (pending && pending.workerId === wid && typeof pending.finish === 'function') {
-            pending.finish(failedResult);
-          }
-          return {
-            ok: false,
-            error: 'RESET_STATE_SYNC_FAILED',
-            stateSyncPending: !terminalFailed,
-            executionCompleted: true,
-            detail,
-            partialResetFailures: finalizeFailure,
-            completed: false
-          };
-        }
-
+      if (outcome.ok) {
         if (pending && pending.workerId === wid && typeof pending.finish === 'function') {
           pending.finish(result);
         }
-        return { ok: Boolean(finalized || pending) };
+        return { ok: Boolean(outcome.completed || pending) };
       }
 
-      const { detail, terminalFailed } = await this.scheduleResetStateSyncRetry(
-        wid,
-        cid,
-        result,
-        execRec?.command?.result?._stateSync,
-        {
-          candidateStatus,
-          statusSource: 'manager-command-poll',
-          remainingSteps,
-          partialResetFailures
-        }
-      );
       const failedResult = {
         ...(result && typeof result === 'object' ? result : {}),
         ok: false,
-        error: 'RESET_STATE_SYNC_FAILED',
-        stateSyncPending: !terminalFailed,
+        error: outcome.error || 'RESET_STATE_SYNC_FAILED',
+        ...(outcome.leaseLost ? { leaseLost: true, reason: outcome.reason } : {}),
+        ...(typeof outcome.stateSyncPending === 'boolean' ? { stateSyncPending: outcome.stateSyncPending } : {}),
         executionCompleted: true,
-        detail,
-        partialResetFailures
+        ...(outcome.detail ? { detail: outcome.detail } : {}),
+        ...(outcome.partialResetFailures ? { partialResetFailures: outcome.partialResetFailures } : {})
       };
       if (pending && pending.workerId === wid && typeof pending.finish === 'function') {
         pending.finish(failedResult);
       }
       return {
-        ok: false,
-        error: 'RESET_STATE_SYNC_FAILED',
-        stateSyncPending: !terminalFailed,
-        executionCompleted: true,
-        detail,
-        partialResetFailures,
+        ...failedResult,
         completed: false
       };
     }

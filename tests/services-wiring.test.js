@@ -11,6 +11,7 @@ const AsyncKeyLock = require('../src/services/async-key-lock');
 const { AccessControl } = require('../src/services/access-control');
 const { Link4mService } = require('../src/services/link4m-service');
 const CommandBroker = require('../src/services/command-broker');
+const SupabaseCommandStore = require('../src/storage/supabase-command-store');
 const FleetOperations = require('../src/services/fleet-operations');
 const { EntitlementService, isWorkerStopConfirmed } = require('../src/services/entitlement-service');
 const { createApp } = require('../src/http/app');
@@ -1533,6 +1534,663 @@ async function testResetTwoPhaseExecutionAndIndependentRetry() {
   console.log('✅ 9. Two-Phase Polling RESET & Independent Retry verified.');
 }
 
+function createInMemoryPostgresCommandDb() {
+  const rows = new Map();
+  const rpcCalls = [];
+
+  function cloneSync(row) {
+    return row ? JSON.parse(JSON.stringify(row)) : null;
+  }
+
+  function makeClient() {
+    return {
+      async rpc(fnName, params = {}) {
+        rpcCalls.push({ fnName, params: JSON.parse(JSON.stringify(params)) });
+        const nowMs = Date.now();
+        const nowIso = new Date(nowMs).toISOString();
+
+        if (fnName === 'manager_record_command_execution') {
+          const row = rows.get(params.p_command_id);
+          if (!row || row.worker_id !== params.p_worker_id) {
+            return { data: { ok: false, reason: 'not_found' }, error: null };
+          }
+          if (row.status === 'completed') {
+            return { data: { ok: true, alreadyCompleted: true, status: 'completed', command: cloneSync(row) }, error: null };
+          }
+          if (row.status === 'state_sync_failed') {
+            return { data: { ok: false, reason: 'state_sync_failed', status: 'state_sync_failed' }, error: null };
+          }
+          if (!['delivered', 'queued', 'execution_completed', 'state_sync_pending'].includes(row.status)) {
+            return { data: { ok: false, reason: 'invalid_status', status: row.status }, error: null };
+          }
+          const existingSync = row.result?._stateSync || {};
+          const existingLeaseUntil = existingSync.leaseUntil ? Date.parse(existingSync.leaseUntil) : null;
+          if (
+            ['execution_completed', 'state_sync_pending'].includes(row.status) &&
+            existingSync.leaseOwner &&
+            existingLeaseUntil > nowMs &&
+            (!params.p_lease_owner || existingSync.leaseOwner !== params.p_lease_owner)
+          ) {
+            return {
+              data: {
+                ok: false,
+                reason: 'state_sync_in_progress',
+                status: row.status,
+                fencingToken: Number(existingSync.fencingToken || 0)
+              },
+              error: null
+            };
+          }
+          const leaseSecs = Math.max(1, Math.min(3600, Number(params.p_lease_seconds) || 60));
+          const leaseUntil = params.p_lease_owner ? new Date(nowMs + leaseSecs * 1000).toISOString() : null;
+          const nextToken = params.p_lease_owner
+            ? Number(existingSync.fencingToken || 0) + 1
+            : Number(existingSync.fencingToken || 0);
+          const incomingSync = params.p_result?._stateSync || {};
+          const cleanBase = { ...(params.p_result || row.result || {}) };
+          delete cleanBase._stateSync;
+          row.status = 'execution_completed';
+          row.completed_at = null;
+          row.result = {
+            ...cleanBase,
+            _stateSync: {
+              ...existingSync,
+              ...incomingSync,
+              pending: true,
+              executionCompleted: true,
+              attempts: Number(existingSync.attempts ?? incomingSync.attempts ?? 0),
+              leaseOwner: params.p_lease_owner || null,
+              leaseUntil,
+              fencingToken: nextToken,
+              updatedAt: nowIso
+            }
+          };
+          return {
+            data: {
+              ok: true,
+              alreadyCompleted: false,
+              status: 'execution_completed',
+              fencingToken: nextToken,
+              leaseUntil,
+              command: cloneSync(row)
+            },
+            error: null
+          };
+        }
+
+        if (fnName === 'manager_renew_command_sync_lease') {
+          const row = rows.get(params.p_command_id);
+          if (!params.p_lease_owner) return { data: { ok: false, lost: true, reason: 'invalid_lease_owner' }, error: null };
+          if (!row || row.worker_id !== params.p_worker_id) return { data: { ok: false, lost: true, reason: 'not_found' }, error: null };
+          if (!['execution_completed', 'state_sync_pending'].includes(row.status)) {
+            return { data: { ok: false, lost: true, reason: 'invalid_status', status: row.status }, error: null };
+          }
+          const sync = row.result?._stateSync || {};
+          const token = Number(sync.fencingToken || 0);
+          const leaseUntilMs = sync.leaseUntil ? Date.parse(sync.leaseUntil) : null;
+          if ((sync.leaseOwner || null) !== params.p_lease_owner) {
+            return { data: { ok: false, lost: true, reason: 'lease_owner_mismatch', currentOwner: sync.leaseOwner || null, currentFencingToken: token }, error: null };
+          }
+          if (params.p_fencing_token !== null && params.p_fencing_token !== undefined && token !== Number(params.p_fencing_token)) {
+            return { data: { ok: false, lost: true, reason: 'fencing_token_mismatch', currentOwner: sync.leaseOwner, currentFencingToken: token }, error: null };
+          }
+          if (!leaseUntilMs || leaseUntilMs <= nowMs) {
+            return { data: { ok: false, lost: true, reason: 'lease_expired', currentOwner: sync.leaseOwner, currentFencingToken: token }, error: null };
+          }
+          const leaseSecs = Math.max(1, Math.min(3600, Number(params.p_lease_seconds) || 60));
+          const nextLeaseUntil = new Date(nowMs + leaseSecs * 1000).toISOString();
+          row.result._stateSync = { ...sync, leaseUntil: nextLeaseUntil, updatedAt: nowIso };
+          return {
+            data: { ok: true, lost: false, leaseOwner: sync.leaseOwner, leaseUntil: nextLeaseUntil, fencingToken: token },
+            error: null
+          };
+        }
+
+        if (fnName === 'manager_verify_command_sync_lease') {
+          const row = rows.get(params.p_command_id);
+          if (!params.p_lease_owner) return { data: { ok: false, held: false, reason: 'invalid_lease_owner' }, error: null };
+          if (!row || row.worker_id !== params.p_worker_id) return { data: { ok: false, held: false, reason: 'not_found' }, error: null };
+          if (!['execution_completed', 'state_sync_pending'].includes(row.status)) {
+            return { data: { ok: false, held: false, reason: 'invalid_status', status: row.status }, error: null };
+          }
+          const sync = row.result?._stateSync || {};
+          const token = Number(sync.fencingToken || 0);
+          const leaseUntilMs = sync.leaseUntil ? Date.parse(sync.leaseUntil) : null;
+          if ((sync.leaseOwner || null) !== params.p_lease_owner) {
+            return { data: { ok: false, held: false, reason: 'lease_owner_mismatch', currentOwner: sync.leaseOwner || null, currentFencingToken: token }, error: null };
+          }
+          if (params.p_fencing_token !== null && params.p_fencing_token !== undefined && token !== Number(params.p_fencing_token)) {
+            return { data: { ok: false, held: false, reason: 'fencing_token_mismatch', currentOwner: sync.leaseOwner, currentFencingToken: token }, error: null };
+          }
+          if (!leaseUntilMs || leaseUntilMs <= nowMs) {
+            return { data: { ok: false, held: false, reason: 'lease_expired', currentOwner: sync.leaseOwner, currentFencingToken: token }, error: null };
+          }
+          return {
+            data: { ok: true, held: true, leaseOwner: sync.leaseOwner, leaseUntil: sync.leaseUntil, fencingToken: token },
+            error: null
+          };
+        }
+
+        if (fnName === 'manager_mark_command_sync_pending') {
+          const row = rows.get(params.p_command_id);
+          if (!row || row.worker_id !== params.p_worker_id) return { data: false, error: null };
+          if (!['queued', 'delivered', 'execution_completed', 'state_sync_pending'].includes(row.status)) {
+            return { data: false, error: null };
+          }
+          const sync = row.result?._stateSync || {};
+          const owner = sync.leaseOwner || null;
+          const token = Number(sync.fencingToken || 0);
+          if (params.p_lease_owner !== null && params.p_lease_owner !== undefined && owner && owner !== params.p_lease_owner) {
+            return { data: false, error: null };
+          }
+          if (params.p_fencing_token !== null && params.p_fencing_token !== undefined && token > 0 && token !== Number(params.p_fencing_token)) {
+            return { data: false, error: null };
+          }
+          const nextSync = {
+            ...(params.p_sync_state || {}),
+            fencingToken: Math.max(token, Number(params.p_sync_state?.fencingToken || 0), Number(params.p_fencing_token || 0))
+          };
+          row.status = params.p_terminal_failed ? 'state_sync_failed' : 'state_sync_pending';
+          row.completed_at = null;
+          row.result = { ...(row.result || {}), _stateSync: nextSync };
+          return { data: true, error: null };
+        }
+
+        if (fnName === 'manager_finalize_command_sync') {
+          const row = rows.get(params.p_command_id);
+          if (!row || row.worker_id !== params.p_worker_id) return { data: false, error: null };
+          if (row.status === 'completed') return { data: true, error: null };
+          if (!['queued', 'delivered', 'execution_completed', 'state_sync_pending'].includes(row.status)) {
+            return { data: false, error: null };
+          }
+          const sync = row.result?._stateSync || {};
+          const owner = sync.leaseOwner || null;
+          const token = Number(sync.fencingToken || 0);
+          if (params.p_lease_owner !== null && params.p_lease_owner !== undefined && owner && owner !== params.p_lease_owner) {
+            return { data: false, error: null };
+          }
+          if (params.p_fencing_token !== null && params.p_fencing_token !== undefined && token > 0 && token !== Number(params.p_fencing_token)) {
+            return { data: false, error: null };
+          }
+          const base = { ...(params.p_result || row.result || {}) };
+          delete base._stateSync;
+          row.status = 'completed';
+          row.result = base;
+          row.completed_at = nowIso;
+          return { data: true, error: null };
+        }
+
+        if (fnName === 'manager_claim_pending_command_syncs') {
+          if (!params.p_lease_owner) return { data: [], error: null };
+          const limit = Math.max(1, Math.min(100, Number(params.p_limit) || 10));
+          const leaseSecs = Math.max(1, Math.min(3600, Number(params.p_lease_seconds) || 60));
+          const leaseUntil = new Date(nowMs + leaseSecs * 1000).toISOString();
+          const claimed = [];
+          const sorted = [...rows.values()].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+          for (const row of sorted) {
+            if (claimed.length >= limit) break;
+            if (!['state_sync_pending', 'execution_completed'].includes(row.status)) continue;
+            const sync = row.result?._stateSync || {};
+            if (sync.nextRetryAt && Date.parse(sync.nextRetryAt) > nowMs) continue;
+            if (sync.leaseUntil && Date.parse(sync.leaseUntil) > nowMs) continue;
+            const nextToken = Number(sync.fencingToken || 0) + 1;
+            row.status = 'state_sync_pending';
+            row.result = {
+              ...(row.result || {}),
+              _stateSync: {
+                ...sync,
+                pending: true,
+                leaseOwner: params.p_lease_owner,
+                leaseUntil,
+                fencingToken: nextToken,
+                updatedAt: nowIso
+              }
+            };
+            claimed.push(cloneSync(row));
+          }
+          return { data: claimed, error: null };
+        }
+
+        return { data: null, error: { code: 'PGRST202', message: `Could not find the function public.${fnName}` } };
+      },
+      from(table) {
+        const filters = {};
+        let inVals = null;
+        let notExcluded = new Set();
+        let mode = 'select';
+        const chain = {
+          select: () => chain,
+          delete: () => { mode = 'delete'; return chain; },
+          eq: (c, v) => { filters[c] = v; return chain; },
+          in: (_c, vals) => { inVals = vals; return chain; },
+          not: (_c, _op, val) => {
+            const inner = String(val || '').replace(/^\(|\)$/g, '');
+            for (const part of inner.split(',')) {
+              const cleaned = part.trim().replace(/^"|"$/g, '');
+              if (cleaned) notExcluded.add(cleaned);
+            }
+            return chain;
+          },
+          limit: () => chain,
+          maybeSingle: async () => {
+            if (table !== 'manager_commands') return { data: null, error: null };
+            const found = [...rows.values()].find((r) =>
+              (!filters.command_id || r.command_id === filters.command_id) &&
+              (!filters.worker_id || r.worker_id === filters.worker_id)
+            );
+            return { data: cloneSync(found), error: null };
+          },
+          then(resolve, reject) {
+            Promise.resolve().then(() => {
+              if (mode === 'delete' && table === 'manager_commands') {
+                for (const [id, r] of rows.entries()) {
+                  if (filters.worker_id && r.worker_id !== filters.worker_id) continue;
+                  if (inVals && !inVals.includes(r.status)) continue;
+                  if (notExcluded.has(id)) continue;
+                  rows.delete(id);
+                }
+                return { data: [], error: null };
+              }
+              return { data: [], error: null };
+            }).then(resolve, reject);
+          }
+        };
+        return chain;
+      }
+    };
+  }
+
+  return { rows, rpcCalls, makeClient };
+}
+
+async function testLongRunningResetLeaseRenewalBlocksConcurrentSteal() {
+  console.log('10. Testing Long-Running RESET Lease Renewal & Multi-Instance Exclusion...');
+  const db = createInMemoryPostgresCommandDb();
+  const cmdId = '44444444-4444-4444-8444-444444444444';
+  db.rows.set(cmdId, {
+    command_id: cmdId,
+    worker_id: 'bot-lease-long',
+    action: 'reset',
+    status: 'delivered',
+    result: null,
+    created_at: new Date().toISOString(),
+    completed_at: null
+  });
+  db.rows.set('44444444-4444-4444-8444-000000000001', {
+    command_id: '44444444-4444-4444-8444-000000000001',
+    worker_id: 'bot-lease-long',
+    action: 'status',
+    status: 'queued',
+    created_at: new Date().toISOString()
+  });
+
+  const storeA = new SupabaseCommandStore(db.makeClient());
+  const storeB = new SupabaseCommandStore(db.makeClient());
+
+  let resetCallsA = 0;
+  let resetCallsB = 0;
+  let concurrentStealClaims = 0;
+
+  const brokerB = new CommandBroker({
+    registry: {
+      resetData: async () => { resetCallsB += 1; },
+      updateStatus: async () => {}
+    },
+    commandStore: storeB,
+    config: { stateSyncLeaseSeconds: 1 },
+    logger: createSilentLogger()
+  });
+
+  const brokerA = new CommandBroker({
+    registry: {
+      resetData: async () => {
+        resetCallsA += 1;
+        // Wait 1450ms (> 1s lease!): active lease renewal every ~333ms keeps lease alive so brokerB cannot steal!
+        await new Promise((r) => setTimeout(r, 750));
+        const midSteal1 = await brokerB.processPendingStateSyncs();
+        concurrentStealClaims += midSteal1.processed;
+        await new Promise((r) => setTimeout(r, 700));
+        const midSteal2 = await brokerB.processPendingStateSyncs();
+        concurrentStealClaims += midSteal2.processed;
+      },
+      updateStatus: async () => {}
+    },
+    commandStore: storeA,
+    config: { stateSyncLeaseSeconds: 1 },
+    logger: createSilentLogger()
+  });
+
+  const outcome = await brokerA.reportResult('bot-lease-long', cmdId, { ok: true, state: 'stopped', connected: false });
+  assert.strictEqual(outcome.ok, true, 'Slow reset with active lease renewal must complete cleanly');
+  assert.strictEqual(concurrentStealClaims, 0, 'Broker B must NEVER steal an actively renewed lease');
+  assert.strictEqual(resetCallsA, 1);
+  assert.strictEqual(resetCallsB, 0);
+
+  const renewCalls = db.rpcCalls.filter((c) => c.fnName === 'manager_renew_command_sync_lease');
+  const verifyCalls = db.rpcCalls.filter((c) => c.fnName === 'manager_verify_command_sync_lease');
+  assert.ok(renewCalls.length >= 2, `Expected >=2 background lease renewals during 1.45s sync, got ${renewCalls.length}`);
+  assert.ok(verifyCalls.length >= 4, `Expected pre-step & pre-write lease checks (>=4), got ${verifyCalls.length}`);
+  assert.strictEqual(db.rows.get(cmdId).status, 'completed');
+  assert.strictEqual(db.rows.has('44444444-4444-4444-8444-000000000001'), false, 'Queued command cleared cleanly');
+
+  console.log('✅ 10. Long-Running RESET Lease Renewal & Multi-Instance Exclusion verified.');
+}
+
+async function testStalledLeaseExpiryTakeoverAndFencingRejection() {
+  console.log('11. Testing Stalled Holder Takeover After Lease Expiry, Pre-Step Abort & Fencing Rejection...');
+  const db = createInMemoryPostgresCommandDb();
+  const cmdId = '55555555-5555-4555-8555-555555555555';
+  db.rows.set(cmdId, {
+    command_id: cmdId,
+    worker_id: 'bot-lease-stale',
+    action: 'reset',
+    status: 'delivered',
+    result: null,
+    created_at: new Date().toISOString(),
+    completed_at: null
+  });
+
+  const rawStoreA = new SupabaseCommandStore(db.makeClient());
+  // Simulate Manager A experiencing a renewal partition / freeze while its resetData stalls > lease
+  const partitionedStoreA = Object.create(rawStoreA);
+  partitionedStoreA.renewStateSyncLease = async () => ({ ok: false, lost: true, reason: 'partitioned_timeout' });
+
+  const storeB = new SupabaseCommandStore(db.makeClient());
+
+  let clearWorkerCallsA = 0;
+  let updateStatusCallsA = 0;
+  let resetCallsB = 0;
+  const errorLogsA = [];
+
+  const brokerB = new CommandBroker({
+    registry: {
+      resetData: async () => { resetCallsB += 1; },
+      updateStatus: async () => {}
+    },
+    commandStore: {
+      claimPendingStateSyncBatch: (...args) => storeB.claimPendingStateSyncBatch(...args),
+      renewStateSyncLease: (...args) => storeB.renewStateSyncLease(...args),
+      verifyStateSyncLease: (...args) => storeB.verifyStateSyncLease(...args),
+      clearWorker: (...args) => storeB.clearWorker(...args),
+      finalizeCompleted: (...args) => storeB.finalizeCompleted(...args),
+      markStateSyncPending: (...args) => storeB.markStateSyncPending(...args)
+    },
+    config: { stateSyncLeaseSeconds: 1 },
+    logger: createSilentLogger()
+  });
+
+  let clearCalledWrapped = false;
+  const wrappedStoreA = {
+    get: (...args) => rawStoreA.get(...args),
+    recordExecutionCompleted: (...args) => rawStoreA.recordExecutionCompleted(...args),
+    renewStateSyncLease: (...args) => partitionedStoreA.renewStateSyncLease(...args),
+    verifyStateSyncLease: (...args) => rawStoreA.verifyStateSyncLease(...args),
+    clearWorker: async (...args) => {
+      clearCalledWrapped = true;
+      clearWorkerCallsA += 1;
+      return rawStoreA.clearWorker(...args);
+    },
+    finalizeCompleted: (...args) => rawStoreA.finalizeCompleted(...args),
+    markStateSyncPending: (...args) => rawStoreA.markStateSyncPending(...args)
+  };
+
+  let brokerBOutcome = null;
+  const brokerA = new CommandBroker({
+    registry: {
+      resetData: async () => {
+        // Stall past the 1s lease so Manager B safely takes over mid-flight
+        await new Promise((r) => setTimeout(r, 1200));
+        brokerBOutcome = await brokerB.processPendingStateSyncs();
+      },
+      updateStatus: async () => { updateStatusCallsA += 1; }
+    },
+    commandStore: wrappedStoreA,
+    config: { stateSyncLeaseSeconds: 1 },
+    logger: {
+      info: () => {},
+      warn: () => {},
+      error: (msg, meta) => errorLogsA.push({ msg, meta })
+    }
+  });
+
+  const outcomeA = await brokerA.reportResult('bot-lease-stale', cmdId, { ok: true, state: 'stopped' });
+  assert.strictEqual(brokerBOutcome?.completed, 1, 'Manager B must reclaim & complete after Manager A lease expires');
+  assert.strictEqual(resetCallsB, 1);
+  assert.strictEqual(outcomeA.ok, false);
+  assert.strictEqual(outcomeA.error, 'STATE_SYNC_LEASE_LOST');
+  assert.strictEqual(outcomeA.leaseLost, true);
+  assert.strictEqual(clearCalledWrapped, false, 'Stalled Manager A MUST abort BEFORE clearWorker after lease loss');
+  assert.strictEqual(clearWorkerCallsA, 0);
+  assert.strictEqual(updateStatusCallsA, 0);
+  assert.ok(errorLogsA.some((e) => e.msg === 'command_reset_lease_lost'));
+  assert.strictEqual(db.rows.get(cmdId).status, 'completed');
+
+  // Verify fencing token rejection if stalled Manager A directly tries stale finalize or markPending
+  const rowStaleTest = '55555555-5555-4555-8555-666666666666';
+  db.rows.set(rowStaleTest, {
+    command_id: rowStaleTest,
+    worker_id: 'bot-fence',
+    action: 'reset',
+    status: 'state_sync_pending',
+    result: {
+      ok: true,
+      _stateSync: {
+        pending: true,
+        leaseOwner: 'mgr_new_owner',
+        leaseUntil: new Date(Date.now() + 60000).toISOString(),
+        fencingToken: 2
+      }
+    },
+    created_at: new Date().toISOString(),
+    completed_at: null
+  });
+  const staleFinalize = await storeB.finalizeCompleted('bot-fence', rowStaleTest, { ok: true }, { leaseOwner: 'mgr_old_owner', fencingToken: 1 });
+  assert.strictEqual(staleFinalize, false, 'Stale fencingToken/owner finalizeCompleted MUST be rejected');
+  const staleMark = await storeB.markStateSyncPending('bot-fence', rowStaleTest, { leaseOwner: 'mgr_old_owner', fencingToken: 1, syncState: { pending: true } });
+  assert.strictEqual(staleMark, false, 'Stale fencingToken/owner markStateSyncPending MUST be rejected');
+
+  // Concurrent simultaneous race on due pending sync: only ONE broker claims & executes
+  const raceCmdId = '55555555-5555-4555-8555-777777777777';
+  db.rows.set(raceCmdId, {
+    command_id: raceCmdId,
+    worker_id: 'bot-race',
+    action: 'reset',
+    status: 'state_sync_pending',
+    result: {
+      ok: true,
+      _stateSync: {
+        pending: true,
+        leaseOwner: null,
+        leaseUntil: null,
+        nextRetryAt: new Date(Date.now() - 1000).toISOString(),
+        fencingToken: 1,
+        pendingSteps: ['registry.resetData', 'commandStore.clearWorker', 'registry.updateStatus']
+      }
+    },
+    created_at: new Date().toISOString(),
+    completed_at: null
+  });
+  let totalRaceResets = 0;
+  const raceBroker1 = new CommandBroker({
+    registry: { resetData: async () => { totalRaceResets += 1; }, updateStatus: async () => {} },
+    commandStore: new SupabaseCommandStore(db.makeClient()),
+    logger: createSilentLogger()
+  });
+  const raceBroker2 = new CommandBroker({
+    registry: { resetData: async () => { totalRaceResets += 1; }, updateStatus: async () => {} },
+    commandStore: new SupabaseCommandStore(db.makeClient()),
+    logger: createSilentLogger()
+  });
+  const [race1, race2] = await Promise.all([
+    raceBroker1.processPendingStateSyncs(),
+    raceBroker2.processPendingStateSyncs()
+  ]);
+  assert.strictEqual(race1.completed + race2.completed, 1, 'Exactly one instance must claim and finish concurrent pending sync');
+  assert.strictEqual(totalRaceResets, 1);
+
+  console.log('✅ 11. Stalled Lease Expiry Takeover, Fencing & Concurrent Race verified.');
+}
+
+async function testManagerRestartMidFlightRecovery() {
+  console.log('12. Testing Manager Restart Recovery of Expired Mid-Flight Execution...');
+  const db = createInMemoryPostgresCommandDb();
+  const cmdId = '66666666-6666-4666-8666-666666666666';
+  db.rows.set(cmdId, {
+    command_id: cmdId,
+    worker_id: 'bot-restart',
+    action: 'reset',
+    status: 'execution_completed',
+    result: {
+      ok: true,
+      state: 'stopped',
+      _stateSync: {
+        pending: true,
+        executionCompleted: true,
+        attempts: 0,
+        fencingToken: 1,
+        leaseOwner: 'mgr_crashed_old',
+        leaseUntil: new Date(Date.now() - 10000).toISOString(),
+        nextRetryAt: new Date(Date.now() - 10000).toISOString(),
+        candidateStatus: { state: 'stopped', online: false },
+        statusSource: 'manager-command-poll',
+        pendingSteps: ['registry.resetData', 'commandStore.clearWorker', 'registry.updateStatus']
+      }
+    },
+    created_at: new Date(Date.now() - 30000).toISOString(),
+    completed_at: null
+  });
+
+  const restartedStore = new SupabaseCommandStore(db.makeClient());
+  let resetDone = false;
+  let statusDone = false;
+  const restartedBroker = new CommandBroker({
+    registry: {
+      resetData: async (wid) => { assert.strictEqual(wid, 'bot-restart'); resetDone = true; },
+      updateStatus: async (wid) => { assert.strictEqual(wid, 'bot-restart'); statusDone = true; }
+    },
+    commandStore: restartedStore,
+    logger: createSilentLogger()
+  });
+
+  await restartedBroker.processOutboxBatch();
+  assert.strictEqual(resetDone, true);
+  assert.strictEqual(statusDone, true);
+  const finalRow = db.rows.get(cmdId);
+  assert.strictEqual(finalRow.status, 'completed');
+  assert.ok(finalRow.completed_at);
+  assert.strictEqual(finalRow.result._stateSync, undefined);
+
+  console.log('✅ 12. Manager Restart Mid-Flight Recovery verified.');
+}
+
+async function testFailClosedMissingAtomicRpcAndHealthReadiness() {
+  console.log('13. Testing Fail-Closed Atomic RPC Enforcement & /health /ready Degraded Surface...');
+  let fallbackTableReads = 0;
+  const missingRpcClient = {
+    adapter: {
+      url: 'https://supabase.test',
+      isEnabled: () => true,
+      getHeaders: () => ({}),
+      fetchWithRetry: async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ paths: {} })
+      })
+    },
+    async rpc(fnName) {
+      return { data: null, error: { code: 'PGRST202', message: `Could not find ${fnName}` } };
+    },
+    from: () => ({
+      select: () => {
+        fallbackTableReads += 1;
+        return {
+          limit: async () => ({ data: [], error: null }),
+          eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }),
+          in: () => ({
+            lte: async () => ({ data: [], error: null }),
+            order: () => ({ limit: async () => ({ data: [], error: null }) })
+          }),
+          lt: async () => ({ data: [], error: null })
+        };
+      },
+      update: () => ({
+        in: () => ({ lte: async () => ({ data: [], error: null }) })
+      }),
+      delete: () => ({
+        in: () => ({ lt: async () => ({ data: [], error: null }) }),
+        lt: async () => ({ data: [], error: null })
+      })
+    })
+  };
+
+  const errLogs = [];
+  const origConsoleErr = console.error;
+  console.error = () => {};
+  const prodStore = new SupabaseCommandStore(missingRpcClient);
+  try {
+    await prodStore.initialize();
+  } finally {
+    console.error = origConsoleErr;
+  }
+
+  const broker = new CommandBroker({
+    registry: { resetData: async () => {}, updateStatus: async () => {} },
+    commandStore: prodStore,
+    logger: {
+      info: () => {},
+      warn: () => {},
+      error: (msg, meta) => errLogs.push({ msg, meta })
+    }
+  });
+
+  // Two background ticks must both fail closed without querying/updating non-atomically, logging once
+  const tick1 = await broker.processPendingStateSyncs();
+  const tick2 = await broker.processPendingStateSyncs();
+  assert.strictEqual(tick1.blocked, true);
+  assert.strictEqual(tick1.error, 'ATOMIC_STATE_SYNC_RPC_REQUIRED');
+  assert.strictEqual(tick2.blocked, true);
+  assert.strictEqual(fallbackTableReads, 1, 'Only initial limit(0) ping allowed; NO fallback SELECT polling');
+  assert.strictEqual(
+    errLogs.filter((e) => e.msg === 'command_reset_atomic_rpc_missing').length,
+    1,
+    'Missing atomic RPC error log must not spam on repeated ticks'
+  );
+
+  // /health and /ready surface degraded state cleanly
+  const app = createApp({
+    store: { adapter: { testConnection: async () => ({ ok: true }) } },
+    registry: { store: {} },
+    broker,
+    commandStore: prodStore,
+    config: { discordToken: '' }
+  });
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, resolve));
+  try {
+    const port = server.address().port;
+    const hRes = await fetch(`http://127.0.0.1:${port}/health`);
+    const hJson = await hRes.json();
+    assert.strictEqual(hRes.status, 200);
+    assert.strictEqual(hJson.status, 'degraded');
+    assert.strictEqual(hJson.degraded, true);
+    assert.strictEqual(hJson.checks.commandSyncRpc.ok, false);
+    assert.strictEqual(hJson.checks.commandSyncRpc.retryEnabled, false);
+    assert.ok(hJson.warnings.some((w) => w.startsWith('command_sync_rpc_missing:')));
+
+    const rRes = await fetch(`http://127.0.0.1:${port}/ready`);
+    const rJson = await rRes.json();
+    assert.strictEqual(rRes.status, 200);
+    assert.strictEqual(rJson.status, 'degraded');
+    assert.strictEqual(rJson.degraded, true);
+    assert.strictEqual(rJson.checks.commandSyncRpc.ok, false);
+    assert.ok(rJson.warnings.some((w) => w.startsWith('command_sync_rpc_missing:')));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  console.log('✅ 13. Fail-Closed Atomic RPC Enforcement & Health/Readiness verified.');
+}
+
 let completedAll = false;
 process.on('beforeExit', (code) => {
   if (code === 0 && !completedAll) {
@@ -1552,6 +2210,10 @@ async function runTests() {
   await testLink4mInitFailureDegradedVisibility();
   await testCommandResetErrorVisibility();
   await testResetTwoPhaseExecutionAndIndependentRetry();
+  await testLongRunningResetLeaseRenewalBlocksConcurrentSteal();
+  await testStalledLeaseExpiryTakeoverAndFencingRejection();
+  await testManagerRestartMidFlightRecovery();
+  await testFailClosedMissingAtomicRpcAndHealthReadiness();
   completedAll = true;
   console.log('🎉 ALL MANAGER SERVICES WIRING TESTS PASSED 100%!');
 }

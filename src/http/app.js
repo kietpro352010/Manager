@@ -26,6 +26,7 @@ function createApp({
   link4mService,
   registry,
   broker,
+  commandStore = null,
   workerStore,
   fleetOperations,
   adminNotifier,
@@ -205,23 +206,41 @@ function createApp({
     return res.type('html').send(PUBLIC_LOGIN_HTML);
   });
 
-  // 6.1 Liveness Probe (process health, uptime, memory, optional degraded warnings)
-  app.get('/health', (_req, res) => {
-    const memory = process.memoryUsage();
+  function getDegradedChecks() {
     const link4mHealth = (link4mService && typeof link4mService.health === 'function')
       ? link4mService.health()
       : { ok: true, status: 'not_configured', initialized: false, degraded: false, error: null };
+    const effectiveCommandStore = commandStore || broker?.commandStore || null;
+    const commandSyncHealth = (effectiveCommandStore && typeof effectiveCommandStore.health === 'function')
+      ? effectiveCommandStore.health()
+      : { ok: true, status: 'not_configured', degraded: false, rpcVerified: false, retryEnabled: true, missingRpcs: [], error: null };
+
     const warnings = [];
     if (link4mHealth.degraded) {
       warnings.push(`link4m_degraded:${link4mHealth.error || 'unknown_error'}`);
     }
+    if (commandSyncHealth.degraded) {
+      const detail = Array.isArray(commandSyncHealth.missingRpcs) && commandSyncHealth.missingRpcs.length > 0
+        ? commandSyncHealth.missingRpcs.join(',')
+        : (commandSyncHealth.error || 'ATOMIC_STATE_SYNC_RPC_REQUIRED');
+      warnings.push(`command_sync_rpc_missing:${detail}`);
+    }
+    const degraded = Boolean(link4mHealth.degraded || commandSyncHealth.degraded);
+    return { link4mHealth, commandSyncHealth, warnings, degraded };
+  }
+
+  // 6.1 Liveness Probe (process health, uptime, memory, optional degraded warnings)
+  app.get('/health', (_req, res) => {
+    const memory = process.memoryUsage();
+    const { link4mHealth, commandSyncHealth, warnings, degraded } = getDegradedChecks();
     return res.json({
       ok: true,
-      degraded: Boolean(link4mHealth.degraded),
+      degraded,
       service: 'KingMC AFK Bot Cloud 24/7',
-      status: link4mHealth.degraded ? 'degraded' : 'healthy',
+      status: degraded ? 'degraded' : 'healthy',
       checks: {
-        link4m: link4mHealth
+        link4m: link4mHealth,
+        commandSyncRpc: commandSyncHealth
       },
       warnings,
       uptime: Math.floor(process.uptime()),
@@ -256,29 +275,23 @@ function createApp({
       discordOk = isDiscordReady;
     }
 
-    const link4mHealth = (link4mService && typeof link4mService.health === 'function')
-      ? link4mService.health()
-      : { ok: true, status: 'not_configured', initialized: false, degraded: false, error: null };
-    const warnings = [];
-    if (link4mHealth.degraded) {
-      warnings.push(`link4m_degraded:${link4mHealth.error || 'unknown_error'}`);
-    }
-
+    const { link4mHealth, commandSyncHealth, warnings, degraded } = getDegradedChecks();
     const isReady = dbOk && discordOk;
     const statusCode = isReady ? 200 : 503;
     const readinessStatus = !isReady
       ? 'not_ready'
-      : (link4mHealth.degraded ? 'degraded' : 'ready');
+      : (degraded ? 'degraded' : 'ready');
 
     return res.status(statusCode).json({
       ok: isReady,
-      degraded: Boolean(link4mHealth.degraded),
+      degraded,
       status: readinessStatus,
       service: 'KingMC AFK Bot Cloud 24/7',
       checks: {
         database: { ok: dbOk, latencyMs: dbLatencyMs },
         discord: { status: discordStatus, ok: discordOk },
-        link4m: link4mHealth
+        link4m: link4mHealth,
+        commandSyncRpc: commandSyncHealth
       },
       warnings,
       time: new Date().toISOString()

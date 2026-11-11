@@ -64,6 +64,14 @@ async function main() {
   await store.initialize();
   await accessStore.initialize();
   await commandStore.initialize();
+  const initialCommandSyncHealth = typeof commandStore.health === 'function' ? commandStore.health() : null;
+  if (initialCommandSyncHealth?.degraded) {
+    logger.error('command_reset_atomic_rpc_missing', {
+      missingRpcs: initialCommandSyncHealth.missingRpcs,
+      error: initialCommandSyncHealth.error,
+      message: initialCommandSyncHealth.message
+    });
+  }
 
   // 2. Dynamic Runtime Settings
   const managerRuntimeSettings = new ManagerRuntimeSettings({
@@ -190,6 +198,7 @@ async function main() {
     link4mService,
     registry,
     broker,
+    commandStore,
     workerStore: store,
     fleetOperations,
     adminNotifier,
