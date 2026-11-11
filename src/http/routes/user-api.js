@@ -655,6 +655,22 @@ function createUserApi({
         details: { result: result?.result || 'dispatched' }
       });
 
+      if (result?.result && typeof result.result === 'object' && result.result.ok === false) {
+        const reason = result.result.detail || result.result.error || 'UNKNOWN_ERROR';
+        logger?.error?.('Bot action state sync or execution failed', {
+          botId: worker.workerId,
+          action,
+          error: result.result.error || null,
+          detail: result.result.detail || null
+        });
+        return res.status(500).json({
+          ok: false,
+          error: `Thực thi lệnh ${action} không hoàn tất: ${reason}`,
+          code: result.result.error || null,
+          result: result.result
+        });
+      }
+
       return res.json({
         ok: true,
         message: `Đã gửi lệnh ${action} tới Bot #${worker.botNumber || worker.workerId}.`,

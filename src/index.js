@@ -129,7 +129,10 @@ async function main() {
   const entitlementService = new EntitlementService({ store: accessStore, registry, accessControl, userLock });
   const link4mService = new Link4mService({ store: accessStore, accessControl, userLock, config: runtimeConfig, logger });
   await link4mService.initialize().catch((err) => {
-    logger?.warn?.('Link4M initialization failed', { error: err?.message || String(err) });
+    logger?.error?.('link4m_initialization_failed', {
+      degraded: true,
+      error: err?.message || String(err)
+    });
   });
   const wispbyteKeepAlive = new WispbyteKeepAliveManager({ store: accessStore, config: runtimeConfig, logger, adminNotifier });
 

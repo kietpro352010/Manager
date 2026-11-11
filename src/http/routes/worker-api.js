@@ -61,6 +61,16 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
       const commandId = String(req.body?.commandId || '');
       if (!/^(?:cmd_)?[0-9a-f-]{36}$/i.test(commandId)) return res.status(400).json({ ok: false, error: 'invalid_command_id' });
       const accepted = await broker.acceptResult(req.workerId, req.body || {});
+      if (accepted && typeof accepted === 'object' && accepted.ok === false && accepted.error) {
+        const status = accepted.error === 'COMMAND_OWNERSHIP_MISMATCH' ? 403 : 500;
+        return res.status(status).json({
+          ok: false,
+          accepted: false,
+          error: accepted.error,
+          ...(accepted.detail ? { detail: accepted.detail } : {}),
+          ...(accepted.partialResetFailures ? { partialResetFailures: accepted.partialResetFailures } : {})
+        });
+      }
       return res.json({ ok: true, accepted });
     } catch (error) { return next(error); }
   });

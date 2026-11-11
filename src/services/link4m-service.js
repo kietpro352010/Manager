@@ -61,35 +61,65 @@ class Link4mService {
     };
     this.logger = logger;
     this.fetch = fetchImpl;
+    this.initialized = false;
+    this.lastInitError = null;
+    this.lastInitAttemptAt = null;
   }
 
   async initialize() {
-    const stored = await this.store.getSetting('link4m_runtime');
-    if (stored) {
-      this.config.enabled = stored.enabled === true;
-      this.config.rewardHours = Number(stored.rewardHours) || this.config.rewardHours || 12;
-      this.config.dailyLimit = Number(stored.dailyLimit) || this.config.dailyLimit || 2;
-      return;
+    this.lastInitAttemptAt = new Date().toISOString();
+    try {
+      const stored = await this.store.getSetting('link4m_runtime');
+      if (stored) {
+        this.config.enabled = stored.enabled === true;
+        this.config.rewardHours = Number(stored.rewardHours) || this.config.rewardHours || 12;
+        this.config.dailyLimit = Number(stored.dailyLimit) || this.config.dailyLimit || 2;
+      } else {
+        const defaults = {
+          enabled: this.config.enabled === true,
+          rewardHours: Number(this.config.rewardHours || 12),
+          dailyLimit: Number(this.config.dailyLimit || 2)
+        };
+        this.config.enabled = defaults.enabled;
+        this.config.rewardHours = defaults.rewardHours;
+        this.config.dailyLimit = defaults.dailyLimit;
+        await this.store.setSetting('link4m_runtime', defaults);
+      }
+      this.initialized = true;
+      this.lastInitError = null;
+    } catch (error) {
+      this.initialized = false;
+      this.lastInitError = error?.message || String(error);
+      this.logger?.error?.('link4m_initialize_error', { error: this.lastInitError });
+      throw error;
     }
-    const defaults = {
-      enabled: this.config.enabled === true,
-      rewardHours: Number(this.config.rewardHours || 12),
-      dailyLimit: Number(this.config.dailyLimit || 2)
+  }
+
+  health() {
+    const hasError = Boolean(this.lastInitError);
+    return {
+      ok: !hasError,
+      status: hasError ? 'degraded' : (this.initialized ? 'healthy' : 'uninitialized'),
+      initialized: this.initialized,
+      degraded: hasError,
+      error: this.lastInitError,
+      lastAttemptAt: this.lastInitAttemptAt
     };
-    this.config.enabled = defaults.enabled;
-    this.config.rewardHours = defaults.rewardHours;
-    this.config.dailyLimit = defaults.dailyLimit;
-    await this.store.setSetting('link4m_runtime', defaults);
   }
 
   publicConfig() {
+    const degraded = Boolean(this.lastInitError);
     return {
-      enabled: this.config.enabled === true,
+      enabled: this.config.enabled === true && !degraded,
+      configuredEnabled: this.config.enabled === true,
       rewardHours: Number(this.config.rewardHours || 12),
       dailyLimit: Number(this.config.dailyLimit || 2),
       providerConfigured: Boolean(this.config.link4mApiToken || this.config.apiToken),
       webhookConfigured: Boolean(this.config.link4mSecretKey || this.config.secretKey),
-      callbackConfigured: Boolean(validPublicUrl(this.config.publicBaseUrl))
+      callbackConfigured: Boolean(validPublicUrl(this.config.publicBaseUrl)),
+      initialized: this.initialized,
+      degraded,
+      initError: this.lastInitError
     };
   }
 
@@ -107,6 +137,8 @@ class Link4mService {
     }
     await this.store.setSetting('link4m_runtime', next);
     this.config = { ...this.config, ...next };
+    this.initialized = true;
+    this.lastInitError = null;
     return this.publicConfig();
   }
 
@@ -115,6 +147,16 @@ class Link4mService {
     const config = this.publicConfig();
     if (!member || member.role !== 'user' || member.status === 'disabled') {
       return { ok: true, ...config, eligible: false, reason: 'Link4M is available to user accounts only.' };
+    }
+    if (this.lastInitError) {
+      return {
+        ok: true,
+        ...config,
+        eligible: false,
+        degraded: true,
+        error: this.lastInitError,
+        reason: 'Tính năng Link4M hiện đang gặp sự cố khởi tạo cấu hình.'
+      };
     }
     if (member.isPermanent) {
       return { ok: true, ...config, eligible: false, reason: 'Tài khoản vĩnh viễn không cần vượt link.' };
@@ -161,6 +203,9 @@ class Link4mService {
     }
     if (member.isPermanent) {
       throw new Error('Tài khoản vĩnh viễn không cần vượt link.');
+    }
+    if (this.lastInitError) {
+      throw new Error(`Tính năng Link4M hiện đang gặp sự cố khởi tạo: ${this.lastInitError}`);
     }
     if (this.config.enabled === false) {
       throw new Error('Tính năng nhận thưởng Link4M hiện đang bảo trì.');

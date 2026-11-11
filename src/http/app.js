@@ -205,13 +205,25 @@ function createApp({
     return res.type('html').send(PUBLIC_LOGIN_HTML);
   });
 
-  // 6.1 Liveness Probe (process health, uptime, memory)
+  // 6.1 Liveness Probe (process health, uptime, memory, optional degraded warnings)
   app.get('/health', (_req, res) => {
     const memory = process.memoryUsage();
+    const link4mHealth = (link4mService && typeof link4mService.health === 'function')
+      ? link4mService.health()
+      : { ok: true, status: 'not_configured', initialized: false, degraded: false, error: null };
+    const warnings = [];
+    if (link4mHealth.degraded) {
+      warnings.push(`link4m_degraded:${link4mHealth.error || 'unknown_error'}`);
+    }
     return res.json({
       ok: true,
+      degraded: Boolean(link4mHealth.degraded),
       service: 'KingMC AFK Bot Cloud 24/7',
-      status: 'healthy',
+      status: link4mHealth.degraded ? 'degraded' : 'healthy',
+      checks: {
+        link4m: link4mHealth
+      },
+      warnings,
       uptime: Math.floor(process.uptime()),
       memory: {
         rssMb: Math.round(memory.rss / (1024 * 1024)),
@@ -244,16 +256,31 @@ function createApp({
       discordOk = isDiscordReady;
     }
 
+    const link4mHealth = (link4mService && typeof link4mService.health === 'function')
+      ? link4mService.health()
+      : { ok: true, status: 'not_configured', initialized: false, degraded: false, error: null };
+    const warnings = [];
+    if (link4mHealth.degraded) {
+      warnings.push(`link4m_degraded:${link4mHealth.error || 'unknown_error'}`);
+    }
+
     const isReady = dbOk && discordOk;
     const statusCode = isReady ? 200 : 503;
+    const readinessStatus = !isReady
+      ? 'not_ready'
+      : (link4mHealth.degraded ? 'degraded' : 'ready');
+
     return res.status(statusCode).json({
       ok: isReady,
-      status: isReady ? 'ready' : 'not_ready',
+      degraded: Boolean(link4mHealth.degraded),
+      status: readinessStatus,
       service: 'KingMC AFK Bot Cloud 24/7',
       checks: {
         database: { ok: dbOk, latencyMs: dbLatencyMs },
-        discord: { status: discordStatus, ok: discordOk }
+        discord: { status: discordStatus, ok: discordOk },
+        link4m: link4mHealth
       },
+      warnings,
       time: new Date().toISOString()
     });
   });

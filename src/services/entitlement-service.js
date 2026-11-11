@@ -35,60 +35,51 @@ function isCachedWorkerStopped(worker) {
   return STOP_CONFIRMED_STATES.has(state);
 }
 
-function extractStopWorkerStatus(res, detail) {
-  const candidates = [
-    detail?.result?.worker,
-    detail?.worker,
-    detail?.result,
-    detail?.status,
-    detail,
-    res.worker,
-    res.status
-  ];
-  return candidates.find((candidate) => candidate && typeof candidate === 'object') || null;
-}
-
 /**
  * Confirm that a worker stop dispatch actually reached a stopped/offline state
- * rather than timing out, queueing, or leaving the worker connected.
+ * rather than timing out, queueing, merely delivering, or leaving the worker connected.
  */
 function isWorkerStopConfirmed(res) {
   if (!res || typeof res !== 'object') return false;
   if (res.delivered === false) return false;
-  if (hasUnconfirmedFlag(res)) return false;
 
   const detail = res.result && typeof res.result === 'object' ? res.result : null;
-  if (hasUnconfirmedFlag(detail)) return false;
-
   const nestedResult = detail?.result && typeof detail.result === 'object' ? detail.result : null;
-  if (hasUnconfirmedFlag(nestedResult)) return false;
+  const objects = [
+    nestedResult?.worker?.status,
+    nestedResult?.worker,
+    nestedResult?.status,
+    nestedResult,
+    detail?.worker?.status,
+    detail?.worker,
+    detail?.status,
+    detail,
+    res.worker?.status,
+    res.worker,
+    res.status,
+    res
+  ].filter((candidate) => candidate && typeof candidate === 'object');
 
-  if (res.connected === true || res.online === true) return false;
-  if (detail && (detail.connected === true || detail.online === true)) return false;
-
-  const workerStatus = extractStopWorkerStatus(res, detail);
-  if (workerStatus) {
-    if (hasUnconfirmedFlag(workerStatus)) return false;
-    if (workerStatus.connected === true || workerStatus.online === true) return false;
-
-    if (typeof workerStatus.state === 'string' && workerStatus.state.trim() !== '') {
-      const normalizedState = workerStatus.state.trim().toLowerCase();
-      if (!STOP_CONFIRMED_STATES.has(normalizedState)) return false;
-      return res.delivered === true || res.ok === true;
-    }
+  for (const obj of objects) {
+    if (hasUnconfirmedFlag(obj)) return false;
+    if (obj.connected === true || obj.online === true) return false;
   }
 
-  const fallbackState = (typeof detail?.state === 'string' && detail.state.trim() !== '')
-    ? detail.state
-    : (typeof res.state === 'string' && res.state.trim() !== '' ? res.state : '');
+  const states = objects
+    .map((obj) => (typeof obj.state === 'string' ? obj.state.trim().toLowerCase() : ''))
+    .filter(Boolean);
 
-  if (fallbackState) {
-    const normalizedFallback = fallbackState.trim().toLowerCase();
-    if (!STOP_CONFIRMED_STATES.has(normalizedFallback)) return false;
-    return res.delivered === true || res.ok === true;
+  if (states.length > 0) {
+    return states.every((state) => STOP_CONFIRMED_STATES.has(state));
   }
 
-  return res.delivered === true || (res.ok === true && (res.stopped === true || detail?.stopped === true));
+  const acknowledged =
+    res.delivered === true ||
+    res.ok === true ||
+    detail?.ok === true ||
+    nestedResult?.ok === true;
+
+  return Boolean(acknowledged && objects.some((obj) => obj.stopped === true));
 }
 
 class EntitlementService {

@@ -613,7 +613,7 @@ async function runTests() {
         throw new Error('Simulated network timeout stopping bot');
       }
       stoppedBots.push(workerId);
-      return { ok: true, delivered: true };
+      return { ok: true, delivered: true, result: { ok: true, state: 'stopped', connected: false } };
     }
   };
 

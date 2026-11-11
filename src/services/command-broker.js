@@ -143,11 +143,32 @@ class CommandBroker {
     if (!response.ok || !body.ok) throw new Error(body.error || `Worker returned HTTP ${response.status}.`);
 
     const workerStatus = body.result?.worker || body.result || {};
-    if (command.action === 'reset' && body.result?.ok === true) {
-      await this.registry.resetData(worker.workerId);
-    }
-    if (['start', 'stop', 'restart', 'status', 'reset'].includes(command.action)) {
-      await this.registry.updateStatus(worker.workerId, workerStatus, 'manager-command');
+    const isSuccess = body.result ? body.result.ok === true : body.ok === true;
+    if (command.action === 'reset' && isSuccess) {
+      const resetFailures = await this.syncResetState(worker.workerId, workerStatus, 'manager-command', command.commandId);
+      if (resetFailures.length > 0) {
+        const detail = resetFailures.map((f) => `${f.step}: ${f.error}`).join('; ');
+        this.logger?.error?.('command_reset_partial_sync_failed', {
+          workerId: worker.workerId,
+          commandId: command.commandId,
+          failures: resetFailures
+        });
+        const syncErr = new Error(`RESET_STATE_SYNC_FAILED: ${detail}`);
+        syncErr.code = 'RESET_STATE_SYNC_FAILED';
+        syncErr.partialResetFailures = resetFailures;
+        throw syncErr;
+      }
+    } else if (['start', 'stop', 'restart', 'status', 'reset'].includes(command.action)) {
+      try {
+        await this.registry.updateStatus(worker.workerId, workerStatus, 'manager-command');
+      } catch (err) {
+        this.logger?.warn?.('command_status_sync_failed', {
+          workerId: worker.workerId,
+          commandId: command.commandId,
+          action: command.action,
+          error: err?.message || String(err)
+        });
+      }
     }
     return { delivered: true, result: body.result || body };
   }
@@ -296,6 +317,54 @@ class CommandBroker {
     }
   }
 
+  async syncResetState(workerId, candidateStatus, statusSource, commandId = null) {
+    const partialResetFailures = [];
+
+    if (typeof this.registry?.resetData === 'function') {
+      try {
+        await this.registry.resetData(workerId);
+      } catch (err) {
+        const message = err?.message || String(err);
+        partialResetFailures.push({ step: 'registry.resetData', error: message });
+        this.logger?.error?.('command_reset_registry_sync_failed', {
+          workerId,
+          commandId,
+          error: message
+        });
+      }
+    }
+
+    if (typeof this.commandStore?.clearWorker === 'function') {
+      try {
+        await this.commandStore.clearWorker(workerId);
+      } catch (err) {
+        const message = err?.message || String(err);
+        partialResetFailures.push({ step: 'commandStore.clearWorker', error: message });
+        this.logger?.error?.('command_reset_queue_clear_failed', {
+          workerId,
+          commandId,
+          error: message
+        });
+      }
+    }
+
+    if (candidateStatus && typeof candidateStatus === 'object' && typeof this.registry?.updateStatus === 'function') {
+      try {
+        await this.registry.updateStatus(workerId, candidateStatus, statusSource);
+      } catch (err) {
+        const message = err?.message || String(err);
+        partialResetFailures.push({ step: 'registry.updateStatus', error: message });
+        this.logger?.error?.('command_reset_status_sync_failed', {
+          workerId,
+          commandId,
+          error: message
+        });
+      }
+    }
+
+    return partialResetFailures;
+  }
+
   async reportResult(workerId, commandId, result) {
     const wid = String(workerId || '').trim().toLowerCase();
     const cid = String(commandId || '').trim();
@@ -308,25 +377,61 @@ class CommandBroker {
     // RESET & LIFECYCLE PARITY: Polling transport parity with HTTP transport
     let storedCommand = null;
     if (!pending && !result?.action && completed && typeof this.commandStore.get === 'function') {
-      try { storedCommand = await this.commandStore.get(cid); } catch (_) {}
+      try {
+        storedCommand = await this.commandStore.get(cid);
+      } catch (err) {
+        this.logger?.warn?.('command_result_lookup_failed', {
+          workerId: wid,
+          commandId: cid,
+          error: err?.message || String(err)
+        });
+      }
     }
     const action = pending?.action || result?.action || storedCommand?.action;
     const isSuccess = result?.ok === true || result?.result?.ok === true;
-    if (action === 'reset' && isSuccess) {
-      if (typeof this.registry?.resetData === 'function') {
-        try { await this.registry.resetData(wid); } catch (_) {}
-      }
-      if (typeof this.commandStore?.clearWorker === 'function') {
-        try { await this.commandStore.clearWorker(wid); } catch (_) {}
-      }
-    }
-
     const candidateStatus = result?.worker || result?.result?.worker || result?.status ||
       (result && typeof result === 'object' && ('state' in result || 'online' in result || 'connected' in result)
         ? result
         : null);
-    if (candidateStatus && typeof candidateStatus === 'object' && typeof this.registry?.updateStatus === 'function') {
-      try { await this.registry.updateStatus(wid, candidateStatus, 'manager-command-poll'); } catch (_) {}
+
+    if (action === 'reset' && isSuccess) {
+      const partialResetFailures = await this.syncResetState(wid, candidateStatus, 'manager-command-poll', cid);
+      if (partialResetFailures.length > 0) {
+        const detail = partialResetFailures.map((f) => `${f.step}: ${f.error}`).join('; ');
+        this.logger?.error?.('command_reset_partial_sync_failed', {
+          workerId: wid,
+          commandId: cid,
+          failures: partialResetFailures
+        });
+        const failedResult = {
+          ...(result && typeof result === 'object' ? result : {}),
+          ok: false,
+          error: 'RESET_STATE_SYNC_FAILED',
+          detail,
+          partialResetFailures
+        };
+        if (pending && pending.workerId === wid && typeof pending.finish === 'function') {
+          pending.finish(failedResult);
+        }
+        return {
+          ok: false,
+          error: 'RESET_STATE_SYNC_FAILED',
+          detail,
+          partialResetFailures,
+          completed: Boolean(completed || pending)
+        };
+      }
+    } else if (candidateStatus && typeof candidateStatus === 'object' && typeof this.registry?.updateStatus === 'function') {
+      try {
+        await this.registry.updateStatus(wid, candidateStatus, 'manager-command-poll');
+      } catch (err) {
+        this.logger?.warn?.('command_status_sync_failed', {
+          workerId: wid,
+          commandId: cid,
+          action: action || 'unknown',
+          error: err?.message || String(err)
+        });
+      }
     }
 
     if (pending && pending.workerId === wid && typeof pending.finish === 'function') {

@@ -3,7 +3,9 @@
 const assert = require('node:assert');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const http = require('node:http');
 const path = require('node:path');
+const express = require('express');
 
 const AsyncKeyLock = require('../src/services/async-key-lock');
 const { AccessControl } = require('../src/services/access-control');
@@ -11,6 +13,9 @@ const { Link4mService } = require('../src/services/link4m-service');
 const CommandBroker = require('../src/services/command-broker');
 const FleetOperations = require('../src/services/fleet-operations');
 const { EntitlementService, isWorkerStopConfirmed } = require('../src/services/entitlement-service');
+const { createApp } = require('../src/http/app');
+const { createWorkerApi } = require('../src/http/routes/worker-api');
+const { createUserApi } = require('../src/http/routes/user-api');
 
 function createSilentLogger() {
   return {
@@ -403,9 +408,16 @@ function testIsWorkerStopConfirmedContract() {
     'stopped',
     {},
     { ok: true },
+    { delivered: true },
+    { ok: true, delivered: true },
+    { delivered: true, result: { ok: true } },
     { delivered: false },
     { delivered: false, timedOut: true },
     { ok: false },
+    { pending: true },
+    { pending: true, state: 'stopped' },
+    { timedOut: true },
+    { timedOut: true, state: 'stopped' },
     { ok: true, queued: true },
     { delivered: true, queued: true },
     { delivered: true, pending: true },
@@ -416,6 +428,8 @@ function testIsWorkerStopConfirmedContract() {
     { delivered: true, result: { ok: false } },
     { delivered: true, result: { ok: false, state: 'online' } },
     { delivered: true, result: { ok: false, state: 'stopped' } },
+    { state: 'connecting' },
+    { state: 'online' },
     { delivered: true, result: { state: 'online', connected: true } },
     { delivered: true, result: { ok: true, state: 'online', connected: true } },
     { delivered: true, result: { ok: true, state: 'connecting' } },
@@ -427,7 +441,8 @@ function testIsWorkerStopConfirmedContract() {
     { delivered: true, result: { ok: true, worker: { state: 'online', online: true } } },
     { delivered: true, result: { ok: true, status: { state: 'starting', connected: false } } },
     { delivered: true, result: { ok: true, state: 'stopped', connected: true } },
-    { delivered: true, result: { ok: true, state: 'stopped', online: true } }
+    { delivered: true, result: { ok: true, state: 'stopped', online: true } },
+    { delivered: true, state: 'stopped', result: { state: 'connecting' } }
   ];
 
   for (const payload of rejectedPayloads) {
@@ -439,8 +454,9 @@ function testIsWorkerStopConfirmedContract() {
   }
 
   const confirmedPayloads = [
-    { ok: true, delivered: true },
     { ok: true, stopped: true },
+    { state: 'stopped' },
+    { state: 'offline' },
     { delivered: true, result: { state: 'stopped', connected: false } },
     { delivered: true, result: { ok: true, state: 'offline', connected: false, online: false } },
     { delivered: true, result: { ok: true, worker: { state: 'stopped', online: false, connected: false } } },
@@ -464,9 +480,14 @@ async function testGracefulStopConfirmationStateMachine() {
   const logger = createSilentLogger();
 
   const cases = [
+    { name: 'delivered:true without state', response: { delivered: true } },
+    { name: 'ok:true delivered:true without state', response: { ok: true, delivered: true } },
+    { name: 'pending response', response: { pending: true } },
     { name: 'timedOut response', response: { delivered: false, timedOut: true } },
     { name: 'queued with ok:true', response: { ok: true, queued: true } },
     { name: 'queued with delivered:true', response: { delivered: true, queued: true } },
+    { name: 'state connecting bare', response: { state: 'connecting' } },
+    { name: 'state online bare', response: { state: 'online' } },
     { name: 'delivered with result.state online & connected (no ok field)', response: { delivered: true, result: { state: 'online', connected: true } } },
     { name: 'delivered but state online & connected', response: { delivered: true, result: { ok: true, state: 'online', connected: true } } },
     { name: 'delivered but result.ok false & state online', response: { delivered: true, result: { ok: false, state: 'online' } } },
@@ -1043,6 +1064,246 @@ async function testCoordinatorCrossCuttingContracts() {
   console.log('✅ 6. Cross-Cutting Parity Contracts verified.');
 }
 
+async function testLink4mInitFailureDegradedVisibility() {
+  console.log('7. Testing Link4mService Init Failure Degraded State & Health/Ready Surfacing...');
+  const errors = [];
+  const store = createInMemoryTableStore();
+  await store.setAccess('usr_l4m_deg', {
+    userId: 'usr_l4m_deg',
+    username: 'l4muser',
+    role: 'user',
+    status: 'active',
+    isPermanent: false
+  });
+  store.getSetting = async () => {
+    throw new Error('supabase_settings_read_failed');
+  };
+
+  const accessControl = new AccessControl({ store });
+  const link4mService = new Link4mService({
+    store,
+    accessControl,
+    config: {
+      enabled: true,
+      apiToken: 'tok_test',
+      publicBaseUrl: 'https://manager.example.com'
+    },
+    logger: {
+      info: () => {},
+      warn: () => {},
+      error: (msg, meta) => errors.push({ msg, meta }),
+      debug: () => {}
+    }
+  });
+
+  await assert.rejects(() => link4mService.initialize(), /supabase_settings_read_failed/);
+  assert.strictEqual(errors[0]?.msg, 'link4m_initialize_error');
+
+  const degradedHealth = link4mService.health();
+  assert.strictEqual(degradedHealth.ok, false);
+  assert.strictEqual(degradedHealth.status, 'degraded');
+  assert.strictEqual(degradedHealth.degraded, true);
+  assert.strictEqual(degradedHealth.initialized, false);
+  assert.ok(degradedHealth.error.includes('supabase_settings_read_failed'));
+
+  const cfg = link4mService.publicConfig();
+  assert.strictEqual(cfg.degraded, true);
+  assert.strictEqual(cfg.initialized, false);
+  assert.strictEqual(cfg.enabled, false);
+
+  const st = await link4mService.status('usr_l4m_deg');
+  assert.strictEqual(st.eligible, false);
+  assert.strictEqual(st.degraded, true);
+
+  await assert.rejects(() => link4mService.startAttempt('usr_l4m_deg', '127.0.0.1'), /lỗi khởi tạo|khởi tạo/i);
+
+  const indexSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'index.js'), 'utf8');
+  assert.ok(indexSource.includes('link4m_initialization_failed'), 'src/index.js must log explicit error on Link4M init failure');
+
+  const app = createApp({
+    store,
+    link4mService,
+    registry: { store: {} },
+    config: { discordToken: '' }
+  });
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, resolve));
+  try {
+    const port = server.address().port;
+    const healthRes = await fetch(`http://127.0.0.1:${port}/health`);
+    const healthJson = await healthRes.json();
+    assert.strictEqual(healthRes.status, 200);
+    assert.strictEqual(healthJson.status, 'degraded');
+    assert.strictEqual(healthJson.degraded, true);
+    assert.strictEqual(healthJson.checks.link4m.ok, false);
+    assert.ok(healthJson.warnings.some((w) => w.includes('supabase_settings_read_failed')));
+
+    const readyRes = await fetch(`http://127.0.0.1:${port}/ready`);
+    const readyJson = await readyRes.json();
+    assert.strictEqual(readyRes.status, 200);
+    assert.strictEqual(readyJson.status, 'degraded');
+    assert.strictEqual(readyJson.degraded, true);
+    assert.strictEqual(readyJson.checks.link4m.ok, false);
+    assert.ok(readyJson.warnings.some((w) => w.includes('supabase_settings_read_failed')));
+
+    await link4mService.configure({ enabled: true, rewardHours: 12, dailyLimit: 2 });
+    const recoveredHealth = await (await fetch(`http://127.0.0.1:${port}/health`)).json();
+    const recoveredReady = await (await fetch(`http://127.0.0.1:${port}/ready`)).json();
+    assert.strictEqual(recoveredHealth.status, 'healthy');
+    assert.strictEqual(recoveredHealth.degraded, false);
+    assert.strictEqual(recoveredReady.status, 'ready');
+    assert.deepStrictEqual(recoveredReady.warnings, []);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  console.log('✅ 7. Link4M Degraded Initialization Visibility verified.');
+}
+
+async function testCommandResetErrorVisibility() {
+  console.log('8. Testing CommandBroker Reset Partial State-Sync Error Propagation...');
+
+  // 8a. Polling transport + worker-api /result + pending.finish + user-api /bot/:id/reset
+  const pollErrors = [];
+  const brokerPoll = new CommandBroker({
+    registry: {
+      resetData: async () => { throw new Error('db_reset_write_failed'); },
+      updateStatus: async () => {}
+    },
+    commandStore: {
+      complete: async () => ({ commandId: 'cmd_reset_fail', action: 'reset' }),
+      clearWorker: async () => { throw new Error('queue_clear_failed'); }
+    },
+    config: { commandResultTimeoutMs: 5000 },
+    logger: {
+      info: () => {},
+      warn: () => {},
+      error: (msg, meta) => pollErrors.push({ msg, meta })
+    }
+  });
+
+  let pendingOutcome = null;
+  brokerPoll.pendingResults.set('cmd_11111111-1111-4111-8111-111111111111', {
+    workerId: 'bot-reset-1',
+    action: 'reset',
+    command: { action: 'reset' },
+    finish: (payload) => { pendingOutcome = payload; }
+  });
+
+  const workerApp = express();
+  workerApp.use(express.json());
+  workerApp.use('/api/v1/workers/:workerId', createWorkerApi({
+    registry: {
+      authenticate: async (workerId) => ({ workerId, secret: 'sec' }),
+      touchHeartbeat: async () => ({})
+    },
+    broker: brokerPoll,
+    config: { botSecret: 'sec' }
+  }));
+
+  const workerServer = http.createServer(workerApp);
+  await new Promise((resolve) => workerServer.listen(0, resolve));
+  try {
+    const port = workerServer.address().port;
+    const resultRes = await fetch(`http://127.0.0.1:${port}/api/v1/workers/bot-reset-1/result`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-worker-id': 'bot-reset-1',
+        'x-worker-secret': 'sec'
+      },
+      body: JSON.stringify({
+        commandId: 'cmd_11111111-1111-4111-8111-111111111111',
+        action: 'reset',
+        result: { ok: true, state: 'stopped' }
+      })
+    });
+    const resultBody = await resultRes.json();
+    assert.strictEqual(resultRes.status, 500, '/result must return HTTP 500 when reset state sync fails');
+    assert.strictEqual(resultBody.ok, false);
+    assert.strictEqual(resultBody.error, 'RESET_STATE_SYNC_FAILED');
+    assert.strictEqual(resultBody.partialResetFailures.length, 2);
+    assert.strictEqual(pendingOutcome?.ok, false, 'pending waiter must receive ok:false when reset sync fails');
+    assert.strictEqual(pendingOutcome?.error, 'RESET_STATE_SYNC_FAILED');
+    assert.ok(pollErrors.some((e) => e.msg === 'command_reset_partial_sync_failed'));
+  } finally {
+    await new Promise((resolve) => workerServer.close(resolve));
+  }
+
+  // 8b. user-api POST /bot/:id/reset surfaces failed dispatch result as HTTP 500
+  const userApp = express();
+  userApp.use(express.json());
+  userApp.use((req, _res, next) => {
+    req.managerAuthSession = { username: 'tester', userId: 'usr_t', role: 'admin', status: 'active' };
+    next();
+  });
+  userApp.use('/api', createUserApi({
+    store: { addAudit: async () => true },
+    registry: {
+      find: async () => ({ workerId: 'bot-reset-1', botNumber: 1, status: { state: 'online' } })
+    },
+    broker: {
+      dispatch: async () => ({
+        delivered: true,
+        result: { ok: false, error: 'RESET_STATE_SYNC_FAILED', detail: 'db_reset_write_failed' }
+      })
+    },
+    logger: createSilentLogger()
+  }));
+
+  const userServer = http.createServer(userApp);
+  await new Promise((resolve) => userServer.listen(0, resolve));
+  try {
+    const port = userServer.address().port;
+    const actionRes = await fetch(`http://127.0.0.1:${port}/api/bot/bot-reset-1/reset`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}'
+    });
+    const actionBody = await actionRes.json();
+    assert.strictEqual(actionRes.status, 500, '/api/bot/:id/reset must return HTTP 500 when reset state sync fails');
+    assert.strictEqual(actionBody.ok, false);
+    assert.strictEqual(actionBody.code, 'RESET_STATE_SYNC_FAILED');
+  } finally {
+    await new Promise((resolve) => userServer.close(resolve));
+  }
+
+  // 8c. dispatchRender HTTP transport throws RESET_STATE_SYNC_FAILED if registry sync fails
+  const renderErrors = [];
+  const brokerRender = new CommandBroker({
+    registry: {
+      credential: () => 'sec',
+      resetData: async () => { throw new Error('render_reset_sync_boom'); },
+      updateStatus: async () => {}
+    },
+    commandStore: {
+      clearWorker: async () => true
+    },
+    config: { botSecret: 'sec', commandResultTimeoutMs: 5000 },
+    logger: {
+      info: () => {},
+      warn: () => {},
+      error: (msg, meta) => renderErrors.push({ msg, meta })
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ ok: true, result: { ok: true, state: 'stopped' } })
+    })
+  });
+
+  await assert.rejects(
+    () => brokerRender.dispatchRender(
+      { workerId: 'bot-render-1', provider: 'render', serviceUrl: 'https://worker.example.com', secret: 'sec' },
+      { commandId: 'cmd_r1', action: 'reset', payload: {} }
+    ),
+    (err) => err && err.code === 'RESET_STATE_SYNC_FAILED' && Array.isArray(err.partialResetFailures) && err.partialResetFailures.length === 1
+  );
+  assert.ok(renderErrors.some((e) => e.msg === 'command_reset_partial_sync_failed'));
+
+  console.log('✅ 8. CommandBroker Reset Error Visibility verified.');
+}
+
 let completedAll = false;
 process.on('beforeExit', (code) => {
   if (code === 0 && !completedAll) {
@@ -1059,6 +1320,8 @@ async function runTests() {
   await testGracefulStopConfirmationStateMachine();
   await testRealBrokerFleetEntitlementWiring();
   await testCoordinatorCrossCuttingContracts();
+  await testLink4mInitFailureDegradedVisibility();
+  await testCommandResetErrorVisibility();
   completedAll = true;
   console.log('🎉 ALL MANAGER SERVICES WIRING TESTS PASSED 100%!');
 }
