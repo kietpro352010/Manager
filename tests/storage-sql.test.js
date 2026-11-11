@@ -220,6 +220,21 @@ async function testSqlSchemaStructure() {
   }
   assert.ok(migrationSql.includes("'20261111120000_command_two_phase_sync'"), 'Migration must record version in manager_schema_migrations');
 
+  // 1m. Verify supabase/reset_and_setup.sql covers clean drop + full canonical schema
+  const resetSetupPath = path.join(__dirname, '../supabase/reset_and_setup.sql');
+  assert.ok(fs.existsSync(resetSetupPath), 'Expected supabase/reset_and_setup.sql');
+  const resetSetupSql = fs.readFileSync(resetSetupPath, 'utf8');
+  assert.match(resetSetupSql, /n\.nspname = 'public'/);
+  assert.match(resetSetupSql, /p\.prokind = 'f'/);
+  assert.match(resetSetupSql, /NOT EXISTS\s*\(\s*SELECT 1 FROM pg_depend/i);
+  assert.match(resetSetupSql, /'manager_access'/);
+  assert.match(resetSetupSql, /'manager_worker_assignments'/);
+  assert.match(resetSetupSql, /'manager_audit'/);
+  assert.match(resetSetupSql, /CREATE TABLE IF NOT EXISTS public\.manager_users/);
+  assert.match(resetSetupSql, /CREATE OR REPLACE VIEW public\.manager_audit/);
+  assert.match(resetSetupSql, /CREATE OR REPLACE FUNCTION public\.manager_claim_pending_command_syncs/);
+  assert.match(resetSetupSql, /NOTIFY pgrst,\s*'reload schema'/i);
+
   console.log('✅ 1. SQL DDL & RPC structural validation passed.');
 }
 
