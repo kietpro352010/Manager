@@ -1,89 +1,217 @@
 'use strict';
 
 const HTML = String.raw`<!doctype html>
-<html lang="vi">
+<html lang="vi" data-theme="deep-galaxy">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="dark">
-<title>KBOT — Hệ Thống Cho Thuê Bot AFK KingMC Thương Mại Cao Cấp</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23040711'/%3E%3Cpath d='M16 5l9 3.5v7c0 6-4 9.5-9 11.5-5-2-9-5.5-9-11.5v-7L16 5z' fill='none' stroke='%2338bdf8' stroke-width='2.2'/%3E%3C/svg%3E">
+<meta name="color-scheme" content="dark light">
+<title>KBOT Manager — Bảng Điều Khiển Quản Lý Bot Minecraft</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23080511'/%3E%3Cpath d='M16 5l9 3.5v7c0 6-4 9.5-9 11.5-5-2-9-5.5-9-11.5v-7L16 5z' fill='none' stroke='%238b5cf6' stroke-width='2.2'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script data-kbot-theme-boot>
+(function(){
+  try {
+    var raw = localStorage.getItem('kbot_theme') || localStorage.getItem('kbot_dashboard_theme') || localStorage.getItem('kbot_cosmic_mode') || 'deep-galaxy';
+    var map = {
+      'deep-galaxy': 'deep-galaxy',
+      'galaxy': 'deep-galaxy',
+      'vivid': 'deep-galaxy',
+      'violet-dusk': 'violet-dusk',
+      'sunset': 'violet-dusk',
+      'subtle': 'violet-dusk',
+      'off': 'violet-dusk',
+      'moonlight': 'moonlight',
+      'morning': 'moonlight',
+      'light': 'moonlight'
+    };
+    var theme = map[raw] || 'deep-galaxy';
+    document.documentElement.setAttribute('data-theme', theme);
+    document.documentElement.style.colorScheme = theme === 'moonlight' ? 'light' : 'dark';
+  } catch (_) {}
+})();
+</script>
 <style>
 /* ==========================================================================
-   KBOT CLOUD CONSOLE — OBSIDIAN / SLATE DESIGN SYSTEM (PHASE A)
+   KBOT MANAGER V3 — MINIMAL DARK PURPLE SAAS DESIGN SYSTEM (3-THEME)
    ========================================================================== */
-:root {
+:root,
+:root[data-theme="deep-galaxy"] {
   color-scheme: dark;
-  --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
-  /* Core Obsidian & Slate Surfaces */
-  --bg: #040711;
-  --bg-base: #040711;
-  --bg-surface: rgba(12, 20, 36, 0.86);
-  --bg-elevated: rgba(16, 26, 46, 0.94);
-  --bg-input: rgba(6, 11, 22, 0.80);
+  /* Deep Galaxy — Minimal Dark Purple (Default) */
+  --bg: #080511;
+  --bg-base: #080511;
+  --bg-surface: rgba(18, 13, 34, 0.92);
+  --bg-elevated: rgba(24, 18, 44, 0.96);
+  --bg-input: rgba(10, 7, 20, 0.92);
   --bg-gradient:
-    radial-gradient(ellipse at 12% 10%, rgba(14, 165, 233, 0.14) 0%, transparent 45%),
-    radial-gradient(ellipse at 88% 88%, rgba(99, 102, 241, 0.12) 0%, transparent 50%),
-    radial-gradient(ellipse at 55% 0%, rgba(16, 185, 129, 0.08) 0%, transparent 35%),
-    radial-gradient(circle at 50% 50%, rgba(8, 14, 26, 0.98) 0%, #040711 100%);
+    radial-gradient(ellipse at 14% 12%, rgba(124, 58, 237, 0.16) 0%, transparent 48%),
+    radial-gradient(ellipse at 86% 84%, rgba(91, 33, 182, 0.14) 0%, transparent 52%),
+    radial-gradient(circle at 50% 45%, #0e091d 0%, #080511 100%);
 
-  --card: rgba(12, 20, 36, 0.86);
-  --card-hover: rgba(18, 28, 48, 0.94);
-  --card2: rgba(8, 13, 24, 0.80);
+  --card: rgba(18, 13, 34, 0.92);
+  --card-hover: rgba(26, 19, 48, 0.96);
+  --card2: rgba(13, 9, 26, 0.90);
+  --sidebar-bg: rgba(13, 9, 26, 0.96);
 
   /* Hairline Borders */
-  --border: rgba(148, 163, 184, 0.14);
-  --border-subtle: rgba(148, 163, 184, 0.12);
-  --border-strong: rgba(56, 189, 248, 0.34);
-  --border-glow: rgba(56, 189, 248, 0.48);
-  --border-focus: rgba(56, 189, 248, 0.82);
+  --border: rgba(167, 139, 250, 0.18);
+  --border-subtle: rgba(167, 139, 250, 0.14);
+  --border-strong: rgba(167, 139, 250, 0.34);
+  --border-glow: rgba(139, 92, 246, 0.45);
+  --border-focus: #8b5cf6;
 
   /* Typography */
-  --text: #f0f6fc;
-  --text-primary: #f0f6fc;
-  --text-secondary: #cbd5e1;
-  --text-muted: #94a3b8;
-  --text-dim: #8596b0;
-  --muted: #94a3b8;
+  --text: #f5f3ff;
+  --text-primary: #f5f3ff;
+  --text-secondary: #cbc4e6;
+  --text-muted: #9b92bf;
+  --text-dim: #8a80b0;
+  --muted: #9b92bf;
 
-  /* Semantic Accents */
-  --cyan: #38bdf8;
-  --cyan-soft: rgba(56, 189, 248, 0.14);
-  --indigo: #6366f1;
+  /* Semantic Accents (Purple Primary + Restrained Status Palette) */
+  --cyan: #8b5cf6;
+  --cyan-soft: rgba(139, 92, 246, 0.16);
+  --indigo: #7c3aed;
   --discord: #5865F2;
-  --green: #10b981;
-  --green-glow: rgba(16, 185, 129, 0.35);
+  --green: #22c55e;
+  --green-glow: rgba(34, 197, 94, 0.25);
   --red: #ef4444;
-  --red-glow: rgba(239, 68, 68, 0.35);
+  --red-glow: rgba(239, 68, 68, 0.25);
   --yellow: #f59e0b;
-  --yellow-glow: rgba(245, 158, 11, 0.35);
-  --blue: #38bdf8;
-  --blue-glow: rgba(56, 189, 248, 0.35);
-  --accent: #38bdf8;
-  --gold: #fbbf24;
+  --yellow-glow: rgba(245, 158, 11, 0.25);
+  --blue: #8b5cf6;
+  --blue-glow: rgba(139, 92, 246, 0.28);
+  --accent: #8b5cf6;
+  --accent-hover: #7c3aed;
+  --accent-soft: rgba(139, 92, 246, 0.16);
+  --accent-text: #c4b5fd;
+  --gold: #f59e0b;
   --purple: #a78bfa;
 
   /* Radii & Shadows */
   --radius-sm: 8px;
   --radius-md: 12px;
-  --radius-lg: 16px;
-  --radius-xl: 20px;
-  --shadow-sm: 0 4px 12px rgba(2, 6, 23, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  --shadow-md: 0 14px 36px -8px rgba(2, 6, 23, 0.58), inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  --shadow-lg: 0 28px 72px rgba(2, 6, 23, 0.84), 0 0 38px rgba(56, 189, 248, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --shadow-sm: 0 2px 8px rgba(4, 2, 12, 0.32);
+  --shadow-md: 0 10px 28px rgba(4, 2, 12, 0.48);
+  --shadow-lg: 0 22px 54px rgba(4, 2, 12, 0.72);
 
   /* Adaptive Touch & Scrollbar Tokens */
   --target-size: 36px;
-  --scrollbar-thumb: rgba(148, 163, 184, 0.32);
-  --scrollbar-track: rgba(9, 14, 26, 0.65);
+  --scrollbar-thumb: rgba(167, 139, 250, 0.28);
+  --scrollbar-track: rgba(10, 7, 20, 0.65);
 
   scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
   scrollbar-width: thin;
+}
+
+:root[data-theme="violet-dusk"] {
+  color-scheme: dark;
+  --bg: #121118;
+  --bg-base: #121118;
+  --bg-surface: #1b1925;
+  --bg-elevated: #221f2e;
+  --bg-input: #14121c;
+  --bg-gradient:
+    radial-gradient(ellipse at 20% 10%, rgba(126, 91, 239, 0.08) 0%, transparent 50%),
+    linear-gradient(180deg, #13111a 0%, #100f16 100%);
+
+  --card: #1b1925;
+  --card-hover: #232030;
+  --card2: #15131d;
+  --sidebar-bg: #16141f;
+
+  --border: rgba(176, 168, 206, 0.16);
+  --border-subtle: rgba(176, 168, 206, 0.12);
+  --border-strong: rgba(176, 168, 206, 0.28);
+  --border-glow: rgba(126, 91, 239, 0.38);
+  --border-focus: #7e5bef;
+
+  --text: #f2f0fa;
+  --text-primary: #f2f0fa;
+  --text-secondary: #c5bfd8;
+  --text-muted: #9891b0;
+  --text-dim: #837c9c;
+  --muted: #9891b0;
+
+  --cyan: #7e5bef;
+  --cyan-soft: rgba(126, 91, 239, 0.14);
+  --indigo: #6f4ce2;
+  --blue: #7e5bef;
+  --blue-glow: rgba(126, 91, 239, 0.22);
+  --accent: #7e5bef;
+  --accent-hover: #6f4ce2;
+  --accent-soft: rgba(126, 91, 239, 0.14);
+  --accent-text: #c4b5fd;
+  --purple: #a78bfa;
+
+  --shadow-sm: 0 2px 6px rgba(5, 4, 10, 0.28);
+  --shadow-md: 0 8px 22px rgba(5, 4, 10, 0.40);
+  --shadow-lg: 0 18px 44px rgba(5, 4, 10, 0.58);
+  --scrollbar-thumb: rgba(176, 168, 206, 0.24);
+  --scrollbar-track: #14121c;
+}
+
+:root[data-theme="moonlight"] {
+  color-scheme: light;
+  --bg: #f3f1fa;
+  --bg-base: #f3f1fa;
+  --bg-surface: rgba(255, 255, 255, 0.96);
+  --bg-elevated: #ffffff;
+  --bg-input: #faf9fe;
+  --bg-gradient:
+    radial-gradient(ellipse at 18% 10%, rgba(124, 58, 237, 0.08) 0%, transparent 50%),
+    radial-gradient(ellipse at 85% 90%, rgba(139, 92, 246, 0.06) 0%, transparent 55%),
+    linear-gradient(180deg, #f5f3fc 0%, #ede9f7 100%);
+
+  --card: #ffffff;
+  --card-hover: #faf8ff;
+  --card2: #f4f1fb;
+  --sidebar-bg: #ffffff;
+
+  --border: rgba(91, 33, 182, 0.15);
+  --border-subtle: rgba(91, 33, 182, 0.11);
+  --border-strong: rgba(91, 33, 182, 0.28);
+  --border-glow: rgba(109, 40, 217, 0.36);
+  --border-focus: #6d28d9;
+
+  --text: #171326;
+  --text-primary: #171326;
+  --text-secondary: #3e3759;
+  --text-muted: #5c537a;
+  --text-dim: #6e658c;
+  --muted: #5c537a;
+
+  --cyan: #6d28d9;
+  --cyan-soft: rgba(109, 40, 217, 0.10);
+  --indigo: #5b21b6;
+  --green: #15803d;
+  --green-glow: rgba(21, 128, 61, 0.18);
+  --red: #b91c1c;
+  --red-glow: rgba(185, 28, 28, 0.18);
+  --yellow: #b45309;
+  --yellow-glow: rgba(180, 83, 9, 0.18);
+  --blue: #6d28d9;
+  --blue-glow: rgba(109, 40, 217, 0.18);
+  --accent: #6d28d9;
+  --accent-hover: #5b21b6;
+  --accent-soft: rgba(109, 40, 217, 0.10);
+  --accent-text: #5b21b6;
+  --gold: #b45309;
+  --purple: #6d28d9;
+
+  --shadow-sm: 0 1px 4px rgba(36, 20, 74, 0.06);
+  --shadow-md: 0 8px 22px rgba(36, 20, 74, 0.08);
+  --shadow-lg: 0 18px 42px rgba(36, 20, 74, 0.14);
+  --scrollbar-thumb: rgba(91, 33, 182, 0.25);
+  --scrollbar-track: #ebe6f7;
 }
 
 /* ==========================================================================
@@ -829,7 +957,7 @@ select option {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
-  background: rgba(11, 16, 26, 0.72);
+  background: var(--bg-input);
   padding: 4px;
   border-radius: 12px;
   border: 1px solid var(--border);
@@ -847,9 +975,9 @@ select option {
 }
 
 .tab-btn.active {
-  background: rgba(56, 189, 248, 0.16);
-  color: #e0f2fe;
-  border-color: rgba(56, 189, 248, 0.36);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  border-color: var(--border-strong);
 }
 
 .fleet-tag-filter-row {
@@ -951,7 +1079,8 @@ select option {
 .bot-card-topbar {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 10px;
 }
@@ -959,17 +1088,17 @@ select option {
 .bot-card-title-group {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
-  flex: 1;
+  flex: 1 1 180px;
 }
 
 .bot-id-chip {
   font-size: 11px;
   font-weight: 800;
-  color: #38bdf8;
-  background: rgba(56, 189, 248, 0.14);
-  border: 1px solid rgba(56, 189, 248, 0.32);
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border: 1px solid var(--border-strong);
   padding: 2px 7px;
   border-radius: 6px;
   flex-shrink: 0;
@@ -996,7 +1125,8 @@ select option {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  margin-left: 4px;
+  margin-left: 2px;
+  flex-shrink: 0;
 }
 
 .bot-mini-btn {
@@ -1005,10 +1135,12 @@ select option {
   padding: 4px 8px;
   min-block-size: 28px;
   border-radius: 7px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
   color: var(--text-secondary);
   cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
   transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
   box-shadow: none;
 }
@@ -2176,8 +2308,8 @@ select option {
 .info-item {
   padding: 11px 13px;
   border-radius: 12px;
-  background: rgba(6, 11, 22, 0.74);
-  border: 1px solid rgba(255, 255, 255, 0.065);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
   min-width: 0;
 }
 .info-label {
@@ -2318,8 +2450,9 @@ select option {
   animation: toastSlideIn 0.24s cubic-bezier(0.16, 1, 0.3, 1);
   max-width: min(440px, calc(100dvw - 32px));
 }
-.toast.hidden {
-  display: none;
+.toast.hidden,
+.toast:empty {
+  display: none !important;
 }
 
 /* ==========================================================================
@@ -3345,9 +3478,9 @@ select option {
 
 .sub-tab-btn.active,
 .audit-tab-btn.active {
-  background: rgba(56, 189, 248, 0.16) !important;
-  border-color: rgba(56, 189, 248, 0.48) !important;
-  color: #38bdf8 !important;
+  background: var(--accent-soft) !important;
+  border-color: var(--border-strong) !important;
+  color: var(--accent-text) !important;
 }
 
 .mgmt-filter-bar {
@@ -3357,8 +3490,8 @@ select option {
   flex-wrap: wrap;
   margin-bottom: 14px;
   padding: 12px 14px;
-  background: rgba(15, 23, 42, 0.72);
-  border: 1px solid var(--border-subtle);
+  background: var(--card2);
+  border: 1px solid var(--border);
   border-radius: 12px;
 }
 
@@ -3367,16 +3500,16 @@ select option {
   border-radius: 999px !important;
   font-size: 11.5px !important;
   font-weight: 700 !important;
-  background: rgba(255, 255, 255, 0.05) !important;
-  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  background: var(--surface-soft) !important;
+  border: 1px solid var(--border) !important;
   color: var(--text-muted) !important;
   cursor: pointer;
   box-shadow: none !important;
 }
 .filter-chip.active {
-  background: rgba(56, 189, 248, 0.2) !important;
-  border-color: #38bdf8 !important;
-  color: #38bdf8 !important;
+  background: var(--accent-soft) !important;
+  border-color: var(--border-strong) !important;
+  color: var(--accent-text) !important;
 }
 
 .password-cell-wrap {
@@ -3491,7 +3624,7 @@ select option {
 }
 
 /* ==========================================================================
-   COSMIC STAGE BACKDROP ENGINE & THEME VARIANTS
+   COSMIC STAGE BACKDROP ENGINE & 3-THEME AMBIENT LAYER
    ========================================================================== */
 .app-cosmic-stage {
   position: fixed;
@@ -3499,9 +3632,7 @@ select option {
   z-index: 0;
   pointer-events: none;
   overflow: hidden;
-  background: radial-gradient(ellipse at 18% 12%, rgba(14, 165, 233, 0.14) 0%, transparent 50%),
-              radial-gradient(ellipse at 85% 88%, rgba(99, 102, 241, 0.12) 0%, transparent 55%),
-              #03060f;
+  background: var(--bg-gradient);
 }
 .app-cosmic-video {
   position: absolute;
@@ -3509,158 +3640,78 @@ select option {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  opacity: 0.30;
-  filter: saturate(1.2) contrast(1.08) brightness(0.65);
-  transition: opacity 0.6s ease;
+  opacity: 0.14;
+  filter: saturate(0.8) hue-rotate(15deg) brightness(0.6);
+}
+:root[data-theme="violet-dusk"] .app-cosmic-video,
+:root[data-theme="moonlight"] .app-cosmic-video {
+  display: none !important;
 }
 .app-cosmic-nebula {
   position: absolute;
   border-radius: 50%;
-  filter: blur(90px);
-  opacity: 0.30;
+  filter: blur(88px);
+  opacity: 0.24;
   will-change: transform;
-  transition: opacity 0.6s ease, background 0.6s ease;
 }
 .app-cosmic-nebula.n1 {
-  width: 58vw;
-  height: 58vw;
-  top: -20vw;
-  left: -14vw;
-  background: radial-gradient(circle, rgba(14, 165, 233, 0.32), transparent 65%);
+  width: 52vw;
+  height: 52vw;
+  top: -18vw;
+  left: -12vw;
+  background: radial-gradient(circle, rgba(124, 58, 237, 0.28), transparent 65%);
 }
 .app-cosmic-nebula.n2 {
-  width: 50vw;
-  height: 50vw;
-  bottom: -22vw;
+  width: 48vw;
+  height: 48vw;
+  bottom: -20vw;
   right: -10vw;
-  background: radial-gradient(circle, rgba(99, 102, 241, 0.30), transparent 65%);
+  background: radial-gradient(circle, rgba(91, 33, 182, 0.24), transparent 65%);
+}
+:root[data-theme="violet-dusk"] .app-cosmic-nebula {
+  opacity: 0.12;
+}
+:root[data-theme="moonlight"] .app-cosmic-nebula {
+  opacity: 0.14;
 }
 .app-cosmic-canvas {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
-  opacity: 0.72;
-  transition: opacity 0.6s ease;
+  opacity: 0.62;
+}
+:root[data-theme="violet-dusk"] .app-cosmic-canvas {
+  opacity: 0.36;
+}
+:root[data-theme="moonlight"] .app-cosmic-canvas {
+  opacity: 0.42;
+}
+.app-cosmic-island-horizon {
+  position: absolute;
+  right: 3%;
+  bottom: 2%;
+  width: min(440px, 42vw);
+  opacity: 0.16;
+  pointer-events: none;
+}
+:root[data-theme="violet-dusk"] .app-cosmic-island-horizon {
+  opacity: 0.11;
+}
+:root[data-theme="moonlight"] .app-cosmic-island-horizon {
+  opacity: 0.14;
 }
 .app-cosmic-scrim {
   position: absolute;
   inset: 0;
-  background: radial-gradient(circle at 50% 45%, rgba(4, 7, 17, 0.34) 0%, rgba(3, 6, 15, 0.80) 100%);
-  transition: background 0.6s ease;
+  background: radial-gradient(circle at 50% 45%, transparent 0%, rgba(6, 4, 15, 0.46) 100%);
 }
-
-/* Vivid / Subtle / Login Cosmic Modes */
-body.cosmic-mode-login .app-cosmic-video,
-body.cosmic-mode-vivid .app-cosmic-video {
-  opacity: 0.68 !important;
+:root[data-theme="moonlight"] .app-cosmic-scrim {
+  background: radial-gradient(circle at 50% 35%, rgba(255, 255, 255, 0.18) 0%, rgba(235, 230, 248, 0.42) 100%);
 }
-body.cosmic-mode-login .app-cosmic-nebula,
-body.cosmic-mode-vivid .app-cosmic-nebula {
-  opacity: 0.60 !important;
-}
-body.cosmic-mode-login .app-cosmic-canvas,
-body.cosmic-mode-vivid .app-cosmic-canvas {
-  opacity: 1 !important;
-}
-body.cosmic-mode-login .app-cosmic-scrim,
-body.cosmic-mode-vivid .app-cosmic-scrim {
-  background: radial-gradient(circle at 50% 50%, rgba(4, 7, 17, 0.16) 0%, rgba(3, 6, 15, 0.64) 100%) !important;
-}
-body.cosmic-mode-subtle .app-cosmic-video { opacity: 0.24; }
-
-/* Theme: Off / Minimal Obsidian */
-body.cosmic-mode-off .app-cosmic-stage,
-body.theme-off .app-cosmic-stage {
-  background: #030712 !important;
-}
-body.cosmic-mode-off .app-cosmic-video,
-body.cosmic-mode-off .app-cosmic-nebula,
-body.cosmic-mode-off .app-cosmic-canvas,
-body.theme-off .app-cosmic-video,
-body.theme-off .app-cosmic-nebula,
-body.theme-off .app-cosmic-canvas {
-  opacity: 0 !important;
-  display: none !important;
-}
-body.cosmic-mode-off .app-cosmic-scrim,
-body.theme-off .app-cosmic-scrim {
-  background: #030712 !important;
-}
-
-/* Theme: Sunset (Dusk Purple / Crimson / Gold Glow) */
-body.theme-sunset .app-cosmic-stage {
-  background: linear-gradient(135deg, #1b0a28 0%, #3d1239 45%, #7c2d12 100%) !important;
-}
-body.theme-sunset .app-cosmic-video { display: none !important; }
-body.theme-sunset .app-cosmic-nebula.n1 {
-  background: radial-gradient(circle, rgba(249, 115, 22, 0.42), rgba(236, 72, 153, 0.18) 55%, transparent 72%) !important;
-  top: -10vw !important; right: -8vw !important; left: auto !important; opacity: 0.72 !important;
-}
-body.theme-sunset .app-cosmic-nebula.n2 {
-  background: radial-gradient(circle, rgba(168, 85, 247, 0.42), rgba(251, 146, 60, 0.15) 55%, transparent 72%) !important;
-  bottom: -18vw !important; left: -10vw !important; right: auto !important; opacity: 0.70 !important;
-}
-body.theme-sunset .app-cosmic-scrim {
-  background: radial-gradient(circle at 60% 25%, rgba(251, 146, 60, 0.10) 0%, rgba(16, 7, 26, 0.64) 100%) !important;
-}
-body.theme-sunset .kpi-card,
-body.theme-sunset .bot-card,
-body.theme-sunset .panel,
-body.theme-sunset .fleet-toolbar,
-body.theme-sunset .fleet-welcome-header,
-body.theme-sunset .fleet-resource-bar,
-body.theme-sunset .user-table-wrap,
-body.theme-sunset .modal-card {
-  background: rgba(24, 12, 34, 0.80);
-  border-color: rgba(249, 115, 22, 0.22);
-}
-body.theme-sunset .global-header {
-  background: rgba(18, 9, 27, 0.84);
-  border-bottom-color: rgba(249, 115, 22, 0.25);
-}
-body.theme-sunset .cosmic-toggle-pill {
-  background: rgba(249, 115, 22, 0.18);
-  border-color: rgba(251, 146, 60, 0.45);
-  color: #fed7aa;
-}
-
-/* Theme: Morning (Dawn Sky / Crisp Teal / Emerald Glow) */
-body.theme-morning .app-cosmic-stage {
-  background: linear-gradient(150deg, #07192f 0%, #0d2b45 48%, #0d4a58 100%) !important;
-}
-body.theme-morning .app-cosmic-video { display: none !important; }
-body.theme-morning .app-cosmic-nebula.n1 {
-  background: radial-gradient(circle, rgba(56, 189, 248, 0.36), rgba(45, 212, 191, 0.18) 55%, transparent 72%) !important;
-  top: -14vw !important; right: -10vw !important; left: auto !important; opacity: 0.72 !important;
-}
-body.theme-morning .app-cosmic-nebula.n2 {
-  background: radial-gradient(circle, rgba(16, 185, 129, 0.32), rgba(56, 189, 248, 0.14) 55%, transparent 72%) !important;
-  bottom: -15vw !important; left: -8vw !important; right: auto !important; opacity: 0.68 !important;
-}
-body.theme-morning .app-cosmic-scrim {
-  background: radial-gradient(circle at 50% 18%, rgba(125, 211, 252, 0.08) 0%, rgba(5, 18, 34, 0.56) 100%) !important;
-}
-body.theme-morning .kpi-card,
-body.theme-morning .bot-card,
-body.theme-morning .panel,
-body.theme-morning .fleet-toolbar,
-body.theme-morning .fleet-welcome-header,
-body.theme-morning .fleet-resource-bar,
-body.theme-morning .user-table-wrap,
-body.theme-morning .modal-card {
-  background: rgba(8, 24, 42, 0.78);
-  border-color: rgba(45, 212, 191, 0.24);
-}
-body.theme-morning .global-header {
-  background: rgba(6, 20, 36, 0.84);
-  border-bottom-color: rgba(45, 212, 191, 0.24);
-}
-body.theme-morning .cosmic-toggle-pill {
-  background: rgba(20, 184, 166, 0.18);
-  border-color: rgba(45, 212, 191, 0.42);
-  color: #99f6e4;
-}
+body.cosmic-mode-login .app-cosmic-nebula { opacity: 0.42; }
+body.cosmic-mode-login .app-cosmic-canvas { opacity: 0.85; }
+body.cosmic-mode-login .app-cosmic-island-horizon { opacity: 0.34; }
 
 /* ==========================================================================
    LEGACY WEBKIT SCROLLBAR FALLBACK
@@ -4293,16 +4344,663 @@ body.theme-morning .cosmic-toggle-pill {
     min-block-size: 44px;
   }
 }
+
+/* ==========================================================================
+   KBOT V3 REDESIGN LAYER — MINIMAL DARK PURPLE SAAS + SIDEBAR SHELL + 3 THEMES
+   ========================================================================== */
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* Unified Minimal Dark Purple Tokens Override for Legacy Components */
+.global-header {
+  position: sticky;
+  top: 0;
+  z-index: 35;
+  background: var(--bg-surface) !important;
+  border-bottom: 1px solid var(--border) !important;
+  backdrop-filter: blur(8px);
+  border-radius: 0 !important;
+  margin: 0 !important;
+  padding: 10px 22px !important;
+  box-shadow: var(--shadow-sm) !important;
+}
+
+.app {
+  display: grid !important;
+  grid-template-columns: 248px minmax(0, 1fr);
+  min-height: 100dvh;
+  max-width: 100% !important;
+  width: 100% !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  position: relative;
+  z-index: 1;
+}
+
+body.sidebar-collapsed .app {
+  grid-template-columns: 74px minmax(0, 1fr);
+}
+
+.app-sidebar {
+  position: sticky;
+  top: 0;
+  height: 100dvh;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 16px 12px;
+  gap: 14px;
+  z-index: 40;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.app-sidebar-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 4px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.sidebar-brand-mark {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  border: 1px solid var(--border-strong);
+  color: var(--accent-text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.sidebar-brand-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.sidebar-brand-name {
+  font-size: 14.5px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.sidebar-brand-sub {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--accent-text);
+  white-space: nowrap;
+}
+
+.sidebar-collapse-btn {
+  width: 30px;
+  height: 30px;
+  padding: 0 !important;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.sidebar-collapse-btn svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  display: block;
+}
+
+.sidebar-collapse-btn:hover {
+  background: var(--accent-soft);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.sidebar-nav-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sidebar-section-label {
+  padding: 6px 10px 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.sidebar-nav-btn {
+  position: relative;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 11px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.sidebar-nav-btn:hover {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.sidebar-nav-btn.active {
+  background: var(--accent-soft);
+  border-color: var(--border-strong);
+  color: var(--accent-text);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.sidebar-nav-btn .sb-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.sidebar-nav-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sidebar-theme-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sidebar-theme-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px;
+}
+
+.sidebar-theme-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  min-height: 34px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: var(--card2);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.sidebar-theme-btn:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.sidebar-theme-btn.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.theme-swatch-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  border: 1px solid var(--border-strong);
+}
+
+body.sidebar-collapsed .sidebar-brand-text,
+body.sidebar-collapsed .sidebar-section-label,
+body.sidebar-collapsed .sidebar-nav-label,
+body.sidebar-collapsed .sidebar-theme-box,
+body.sidebar-collapsed .sidebar-discord-label {
+  display: none;
+}
+
+body.sidebar-collapsed .app-sidebar {
+  padding: 14px 10px;
+  align-items: center;
+}
+
+body.sidebar-collapsed .app-sidebar-top {
+  flex-direction: column;
+  gap: 10px;
+}
+
+body.sidebar-collapsed .sidebar-nav-btn {
+  justify-content: center;
+  padding: 8px;
+  width: 46px;
+}
+
+body.sidebar-collapsed .sidebar-nav-btn[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: fixed;
+  left: 82px;
+  z-index: 200;
+  background: var(--bg-elevated);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: var(--shadow-md);
+  pointer-events: none;
+}
+
+.sidebar-mobile-toggle {
+  display: none;
+  width: 38px;
+  height: 38px;
+  padding: 0 !important;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--card2);
+  color: var(--text);
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.sidebar-mobile-toggle svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  display: block;
+}
+
+.app-sidebar-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 4, 15, 0.65);
+  z-index: 940;
+}
+
+.app-main-column {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+}
+
+#homePage,
+#detailPage,
+#userManagementPage,
+#auditPage,
+#backupPage {
+  width: 100%;
+  max-width: 1480px;
+  margin: 0 auto;
+  padding: 20px 24px 32px;
+  flex: 1 0 auto;
+}
+
+.app-footer {
+  margin-top: auto;
+  width: 100%;
+  max-width: 1480px;
+  margin-inline: auto;
+  padding: 16px 24px 24px !important;
+}
+
+/* Minimal Dark Purple Surface & Accent Restraint */
+.kpi-card,
+.bot-card,
+.panel,
+.fleet-toolbar,
+.fleet-welcome-header,
+.fleet-resource-bar,
+.user-table-wrap,
+.modal-card,
+.login-card,
+.restriction-card,
+.create-key-card {
+  background: var(--card) !important;
+  border: 1px solid var(--border) !important;
+  box-shadow: var(--shadow-sm) !important;
+  backdrop-filter: none !important;
+}
+
+.kpi-card::after {
+  height: 3px !important;
+}
+.kpi-card.kpi-total::after { background: var(--accent) !important; }
+.kpi-card.kpi-health::after,
+.kpi-card.kpi-afk::after { background: var(--green) !important; }
+.kpi-card.kpi-online::after { background: var(--yellow) !important; }
+.kpi-card.kpi-offline::after { background: var(--red) !important; }
+
+.bot-card:hover,
+.kpi-card:hover {
+  border-color: var(--border-strong) !important;
+  box-shadow: var(--shadow-md) !important;
+}
+
+button.primary,
+.primary {
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
+  color: #ffffff !important;
+  box-shadow: none !important;
+}
+
+button.primary:hover:not(:disabled),
+.primary:hover:not(:disabled) {
+  background: var(--accent-hover) !important;
+  border-color: var(--accent-hover) !important;
+}
+
+.nav-pill-btn.active,
+.sub-tab-btn.active,
+.audit-tab-btn.active,
+.tab-btn.active {
+  background: var(--accent-soft) !important;
+  border-color: var(--accent) !important;
+  color: var(--accent-text) !important;
+}
+
+.cosmic-toggle-pill {
+  background: var(--accent-soft) !important;
+  border: 1px solid var(--border-strong) !important;
+  color: var(--accent-text) !important;
+}
+
+.vip-pill,
+.vip-pill-mini {
+  background: var(--accent-soft) !important;
+  border-color: var(--border-strong) !important;
+  color: var(--accent-text) !important;
+}
+
+/* Crisp Interactive Remote GUI Window */
+#detailRemoteGuiSlots {
+  background: var(--card2) !important;
+  border: 1px solid var(--border-strong) !important;
+  border-radius: 12px !important;
+  padding: 12px !important;
+  gap: 6px !important;
+}
+
+#detailRemoteGuiSlots > div:hover,
+#detailRemoteGuiSlots > div:focus-visible {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 2px var(--accent-soft) !important;
+  outline: none;
+}
+
+/* Crisp Toast Palette (4 Semantic States) */
+.toast {
+  background: var(--bg-elevated) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border-strong) !important;
+  border-left-width: 4px !important;
+  border-radius: 12px !important;
+  box-shadow: var(--shadow-lg) !important;
+}
+.toast.toast-success { border-left-color: var(--green) !important; }
+.toast.toast-info { border-left-color: var(--accent) !important; }
+.toast.toast-warning { border-left-color: var(--yellow) !important; }
+.toast.toast-error { border-left-color: var(--red) !important; }
+
+/* In-App Login Gate Alignment with Minimal Dark Purple */
+.login-gate {
+  background: transparent !important;
+  backdrop-filter: blur(6px) !important;
+}
+.kbot-gradient-text {
+  background: linear-gradient(120deg, var(--text) 10%, var(--accent-text) 90%) !important;
+  -webkit-background-clip: text !important;
+  background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+}
+
+/* Moonlight Light-Theme Contrast Safeguards */
+:root[data-theme="moonlight"] .global-header {
+  background: rgba(255, 255, 255, 0.94) !important;
+}
+:root[data-theme="moonlight"] input:not([type="checkbox"]):not([type="radio"]),
+:root[data-theme="moonlight"] select,
+:root[data-theme="moonlight"] textarea {
+  background: var(--bg-input) !important;
+  color: var(--text) !important;
+  border-color: var(--border-strong) !important;
+}
+:root[data-theme="moonlight"] .info-item,
+:root[data-theme="moonlight"] .note,
+:root[data-theme="moonlight"] .mgmt-filter-bar,
+:root[data-theme="moonlight"] .log,
+:root[data-theme="moonlight"] .chat-log,
+:root[data-theme="moonlight"] .credential-list,
+:root[data-theme="moonlight"] .inventory-stat,
+:root[data-theme="moonlight"] .equipment-slot,
+:root[data-theme="moonlight"] .inventory-slot,
+:root[data-theme="moonlight"] .drop-zone,
+:root[data-theme="moonlight"] .schedule-row,
+:root[data-theme="moonlight"] .check-row,
+:root[data-theme="moonlight"] .sub-panel,
+:root[data-theme="moonlight"] .user-profile-dropdown,
+:root[data-theme="moonlight"] .announcement-card,
+:root[data-theme="moonlight"] .user-announcement-card {
+  background: var(--card2) !important;
+  color: var(--text) !important;
+  border-color: var(--border) !important;
+}
+:root[data-theme="moonlight"] .user-table th {
+  background: #ede9f8 !important;
+  color: #2e244d !important;
+}
+:root[data-theme="moonlight"] .user-table td,
+:root[data-theme="moonlight"] .bot-card-name,
+:root[data-theme="moonlight"] .kpi-value,
+:root[data-theme="moonlight"] .panel h3,
+:root[data-theme="moonlight"] .modal-card h3,
+:root[data-theme="moonlight"] .full-page-title,
+:root[data-theme="moonlight"] .fleet-welcome-title {
+  color: var(--text) !important;
+}
+:root[data-theme="moonlight"] [style*="color:#fff"],
+:root[data-theme="moonlight"] [style*="color: #fff"] {
+  color: var(--text) !important;
+}
+:root[data-theme="moonlight"] button.primary,
+:root[data-theme="moonlight"] button.primary *,
+:root[data-theme="moonlight"] .primary,
+:root[data-theme="moonlight"] .announcement-ack-btn {
+  color: #ffffff !important;
+}
+:root[data-theme="moonlight"] [style*="background:rgba(15,23,42"],
+:root[data-theme="moonlight"] [style*="background:rgba(0,0,0"] {
+  background: var(--card2) !important;
+  color: var(--text) !important;
+}
+:root[data-theme="moonlight"] .chip,
+:root[data-theme="moonlight"] button.small:not(.primary):not(.danger),
+:root[data-theme="moonlight"] button.secondary,
+:root[data-theme="moonlight"] button:not(.primary):not(.danger):not(.danger-btn):not(.tab-btn):not(.sidebar-nav-btn):not(.theme-chip-btn):not(.bot-owner-pill):not(.bot-tag-chip):not(.bot-mini-btn):not(.sidebar-collapse-btn):not(.tag-filter-chip):not(.profile-menu-item):not(.user-profile-trigger) {
+  background: #f0ecf9 !important;
+  color: #2b2247 !important;
+  border-color: var(--border-strong) !important;
+}
+:root[data-theme="moonlight"] .filter-tabs {
+  background: #f2eefb !important;
+  border-color: var(--border-strong) !important;
+}
+:root[data-theme="moonlight"] .tab-btn {
+  background: transparent !important;
+  color: #5b5276 !important;
+}
+:root[data-theme="moonlight"] .tab-btn.active {
+  background: rgba(124, 58, 237, 0.14) !important;
+  color: #5b21b6 !important;
+  border-color: rgba(124, 58, 237, 0.38) !important;
+}
+:root[data-theme="moonlight"] .bot-mini-btn {
+  background: #f4f1fc !important;
+  color: #2b2247 !important;
+  border-color: var(--border-strong) !important;
+}
+:root[data-theme="moonlight"] .bot-mini-btn.danger {
+  background: rgba(220, 38, 38, 0.10) !important;
+  color: #b91c1c !important;
+  border-color: rgba(220, 38, 38, 0.28) !important;
+}
+:root[data-theme="moonlight"] #detailResetCustomerBtn {
+  background: rgba(220, 38, 38, 0.12) !important;
+  color: #991b1b !important;
+  border-color: rgba(220, 38, 38, 0.36) !important;
+}
+:root[data-theme="moonlight"] .filter-chip {
+  background: #f0ecf9 !important;
+  color: #4c4269 !important;
+  border-color: var(--border-strong) !important;
+}
+:root[data-theme="moonlight"] .filter-chip.active {
+  background: rgba(109, 40, 217, 0.14) !important;
+  color: #5b21b6 !important;
+  border-color: rgba(109, 40, 217, 0.42) !important;
+}
+
+/* Desktop Sidebar Hides Duplicate Top Nav Pills */
+@media (min-width: 1025px) {
+  .global-nav-pills,
+  .global-header-brand {
+    display: none !important;
+  }
+}
+
+/* Responsive Tablet & Mobile Sidebar Drawer */
+@media (max-width: 1024px) {
+  .app,
+  body.sidebar-collapsed .app {
+    display: block !important;
+    grid-template-columns: 1fr !important;
+  }
+  .sidebar-mobile-toggle {
+    display: inline-flex;
+  }
+  .app-sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 268px;
+    transform: translateX(-105%);
+    transition: transform 0.22s ease;
+    z-index: 950;
+    box-shadow: var(--shadow-lg);
+  }
+  .app-sidebar.is-open {
+    transform: translateX(0);
+  }
+  .sidebar-collapse-btn {
+    display: none;
+  }
+  .global-nav-pills {
+    display: none !important;
+  }
+  #homePage,
+  #detailPage,
+  #userManagementPage,
+  #auditPage,
+  #backupPage {
+    padding: 16px 14px 28px;
+  }
+}
+
+@media (max-width: 640px) {
+  .global-header {
+    padding: 10px 12px !important;
+  }
+  #cosmicModeToggleBtn {
+    display: none;
+  }
+}
+
+/* Accessibility: Forced Colors & Reduced Motion */
+@media (forced-colors: active) {
+  .app-sidebar,
+  .global-header,
+  .kpi-card,
+  .bot-card,
+  .panel,
+  .modal-card,
+  .sidebar-nav-btn.active {
+    border: 1px solid CanvasText !important;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .app-cosmic-island-horizon {
+    animation: kbotAppIslandFloat 14s ease-in-out infinite;
+  }
+}
+@keyframes kbotAppIslandFloat {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  50% { transform: translate3d(0, -8px, 0); }
+}
 </style>
 </head>
 <body>
 <div id="appCosmicStage" class="app-cosmic-stage" aria-hidden="true">
-  <video id="appGalaxyVideo" class="app-cosmic-video" autoplay loop muted playsinline preload="auto">
-    <source src="https://assets.mixkit.co/videos/preview/mixkit-stars-in-space-1610-large.mp4" type="video/mp4">
-  </video>
+  <video id="appGalaxyVideo" class="app-cosmic-video" autoplay loop muted playsinline preload="none"></video>
   <div class="app-cosmic-nebula n1"></div>
   <div class="app-cosmic-nebula n2"></div>
   <canvas id="appStarfieldCanvas" class="app-cosmic-canvas"></canvas>
+  <svg class="app-cosmic-island-horizon" viewBox="0 0 360 180" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <polygon points="84,112 276,112 246,144 196,166 172,172 138,158 106,138" fill="#2e2352"/>
+    <rect x="74" y="100" width="212" height="14" rx="2" fill="#46357a"/>
+    <rect x="74" y="95" width="212" height="7" rx="2" fill="#6d4fc2"/>
+    <rect x="148" y="36" width="64" height="59" rx="3" fill="#170f2e" stroke="#4c3582" stroke-width="2"/>
+    <rect x="159" y="47" width="42" height="48" rx="2" fill="#7c3aed" opacity="0.72"/>
+  </svg>
   <div class="app-cosmic-scrim"></div>
 </div>
 <div id="loginGate" class="login-gate hidden">
@@ -4562,9 +5260,113 @@ body.theme-morning .cosmic-toggle-pill {
 </div>
 
 <div id="mainApp" class="app">
+  <div id="appSidebarBackdrop" class="app-sidebar-backdrop hidden" onclick="closeMobileSidebar()"></div>
+
+  <!-- FIXED LEFT SIDEBAR (AUTHENTIC ROLE-GATED NAVIGATION) -->
+  <aside id="appSidebar" class="app-sidebar" aria-label="Điều hướng chính">
+    <div class="app-sidebar-top">
+      <div class="sidebar-brand" onclick="navigateTo('dashboard'); closeMobileSidebar();">
+        <div class="sidebar-brand-mark" aria-hidden="true">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L3 7v10l9 5 9-5V7l-9-5z"/>
+            <path d="M12 22V12"/>
+            <path d="M21 7l-9 5-9-5"/>
+          </svg>
+        </div>
+        <div class="sidebar-brand-text">
+          <span class="sidebar-brand-name">KBOT Manager</span>
+          <span class="sidebar-brand-sub">V11.8 ENTERPRISE</span>
+        </div>
+      </div>
+      <button type="button" id="sidebarCollapseBtn" class="sidebar-collapse-btn" onclick="toggleSidebarCollapse()" aria-label="Thu gọn hoặc mở rộng thanh bên" title="Thu gọn thanh bên">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+    </div>
+
+    <div class="sidebar-nav-section">
+      <div class="sidebar-section-label">Điều Hành</div>
+      <button type="button" class="sidebar-nav-btn active" data-sidebar-page="dashboard" data-tooltip="Tổng quan & Hạm đội" onclick="navigateTo('dashboard'); closeMobileSidebar();">
+        <svg class="sb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+        <span class="sidebar-nav-label">Tổng quan &amp; Hạm đội</span>
+      </button>
+    </div>
+
+    <div class="sidebar-nav-section admin-only">
+      <div class="sidebar-section-label">Quản Trị Hệ Thống</div>
+      <button type="button" class="sidebar-nav-btn admin-only" data-sidebar-page="users" data-tooltip="Người dùng & Key" onclick="navigateTo('users'); closeMobileSidebar();">
+        <svg class="sb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        <span class="sidebar-nav-label">Người dùng &amp; Key</span>
+      </button>
+      <button type="button" class="sidebar-nav-btn admin-only" data-sidebar-page="audit" data-tooltip="Nhật ký Audit" onclick="navigateTo('audit'); closeMobileSidebar();">
+        <svg class="sb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+        <span class="sidebar-nav-label">Nhật ký Audit</span>
+      </button>
+      <button type="button" class="sidebar-nav-btn admin-only" data-sidebar-page="backup" data-tooltip="Sao lưu & Khôi phục" onclick="navigateTo('backup'); closeMobileSidebar();">
+        <svg class="sb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+        <span class="sidebar-nav-label">Sao lưu &amp; Dữ liệu</span>
+      </button>
+      <button type="button" class="sidebar-nav-btn admin-only" data-tooltip="Supabase Cloud" onclick="openSupabaseModal(); closeMobileSidebar();">
+        <svg class="sb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+        <span class="sidebar-nav-label">Supabase Cloud</span>
+      </button>
+      <button type="button" class="sidebar-nav-btn admin-only" data-tooltip="Mật khẩu Bot" onclick="openAdminModal(); closeMobileSidebar();">
+        <svg class="sb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+        <span class="sidebar-nav-label">Mật khẩu Bot</span>
+      </button>
+      <button type="button" class="sidebar-nav-btn admin-only" data-tooltip="Thông báo & Webhook" onclick="openAnnouncementAdminModal(); closeMobileSidebar();">
+        <svg class="sb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        <span class="sidebar-nav-label">Thông báo Popup</span>
+      </button>
+    </div>
+
+    <div class="sidebar-nav-section">
+      <div class="sidebar-section-label">Tài Khoản &amp; Hỗ Trợ</div>
+      <button type="button" class="sidebar-nav-btn" data-tooltip="Liên kết Discord" onclick="openDiscordLinkModal(); closeMobileSidebar();">
+        <svg class="sb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+        <span class="sidebar-nav-label">Liên kết Discord</span>
+      </button>
+      <button type="button" class="sidebar-nav-btn" data-tooltip="Đổi mật khẩu" onclick="openChangePasswordModal(); closeMobileSidebar();">
+        <svg class="sb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <span class="sidebar-nav-label">Đổi mật khẩu</span>
+      </button>
+      <button type="button" class="sidebar-nav-btn" data-tooltip="Lịch sử cập nhật" onclick="openChangelogModal(); closeMobileSidebar();">
+        <svg class="sb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <span class="sidebar-nav-label">Lịch sử cập nhật</span>
+      </button>
+      <button type="button" class="sidebar-nav-btn" data-tooltip="Đăng xuất" onclick="logout()">
+        <svg class="sb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        <span class="sidebar-nav-label">Đăng xuất</span>
+      </button>
+    </div>
+
+    <div class="sidebar-footer">
+      <div class="sidebar-theme-box">
+        <div class="sidebar-section-label" style="padding-left:2px;">Giao Diện (3 Themes)</div>
+        <div class="sidebar-theme-grid" role="group" aria-label="Chọn giao diện">
+          <button type="button" class="sidebar-theme-btn active" data-theme-choice="deep-galaxy" onclick="applyDashboardCosmicMode('deep-galaxy')">
+            <span>Deep Galaxy</span>
+            <span class="theme-swatch-dot" style="background:#8b5cf6;"></span>
+          </button>
+          <button type="button" class="sidebar-theme-btn" data-theme-choice="violet-dusk" onclick="applyDashboardCosmicMode('violet-dusk')">
+            <span>Violet Dusk</span>
+            <span class="theme-swatch-dot" style="background:#3f3959;"></span>
+          </button>
+          <button type="button" class="sidebar-theme-btn" data-theme-choice="moonlight" onclick="applyDashboardCosmicMode('moonlight')">
+            <span>Moonlight</span>
+            <span class="theme-swatch-dot" style="background:#f3f1fa;"></span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <div class="app-main-column">
   <!-- GLOBAL TOP-RIGHT PINNED NAVIGATION HEADER (PERSISTENT ON ALL TABS PC & MOBILE) -->
   <header id="globalHeader" class="global-header">
     <div class="global-header-left">
+      <button type="button" id="sidebarToggleBtn" class="sidebar-mobile-toggle" onclick="toggleMobileSidebar()" aria-label="Mở menu điều hướng">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
       <div class="global-header-brand" onclick="navigateTo('dashboard')">
         <span class="global-logo">👑</span>
         <span class="global-brand-text">KBOT</span>
@@ -4589,7 +5391,7 @@ body.theme-morning .cosmic-toggle-pill {
       </nav>
     </div>
     <div class="global-header-right">
-      <button type="button" id="cosmicModeToggleBtn" class="cosmic-toggle-pill" onclick="cycleDashboardCosmicMode()" title="Đổi mức độ nền Galaxy trên Dashboard (Dịu / Sâu / Tĩnh)">🌌 Vũ trụ: Dịu</button>
+      <button type="button" id="cosmicModeToggleBtn" class="cosmic-toggle-pill" onclick="cycleDashboardCosmicMode()" title="Chuyển nhanh 3 giao diện: Deep Galaxy / Violet Dusk / Moonlight">🌌 Deep Galaxy</button>
       <span id="globalUserRoleBadge" class="vip-pill" style="background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.3);">🔒 CHƯA ĐĂNG NHẬP</span>
       <span class="ram-pill">📊 <strong id="globalManagerRam">-- MB</strong></span>
 
@@ -4621,6 +5423,13 @@ body.theme-morning .cosmic-toggle-pill {
           <div class="profile-dropdown-divider"></div>
 
           <div class="profile-dropdown-menu">
+            <div class="profile-menu-section-title">GIAO DIỆN HIỂN THỊ</div>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;padding:4px 8px 8px;">
+              <button type="button" class="small" data-theme-choice="deep-galaxy" onclick="applyDashboardCosmicMode('deep-galaxy')">Deep Galaxy</button>
+              <button type="button" class="small" data-theme-choice="violet-dusk" onclick="applyDashboardCosmicMode('violet-dusk')">Violet Dusk</button>
+              <button type="button" class="small" data-theme-choice="moonlight" onclick="applyDashboardCosmicMode('moonlight')">Moonlight</button>
+            </div>
+            <div class="profile-dropdown-divider"></div>
             <div class="profile-menu-section-title">CHUYỂN TRANG NHANH</div>
             <button type="button" class="big-tab-item" onclick="navigateTo('dashboard'); closeGlobalProfileDropdown();">
               <span class="menu-icon">📊</span>
@@ -5125,25 +5934,25 @@ body.theme-morning .cosmic-toggle-pill {
         </div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-        <div class="admin-only" style="display:inline-flex;align-items:center;gap:6px;background:rgba(15,23,42,0.6);border:1px solid rgba(56,189,248,0.3);border-radius:8px;padding:3px 8px;">
-          <button type="button" id="trialGiftToggleBtn" class="small" onclick="toggleTrialGiftSetting()" title="Bật/Tắt chế độ tặng dùng thử kèm bot trống cho người mới" style="background:transparent;border:none;color:#38bdf8;font-weight:700;padding:2px 4px;cursor:pointer;">
+        <div class="admin-only" style="display:inline-flex;align-items:center;gap:6px;background:var(--card2);border:1px solid var(--border-strong);border-radius:8px;padding:3px 8px;">
+          <button type="button" id="trialGiftToggleBtn" class="small" onclick="toggleTrialGiftSetting()" title="Bật/Tắt chế độ tặng dùng thử kèm bot trống cho người mới" style="background:transparent !important;border:none !important;color:var(--accent-text) !important;font-weight:700;padding:2px 4px;cursor:pointer;">
             <span id="trialGiftBtnLabel">🎁 Tặng Dùng Thử:</span> <span id="trialGiftStatusBadge">BẬT</span>
           </button>
           <span style="color:var(--border);">|</span>
           <label for="trialDaysInput" style="font-size:12px;color:var(--muted);display:inline-flex;align-items:center;gap:4px;margin:0;">
             <span>Số ngày:</span>
-            <input type="number" id="trialDaysInput" min="1" max="365" value="1" title="Số ngày dùng thử tặng khi đăng ký tài khoản mới" style="width:52px;padding:3px 6px;font-size:12px;border-radius:4px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);text-align:center;" onchange="saveTrialDaysSetting()">
+            <input type="number" id="trialDaysInput" min="1" max="365" value="1" title="Số ngày dùng thử tặng khi đăng ký tài khoản mới" style="width:52px;padding:3px 6px;font-size:12px;border-radius:4px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);text-align:center;" onchange="saveTrialDaysSetting()">
             <span style="font-size:11px;">ngày</span>
           </label>
         </div>
 
         <!-- CỤM CẤU HÌNH VƯỢT LINK +12H (ADMIN) -->
-        <div class="admin-only" style="display:inline-flex;align-items:center;gap:6px;background:rgba(15,23,42,0.6);border:1px solid rgba(234,179,8,0.35);border-radius:8px;padding:3px 8px;">
-          <button type="button" id="link4mToggleBtn" class="small" onclick="toggleLink4mSetting()" title="Bật/Tắt tính năng vượt link Link4M nhận +12h" style="background:transparent;border:none;color:#facc15;font-weight:700;padding:2px 4px;cursor:pointer;">
+        <div class="admin-only" style="display:inline-flex;align-items:center;gap:6px;background:var(--card2);border:1px solid rgba(234,179,8,0.38);border-radius:8px;padding:3px 8px;">
+          <button type="button" id="link4mToggleBtn" class="small" onclick="toggleLink4mSetting()" title="Bật/Tắt tính năng vượt link Link4M nhận +12h" style="background:transparent !important;border:none !important;color:var(--yellow) !important;font-weight:700;padding:2px 4px;cursor:pointer;">
             <span id="link4mBtnLabel">⚡ Vượt Link +12h:</span> <span id="link4mStatusBadge">TẮT</span>
           </button>
           <span style="color:var(--border);">|</span>
-          <button type="button" class="small" onclick="openLink4mConfigModal()" title="Cấu hình Link rút gọn hoặc API Token Link4M" style="background:rgba(234,179,8,0.15);border:1px solid rgba(234,179,8,0.3);color:#facc15;padding:2px 8px;border-radius:5px;cursor:pointer;font-weight:600;">
+          <button type="button" class="small" onclick="openLink4mConfigModal()" title="Cấu hình Link rút gọn hoặc API Token Link4M" style="background:rgba(234,179,8,0.14);border:1px solid rgba(234,179,8,0.35);color:var(--yellow);padding:2px 8px;border-radius:5px;cursor:pointer;font-weight:600;">
             ⚙ Cấu hình Link
           </button>
         </div>
@@ -5413,6 +6222,24 @@ body.theme-morning .cosmic-toggle-pill {
       <div id="backupTotalCount" style="color:var(--muted);font-size:12px;">Tổng cộng: 0 bản sao lưu (Tối đa 30)</div>
     </div>
   </section>
+
+  <div class="app-footer">
+    <div class="footer-recent-wrap">
+      <div class="footer-recent-left">
+        <span class="footer-recent-tag">🚀 KBOT V11.8 COMMERCIAL ENTERPRISE</span>
+        <span class="footer-recent-desc">Nền Tảng Cho Thuê Bot AFK KingMC Thương Mại Số 1 • Pure Render Native • Zero Bandwidth Waste • 99.9% Uptime.</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <a href="https://discord.gg/mJWX5Xp3z" target="_blank" rel="noopener noreferrer" class="footer-discord-btn" title="Tham gia máy chủ Discord hỗ trợ KingMC">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994.021-.041.001-.09-.041-.106a13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.929 1.793 8.18 1.793 12.061 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.894.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.028zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
+          Discord
+        </a>
+        <button class="footer-changelog-btn" onclick="openChangelogModal()">📜 Xem Lịch Sử Cập Nhật (V1.0 - V11.8)</button>
+      </div>
+    </div>
+    <div class="footer-copy">© 2026 KBOT — Hệ Thống Cho Thuê Bot AFK KingMC Thương Mại Cao Cấp. All rights reserved.</div>
+  </div>
+  </div><!-- /.app-main-column -->
 </div>
 
 <!-- MODAL TẠM KHÓA USER KÈM LỜI NHẮN (ADMIN) -->
@@ -6438,23 +7265,7 @@ body.theme-morning .cosmic-toggle-pill {
   </div>
 </div>
 
-<div class="app-footer">
-  <div class="footer-recent-wrap">
-    <div class="footer-recent-left">
-      <span class="footer-recent-tag">🚀 KBOT V11.8 COMMERCIAL ENTERPRISE</span>
-      <span class="footer-recent-desc">Nền Tảng Cho Thuê Bot AFK KingMC Thương Mại Số 1 • Pure Render Native • Zero Bandwidth Waste • 99.9% Uptime.</span>
-    </div>
-    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-      <a href="https://discord.gg/mJWX5Xp3z" target="_blank" rel="noopener noreferrer" class="footer-discord-btn" title="Tham gia máy chủ Discord hỗ trợ KingMC">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994.021-.041.001-.09-.041-.106a13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.929 1.793 8.18 1.793 12.061 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.894.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.028zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
-        Discord
-      </a>
-      <button class="footer-changelog-btn" onclick="openChangelogModal()">📜 Xem Lịch Sử Cập Nhật (V1.0 - V11.8)</button>
-    </div>
-  </div>
-  <div class="footer-copy">© 2026 KBOT — Hệ Thống Cho Thuê Bot AFK KingMC Thương Mại Cao Cấp. All rights reserved.</div>
-</div>
-<div id="toast" class="toast"></div>
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 <script>
 window.__INITIAL_USER__ = null;
 let currentUser = window.__INITIAL_USER__ || null;
@@ -7222,53 +8033,88 @@ function showLoginGate() {
   }
 }
 
+function normalizeDashboardTheme(mode) {
+  var m = String(mode || '').trim();
+  var map = {
+    'deep-galaxy': 'deep-galaxy',
+    'galaxy': 'deep-galaxy',
+    'vivid': 'deep-galaxy',
+    'violet-dusk': 'violet-dusk',
+    'sunset': 'violet-dusk',
+    'subtle': 'violet-dusk',
+    'off': 'violet-dusk',
+    'moonlight': 'moonlight',
+    'morning': 'moonlight',
+    'light': 'moonlight'
+  };
+  return map[m] || 'deep-galaxy';
+}
+
+function getSavedDashboardTheme() {
+  try {
+    return normalizeDashboardTheme(
+      localStorage.getItem('kbot_theme') ||
+      localStorage.getItem('kbot_dashboard_theme') ||
+      localStorage.getItem('kbot_cosmic_mode') ||
+      'deep-galaxy'
+    );
+  } catch (_) {
+    return 'deep-galaxy';
+  }
+}
+
 function hideLoginGate() {
   if (!currentUser) return;
   document.getElementById('loginGate')?.classList.add('hidden');
   document.body.classList.remove('cosmic-mode-login');
-  applyDashboardCosmicMode(localStorage.getItem('kbot_cosmic_mode') || 'subtle');
+  applyDashboardCosmicMode(getSavedDashboardTheme());
 }
 
 function applyDashboardCosmicMode(mode) {
-  var validThemes = ['galaxy', 'subtle', 'vivid', 'sunset', 'morning', 'off'];
-  var raw = validThemes.indexOf(mode) >= 0 ? mode : 'galaxy';
-  var effective = (raw === 'subtle' || raw === 'vivid') ? 'galaxy' : raw;
+  var theme = normalizeDashboardTheme(mode);
 
-  localStorage.setItem('kbot_dashboard_theme', effective);
-  localStorage.setItem('kbot_cosmic_mode', raw);
+  try {
+    localStorage.setItem('kbot_theme', theme);
+    localStorage.setItem('kbot_dashboard_theme', theme);
+    localStorage.setItem('kbot_cosmic_mode', theme);
+  } catch (_) {}
+
+  if (document.documentElement) {
+    document.documentElement.setAttribute('data-theme', theme);
+    document.documentElement.style.colorScheme = theme === 'moonlight' ? 'light' : 'dark';
+  }
 
   document.body.classList.remove(
     'theme-galaxy', 'theme-sunset', 'theme-morning', 'theme-off',
+    'theme-deep-galaxy', 'theme-violet-dusk', 'theme-moonlight',
     'cosmic-mode-vivid', 'cosmic-mode-subtle', 'cosmic-mode-off'
   );
+  document.body.classList.add('theme-' + theme);
 
-  document.body.classList.add('theme-' + effective);
-  if (effective === 'galaxy') {
-    document.body.classList.add('cosmic-mode-vivid');
-  } else if (effective === 'off') {
-    document.body.classList.add('cosmic-mode-off');
-  }
+  var themeBtns = document.querySelectorAll('[data-theme-choice]');
+  themeBtns.forEach(function(el) {
+    var active = el.getAttribute('data-theme-choice') === theme;
+    el.classList.toggle('active', active);
+    el.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
 
   var btn = document.getElementById('cosmicModeToggleBtn');
   if (btn) {
-    if (effective === 'galaxy') {
-      btn.textContent = '🌌 Chủ đề: Galaxy';
-      btn.title = 'Chủ đề: Vũ Trụ Vô Tận (Deep Galaxy) — Bấm để chuyển sang Hoàng Hôn Bờ Biển';
-    } else if (effective === 'sunset') {
-      btn.textContent = '🌅 Chủ đề: Hoàng Hôn';
-      btn.title = 'Chủ đề: Hoàng Hôn Bờ Biển (Sunset Coast) — Bấm để chuyển sang Bình Minh Thiên Nhiên';
-    } else if (effective === 'morning') {
-      btn.textContent = '🌄 Chủ đề: Bình Minh';
-      btn.title = 'Chủ đề: Bình Minh Thiên Nhiên (Morning Nature) — Bấm để chuyển sang Tối Giản';
+    if (theme === 'deep-galaxy') {
+      btn.textContent = '🌌 Deep Galaxy';
+      btn.title = 'Theme: Deep Galaxy (Mặc định) — Bấm để chuyển sang Violet Dusk';
+    } else if (theme === 'violet-dusk') {
+      btn.textContent = '🌙 Violet Dusk';
+      btn.title = 'Theme: Violet Dusk — Bấm để chuyển sang Moonlight';
     } else {
-      btn.textContent = '🌑 Chủ đề: Tĩnh';
-      btn.title = 'Chủ đề: Tối Giản (Minimal Mode) — Bấm để quay về Vũ Trụ Galaxy';
+      btn.textContent = '☀️ Moonlight';
+      btn.title = 'Theme: Moonlight (Sáng) — Bấm để chuyển sang Deep Galaxy';
     }
   }
 
   var v = document.getElementById('appGalaxyVideo');
   if (v) {
-    if (effective === 'galaxy' && !document.body.classList.contains('cosmic-mode-off') && !kbotReducedMotionQuery.matches) {
+    if (theme === 'deep-galaxy' && !kbotReducedMotionQuery.matches && v.querySelector('source')) {
       v.style.display = 'block';
       v.style.transform = 'translate3d(0px,0px,0) scale(1.02)';
       v.playbackRate = 0.85;
@@ -7284,34 +8130,60 @@ function applyDashboardCosmicMode(mode) {
 }
 
 function cycleDashboardCosmicMode() {
-  var current = localStorage.getItem('kbot_dashboard_theme') || localStorage.getItem('kbot_cosmic_mode') || 'galaxy';
-  if (current === 'subtle' || current === 'vivid') current = 'galaxy';
-  var themeOrder = ['galaxy', 'sunset', 'morning', 'off'];
+  var current = getSavedDashboardTheme();
+  var themeOrder = ['deep-galaxy', 'violet-dusk', 'moonlight'];
   var idx = themeOrder.indexOf(current);
-  var next = idx >= 0 ? themeOrder[(idx + 1) % themeOrder.length] : 'sunset';
+  var next = idx >= 0 ? themeOrder[(idx + 1) % themeOrder.length] : 'violet-dusk';
   applyDashboardCosmicMode(next);
   if (typeof showToast === 'function') {
     var toastMap = {
-      galaxy: '🌌 Chủ đề: Vũ Trụ Vô Tận (Deep Galaxy) — Chiều sâu 3D & Huyền bí',
-      sunset: '🌅 Chủ đề: Hoàng Hôn Bờ Biển (Sunset Coast) — Yên ắng, tĩnh lặng & Thư thái',
-      morning: '🌄 Chủ đề: Bình Minh Sinh Thái (Morning Nature) — Mây gió, chim trời & Thiên nhiên',
-      off: '🌑 Chủ đề: Tối Giản (Minimal Mode) — Giải phóng 100% GPU & Phần cứng'
+      'deep-galaxy': '🌌 Đã chuyển sang Deep Galaxy (Tím Vũ Trụ)',
+      'violet-dusk': '🌙 Đã chuyển sang Violet Dusk (Tím Trầm Dịu Mắt)',
+      'moonlight': '☀️ Đã chuyển sang Moonlight (Giao Diện Sáng)'
     };
-    showToast(toastMap[next] || 'Đã chuyển đổi chủ đề', 'info');
+    showToast(toastMap[next] || 'Đã chuyển đổi giao diện', 'info');
   }
 }
 window.cycleDashboardCosmicMode = cycleDashboardCosmicMode;
 window.applyDashboardCosmicMode = applyDashboardCosmicMode;
 
+function toggleSidebarCollapse() {
+  var collapsed = document.body.classList.toggle('sidebar-collapsed');
+  try { localStorage.setItem('kbot_sidebar_collapsed', collapsed ? '1' : '0'); } catch (_) {}
+}
+window.toggleSidebarCollapse = toggleSidebarCollapse;
+
+function toggleMobileSidebar() {
+  var sidebar = document.getElementById('appSidebar');
+  var backdrop = document.getElementById('appSidebarBackdrop');
+  if (!sidebar) return;
+  var open = sidebar.classList.toggle('is-open');
+  if (backdrop) backdrop.classList.toggle('hidden', !open);
+}
+window.toggleMobileSidebar = toggleMobileSidebar;
+
+function closeMobileSidebar() {
+  var sidebar = document.getElementById('appSidebar');
+  var backdrop = document.getElementById('appSidebarBackdrop');
+  if (sidebar) sidebar.classList.remove('is-open');
+  if (backdrop) backdrop.classList.add('hidden');
+}
+window.closeMobileSidebar = closeMobileSidebar;
+
+try {
+  if (localStorage.getItem('kbot_sidebar_collapsed') === '1' && window.innerWidth > 1024) {
+    document.body.classList.add('sidebar-collapsed');
+  }
+} catch (_) {}
+
 (function initAppGalaxyEngine() {
-  var savedTheme = localStorage.getItem('kbot_dashboard_theme') || localStorage.getItem('kbot_cosmic_mode') || 'galaxy';
-  setTimeout(function() { applyDashboardCosmicMode(savedTheme); }, 50);
+  var savedTheme = getSavedDashboardTheme();
+  setTimeout(function() { applyDashboardCosmicMode(savedTheme); }, 10);
 
   var canvas = document.getElementById('appStarfieldCanvas');
   if (!canvas) return;
   var ctx = canvas.getContext('2d');
   var w = 0, h = 0;
-  var animTime = 0;
   var rafId = null;
   var isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (window.innerWidth <= 768);
 
@@ -7322,11 +8194,6 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
       bgVideo.pause();
     };
     bgVideo.addEventListener('error', hideAppVideo);
-    var videoSources = bgVideo.querySelectorAll('source');
-    var lastVideoSource = videoSources && videoSources.length ? videoSources[videoSources.length - 1] : null;
-    if (lastVideoSource) {
-      lastVideoSource.addEventListener('error', hideAppVideo);
-    }
   }
 
   function resize() {
@@ -7337,63 +8204,15 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
   window.addEventListener('resize', resize, { passive: true });
   resize();
 
-  // 1. GALAXY ASSETS (Optimized particle budget for mobile and desktop)
   var stars = [];
   var shootingStars = [];
-  var starCount = isMobile ? 35 : 85;
+  var starCount = isMobile ? 26 : 64;
   for (var i = 0; i < starCount; i++) {
     stars.push({
-      x: Math.random() * w, y: Math.random() * h, z: Math.random() * 2.0 + 0.4,
-      r: Math.random() * 1.8 + 0.7, a: Math.random() * 0.6 + 0.3,
-      da: (Math.random() * 0.014 + 0.004) * (Math.random() < 0.5 ? 1 : -1),
-      rgb: Math.random() < 0.4 ? '255,255,255' : (Math.random() < 0.7 ? '224,242,254' : '233,213,255')
-    });
-  }
-
-  // 2. SUNSET ASSETS (Optimized particle budget)
-  var sunsetEmbers = [];
-  var emberCount = isMobile ? 12 : 28;
-  for (var se = 0; se < emberCount; se++) {
-    sunsetEmbers.push({
-      x: Math.random() * w,
-      y: Math.random() * h * 0.75 + h * 0.25,
-      r: Math.random() * 2.2 + 0.8,
-      a: Math.random() * 0.5 + 0.3,
-      speedY: Math.random() * 0.5 + 0.25,
-      seed: Math.random() * 10
-    });
-  }
-
-  // 3. MORNING NATURE ASSETS
-  var morningClouds = [
-    { x: w * 0.08, y: h * 0.16, scale: 1.15, speed: 0.22 },
-    { x: w * 0.38, y: h * 0.09, scale: 0.85, speed: 0.16 },
-    { x: w * 0.68, y: h * 0.22, scale: 1.35, speed: 0.28 },
-    { x: w * 0.92, y: h * 0.13, scale: 0.95, speed: 0.19 }
-  ];
-  var morningBirds = isMobile ? [
-    { x: -50, y: h * 0.28, speedX: 2.3, speedY: -0.22, scale: 0.9, flapSpeed: 8.5, offset: 0 },
-    { x: -110, y: h * 0.32, speedX: 2.4, speedY: -0.25, scale: 0.8, flapSpeed: 9.0, offset: 1.5 },
-    { x: -170, y: h * 0.29, speedX: 2.2, speedY: -0.20, scale: 0.75, flapSpeed: 8.7, offset: 3.0 }
-  ] : [
-    { x: -50, y: h * 0.28, speedX: 2.4, speedY: -0.25, scale: 1.0, flapSpeed: 8.5, offset: 0 },
-    { x: -90, y: h * 0.31, speedX: 2.3, speedY: -0.22, scale: 0.85, flapSpeed: 9.0, offset: 1.2 },
-    { x: -130, y: h * 0.27, speedX: 2.5, speedY: -0.26, scale: 0.95, flapSpeed: 8.2, offset: 2.1 },
-    { x: -160, y: h * 0.34, speedX: 2.2, speedY: -0.20, scale: 0.75, flapSpeed: 9.5, offset: 3.4 },
-    { x: -210, y: h * 0.30, speedX: 2.4, speedY: -0.24, scale: 0.90, flapSpeed: 8.7, offset: 4.5 }
-  ];
-  var morningLeaves = [];
-  var leafCount = isMobile ? 8 : 20;
-  for (var ml = 0; ml < leafCount; ml++) {
-    morningLeaves.push({
-      x: Math.random() * w,
-      y: Math.random() * h,
-      vx: Math.random() * 1.2 + 0.8,
-      vy: Math.random() * 0.8 + 0.4,
-      size: Math.random() * 7 + 4,
-      angle: Math.random() * Math.PI * 2,
-      rotSpeed: (Math.random() - 0.5) * 0.04,
-      color: Math.random() < 0.65 ? 'rgba(52,211,153,0.72)' : 'rgba(251,191,36,0.68)'
+      x: Math.random() * w, y: Math.random() * h, z: Math.random() * 1.6 + 0.4,
+      r: Math.random() * 1.4 + 0.6, a: Math.random() * 0.45 + 0.2,
+      da: (Math.random() * 0.009 + 0.003) * (Math.random() < 0.5 ? 1 : -1),
+      rgb: Math.random() < 0.55 ? '237,233,254' : '196,181,253'
     });
   }
 
@@ -7417,11 +8236,6 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
       stopCosmicLoop();
       return;
     }
-    var v = document.getElementById('appGalaxyVideo');
-    if (v && (localStorage.getItem('kbot_dashboard_theme') || 'galaxy') === 'galaxy') {
-      v.style.display = 'block';
-      v.play().catch(function() {});
-    }
     if (rafId === null) {
       rafId = requestAnimationFrame(render);
     }
@@ -7441,7 +8255,7 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
     if (ev.matches) {
       stopCosmicLoop();
     } else {
-      applyDashboardCosmicMode(localStorage.getItem('kbot_cosmic_mode') || 'subtle');
+      applyDashboardCosmicMode(getSavedDashboardTheme());
       startCosmicLoop();
     }
   };
@@ -7449,274 +8263,6 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
     kbotReducedMotionQuery.addEventListener('change', onReducedMotionChange);
   } else if (typeof kbotReducedMotionQuery.addListener === 'function') {
     kbotReducedMotionQuery.addListener(onReducedMotionChange);
-  }
-
-  function renderGalaxy(t) {
-    for (var i = 0; i < stars.length; i++) {
-      var s = stars[i];
-      s.y -= 0.12 * s.z;
-      s.a += s.da;
-      if (s.a > 1.0 || s.a < 0.2) s.da = -s.da;
-      if (s.y < -10) { s.y = h + 10; s.x = Math.random() * w; }
-      var rad = s.r * s.z * 0.85;
-      var alpha = Math.max(0.18, Math.min(1.0, s.a));
-      if (rad > 1.8 && alpha > 0.6) {
-        ctx.beginPath();
-        ctx.arc(s.x, s.y, rad * 1.9, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(' + s.rgb + ',' + (alpha * 0.2).toFixed(2) + ')';
-        ctx.fill();
-        if (!isMobile && alpha > 0.85) {
-          ctx.strokeStyle = 'rgba(255,255,255,' + (alpha * 0.7).toFixed(2) + ')';
-          ctx.lineWidth = 1.0;
-          var spLen = rad * 2.5;
-          ctx.beginPath();
-          ctx.moveTo(s.x - spLen, s.y); ctx.lineTo(s.x + spLen, s.y);
-          ctx.moveTo(s.x, s.y - spLen); ctx.lineTo(s.x + spLen, s.y);
-          ctx.stroke();
-        }
-      }
-      ctx.beginPath();
-      ctx.arc(s.x, s.y, rad, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(' + s.rgb + ',' + alpha + ')';
-      ctx.fill();
-    }
-    if (shootingStars.length < 2 && Math.random() < 0.012) {
-      shootingStars.push({
-        x: Math.random() * w * 0.85 + w * 0.1,
-        y: Math.random() * h * 0.4,
-        len: Math.random() * 120 + 75,
-        speed: Math.random() * 9 + 8,
-        a: 1.0
-      });
-    }
-    for (var j = shootingStars.length - 1; j >= 0; j--) {
-      var st = shootingStars[j];
-      st.x -= st.speed; st.y += st.speed * 0.58; st.a -= 0.02;
-      if (st.a <= 0) { shootingStars.splice(j, 1); continue; }
-      var tailX = st.x + st.len;
-      var tailY = st.y - st.len * 0.58;
-      var gGlow = ctx.createLinearGradient(st.x, st.y, tailX, tailY);
-      gGlow.addColorStop(0, 'rgba(56,189,248,' + (st.a * 0.6).toFixed(2) + ')');
-      gGlow.addColorStop(1, 'rgba(56,189,248,0)');
-      ctx.strokeStyle = gGlow; ctx.lineWidth = 3.6; ctx.beginPath();
-      ctx.moveTo(st.x, st.y); ctx.lineTo(tailX, tailY); ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(st.x, st.y, 2.5, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(255,255,255,' + st.a.toFixed(2) + ')';
-      ctx.fill();
-    }
-  }
-
-  function renderSunsetCoast(t) {
-    var horizonY = h * 0.58;
-    var sunX = w * 0.5;
-    var sunY = horizonY - 14;
-
-    // 1. Crepuscular dusk sunbeams
-    ctx.save();
-    for (var r = 0; r < 8; r++) {
-      var angle = -Math.PI * 0.85 + (r / 7) * Math.PI * 0.70 + Math.sin(t * 0.4 + r) * 0.04;
-      var rLen = Math.max(w, h) * 1.2;
-      var rayGrad = ctx.createLinearGradient(sunX, sunY, sunX + Math.cos(angle) * rLen, sunY + Math.sin(angle) * rLen);
-      rayGrad.addColorStop(0, 'rgba(251,146,60,0.18)');
-      rayGrad.addColorStop(0.6, 'rgba(234,88,12,0.06)');
-      rayGrad.addColorStop(1, 'rgba(234,88,12,0)');
-      ctx.fillStyle = rayGrad;
-      ctx.beginPath();
-      ctx.moveTo(sunX, sunY);
-      ctx.lineTo(sunX + Math.cos(angle - 0.07) * rLen, sunY + Math.sin(angle - 0.07) * rLen);
-      ctx.lineTo(sunX + Math.cos(angle + 0.07) * rLen, sunY + Math.sin(angle + 0.07) * rLen);
-      ctx.closePath();
-      ctx.fill();
-    }
-    ctx.restore();
-
-    // 2. Majestic Sinking Sun Disc & Corona
-    var sunAura = ctx.createRadialGradient(sunX, sunY, 15, sunX, sunY, 180);
-    sunAura.addColorStop(0, 'rgba(255,255,240,0.95)');
-    sunAura.addColorStop(0.25, 'rgba(253,186,116,0.75)');
-    sunAura.addColorStop(0.6, 'rgba(249,115,22,0.30)');
-    sunAura.addColorStop(1, 'rgba(234,88,12,0)');
-    ctx.fillStyle = sunAura;
-    ctx.beginPath();
-    ctx.arc(sunX, sunY, 180, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = '#fffbeb';
-    ctx.beginPath();
-    ctx.arc(sunX, sunY, 44, 0, Math.PI * 2);
-    ctx.fill();
-
-    // 3. Distant Coastline Islands Silhouette
-    ctx.fillStyle = 'rgba(28, 9, 38, 0.94)';
-    ctx.beginPath();
-    ctx.moveTo(0, horizonY);
-    for (var px = 0; px <= w; px += 30) {
-      var py = horizonY - 14 - Math.sin(px * 0.0035 + 0.4) * 22 - Math.sin(px * 0.011) * 10;
-      ctx.lineTo(px, py);
-    }
-    ctx.lineTo(w, horizonY + 2);
-    ctx.lineTo(0, horizonY + 2);
-    ctx.closePath();
-    ctx.fill();
-
-    // 4. Multi-layered Ocean Waves
-    var waveBands = [
-      { y0: horizonY, h: 45, speed: 0.7, amp: 3.5, color: 'rgba(36, 12, 48, 0.82)' },
-      { y0: horizonY + 35, h: 65, speed: 0.55, amp: 5.0, color: 'rgba(26, 9, 36, 0.88)' },
-      { y0: horizonY + 85, h: 95, speed: 0.42, amp: 6.8, color: 'rgba(18, 6, 26, 0.93)' },
-      { y0: horizonY + 160, h: h - (horizonY + 160), speed: 0.32, amp: 8.5, color: 'rgba(10, 3, 16, 0.98)' }
-    ];
-    for (var b = 0; b < waveBands.length; b++) {
-      var wb = waveBands[b];
-      ctx.fillStyle = wb.color;
-      ctx.beginPath();
-      ctx.moveTo(0, wb.y0);
-      for (var wx = 0; wx <= w; wx += 25) {
-        var waveY = wb.y0 + Math.sin(wx * 0.008 + t * wb.speed + b) * wb.amp + Math.cos(wx * 0.016 - t * 0.3) * (wb.amp * 0.4);
-        ctx.lineTo(wx, waveY);
-      }
-      ctx.lineTo(w, h);
-      ctx.lineTo(0, h);
-      ctx.closePath();
-      ctx.fill();
-    }
-
-    // 5. Sun Reflection Shimmer on Water
-    for (var wy = horizonY + 4; wy < h; wy += 8) {
-      var prog = (wy - horizonY) / (h - horizonY);
-      var colSpread = 30 + prog * 260;
-      var shimCenter = sunX + Math.sin(wy * 0.04 + t * 2.2) * (8 + prog * 24);
-      var shimAlpha = (1.0 - prog * 0.72) * (0.32 + Math.sin(wy * 0.14 - t * 2.8) * 0.24);
-      if (shimAlpha > 0.04) {
-        ctx.strokeStyle = 'rgba(253, 186, 116, ' + shimAlpha.toFixed(2) + ')';
-        ctx.lineWidth = 2.0 + prog * 2.2;
-        ctx.beginPath();
-        var barW = colSpread * (0.35 + Math.sin(wy + t) * 0.25);
-        ctx.moveTo(shimCenter - barW, wy);
-        ctx.lineTo(shimCenter + barW, wy);
-        ctx.stroke();
-      }
-    }
-
-    // 6. Floating Sunset Embers
-    for (var se = 0; se < sunsetEmbers.length; se++) {
-      var em = sunsetEmbers[se];
-      em.y -= em.speedY;
-      em.x += Math.sin(t + em.seed) * 0.6;
-      if (em.y < horizonY - 40) { em.y = h + 10; em.x = Math.random() * w; }
-      ctx.fillStyle = 'rgba(254, 215, 170, ' + em.a.toFixed(2) + ')';
-      ctx.beginPath();
-      ctx.arc(em.x, em.y, em.r, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
-  function renderMorningNature(t) {
-    var sunX = w * 0.82;
-    var sunY = h * 0.18;
-
-    // 1. Radiant Morning Sunbeams
-    ctx.save();
-    for (var gr = 0; gr < 10; gr++) {
-      var bAngle = (gr / 10) * Math.PI * 2 + t * 0.025;
-      var rSpread = 0.08 + Math.sin(t * 0.6 + gr) * 0.02;
-      var rayLen = Math.max(w, h) * 1.4;
-      ctx.fillStyle = 'rgba(254, 240, 138, ' + (0.04 + Math.sin(t + gr * 0.7) * 0.022).toFixed(3) + ')';
-      ctx.beginPath();
-      ctx.moveTo(sunX, sunY);
-      ctx.lineTo(sunX + Math.cos(bAngle - rSpread) * rayLen, sunY + Math.sin(bAngle - rSpread) * rayLen);
-      ctx.lineTo(sunX + Math.cos(bAngle + rSpread) * rayLen, sunY + Math.sin(bAngle + rSpread) * rayLen);
-      ctx.closePath();
-      ctx.fill();
-    }
-    ctx.restore();
-
-    // 2. Radiant Sun Disc
-    var mSunAura = ctx.createRadialGradient(sunX, sunY, 12, sunX, sunY, 150);
-    mSunAura.addColorStop(0, 'rgba(255,255,245,0.95)');
-    mSunAura.addColorStop(0.3, 'rgba(254,240,138,0.72)');
-    mSunAura.addColorStop(0.65, 'rgba(56,189,248,0.22)');
-    mSunAura.addColorStop(1, 'rgba(56,189,248,0)');
-    ctx.fillStyle = mSunAura;
-    ctx.beginPath();
-    ctx.arc(sunX, sunY, 150, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = '#fef08a';
-    ctx.beginPath();
-    ctx.arc(sunX, sunY, 40, 0, Math.PI * 2);
-    ctx.fill();
-
-    // 3. Drifting Fluffy Morning Clouds
-    for (var c = 0; c < morningClouds.length; c++) {
-      var cd = morningClouds[c];
-      cd.x += cd.speed * 1.2;
-      if (cd.x > w + 160) cd.x = -160;
-      var cX = cd.x;
-      var cY = cd.y;
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.40)';
-      ctx.beginPath();
-      ctx.arc(cX, cY, 35 * cd.scale, 0, Math.PI * 2);
-      ctx.arc(cX + 28 * cd.scale, cY - 14 * cd.scale, 42 * cd.scale, 0, Math.PI * 2);
-      ctx.arc(cX + 65 * cd.scale, cY, 32 * cd.scale, 0, Math.PI * 2);
-      ctx.arc(cX + 35 * cd.scale, cY + 10 * cd.scale, 28 * cd.scale, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // 4. Flock of Flying Birds (Đàn chim bay tự nhiên)
-    for (var b = 0; b < morningBirds.length; b++) {
-      var bd = morningBirds[b];
-      bd.x += bd.speedX;
-      bd.y += bd.speedY;
-      if (bd.x > w + 60) {
-        bd.x = -60 - Math.random() * 80;
-        bd.y = h * 0.20 + Math.random() * h * 0.25;
-      }
-      var wing = Math.sin(t * bd.flapSpeed + bd.offset) * 10 * bd.scale;
-      var span = 14 * bd.scale;
-      ctx.strokeStyle = 'rgba(15, 35, 55, 0.90)';
-      ctx.lineWidth = 1.8 * bd.scale;
-      ctx.beginPath();
-      ctx.moveTo(bd.x, bd.y);
-      ctx.quadraticCurveTo(bd.x - span * 0.5, bd.y - wing - 4 * bd.scale, bd.x - span, bd.y - wing);
-      ctx.moveTo(bd.x, bd.y);
-      ctx.quadraticCurveTo(bd.x + span * 0.5, bd.y - wing - 4 * bd.scale, bd.x + span, bd.y - wing);
-      ctx.stroke();
-    }
-
-    // 5. Swaying Forest Canopy
-    ctx.fillStyle = 'rgba(4, 28, 20, 0.94)';
-    ctx.beginPath();
-    ctx.moveTo(0, h);
-    for (var fx = 0; fx <= w; fx += 20) {
-      var treeSway = Math.sin(fx * 0.04 + t * 1.4) * 3;
-      var foliageY = h - 55 - Math.sin(fx * 0.008) * 25 - Math.sin(fx * 0.02) * 14 + treeSway;
-      ctx.lineTo(fx, foliageY);
-    }
-    ctx.lineTo(w, h);
-    ctx.closePath();
-    ctx.fill();
-
-    // 6. Floating Wind Leaves
-    for (var l = 0; l < morningLeaves.length; l++) {
-      var lf = morningLeaves[l];
-      lf.x += lf.vx + Math.sin(t + l) * 0.5;
-      lf.y += lf.vy + Math.cos(t + l) * 0.3;
-      lf.angle += lf.rotSpeed;
-      if (lf.x > w + 20 || lf.y > h + 20) {
-        lf.x = -20;
-        lf.y = Math.random() * h * 0.8;
-      }
-      ctx.save();
-      ctx.translate(lf.x, lf.y);
-      ctx.rotate(lf.angle);
-      ctx.fillStyle = lf.color;
-      ctx.beginPath();
-      ctx.ellipse(0, 0, lf.size, lf.size * 0.45, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-    }
   }
 
   function render() {
@@ -7727,16 +8273,47 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
     }
 
     ctx.clearRect(0, 0, w, h);
-    animTime += 0.02;
 
-    var curTheme = localStorage.getItem('kbot_dashboard_theme') || 'galaxy';
+    var curTheme = getSavedDashboardTheme();
+    var isLight = curTheme === 'moonlight';
+    var speedScale = curTheme === 'violet-dusk' ? 0.45 : 0.85;
 
-    if (curTheme === 'sunset') {
-      renderSunsetCoast(animTime);
-    } else if (curTheme === 'morning') {
-      renderMorningNature(animTime);
-    } else {
-      renderGalaxy(animTime);
+    for (var i = 0; i < stars.length; i++) {
+      var s = stars[i];
+      s.y -= 0.07 * s.z * speedScale;
+      s.a += s.da * speedScale;
+      if (s.a > 0.85 || s.a < 0.14) s.da = -s.da;
+      if (s.y < -10) { s.y = h + 10; s.x = Math.random() * w; }
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r * s.z * 0.8, 0, Math.PI * 2);
+      ctx.fillStyle = isLight
+        ? 'rgba(109,40,217,' + (s.a * 0.18).toFixed(2) + ')'
+        : 'rgba(' + s.rgb + ',' + (s.a * (curTheme === 'violet-dusk' ? 0.42 : 0.65)).toFixed(2) + ')';
+      ctx.fill();
+    }
+
+    if (!isMobile && curTheme === 'deep-galaxy') {
+      if (shootingStars.length < 1 && Math.random() < 0.004) {
+        shootingStars.push({
+          x: Math.random() * w * 0.75 + w * 0.12,
+          y: Math.random() * h * 0.35,
+          len: Math.random() * 90 + 55,
+          speed: Math.random() * 5 + 5,
+          a: 0.75
+        });
+      }
+      for (var j = shootingStars.length - 1; j >= 0; j--) {
+        var st = shootingStars[j];
+        st.x -= st.speed; st.y += st.speed * 0.52; st.a -= 0.022;
+        if (st.a <= 0) { shootingStars.splice(j, 1); continue; }
+        var tailX = st.x + st.len;
+        var tailY = st.y - st.len * 0.52;
+        var gGlow = ctx.createLinearGradient(st.x, st.y, tailX, tailY);
+        gGlow.addColorStop(0, 'rgba(196,181,253,' + st.a.toFixed(2) + ')');
+        gGlow.addColorStop(1, 'rgba(196,181,253,0)');
+        ctx.strokeStyle = gGlow; ctx.lineWidth = 1.8; ctx.beginPath();
+        ctx.moveTo(st.x, st.y); ctx.lineTo(tailX, tailY); ctx.stroke();
+      }
     }
 
     rafId = requestAnimationFrame(render);
@@ -8606,6 +9183,11 @@ function navigateTo(pageName) {
   const targetPage = pages[pageName] || pages.dashboard;
   if (targetPage) targetPage.classList.remove('hidden');
   if (navPills[pageName]) navPills[pageName]?.classList.add('active');
+
+  const sidebarActivePage = pageName === 'detail' ? 'dashboard' : pageName;
+  document.querySelectorAll('[data-sidebar-page]').forEach(btn => {
+    btn.classList.toggle('active', btn.getAttribute('data-sidebar-page') === sidebarActivePage);
+  });
 
   // Kích hoạt nạp dữ liệu cho trang đích
   if (pageName === 'dashboard') {
@@ -11659,13 +12241,13 @@ function renderDetailRemoteGui(win) {
   if (!container) return;
   container.innerHTML = win.slots.slice(0, 54).map(function(item, idx) {
     if (!item) {
-      return '<div onclick="clickDetailGuiSlot(' + idx + ')" style="aspect-ratio:1;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:6px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.18);font-size:10px;font-family:monospace;" title="Ô #' + idx + ' (Trống)">' + idx + '</div>';
+      return '<div onclick="clickDetailGuiSlot(' + idx + ')" style="aspect-ratio:1;background:var(--surface-soft);border:1px solid var(--border);border-radius:6px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:10px;font-family:monospace;" title="Ô #' + idx + ' (Trống)">' + idx + '</div>';
     }
     const rawName = String(item.displayName || item.name || 'Vật phẩm');
     const safeName = escapeHtml(rawName);
-    return '<div onclick="clickDetailGuiSlot(' + idx + ')" style="aspect-ratio:1;background:rgba(56,189,248,0.15);border:1px solid rgba(56,189,248,0.45);border-radius:6px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;padding:3px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,0.3);transition:all 0.15s ease;" onmouseenter="this.style.transform=\'scale(1.05)\'" onmouseleave="this.style.transform=\'none\'" title="Ô #' + idx + ': ' + safeName + ' (Click để chọn)">' +
-      '<span style="font-size:11px;font-weight:700;color:#fff;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.2;max-width:100%;word-break:break-word;">' + safeName + '</span>' +
-      (item.count > 1 ? '<span style="position:absolute;bottom:2px;right:2px;font-size:9.5px;font-weight:800;background:rgba(15,23,42,0.9);border:1px solid rgba(56,189,248,0.4);padding:0 3px;border-radius:3px;color:#38bdf8;">x' + item.count + '</span>' : '') +
+    return '<div onclick="clickDetailGuiSlot(' + idx + ')" style="aspect-ratio:1;background:var(--accent-soft);border:1px solid var(--border-strong);border-radius:8px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;padding:3px;text-align:center;box-shadow:var(--shadow-sm);transition:transform 0.15s ease,border-color 0.15s ease;" onmouseenter="this.style.transform=\'scale(1.04)\'" onmouseleave="this.style.transform=\'none\'" title="Ô #' + idx + ': ' + safeName + ' (Click để chọn)">' +
+      '<span style="font-size:11px;font-weight:700;color:var(--text);overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.2;max-width:100%;word-break:break-word;">' + safeName + '</span>' +
+      (item.count > 1 ? '<span style="position:absolute;bottom:2px;right:2px;font-size:9.5px;font-weight:800;background:var(--bg-elevated);border:1px solid var(--border-strong);padding:0 4px;border-radius:4px;color:var(--accent-text);">x' + item.count + '</span>' : '') +
       '</div>';
   }).join('');
 }
