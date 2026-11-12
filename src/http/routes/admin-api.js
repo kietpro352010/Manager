@@ -13,7 +13,8 @@ function createAdminApi({
   fleetOperations,
   adminNotifier,
   config,
-  logger
+  logger,
+  invalidateUserSessions
 }) {
   const router = express.Router();
 
@@ -60,6 +61,7 @@ function createAdminApi({
       if (action === 'delete') {
         if (!targetUserId) return res.status(400).json({ ok: false, error: 'Thiếu userId cần xóa.' });
         await store.removeAccess(targetUserId);
+        if (typeof invalidateUserSessions === 'function') invalidateUserSessions(targetUserId);
         await store.addAudit({ action: 'ADMIN_DELETE_USER', targetId: targetUserId, actorId: req.managerAuthSession.username });
         return res.json({ ok: true, message: 'Đã xóa người dùng thành công.' });
       }
@@ -68,6 +70,12 @@ function createAdminApi({
       if (!targetUserId) return res.status(400).json({ ok: false, error: 'Thiếu userId cần cập nhật.' });
 
       await store.setAccess(targetUserId, updateData, req.managerAuthSession.username);
+      if (String(updateData?.status || '').trim().toLowerCase() === 'disabled') {
+        if (typeof invalidateUserSessions === 'function') invalidateUserSessions(targetUserId);
+        if (typeof store.adapter?.revokeUserSessions === 'function') {
+          await store.adapter.revokeUserSessions(targetUserId).catch(() => null);
+        }
+      }
       await store.addAudit({ action: 'ADMIN_UPDATE_USER', targetId: targetUserId, actorId: req.managerAuthSession.username, details: updateData });
       return res.json({ ok: true, message: 'Đã cập nhật thông tin người dùng.' });
     } catch (error) {
@@ -80,6 +88,7 @@ function createAdminApi({
     if (req.method === 'DELETE') {
       try {
         await store.removeAccess(id);
+        if (typeof invalidateUserSessions === 'function') invalidateUserSessions(id);
         await store.addAudit({ action: 'ADMIN_DELETE_USER', targetId: id, actorId: req.managerAuthSession.username });
         return res.json({ ok: true, message: 'Đã xóa người dùng thành công.' });
       } catch (error) {
@@ -91,6 +100,12 @@ function createAdminApi({
       try {
         const values = req.body?.values || req.body || {};
         await store.setAccess(id, values, req.managerAuthSession.username);
+        if (String(values?.status || '').trim().toLowerCase() === 'disabled') {
+          if (typeof invalidateUserSessions === 'function') invalidateUserSessions(id);
+          if (typeof store.adapter?.revokeUserSessions === 'function') {
+            await store.adapter.revokeUserSessions(id).catch(() => null);
+          }
+        }
         await store.addAudit({ action: 'ADMIN_UPDATE_USER', targetId: id, actorId: req.managerAuthSession.username, details: values });
         return res.json({ ok: true, message: 'Đã cập nhật thông tin người dùng.' });
       } catch (error) {

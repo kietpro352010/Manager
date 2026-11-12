@@ -5,26 +5,57 @@ const HTML = String.raw`<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
 <title>KBOT — Hệ Thống Cho Thuê Bot AFK KingMC Thương Mại Cao Cấp</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23040711'/%3E%3Cpath d='M16 5l9 3.5v7c0 6-4 9.5-9 11.5-5-2-9-5.5-9-11.5v-7L16 5z' fill='none' stroke='%2338bdf8' stroke-width='2.2'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
+/* ==========================================================================
+   KBOT CLOUD CONSOLE — OBSIDIAN / SLATE DESIGN SYSTEM (PHASE A)
+   ========================================================================== */
 :root {
   color-scheme: dark;
+  --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  /* Core Obsidian & Slate Surfaces */
   --bg: #040711;
+  --bg-base: #040711;
+  --bg-surface: rgba(12, 20, 36, 0.86);
+  --bg-elevated: rgba(16, 26, 46, 0.94);
+  --bg-input: rgba(6, 11, 22, 0.80);
   --bg-gradient:
-    radial-gradient(ellipse at 12% 10%, rgba(14, 165, 233, 0.16) 0%, transparent 45%),
-    radial-gradient(ellipse at 88% 88%, rgba(124, 58, 237, 0.14) 0%, transparent 50%),
-    radial-gradient(ellipse at 55% 0%, rgba(16, 185, 129, 0.09) 0%, transparent 35%),
+    radial-gradient(ellipse at 12% 10%, rgba(14, 165, 233, 0.14) 0%, transparent 45%),
+    radial-gradient(ellipse at 88% 88%, rgba(99, 102, 241, 0.12) 0%, transparent 50%),
+    radial-gradient(ellipse at 55% 0%, rgba(16, 185, 129, 0.08) 0%, transparent 35%),
     radial-gradient(circle at 50% 50%, rgba(8, 14, 26, 0.98) 0%, #040711 100%);
-  --card: rgba(13, 20, 34, 0.82);
-  --card-hover: rgba(18, 28, 46, 0.92);
-  --card2: rgba(9, 14, 24, 0.78);
-  --border: rgba(255, 255, 255, 0.08);
-  --border-glow: rgba(56, 189, 248, 0.42);
+
+  --card: rgba(12, 20, 36, 0.86);
+  --card-hover: rgba(18, 28, 48, 0.94);
+  --card2: rgba(8, 13, 24, 0.80);
+
+  /* Hairline Borders */
+  --border: rgba(148, 163, 184, 0.14);
+  --border-subtle: rgba(148, 163, 184, 0.12);
+  --border-strong: rgba(56, 189, 248, 0.34);
+  --border-glow: rgba(56, 189, 248, 0.48);
+  --border-focus: rgba(56, 189, 248, 0.82);
+
+  /* Typography */
   --text: #f0f6fc;
-  --muted: #8b9bb4;
+  --text-primary: #f0f6fc;
+  --text-secondary: #cbd5e1;
+  --text-muted: #94a3b8;
+  --text-dim: #8596b0;
+  --muted: #94a3b8;
+
+  /* Semantic Accents */
+  --cyan: #38bdf8;
+  --cyan-soft: rgba(56, 189, 248, 0.14);
+  --indigo: #6366f1;
+  --discord: #5865F2;
   --green: #10b981;
   --green-glow: rgba(16, 185, 129, 0.35);
   --red: #ef4444;
@@ -36,8 +67,32 @@ const HTML = String.raw`<!doctype html>
   --accent: #38bdf8;
   --gold: #fbbf24;
   --purple: #a78bfa;
+
+  /* Radii & Shadows */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --shadow-sm: 0 4px 12px rgba(2, 6, 23, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --shadow-md: 0 14px 36px -8px rgba(2, 6, 23, 0.58), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --shadow-lg: 0 28px 72px rgba(2, 6, 23, 0.84), 0 0 38px rgba(56, 189, 248, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+
+  /* Adaptive Touch & Scrollbar Tokens */
+  --target-size: 36px;
+  --scrollbar-thumb: rgba(148, 163, 184, 0.32);
+  --scrollbar-track: rgba(9, 14, 26, 0.65);
+
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  scrollbar-width: thin;
 }
 
+/* ==========================================================================
+   KEYFRAMES
+   ========================================================================== */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 @keyframes fadeUpIn {
   from { opacity: 0; transform: translateY(14px); }
   to { opacity: 1; transform: translateY(0); }
@@ -64,51 +119,103 @@ const HTML = String.raw`<!doctype html>
   100% { background-position: 250% center; }
 }
 @keyframes modalSpringIn {
-  from { opacity: 0; transform: scale(0.92) translateY(16px); }
+  from { opacity: 0; transform: scale(0.94) translateY(14px); }
   to { opacity: 1; transform: scale(1) translateY(0); }
 }
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes modalZoomIn {
+  from { opacity: 0; transform: scale(0.94) translateY(10px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes bellFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+@keyframes pulseGreen {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.65); }
+  50% { transform: scale(1.12); box-shadow: 0 0 12px 3px rgba(16, 185, 129, 0.35); }
+}
+@keyframes pulseYellow {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.65); }
+  50% { transform: scale(1.12); box-shadow: 0 0 12px 3px rgba(245, 158, 11, 0.35); }
+}
+@keyframes pulseRed {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.65); }
+  50% { transform: scale(1.12); box-shadow: 0 0 12px 3px rgba(239, 68, 68, 0.35); }
+}
+@keyframes toastSlideIn {
+  from { opacity: 0; transform: translateY(18px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes movePulse {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.35), 0 0 16px rgba(251, 191, 36, 0.55); }
+  50% { box-shadow: 0 0 0 4px rgba(251, 191, 36, 0.55), 0 0 24px rgba(251, 191, 36, 0.85); }
+}
 
-* {
+/* ==========================================================================
+   BASE ELEMENTS & ACCESSIBLE UTILITIES
+   ========================================================================== */
+*, *::before, *::after {
   box-sizing: border-box;
 }
 
 body {
   margin: 0;
   min-height: 100vh;
-  background: var(--bg);
-  background-image: var(--bg-gradient),
-    linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
-  background-size: auto, 32px 32px, 32px 32px;
-  background-attachment: fixed;
-  color: var(--text);
-  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  min-block-size: 100dvh;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  overflow-x: hidden;
+  overflow-x: clip;
+  overflow-wrap: anywhere;
 }
 
 h1, h2, h3, p, label {
   margin: 0;
 }
 
+h1, h2, h3 {
+  text-wrap: balance;
+}
+
 button, input, select, textarea {
   font: inherit;
 }
 
-button {
+.visually-hidden:where(:not(:focus-within, :active)) {
+  position: absolute !important;
+  clip-path: inset(50%) !important;
+  overflow: hidden !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  white-space: nowrap !important;
+}
+
+/* ==========================================================================
+   BUTTONS & INPUT CONTROLS
+   ========================================================================== */
+button, .btn {
   position: relative;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 10px;
-  background: linear-gradient(160deg, rgba(28, 40, 58, 0.95) 0%, rgba(18, 28, 44, 0.98) 100%);
-  color: var(--text);
+  background: linear-gradient(165deg, rgba(26, 38, 58, 0.94) 0%, rgba(15, 24, 40, 0.98) 100%);
+  color: var(--text-primary);
   padding: 9px 14px;
+  min-block-size: var(--target-size);
   cursor: pointer;
   font-weight: 600;
   font-family: inherit;
-  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255,255,255,0.07);
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease, transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: var(--shadow-sm);
   user-select: none;
   letter-spacing: 0.01em;
 }
@@ -116,499 +223,800 @@ button {
 button::after {
   content: '';
   position: absolute;
-  top: 0; left: 0;
+  top: 0;
+  left: 0;
   width: 45%;
   height: 100%;
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.12), transparent);
-  transform: translateX(-120%);
-  transition: transform 0s;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.11), transparent);
+  transform: translateX(-160%) skewX(-20deg);
+  transition: transform 0.55s ease;
+  pointer-events: none;
 }
 
-button:hover::after {
-  transform: translateX(280%);
-  transition: transform 0.55s cubic-bezier(0.16, 1, 0.3, 1);
+button:active:not(:disabled),
+.btn:active:not(:disabled) {
+  transform: scale(0.97) translateY(0);
 }
 
-button:hover, button:hover:not(:disabled) {
-  background: linear-gradient(160deg, rgba(36, 52, 74, 0.98) 0%, rgba(24, 38, 58, 0.99) 100%);
-  border-color: rgba(255, 255, 255, 0.16);
-  transform: translateY(-1px);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255,255,255,0.1);
-}
-
-button:active, button:active:not(:disabled) {
-  transform: scale(0.96) translateY(0);
-}
-
-button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+:where(a:any-link, button, input, select, textarea, [role="button"], [tabindex]):focus-visible {
   outline: 2px solid var(--cyan);
   outline-offset: 2px;
 }
 
-button.primary {
+button.primary,
+.btn.primary {
   background: linear-gradient(135deg, #0ea5e9 0%, #2563eb 100%);
-  border-color: rgba(56, 189, 248, 0.55);
-  box-shadow: 0 4px 16px rgba(14, 165, 233, 0.35), inset 0 1px 0 rgba(255,255,255,0.15);
+  border-color: rgba(56, 189, 248, 0.65);
   color: #fff;
   font-weight: 700;
+  box-shadow: 0 4px 16px rgba(14, 165, 233, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.22);
 }
 
-button.primary:hover, button.primary:hover:not(:disabled) {
-  background: linear-gradient(135deg, #22b8fc 0%, #3b7ff5 100%);
-  border-color: rgba(56, 189, 248, 0.7);
-  box-shadow: 0 6px 24px rgba(14, 165, 233, 0.5), inset 0 1px 0 rgba(255,255,255,0.18);
-  transform: translateY(-2px);
+button.secondary,
+.btn-secondary {
+  background: rgba(15, 23, 42, 0.78);
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  color: var(--text-secondary);
 }
 
-button.danger {
-  background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
-  border-color: rgba(239, 68, 68, 0.55);
-  box-shadow: 0 4px 16px rgba(239, 68, 68, 0.3), inset 0 1px 0 rgba(255,255,255,0.1);
+button.danger,
+button.danger-btn,
+.danger-btn {
+  background: linear-gradient(135deg, #e11d48 0%, #dc2626 100%);
+  border-color: rgba(248, 113, 113, 0.5);
   color: #fff;
   font-weight: 700;
+  box-shadow: 0 4px 14px rgba(239, 68, 68, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.16);
 }
 
-button.danger:hover, button.danger:hover:not(:disabled) {
-  background: linear-gradient(135deg, #f87171 0%, #dc2626 100%);
-  border-color: rgba(239, 68, 68, 0.7);
-  box-shadow: 0 6px 24px rgba(239, 68, 68, 0.45), inset 0 1px 0 rgba(255,255,255,0.12);
-  transform: translateY(-2px);
-}
-
-button:disabled {
-  opacity: 0.38;
+button:disabled,
+.btn:disabled {
+  opacity: 0.45;
   cursor: not-allowed;
-  transform: none !important;
-  filter: grayscale(30%);
+  transform: none;
+  box-shadow: none;
 }
 
 input, select, textarea {
   width: 100%;
-  padding: 10px 12px;
-  border-radius: 10px;
   border: 1px solid var(--border);
-  background: rgba(7, 12, 22, 0.85);
-  color: var(--text);
-  outline: none;
+  border-radius: 10px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  padding: 10px 12px;
   font-family: inherit;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
-  box-shadow: inset 0 2px 4px rgba(0,0,0,0.3);
+  font-size: 13.5px;
+  min-block-size: var(--target-size);
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.42);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-dim);
 }
 
 input:focus, select:focus, textarea:focus {
   border-color: var(--cyan);
-  background: rgba(7, 12, 22, 0.95);
-  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.22), inset 0 2px 4px rgba(0,0,0,0.3);
+  background: rgba(8, 14, 28, 0.96);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.16), inset 0 1px 3px rgba(0, 0, 0, 0.42);
+}
+
+select option {
+  background: #0b1222;
+  color: var(--text-primary);
+}
+
+/* ==========================================================================
+   APP SHELL & HEADER
+   ========================================================================== */
+#mainApp {
+  position: relative;
 }
 
 .app {
-  width: min(1360px, calc(100% - 24px));
+  max-width: 1460px;
   margin: 0 auto;
-  padding: 12px 0 48px;
+  padding: 20px 22px 54px;
+  min-width: 0;
 }
 
 .topbar, .header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 16px;
   flex-wrap: wrap;
-  gap: 12px;
-  margin-bottom: 20px;
+  margin-bottom: 18px;
 }
 
 .page-title {
   font-size: 24px;
-  font-weight: 850;
+  font-weight: 800;
   letter-spacing: -0.02em;
-  margin: 0 0 4px;
-  background: linear-gradient(135deg, #ffffff 30%, #a5c2eb 100%);
+  background: linear-gradient(90deg, #ffffff 0%, #bae6fd 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
 .page-subtitle {
-  color: var(--muted);
+  margin-top: 4px;
+  color: var(--text-muted);
   font-size: 13px;
-  margin: 0 0 16px;
 }
 
-/* Fleet Welcome Header */
+/* Global Persistent Navigation Header */
+.global-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 24px;
+  background: rgba(6, 10, 22, 0.78);
+  backdrop-filter: blur(22px) saturate(180%);
+  -webkit-backdrop-filter: blur(22px) saturate(180%);
+  border-bottom: 1px solid rgba(56, 189, 248, 0.16);
+  box-shadow: 0 8px 32px rgba(2, 6, 23, 0.55), inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+  position: sticky;
+  top: 0;
+  z-index: 200;
+  flex-wrap: wrap;
+}
+
+.global-header-left {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.global-header-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.global-logo {
+  font-size: 22px;
+  filter: drop-shadow(0 0 8px rgba(56, 189, 248, 0.55));
+}
+
+.global-brand-text {
+  font-size: 15.5px;
+  font-weight: 900;
+  letter-spacing: 0.3px;
+  background: linear-gradient(90deg, #ffffff, #38bdf8);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.vip-pill-mini {
+  font-size: 10px;
+  font-weight: 850;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #f59e0b, #fbbf24);
+  color: #090d16;
+  letter-spacing: 0.4px;
+}
+
+.global-nav-pills {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.nav-pill-btn {
+  padding: 8px 14px !important;
+  font-size: 12.5px !important;
+  font-weight: 700 !important;
+  border-radius: 10px !important;
+  background: rgba(255, 255, 255, 0.04) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--text-muted) !important;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-shadow: none !important;
+}
+
+.nav-pill-btn.active {
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.22), rgba(56, 189, 248, 0.14)) !important;
+  border-color: rgba(56, 189, 248, 0.52) !important;
+  color: #38bdf8 !important;
+  box-shadow: 0 0 14px rgba(56, 189, 248, 0.18) !important;
+}
+
+.global-header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.cosmic-toggle-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  background: rgba(99, 102, 241, 0.16);
+  border: 1px solid rgba(167, 139, 250, 0.35);
+  color: #ddd6fe;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+/* ==========================================================================
+   FLEET WELCOME, RENTAL BANNER & RESOURCE BAR
+   ========================================================================== */
 .fleet-welcome-header {
-  position: relative;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  flex-wrap: wrap;
   gap: 16px;
-  margin-bottom: 22px;
-  padding: 22px 26px;
-  background: linear-gradient(135deg, rgba(14, 23, 42, 0.75) 0%, rgba(9, 14, 26, 0.88) 100%);
-  backdrop-filter: blur(20px) saturate(160%);
-  -webkit-backdrop-filter: blur(20px) saturate(160%);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 20px;
-  box-shadow: 0 16px 40px -8px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.1);
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+  padding: 20px 24px;
+  border-radius: var(--radius-xl);
+  background: linear-gradient(135deg, rgba(12, 20, 38, 0.80) 0%, rgba(7, 12, 24, 0.92) 100%);
+  border: 1px solid rgba(56, 189, 248, 0.20);
+  box-shadow: 0 18px 45px -10px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.10);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  position: relative;
   overflow: hidden;
-  animation: fadeUpIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
+
 .fleet-welcome-header::before {
   content: '';
   position: absolute;
-  top: -80px;
-  left: 20%;
-  width: 260px;
-  height: 260px;
-  border-radius: 50%;
-  background: radial-gradient(circle, rgba(56, 189, 248, 0.12) 0%, transparent 70%);
-  filter: blur(40px);
-  pointer-events: none;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(56, 189, 248, 0.5), rgba(16, 185, 129, 0.4), transparent);
 }
+
+.fleet-welcome-text {
+  min-width: 0;
+  flex: 1 1 280px;
+}
+
 .fleet-welcome-title-wrap {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  margin-bottom: 6px;
-}
-.fleet-welcome-title {
-  font-size: 22px;
-  font-weight: 850;
-  letter-spacing: -0.02em;
-  margin: 0;
-  background: linear-gradient(135deg, #ffffff 30%, #93c5fd 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-.fleet-welcome-subtitle {
-  color: var(--muted);
-  font-size: 13px;
-  margin: 0;
-  line-height: 1.4;
-}
-.fleet-welcome-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  align-items: center;
 }
 
-/* Bento KPI Grid */
+.fleet-welcome-title {
+  font-size: 20px;
+  font-weight: 850;
+  letter-spacing: -0.02em;
+  color: #fff;
+}
+
+.fleet-welcome-subtitle {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.fleet-welcome-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.vip-pill {
+  font-size: 11px;
+  font-weight: 850;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+  color: #090d16;
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.45);
+  letter-spacing: 0.4px;
+}
+
+.platform-pill {
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 4px 9px;
+  border-radius: 7px;
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  color: #38bdf8;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.ram-pill {
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 6px 11px;
+  border-radius: 9px;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.28);
+  color: #34d399;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.user-rental-dashboard-banner {
+  background: linear-gradient(135deg, rgba(14, 26, 48, 0.88) 0%, rgba(9, 16, 32, 0.94) 100%);
+  border: 1px solid rgba(56, 189, 248, 0.36);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45), 0 0 24px rgba(14, 165, 233, 0.10), inset 0 1px 0 rgba(255, 255, 255, 0.10);
+}
+
+#userRentalBanner {
+  padding: 12px 16px;
+}
+
+#btnUserLink4mReward,
+#btnExpiredLink4mReward {
+  box-shadow: 0 4px 14px rgba(56, 189, 248, 0.18);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
+}
+
+.fleet-resource-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 24px;
+  padding: 12px 18px;
+  margin-bottom: 16px;
+  background: linear-gradient(90deg, rgba(11, 19, 35, 0.86) 0%, rgba(14, 24, 44, 0.82) 50%, rgba(11, 19, 35, 0.86) 100%);
+  border: 1px solid rgba(56, 189, 248, 0.18);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.fleet-res-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.fleet-res-icon {
+  font-size: 15px;
+}
+
+.fleet-res-label {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.fleet-res-val {
+  font-family: var(--font-mono);
+  font-weight: 800;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.eco-badge {
+  background: rgba(16, 185, 129, 0.16);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  padding: 3px 9px;
+  border-radius: 6px;
+  font-weight: 700;
+  font-size: 11px;
+}
+
+.ram-meter-wrap {
+  margin-bottom: 10px;
+}
+
+.ram-meter-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.ram-meter-bar {
+  height: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.ram-meter-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #38bdf8, #818cf8);
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+
+/* ==========================================================================
+   KPI CARDS GRID
+   ========================================================================== */
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
   gap: 14px;
-  margin-bottom: 22px;
+  margin-bottom: 20px;
 }
+
 .kpi-card {
   position: relative;
-  background: rgba(11, 18, 32, 0.82);
-  backdrop-filter: blur(20px) saturate(160%);
-  -webkit-backdrop-filter: blur(20px) saturate(160%);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 18px;
-  padding: 18px 20px;
-  box-shadow: 0 12px 36px -4px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.09);
   overflow: hidden;
-  transition: all 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(175deg, rgba(14, 23, 42, 0.86) 0%, rgba(8, 13, 25, 0.94) 100%);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  border: 1px solid var(--border-subtle);
+  padding: 16px 18px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  animation: fadeUpIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-.kpi-card:nth-child(1) { animation-delay: 0.05s; }
-.kpi-card:nth-child(2) { animation-delay: 0.1s; }
-.kpi-card:nth-child(3) { animation-delay: 0.15s; }
-.kpi-card:nth-child(4) { animation-delay: 0.2s; }
-.kpi-card:nth-child(5) { animation-delay: 0.25s; }
-.kpi-card:hover {
-  transform: translateY(-4px);
-  border-color: rgba(56, 189, 248, 0.45);
-  box-shadow: 0 20px 48px -4px rgba(0, 0, 0, 0.7), 0 0 28px rgba(56, 189, 248, 0.12), inset 0 1px 0 rgba(255,255,255,0.15);
-}
-.kpi-card::before {
-  content: '';
-  position: absolute;
-  top: 0; left: 0; right: 0;
-  height: 3px;
-  background: linear-gradient(90deg, #38bdf8, transparent);
-}
-.kpi-card::after {
-  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 70px;
-  background: radial-gradient(ellipse at top, rgba(56, 189, 248, 0.15), transparent 70%);
-  pointer-events: none;
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.25s ease, box-shadow 0.25s ease;
+  box-shadow: var(--shadow-md);
+  min-width: 0;
 }
 
-/* 6 distinct states for 6 KPI cards */
-.kpi-card.kpi-total::before { background: linear-gradient(90deg, #38bdf8, transparent); }
-.kpi-card.kpi-total::after { background: radial-gradient(ellipse at top, rgba(56, 189, 248, 0.18), transparent 70%); }
-.kpi-card.kpi-health::before { background: linear-gradient(90deg, #10b981, transparent); }
-.kpi-card.kpi-health::after { background: radial-gradient(ellipse at top, rgba(16, 185, 129, 0.18), transparent 70%); }
-.kpi-card.kpi-afk::before { background: linear-gradient(90deg, #34d399, transparent); }
-.kpi-card.kpi-afk::after { background: radial-gradient(ellipse at top, rgba(52, 211, 153, 0.18), transparent 70%); }
-.kpi-card.kpi-online::before { background: linear-gradient(90deg, #3b82f6, transparent); }
-.kpi-card.kpi-online::after { background: radial-gradient(ellipse at top, rgba(59, 130, 246, 0.18), transparent 70%); }
-.kpi-card.kpi-offline::before { background: linear-gradient(90deg, #ef4444, transparent); }
-.kpi-card.kpi-offline::after { background: radial-gradient(ellipse at top, rgba(239, 68, 68, 0.18), transparent 70%); }
-.kpi-card.kpi-unreachable::before { background: linear-gradient(90deg, #f97316, transparent); }
-.kpi-card.kpi-unreachable::after { background: radial-gradient(ellipse at top, rgba(249, 115, 22, 0.18), transparent 70%); }
+.kpi-card::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--muted);
+  opacity: 0.72;
+}
+
+.kpi-card.kpi-total::after { background: linear-gradient(90deg, #38bdf8, #818cf8); opacity: 1; }
+.kpi-card.kpi-health::after { background: linear-gradient(90deg, #10b981, #34d399); opacity: 1; }
+.kpi-card.kpi-afk::after { background: linear-gradient(90deg, #10b981, #059669); opacity: 1; }
+.kpi-card.kpi-online::after { background: linear-gradient(90deg, #f59e0b, #fbbf24); opacity: 1; }
+.kpi-card.kpi-offline::after { background: linear-gradient(90deg, #ef4444, #f87171); opacity: 1; }
+.kpi-card.kpi-unreachable::after { background: linear-gradient(90deg, #f97316, #fb923c); opacity: 1; }
 
 .kpi-header {
   display: flex;
-  align-items: center;
   justify-content: space-between;
-  margin-bottom: 6px;
-}
-.kpi-title {
-  font-size: 11px;
-  font-weight: 750;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-.kpi-icon {
-  font-size: 18px;
-  opacity: 0.85;
-}
-.kpi-value {
-  font-size: 28px;
-  font-weight: 900;
-  letter-spacing: -0.02em;
-  margin: 3px 0;
-  line-height: 1.1;
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-variant-numeric: tabular-nums;
-}
-.kpi-sub {
-  font-size: 11px;
-  color: var(--muted);
-  margin-top: 4px;
+  align-items: center;
+  margin-bottom: 10px;
 }
 
-/* Fleet Command Center Toolbar */
+.kpi-title {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.kpi-icon {
+  font-size: 16px;
+  opacity: 0.85;
+}
+
+.kpi-value {
+  font-size: 27px;
+  font-weight: 850;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.kpi-sub {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+/* ==========================================================================
+   FLEET TOOLBAR & SEARCH / FILTER CONTROLS
+   ========================================================================== */
 .fleet-toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
   flex-wrap: wrap;
-  gap: 10px;
   margin-bottom: 14px;
-  background: rgba(9, 16, 28, 0.72);
-  backdrop-filter: blur(16px) saturate(150%);
-  -webkit-backdrop-filter: blur(16px) saturate(150%);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 14px;
-  padding: 11px 15px;
-  box-shadow: 0 6px 20px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.06);
+  padding: 12px 16px;
+  border-radius: var(--radius-lg);
+  background: rgba(10, 17, 32, 0.86);
+  border: 1px solid var(--border-subtle);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
 }
+
 .fleet-toolbar-primary {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
   align-items: center;
 }
+
 .fleet-toolbar-tools {
   display: flex;
-  gap: 7px;
+  gap: 8px;
   flex-wrap: wrap;
   align-items: center;
 }
+
 .warning-btn {
-  background: rgba(234, 179, 8, 0.15) !important;
-  border-color: rgba(234, 179, 8, 0.35) !important;
-  color: #facc15 !important;
-}
-.warning-btn:hover {
-  background: rgba(234, 179, 8, 0.25) !important;
-  color: #fff !important;
+  background: rgba(245, 158, 11, 0.14) !important;
+  border-color: rgba(245, 158, 11, 0.4) !important;
+  color: #fbbf24 !important;
+  font-weight: 700 !important;
 }
 
 .fleet-search-filter-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  flex-wrap: wrap;
   gap: 12px;
-  margin-bottom: 20px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
 }
+
 .fleet-search-sort-wrap {
   display: flex;
   gap: 8px;
   align-items: center;
-  flex: 1;
-  justify-content: flex-end;
-  min-width: 280px;
+  flex-wrap: wrap;
+  flex: 1 1 280px;
+  min-width: 0;
 }
+
+.fleet-search-sort-wrap > * {
+  min-width: 0;
+}
+
 .sort-select {
-  width: auto;
-  min-width: 170px;
+  flex: 0 1 190px;
+  min-width: 140px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
-  background: rgba(14, 21, 31, 0.85);
 }
 
 .search-box {
-  flex: 1;
-  min-width: 230px;
+  position: relative;
+  flex: 1 1 200px;
+  min-width: 0;
 }
 
-/* Status Filter Tabs */
+.search-box input {
+  padding-left: 36px;
+  background: rgba(11, 16, 26, 0.84);
+  border: 1px solid var(--border);
+}
+
+.search-box::before {
+  content: '⌕';
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 16px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
 .filter-tabs {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
+  background: rgba(11, 16, 26, 0.72);
+  padding: 4px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
 }
 
 .tab-btn {
-  padding: 8px 14px;
-  border-radius: 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
   font-size: 12px;
   font-weight: 650;
-  border: 1px solid var(--border);
-  background: rgba(14, 21, 31, 0.65);
-  color: var(--muted);
-  cursor: pointer;
-  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.tab-btn:hover {
-  background: rgba(25, 36, 52, 0.85);
-  color: var(--text);
-  transform: translateY(-1px);
+  padding: 7px 12px;
+  border-radius: 8px;
+  box-shadow: none;
 }
 
 .tab-btn.active {
-  background: linear-gradient(135deg, rgba(14, 165, 233, 0.25) 0%, rgba(37, 99, 235, 0.2) 100%);
-  color: #7dd3fc;
-  border-color: rgba(56, 189, 248, 0.5);
-  box-shadow: 0 2px 12px rgba(14, 165, 233, 0.25), inset 0 1px 0 rgba(255,255,255,0.08);
+  background: rgba(56, 189, 248, 0.16);
+  color: #e0f2fe;
+  border-color: rgba(56, 189, 248, 0.36);
+}
+
+.fleet-tag-filter-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.bot-tags-wrap {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.bot-tag-chip {
+  font-size: 10.5px;
+  font-weight: 650;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(167, 139, 250, 0.14);
+  color: #c4b5fd;
+  border: 1px solid rgba(167, 139, 250, 0.30);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.badge-tag {
+  background: rgba(56, 189, 248, 0.14);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  padding: 2px 7px;
+  border-radius: 6px;
+  margin: 2px;
+  display: inline-block;
+  font-size: 11px;
   font-weight: 700;
 }
 
-/* Grids & Panels */
+.empty-filter-state {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 42px 20px;
+  background: rgba(12, 20, 36, 0.72);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+}
+
+/* ==========================================================================
+   BOT GRID, PANELS & CLOUD COMPUTE BOT CARDS
+   ========================================================================== */
 .bot-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   gap: 16px;
-  width: 100%;
-  box-sizing: border-box;
   align-items: stretch;
 }
 
 .panel {
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  background: rgba(10, 18, 32, 0.94);
-  padding: 16px;
-  box-shadow: 0 12px 36px -4px rgba(0, 0, 0, 0.5), inset 0 1px 0 0 rgba(255, 255, 255, 0.08);
-  transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.28s, box-shadow 0.28s;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xl);
+  background: linear-gradient(170deg, rgba(12, 20, 36, 0.88) 0%, rgba(7, 12, 23, 0.94) 100%);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  padding: 18px;
+  box-shadow: var(--shadow-md);
+  min-width: 0;
+  max-width: 100%;
 }
 
 .bot-card {
   position: relative;
-  width: 100%;
-  max-width: 100%;
-  box-sizing: border-box;
-  background: #090e1a;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 18px;
-  padding: 14px 16px;
-  box-shadow: 0 12px 36px -4px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  cursor: pointer;
   display: flex;
   flex-direction: column;
-  transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.28s, box-shadow 0.28s;
+  text-align: left;
+  width: 100%;
+  height: 100%;
+  padding: 16px;
+  cursor: pointer;
+  border-radius: var(--radius-xl);
+  background: linear-gradient(168deg, rgba(13, 22, 38, 0.88) 0%, rgba(7, 12, 22, 0.96) 100%);
+  backdrop-filter: blur(16px) saturate(150%);
+  -webkit-backdrop-filter: blur(16px) saturate(150%);
+  border: 1px solid var(--border-subtle);
+  border-left: 3.5px solid var(--border);
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.25s ease, box-shadow 0.25s ease;
+  box-shadow: var(--shadow-md);
   overflow: hidden;
-  min-height: 250px;
-  contain: layout style;
-  font-variant-numeric: tabular-nums;
-  animation: fadeUpIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+  min-width: 0;
 }
 
-.bot-card:hover {
-  border-color: rgba(56, 189, 248, 0.45);
-  transform: translateY(-3px);
-  box-shadow: 0 20px 50px -4px rgba(0, 0, 0, 0.65), 0 0 28px rgba(56, 189, 248, 0.14), inset 0 1px 0 rgba(255,255,255,0.12);
-}
-
-.bot-card.status-afk {
-  border-left: 3px solid #10b981;
-  box-shadow: 0 12px 36px -4px rgba(0, 0, 0, 0.5), inset 3px 0 14px rgba(16, 185, 129, 0.16);
-}
-.bot-card.status-waiting {
-  border-left: 3px solid #f59e0b;
-  box-shadow: 0 12px 36px -4px rgba(0, 0, 0, 0.5), inset 3px 0 14px rgba(245, 158, 11, 0.16);
-}
-.bot-card.status-offline {
-  border-left: 3px solid #ef4444;
-  box-shadow: 0 12px 36px -4px rgba(0, 0, 0, 0.5), inset 3px 0 14px rgba(239, 68, 68, 0.16);
-}
-.bot-card.status-unreachable {
-  border-left: 3px solid #f97316;
-  box-shadow: 0 12px 36px -4px rgba(0, 0, 0, 0.5), inset 3px 0 14px rgba(249, 115, 22, 0.16);
-}
+.bot-card.status-afk { border-left-color: var(--green); }
+.bot-card.status-waiting { border-left-color: var(--yellow); }
+.bot-card.status-offline { border-left-color: var(--red); }
+.bot-card.status-unreachable { border-left-color: #f97316; }
 
 .bot-card-topbar {
   display: flex;
-  align-items: center;
   justify-content: space-between;
-  gap: 6px;
-  margin-bottom: 8px;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 10px;
 }
+
 .bot-card-title-group {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   min-width: 0;
   flex: 1;
 }
+
 .bot-id-chip {
   font-size: 11px;
   font-weight: 800;
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-variant-numeric: tabular-nums;
-  background: rgba(56, 189, 248, 0.15);
   color: #38bdf8;
-  border: 1px solid rgba(56, 189, 248, 0.3);
-  border-radius: 6px;
+  background: rgba(56, 189, 248, 0.14);
+  border: 1px solid rgba(56, 189, 248, 0.32);
   padding: 2px 7px;
+  border-radius: 6px;
   flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
+
 .bot-card-name {
-  font-size: 15px;
+  font-size: 15.5px;
   font-weight: 800;
-  color: #fff;
-  margin: 0;
+  color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
 .bot-card-admin-actions {
   display: flex;
   gap: 4px;
   flex-shrink: 0;
 }
+
+.bot-card-quick-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+}
+
 .bot-mini-btn {
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 700;
-  padding: 3px 7px;
-  border-radius: 6px;
+  padding: 4px 8px;
+  min-block-size: 28px;
+  border-radius: 7px;
   background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #cbd5e1;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--text-secondary);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  box-shadow: none;
 }
-.bot-mini-btn:hover {
-  background: rgba(255, 255, 255, 0.14);
-  color: #fff;
-}
+
 .bot-mini-btn.danger {
   background: rgba(239, 68, 68, 0.12);
   border-color: rgba(239, 68, 68, 0.3);
   color: #f87171;
-}
-.bot-mini-btn.danger:hover {
-  background: #ef4444;
-  color: #fff;
 }
 
 .bot-status-strip {
@@ -616,34 +1024,35 @@ input:focus, select:focus, textarea:focus {
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
-  margin-bottom: 8px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  margin-bottom: 9px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
+
 .bot-status-pill {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 750;
-  padding: 2px 7px;
+  padding: 3px 8px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.06);
 }
 .bot-status-pill.green {
-  background: rgba(48, 209, 88, 0.14);
+  background: rgba(16, 185, 129, 0.15);
   color: #4ade80;
-  border: 1px solid rgba(48, 209, 88, 0.35);
+  border: 1px solid rgba(16, 185, 129, 0.36);
 }
 .bot-status-pill.yellow {
-  background: rgba(234, 179, 8, 0.14);
+  background: rgba(245, 158, 11, 0.15);
   color: #facc15;
-  border: 1px solid rgba(234, 179, 8, 0.35);
+  border: 1px solid rgba(245, 158, 11, 0.36);
 }
 .bot-status-pill.red {
-  background: rgba(239, 68, 68, 0.14);
+  background: rgba(239, 68, 68, 0.15);
   color: #f87171;
-  border: 1px solid rgba(239, 68, 68, 0.35);
+  border: 1px solid rgba(239, 68, 68, 0.36);
 }
 .bot-status-pill.orange, .bot-status-pill.warning {
   background: rgba(249, 115, 22, 0.16);
@@ -665,7 +1074,9 @@ input:focus, select:focus, textarea:focus {
   color: #94a3b8;
   border: 1px solid rgba(148, 163, 184, 0.3);
 }
-.pulse-status-dot {
+
+.pulse-status-dot,
+.pulse-icon {
   width: 7px;
   height: 7px;
   border-radius: 50%;
@@ -678,100 +1089,76 @@ input:focus, select:focus, textarea:focus {
   position: absolute;
   inset: 0;
   border-radius: 50%;
-  animation: sonarPulse 2.2s ease-out infinite;
 }
 .pulse-status-dot.green { background: #10b981; box-shadow: 0 0 7px #10b981; }
 .pulse-status-dot.green::after { background: #10b981; }
 .pulse-status-dot.yellow { background: #f59e0b; box-shadow: 0 0 7px #f59e0b; }
-.pulse-status-dot.yellow::after { background: #f59e0b; animation-duration: 1.8s; }
+.pulse-status-dot.yellow::after { background: #f59e0b; }
 .pulse-status-dot.red { background: #ef4444; box-shadow: 0 0 7px #ef4444; }
-.pulse-status-dot.red::after { background: #ef4444; animation-duration: 2.5s; }
+.pulse-status-dot.red::after { background: #ef4444; }
 .pulse-status-dot.orange, .pulse-status-dot.warning { background: #f97316; box-shadow: 0 0 7px #f97316; }
-.pulse-status-dot.orange::after, .pulse-status-dot.warning::after { background: #f97316; animation-duration: 2s; }
+.pulse-status-dot.orange::after, .pulse-status-dot.warning::after { background: #f97316; }
 .pulse-status-dot.purple, .pulse-status-dot.sleep { background: #a855f7; box-shadow: 0 0 7px #a855f7; }
-.pulse-status-dot.purple::after, .pulse-status-dot.sleep::after { background: #a855f7; animation-duration: 3s; }
+.pulse-status-dot.purple::after, .pulse-status-dot.sleep::after { background: #a855f7; }
 .pulse-status-dot.blue { background: #38bdf8; box-shadow: 0 0 7px #38bdf8; }
-.pulse-status-dot.blue::after { background: #38bdf8; animation-duration: 2.8s; }
+.pulse-status-dot.blue::after { background: #38bdf8; }
 .pulse-status-dot.gray { background: #64748b; box-shadow: none; }
 .pulse-status-dot.gray::after { display: none; }
 
 .bot-error-action-banner {
-  margin: 6px 0 10px;
-  padding: 8px 10px;
+  margin-top: 6px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
   border-radius: 8px;
-  font-size: 11.5px;
-  line-height: 1.4;
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
-  min-height: 48px;
-  box-sizing: border-box;
+  flex-wrap: wrap;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(239, 68, 68, 0.14);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #fca5a5;
+}
+.bot-error-action-banner.blocked {
+  background: rgba(245, 158, 11, 0.14);
+  border-color: rgba(245, 158, 11, 0.4);
+  color: #fcd34d;
 }
 .bot-error-action-banner.warning {
-  background: rgba(249, 115, 22, 0.12);
-  border: 1px solid rgba(249, 115, 22, 0.35);
-  color: #fb923c;
-}
-.bot-error-action-banner.sleep {
-  background: rgba(168, 85, 247, 0.12);
-  border: 1px solid rgba(168, 85, 247, 0.35);
-  color: #c084fc;
-}
-.bot-error-action-banner.danger {
-  background: rgba(239, 68, 68, 0.12);
-  border: 1px solid rgba(239, 68, 68, 0.35);
-  color: #f87171;
+  background: rgba(249, 115, 22, 0.14);
+  border-color: rgba(249, 115, 22, 0.35);
+  color: #fdba74;
 }
 .bot-error-text {
-  flex: 1;
-  min-width: 140px;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  flex: 1 1 140px;
+  min-width: 0;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  word-break: break-word;
 }
 .bot-action-chip {
-  padding: 3px 8px;
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  background: rgba(14, 165, 233, 0.22);
+  color: #38bdf8;
   font-size: 11px;
   font-weight: 700;
-  border-radius: 6px;
   cursor: pointer;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+  transition: background-color 0.15s ease, color 0.15s ease;
   white-space: nowrap;
-  transition: all 0.2s ease;
+  box-shadow: none;
+  min-block-size: 28px;
 }
-.bot-action-chip:hover {
-  background: rgba(255, 255, 255, 0.18);
+.bot-action-chip.loading {
+  opacity: 0.72;
+  cursor: wait;
+  pointer-events: none;
 }
-.bot-action-chip.warning {
-  background: rgba(249, 115, 22, 0.25);
-  border-color: rgba(249, 115, 22, 0.5);
-  color: #ffedd5;
-}
-.bot-action-chip.warning:hover {
-  background: rgba(249, 115, 22, 0.4);
-}
-.bot-action-chip.danger {
-  background: rgba(239, 68, 68, 0.25);
-  border-color: rgba(239, 68, 68, 0.5);
-  color: #fee2e2;
-}
-.bot-action-chip.danger:hover {
-  background: rgba(239, 68, 68, 0.4);
-}
-.bot-action-chip.info {
-  background: rgba(56, 189, 248, 0.25);
-  border-color: rgba(56, 189, 248, 0.5);
-  color: #e0f2fe;
-}
-.bot-action-chip.info:hover {
-  background: rgba(56, 189, 248, 0.4);
-}
+
 .spinner-sm {
   display: inline-block;
   width: 13px;
@@ -782,29 +1169,28 @@ input:focus, select:focus, textarea:focus {
   animation: spin 0.75s linear infinite;
   vertical-align: middle;
 }
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
 
 .eco-badge-glow {
-  font-size: 9.5px;
+  font-size: 10px;
   font-weight: 800;
-  padding: 2px 5px;
+  padding: 2px 6px;
   border-radius: 5px;
-  background: rgba(34, 197, 94, 0.15);
+  background: rgba(16, 185, 129, 0.15);
   color: #4ade80;
-  border: 1px solid rgba(34, 197, 94, 0.35);
-  box-shadow: 0 0 8px rgba(34, 197, 94, 0.2);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.2);
 }
+
 .bot-owner-wrap {
   margin-left: auto;
   display: flex;
   align-items: center;
 }
+
 .bot-owner-pill {
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 700;
-  padding: 2px 6px;
+  padding: 2px 7px;
   border-radius: 6px;
   display: inline-flex;
   align-items: center;
@@ -827,47 +1213,56 @@ input:focus, select:focus, textarea:focus {
   justify-content: space-between;
   gap: 6px;
   margin-bottom: 8px;
-  background: rgba(0, 0, 0, 0.25);
-  padding: 5px 8px;
-  border-radius: 7px;
-  border: 1px solid rgba(255, 255, 255, 0.04);
-  font-size: 11.5px;
+  background: rgba(0, 0, 0, 0.26);
+  padding: 6px 9px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 12px;
 }
+
 .bot-ingame-user {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   font-weight: 700;
-  color: #f1f5f9;
+  color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
   flex: 1;
 }
+
+.ingame-icon {
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
+.ingame-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .bot-ip-pill {
   display: flex;
   align-items: center;
   gap: 4px;
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-size: 10.5px;
   color: #c084fc;
   cursor: pointer;
   padding: 2px 7px;
   border-radius: 5px;
-  background: rgba(192, 132, 252, 0.1);
-  border: 1px solid rgba(192, 132, 252, 0.25);
-  transition: all 0.15s;
+  background: rgba(192, 132, 252, 0.12);
+  border: 1px solid rgba(192, 132, 252, 0.28);
+  transition: background-color 0.15s ease, border-color 0.15s ease;
   max-width: 170px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   flex-shrink: 0;
-}
-.bot-ip-pill:hover {
-  background: rgba(192, 132, 252, 0.22);
-  border-color: #c084fc;
 }
 
 .bot-vitals-matrix {
@@ -876,6 +1271,7 @@ input:focus, select:focus, textarea:focus {
   gap: 6px;
   margin-bottom: 8px;
 }
+
 .vital-card {
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.06);
@@ -884,13 +1280,16 @@ input:focus, select:focus, textarea:focus {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: background-color 0.2s ease, border-color 0.2s ease;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  min-width: 0;
 }
-.vital-card:hover {
-  background: rgba(255, 255, 255, 0.05);
-  border-color: rgba(56, 189, 248, 0.25);
-}
+
+.hp-card { border-top: 2px solid rgba(239, 68, 68, 0.35); }
+.totem-card { border-top: 2px solid rgba(251, 191, 36, 0.35); }
+.ping-card { border-top: 2px solid rgba(56, 189, 248, 0.35); }
+.uptime-card { border-top: 2px solid rgba(16, 185, 129, 0.35); }
+
 .vital-label-row {
   display: flex;
   align-items: center;
@@ -898,18 +1297,21 @@ input:focus, select:focus, textarea:focus {
   font-size: 10.5px;
   margin-bottom: 3px;
 }
+
 .vital-label {
-  font-size: 9.5px;
+  font-size: 10px;
   font-weight: 750;
-  color: var(--muted);
+  color: var(--text-muted);
   letter-spacing: 0.3px;
 }
+
 .vital-val {
   font-size: 12px;
   font-weight: 800;
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
+
 .hp-bar-track {
   width: 100%;
   height: 5px;
@@ -917,8 +1319,9 @@ input:focus, select:focus, textarea:focus {
   border-radius: 999px;
   overflow: hidden;
   margin-top: 3px;
-  box-shadow: inset 0 1px 2px rgba(0,0,0,0.4);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4);
 }
+
 .hp-bar-fill {
   height: 100%;
   border-radius: 999px;
@@ -927,35 +1330,38 @@ input:focus, select:focus, textarea:focus {
   position: relative;
   overflow: hidden;
 }
+
 .hp-bar-fill::after {
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
-  animation: barShimmer 2.4s ease-in-out infinite;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.32), transparent);
 }
+
 .totem-warning-badge {
-  font-size: 9.5px;
+  font-size: 10px;
   font-weight: 800;
   color: #f87171;
-  background: rgba(239, 68, 68, 0.15);
+  background: rgba(239, 68, 68, 0.16);
   border-radius: 4px;
-  padding: 1px 4px;
+  padding: 1px 5px;
   display: inline-block;
   width: fit-content;
   margin-top: 1px;
 }
+
 .totem-ok-badge {
-  font-size: 9.5px;
+  font-size: 10px;
   font-weight: 700;
   color: #4ade80;
   background: rgba(74, 222, 128, 0.12);
   border-radius: 4px;
-  padding: 1px 4px;
+  padding: 1px 5px;
   display: inline-block;
   width: fit-content;
   margin-top: 1px;
 }
+
 .sparkline-container {
   height: 12px;
   margin-top: 2px;
@@ -963,107 +1369,103 @@ input:focus, select:focus, textarea:focus {
   align-items: center;
   justify-content: flex-end;
 }
+
 .vital-sub-info {
-  font-size: 9px;
-  color: var(--muted);
+  font-size: 10px;
+  color: var(--text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   margin-top: 1px;
 }
+
 .bot-kick-notice {
-  background: rgba(234, 179, 8, 0.12);
-  border: 1px solid rgba(234, 179, 8, 0.3);
-  border-radius: 7px;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.32);
+  border-radius: 8px;
   padding: 5px 8px;
-  font-size: 10.5px;
-  color: #facc15;
+  font-size: 11px;
+  color: #fcd34d;
   margin-bottom: 7px;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+  line-clamp: 2;
   overflow: hidden;
   text-overflow: ellipsis;
   word-break: break-word;
 }
+
 .bot-ram-meter-box {
-  background: rgba(0, 0, 0, 0.2);
+  background: rgba(0, 0, 0, 0.22);
   border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 7px;
+  border-radius: 8px;
   padding: 5px 8px;
   margin-bottom: 8px;
-  font-size: 10px;
+  font-size: 10.5px;
 }
+
 .bot-ram-meter-labels {
   display: flex;
   justify-content: space-between;
-  color: var(--muted);
+  color: var(--text-muted);
   margin-bottom: 3px;
 }
+
 .ram-meter-track {
   width: 100%;
   height: 5px;
   background: rgba(255, 255, 255, 0.08);
   border-radius: 999px;
   overflow: hidden;
-  box-shadow: inset 0 1px 2px rgba(0,0,0,0.4);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4);
 }
+
 .ram-meter-bar-fill {
   height: 100%;
   border-radius: 999px;
   transition: width 0.35s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.35s ease;
   box-shadow: 0 0 10px currentColor;
 }
+
 .card-quick-actions {
   display: flex;
   gap: 6px;
   margin-top: auto;
   padding-top: 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
 }
+
 .card-quick-actions .card-btn {
   flex: 1;
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 750;
-  padding: 6px 4px;
+  padding: 6px 6px;
   border-radius: 8px;
   text-align: center;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  box-shadow: 0 2px 6px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.06);
+  box-shadow: var(--shadow-sm);
 }
-.card-quick-actions .card-btn:hover {
-  transform: translateY(-1.5px);
-  box-shadow: 0 4px 12px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.1);
-}
+
 .detail-link-btn {
-  background: rgba(56, 189, 248, 0.12) !important;
-  border-color: rgba(56, 189, 248, 0.3) !important;
+  background: rgba(56, 189, 248, 0.14) !important;
+  border-color: rgba(56, 189, 248, 0.34) !important;
   color: #38bdf8 !important;
 }
-.detail-link-btn:hover {
-  background: #0284c7 !important;
-  border-color: #38bdf8 !important;
-  color: #fff !important;
-}
+
 .back-btn {
   background: rgba(56, 189, 248, 0.15) !important;
   border-color: rgba(56, 189, 248, 0.35) !important;
   color: #38bdf8 !important;
   font-weight: 750 !important;
 }
-.back-btn:hover {
-  background: rgba(56, 189, 248, 0.3) !important;
-  color: #fff !important;
-}
 
 .small {
-  font-size: 11px;
+  font-size: 11.5px;
   padding: 7px 10px;
 }
 
-/* Sound Alert Toggle Button */
 .sound-btn {
-  font-size: 11px;
+  font-size: 11.5px;
   padding: 7px 12px;
   border-radius: 9px;
   display: inline-flex;
@@ -1075,16 +1477,15 @@ input:focus, select:focus, textarea:focus {
 .sound-btn.active {
   border-color: var(--green);
   color: var(--green);
-  background: rgba(48, 209, 88, 0.12);
+  background: rgba(16, 185, 129, 0.14);
   box-shadow: 0 0 8px var(--green-glow);
 }
 
-/* Capacity Badge */
 .capacity-badge {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 750;
   padding: 5px 10px;
   border-radius: 8px;
@@ -1095,114 +1496,107 @@ input:focus, select:focus, textarea:focus {
 .capacity-badge.warning {
   border-color: var(--yellow);
   color: var(--yellow);
-  background: rgba(255, 214, 10, 0.12);
+  background: rgba(245, 158, 11, 0.14);
 }
 
 .capacity-badge.danger {
   border-color: var(--red);
   color: var(--red);
-  background: rgba(255, 69, 58, 0.14);
+  background: rgba(239, 68, 68, 0.15);
 }
 
-/* Modals */
+/* ==========================================================================
+   MODALS, LOGIN GATE & RESTRICTION OVERLAYS (UNIFIED Z-INDEX STACK)
+   ========================================================================== */
 .modal {
   position: fixed;
   inset: 0;
-  background: rgba(2, 6, 18, 0.8);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-  z-index: 1000;
-}
-
-@keyframes modalZoomIn {
-  from { opacity: 0; transform: scale(0.93) translateY(12px); }
-  to { opacity: 1; transform: scale(1) translateY(0); }
+  background: rgba(2, 5, 14, 0.78);
+  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  z-index: 10000;
+  overscroll-behavior: contain;
 }
 
 .modal-card {
-  width: min(540px, 100%);
-  max-height: calc(100vh - 32px);
+  width: min(490px, 100%);
+  max-height: 92vh;
+  max-block-size: 92dvh;
   overflow-y: auto;
+  border: 1px solid rgba(56, 189, 248, 0.36);
+  border-radius: var(--radius-xl);
+  background: linear-gradient(165deg, rgba(13, 22, 40, 0.96) 0%, rgba(7, 12, 24, 0.98) 100%);
+  padding: 24px;
+  box-shadow: var(--shadow-lg);
+  animation: modalSpringIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
   overscroll-behavior: contain;
-  background: rgba(8, 14, 26, 0.96);
-  border: 1px solid rgba(56, 189, 248, 0.35);
-  border-radius: 22px;
-  padding: 26px;
-  box-shadow: 0 32px 80px rgba(0, 0, 0, 0.85), 0 0 45px rgba(56, 189, 248, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  animation: modalSpringIn 0.35s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .modal-card h3 {
-  margin: 0 0 16px;
+  margin-bottom: 14px;
   font-size: 18px;
-  font-weight: 750;
+  font-weight: 800;
 }
 
 .form-row {
-  display: flex;
-  flex-direction: column;
+  display: grid;
   gap: 6px;
   margin-bottom: 12px;
 }
 
 .form-row label {
-  color: var(--muted);
-  font-size: 11px;
+  font-size: 12.5px;
+  color: var(--text-muted);
   font-weight: 600;
 }
 
 .modal-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 10px;
-  margin-top: 18px;
+  gap: 8px;
+  margin-top: 14px;
+  flex-wrap: wrap;
 }
 
 .modal-card.modal-lg {
-  width: min(880px, 98vw);
-  max-height: 88vh;
-  overflow-y: auto;
+  width: min(760px, 100%);
 }
 
-/* User Mode restrictions */
 .user-mode .admin-only {
   display: none !important;
 }
 
-/* Login Gate Styles */
 .login-gate {
   position: fixed;
   inset: 0;
-  background: var(--bg);
-  background-image: var(--bg-gradient);
-  display: flex;
-  align-items: center;
-  justify-content: center;
   z-index: 99999;
+  display: flex;
+  align-items: safe center;
+  justify-content: center;
+  background: transparent;
   padding: 18px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .login-card {
   width: min(440px, 100%);
-  background: rgba(15, 23, 42, 0.95);
+  background: rgba(10, 17, 32, 0.88);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
   border: 1px solid rgba(56, 189, 248, 0.28);
-  border-radius: 22px;
-  padding: 34px 26px;
-  box-shadow: 0 25px 70px rgba(0, 0, 0, 0.8), 0 0 35px rgba(56, 189, 248, 0.15);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  animation: modalZoomIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  border-radius: var(--radius-xl);
+  padding: 28px 26px;
+  box-shadow: 0 28px 65px rgba(0, 0, 0, 0.72), 0 0 0 1px rgba(56, 189, 248, 0.08);
+  animation: modalZoomIn 0.28s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .login-header {
   text-align: center;
-  margin-bottom: 22px;
+  margin-bottom: 20px;
 }
 
 .login-icon {
@@ -1215,21 +1609,21 @@ input:focus, select:focus, textarea:focus {
 .login-title {
   font-size: 20px;
   font-weight: 800;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.3px;
   color: #fff;
   margin: 0 0 6px;
 }
 
 .login-subtitle {
-  font-size: 11.5px;
-  color: var(--muted);
-  line-height: 1.4;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.45;
 }
 
 .login-alert {
   padding: 10px 14px;
-  border-radius: 8px;
-  font-size: 12px;
+  border-radius: 10px;
+  font-size: 12.5px;
   font-weight: 600;
   margin-bottom: 14px;
   display: flex;
@@ -1237,14 +1631,14 @@ input:focus, select:focus, textarea:focus {
   gap: 8px;
 }
 .login-alert.error {
-  background: rgba(255, 69, 58, 0.15);
-  border: 1px solid rgba(255, 69, 58, 0.4);
-  color: #ff8580;
+  background: rgba(239, 68, 68, 0.16);
+  border: 1px solid rgba(239, 68, 68, 0.42);
+  color: #fca5a5;
 }
 .login-alert.success {
-  background: rgba(48, 209, 88, 0.15);
-  border: 1px solid rgba(48, 209, 88, 0.4);
-  color: #5be37f;
+  background: rgba(16, 185, 129, 0.16);
+  border: 1px solid rgba(16, 185, 129, 0.42);
+  color: #6ee7b7;
 }
 
 .password-input-wrap {
@@ -1253,71 +1647,75 @@ input:focus, select:focus, textarea:focus {
   align-items: center;
 }
 .password-input-wrap input {
-  padding-right: 42px;
+  padding-right: 44px;
   width: 100%;
 }
 .password-toggle-btn {
   position: absolute;
-  right: 8px;
+  right: 6px;
   background: transparent !important;
   border: none !important;
-  color: var(--muted) !important;
-  padding: 4px 6px !important;
+  color: var(--text-muted) !important;
+  padding: 4px 8px !important;
   cursor: pointer;
   box-shadow: none !important;
   font-size: 14px;
+  min-block-size: 34px;
 }
 
-/* User Management Tables & Badges */
+/* User Tables */
 .user-table-wrap {
-  margin: 14px 0;
   overflow-x: auto;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 16px;
-  background: rgba(7, 12, 22, 0.7);
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  margin: 12px 0;
+  background: rgba(7, 12, 24, 0.86);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  max-width: 100%;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+  scrollbar-width: thin;
 }
 .user-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 12.5px;
-  text-align: left;
 }
 .user-table th {
-  background: rgba(12, 19, 34, 0.98);
+  text-align: left;
+  padding: 11px 12px;
+  background: rgba(11, 19, 35, 0.98);
+  color: var(--text-muted);
+  font-weight: 700;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  border-bottom: 1px solid rgba(56, 189, 248, 0.22);
   position: sticky;
   top: 0;
   z-index: 2;
-  padding: 13px 16px;
-  color: var(--muted);
-  font-weight: 750;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  white-space: nowrap;
 }
 .user-table td {
-  padding: 13px 16px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
   vertical-align: middle;
-  transition: background 0.18s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .user-table tr:last-child td {
   border-bottom: none;
 }
 .user-table tr:hover td {
-  background: rgba(56, 189, 248, 0.06);
+  background: rgba(56, 189, 248, 0.04);
 }
 
 .bot-checkbox-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 8px;
   max-height: 220px;
   overflow-y: auto;
   padding: 10px;
-  background: rgba(0,0,0,0.3);
+  background: rgba(0, 0, 0, 0.3);
   border: 1px solid var(--border);
   border-radius: 10px;
   margin: 8px 0;
@@ -1327,32 +1725,31 @@ input:focus, select:focus, textarea:focus {
   align-items: center;
   gap: 8px;
   padding: 7px 10px;
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
   cursor: pointer;
-  font-size: 11.5px;
-  transition: all 0.15s ease;
-}
-.bot-check-item:hover {
-  background: rgba(56,189,248,0.1);
-  border-color: rgba(56,189,248,0.3);
+  font-size: 12px;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 .bot-check-item input[type="checkbox"] {
   cursor: pointer;
   accent-color: var(--blue);
+  min-block-size: auto;
+  width: 16px;
+  height: 16px;
 }
 
-/* User Announcement Popup (Modal) */
+/* User Announcement Popup */
 .user-announcement-card {
-  width: min(580px, 95vw);
-  background: radial-gradient(circle at 10% 10%, rgba(26, 42, 66, 0.95) 0%, rgba(15, 23, 42, 0.98) 100%);
+  width: min(580px, 100%);
+  background: radial-gradient(circle at 10% 10%, rgba(22, 36, 60, 0.96) 0%, rgba(11, 18, 34, 0.99) 100%);
   border: 1px solid rgba(56, 189, 248, 0.45);
-  border-radius: 24px;
-  box-shadow: 0 35px 90px rgba(0, 0, 0, 0.85), 0 0 50px rgba(56, 189, 248, 0.25);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  padding: 28px 24px 22px;
+  border-radius: 22px;
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  padding: 26px 24px 22px;
   animation: modalZoomIn 0.28s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .user-announcement-header {
@@ -1364,25 +1761,20 @@ input:focus, select:focus, textarea:focus {
   padding-bottom: 16px;
 }
 .announcement-bell-badge {
-  font-size: 34px;
+  font-size: 32px;
   background: rgba(56, 189, 248, 0.15);
   border: 1px solid rgba(56, 189, 248, 0.35);
-  width: 56px;
-  height: 56px;
-  border-radius: 18px;
+  width: 54px;
+  height: 54px;
+  border-radius: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
-  filter: drop-shadow(0 0 16px rgba(56, 189, 248, 0.5));
+  filter: drop-shadow(0 0 14px rgba(56, 189, 248, 0.45));
   flex-shrink: 0;
-  animation: bellFloat 3s ease-in-out infinite;
-}
-@keyframes bellFloat {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-4px); }
 }
 .announcement-badge-pill {
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 850;
   color: #fbbf24;
   background: rgba(245, 158, 11, 0.18);
@@ -1394,40 +1786,36 @@ input:focus, select:focus, textarea:focus {
   letter-spacing: 0.5px;
 }
 .announcement-main-title {
-  font-size: 20px;
+  font-size: 19px;
   font-weight: 850;
   color: #fff;
   margin: 0 0 4px;
   line-height: 1.3;
 }
 .announcement-sub-date {
-  font-size: 11px;
-  color: var(--muted);
+  font-size: 11.5px;
+  color: var(--text-muted);
 }
 .announcement-close-btn {
   background: rgba(255, 255, 255, 0.08) !important;
   border: 1px solid rgba(255, 255, 255, 0.12) !important;
-  color: var(--muted) !important;
-  width: 32px;
-  height: 32px;
+  color: var(--text-muted) !important;
+  width: 34px;
+  height: 34px;
+  min-block-size: 34px;
   padding: 0 !important;
   border-radius: 10px !important;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: all 0.2s ease;
-}
-.announcement-close-btn:hover {
-  background: rgba(255, 69, 58, 0.2) !important;
-  border-color: rgba(255, 69, 58, 0.4) !important;
-  color: #ff8580 !important;
+  flex-shrink: 0;
 }
 .user-announcement-body {
-  max-height: 52vh;
+  max-height: 52dvh;
   overflow-y: auto;
   padding: 16px 18px;
-  background: rgba(0, 0, 0, 0.35);
+  background: rgba(0, 0, 0, 0.34);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 14px;
   font-size: 13.5px;
@@ -1446,7 +1834,7 @@ input:focus, select:focus, textarea:focus {
 }
 .announcement-freq-note {
   font-size: 11.5px;
-  color: var(--muted);
+  color: var(--text-muted);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1459,111 +1847,95 @@ input:focus, select:focus, textarea:focus {
   border-radius: 12px !important;
   background: linear-gradient(135deg, #0284c7 0%, #2563eb 50%, #4f46e5 100%) !important;
   box-shadow: 0 0 20px rgba(37, 99, 235, 0.4) !important;
-  transition: all 0.2s ease !important;
-}
-.announcement-ack-btn:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 0 28px rgba(37, 99, 235, 0.6) !important;
 }
 
-/* User Profile Menu & Dropdown */
+/* ==========================================================================
+   USER PROFILE MENU & DROPDOWN
+   ========================================================================== */
 .user-profile-menu-wrap {
   position: relative;
   display: inline-block;
-  margin-left: auto;
 }
-
 .user-profile-btn {
-  display: flex !important;
-  align-items: center !important;
-  gap: 8px !important;
-  padding: 6px 12px !important;
-  border-radius: 999px !important;
-  background: rgba(255, 255, 255, 0.06) !important;
-  border: 1px solid rgba(255, 255, 255, 0.15) !important;
-  color: #fff !important;
-  font-size: 12.5px !important;
-  font-weight: 750 !important;
-  cursor: pointer !important;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
-  user-select: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 6px 8px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.88);
+  border: 1px solid rgba(56, 189, 248, 0.32);
+  color: #f8fafc;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
 }
-
-.user-profile-btn:hover {
-  background: rgba(56, 189, 248, 0.15) !important;
-  border-color: rgba(56, 189, 248, 0.45) !important;
-  box-shadow: 0 0 14px rgba(56, 189, 248, 0.25) !important;
-  transform: translateY(-1px);
-}
-
 .user-avatar-badge {
-  font-size: 14px;
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
+  background: linear-gradient(135deg, #0ea5e9, #6366f1);
+  color: #fff;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(255, 255, 255, 0.1);
+  font-weight: 800;
+  font-size: 12px;
+  flex-shrink: 0;
 }
-
 .user-profile-name {
-  max-width: 120px;
+  max-width: 110px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
 .user-profile-arrow {
   font-size: 10px;
-  color: var(--muted);
+  color: var(--text-muted);
   transition: transform 0.2s ease;
 }
-
 .user-profile-dropdown {
   position: absolute;
   top: calc(100% + 8px);
   right: 0;
-  left: auto;
-  transform-origin: top right;
-  width: 250px;
-  max-width: calc(100vw - 24px);
-  background: rgba(15, 23, 42, 0.96);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(56, 189, 248, 0.35);
+  width: min(260px, calc(100dvw - 24px));
+  background: rgba(10, 17, 32, 0.97);
+  border: 1px solid rgba(56, 189, 248, 0.36);
   border-radius: 16px;
-  box-shadow: 0 20px 45px rgba(0, 0, 0, 0.7), 0 0 25px rgba(56, 189, 248, 0.15);
-  padding: 12px;
-  z-index: 150;
-  animation: modalZoomIn 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: var(--shadow-lg);
+  padding: 8px;
+  z-index: 300;
+  overscroll-behavior: contain;
+  animation: modalZoomIn 0.16s cubic-bezier(0.16, 1, 0.3, 1);
 }
-
+.user-profile-dropdown.hidden {
+  display: none !important;
+}
 .profile-dropdown-header {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 6px 6px 10px;
+  gap: 10px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 10px;
+  margin-bottom: 6px;
 }
-
 .profile-dropdown-avatar {
-  font-size: 24px;
-  width: 42px;
-  height: 42px;
-  border-radius: 12px;
-  background: rgba(56, 189, 248, 0.15);
-  border: 1px solid rgba(56, 189, 248, 0.3);
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: rgba(56, 189, 248, 0.14);
+  border: 1px solid rgba(56, 189, 248, 0.35);
   display: flex;
   align-items: center;
   justify-content: center;
+  font-size: 16px;
   flex-shrink: 0;
 }
-
 .profile-dropdown-info {
-  flex: 1;
   min-width: 0;
+  flex: 1;
 }
-
 .profile-dropdown-user {
   font-size: 14px;
   font-weight: 800;
@@ -1572,26 +1944,28 @@ input:focus, select:focus, textarea:focus {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
 .profile-dropdown-role {
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 700;
-  color: #38bdf8;
+  color: var(--cyan);
   margin-top: 2px;
 }
-
+.profile-dropdown-expires {
+  font-size: 11px;
+  font-weight: 700;
+  color: #7dd3fc;
+  margin-top: 3px;
+}
 .profile-dropdown-divider {
   height: 1px;
   background: rgba(255, 255, 255, 0.08);
   margin: 6px 0;
 }
-
 .profile-dropdown-menu {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
-
 .profile-menu-item {
   display: flex !important;
   align-items: center !important;
@@ -1606,38 +1980,72 @@ input:focus, select:focus, textarea:focus {
   font-weight: 650 !important;
   text-align: left !important;
   cursor: pointer !important;
-  transition: all 0.15s ease !important;
   box-shadow: none !important;
 }
-
-.profile-menu-item:hover {
-  background: rgba(255, 255, 255, 0.08) !important;
-  border-color: rgba(255, 255, 255, 0.12) !important;
-  color: #fff !important;
+.profile-menu-item.danger {
+  color: #fca5a5 !important;
 }
 
-.profile-menu-item.danger:hover {
-  background: rgba(255, 69, 58, 0.18) !important;
-  border-color: rgba(255, 69, 58, 0.35) !important;
-  color: #ff8580 !important;
+.dropdown-top-logout-wrap {
+  padding: 4px 4px 6px;
+}
+.dropdown-top-logout-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(239, 68, 68, 0.16);
+  border: 1px solid rgba(239, 68, 68, 0.42);
+  color: #f87171;
+  font-weight: 800;
+  font-size: 13px;
+  cursor: pointer;
+}
+.profile-menu-section-title {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+  color: var(--text-muted);
+  padding: 6px 8px 4px;
+}
+.big-tab-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  margin-bottom: 4px;
+  cursor: pointer;
+}
+.big-tab-item .menu-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+}
+.big-tab-item .menu-text {
+  display: flex;
+  flex-direction: column;
+}
+.big-tab-item .menu-text strong {
+  font-size: 13px;
+  color: #f1f5f9;
+}
+.big-tab-item .menu-text small {
+  font-size: 11px;
+  color: #94a3b8;
 }
 
-/* Pulsing Status Indicators */
-@keyframes pulseGreen {
-  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(48, 209, 88, 0.7); }
-  50% { transform: scale(1.15); box-shadow: 0 0 12px 3px rgba(48, 209, 88, 0.4); }
-}
-
-@keyframes pulseYellow {
-  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(255, 214, 10, 0.7); }
-  50% { transform: scale(1.15); box-shadow: 0 0 12px 3px rgba(255, 214, 10, 0.4); }
-}
-
-@keyframes pulseRed {
-  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(255, 69, 58, 0.7); }
-  50% { transform: scale(1.15); box-shadow: 0 0 12px 3px rgba(255, 69, 58, 0.4); }
-}
-
+/* ==========================================================================
+   STATUS INDICATORS & SUMMARY GRID
+   ========================================================================== */
 .status-line {
   display: flex;
   align-items: center;
@@ -1645,7 +2053,6 @@ input:focus, select:focus, textarea:focus {
   font-weight: 700;
   margin-bottom: 12px;
 }
-
 .dot {
   width: 9px;
   height: 9px;
@@ -1653,46 +2060,24 @@ input:focus, select:focus, textarea:focus {
   display: inline-block;
   background: #4b5a6e;
   position: relative;
-  transition: all 0.25s ease;
   flex-shrink: 0;
 }
-
 .dot::after {
   content: '';
   position: absolute;
   inset: 0;
   border-radius: 50%;
-  animation: sonarPulse 2.2s ease-out infinite;
   opacity: 0;
 }
-
-.dot.green {
-  background: var(--green);
-  box-shadow: 0 0 6px var(--green);
-}
+.dot.green { background: var(--green); box-shadow: 0 0 6px var(--green); }
 .dot.green::after { background: var(--green); }
-
-.dot.yellow {
-  background: var(--yellow);
-  box-shadow: 0 0 6px var(--yellow);
-}
-.dot.yellow::after { background: var(--yellow); animation-duration: 1.8s; }
-
-.dot.red {
-  background: var(--red);
-  box-shadow: 0 0 6px var(--red);
-}
-.dot.red::after { background: var(--red); animation-duration: 2.5s; }
-
-.dot.blue {
-  background: var(--blue);
-  box-shadow: 0 0 6px var(--blue);
-}
-.dot.blue::after { background: var(--blue); animation-duration: 3s; }
-
-.dot.gray {
-  background: #64748b;
-}
+.dot.yellow { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
+.dot.yellow::after { background: var(--yellow); }
+.dot.red { background: var(--red); box-shadow: 0 0 6px var(--red); }
+.dot.red::after { background: var(--red); }
+.dot.blue { background: var(--blue); box-shadow: 0 0 6px var(--blue); }
+.dot.blue::after { background: var(--blue); }
+.dot.gray { background: #64748b; }
 .dot.gray::after { display: none; }
 
 .summary-grid {
@@ -1700,73 +2085,85 @@ input:focus, select:focus, textarea:focus {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
-
 .summary-item {
   padding: 9px 10px;
   border-radius: 10px;
   background: var(--card2);
   min-width: 0;
-  border: 1px solid rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.05);
 }
-
 .summary-label {
-  color: var(--muted);
-  font-size: 9px;
+  color: var(--text-muted);
+  font-size: 10px;
   font-weight: 600;
   margin-bottom: 4px;
   text-transform: uppercase;
 }
-
 .summary-value {
   font-size: 12px;
   font-weight: 700;
   word-break: break-word;
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
 
-/* Detail Page Layout */
+/* ==========================================================================
+   DETAIL PAGE LAYOUT, TELEMETRY, LOGS & REMOTE GUI
+   ========================================================================== */
 .detail-header {
   display: flex;
+  justify-content: space-between;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 20px;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
 }
-
-.detail-header .title-wrap {
-  flex: 1;
-}
-
 .detail-title {
   font-size: 24px;
-  font-weight: 850;
-  margin: 0;
+  font-weight: 800;
+  letter-spacing: -0.02em;
 }
-
+.title-wrap {
+  min-width: 0;
+  flex: 1 1 220px;
+}
 .detail-subtitle {
-  color: var(--muted);
-  font-size: 13px;
   margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.detail-hud {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .grid {
   display: grid;
   grid-template-columns: 1.15fr 0.85fr;
   gap: 18px;
+  align-items: start;
+}
+.grid > * {
+  min-width: 0;
 }
 
 .panel h3 {
+  margin-bottom: 12px;
   font-size: 15px;
   font-weight: 750;
-  margin: 0 0 14px;
-  letter-spacing: -0.01em;
+  color: #e2e8f0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .big-status {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: 18px;
+  font-size: 17px;
   font-weight: 800;
   margin-bottom: 14px;
 }
@@ -1776,154 +2173,108 @@ input:focus, select:focus, textarea:focus {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
-
 .info-item {
-  padding: 10px 12px;
-  border-radius: 11px;
-  background: var(--card2);
-  border: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 11px 13px;
+  border-radius: 12px;
+  background: rgba(6, 11, 22, 0.74);
+  border: 1px solid rgba(255, 255, 255, 0.065);
+  min-width: 0;
 }
-
 .info-label {
-  color: var(--muted);
-  font-size: 10px;
+  color: var(--text-muted);
+  font-size: 10.5px;
   font-weight: 600;
-  margin-bottom: 4px;
   text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-bottom: 4px;
 }
-
 .info-value {
   font-size: 14px;
   font-weight: 700;
   word-break: break-word;
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
 
 .controls {
   display: flex;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
-  margin-top: 16px;
-  padding-top: 14px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  margin-top: 14px;
 }
-
 .controls button {
-  flex: 1;
-  min-width: 100px;
-  padding: 10px 14px;
-  font-size: 13px;
-  font-weight: 750;
-  border-radius: 11px;
+  flex: 1 1 110px;
 }
 
 .chat-panel {
-  display: flex;
-  flex-direction: column;
+  margin-top: 16px;
 }
-
 .chat-title-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 12px;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
 }
-
 .chat-row {
   display: flex;
   gap: 8px;
 }
-
 .chat-form {
   margin-top: 10px;
 }
-
 .chip-row {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
   margin-top: 8px;
 }
-
 .chip {
-  padding: 5px 12px;
-  font-size: 11px;
+  padding: 6px 12px;
+  font-size: 11.5px;
   font-weight: 650;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  color: var(--muted);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  color: var(--text-muted);
   cursor: pointer;
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   user-select: none;
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
 }
-
-.chip:hover {
-  background: rgba(56, 189, 248, 0.16);
-  border-color: rgba(56, 189, 248, 0.5);
-  color: #e0f2fe;
-  transform: translateY(-2px);
-  box-shadow: 0 0 12px rgba(56, 189, 248, 0.25), inset 0 1px 0 rgba(255,255,255,0.1);
-}
-
-.chip:active {
-  transform: scale(0.94) translateY(0);
-}
-
 .copyable {
   cursor: pointer;
-  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.copyable:hover {
-  border-color: rgba(56, 189, 248, 0.5) !important;
-  background: rgba(56, 189, 248, 0.1) !important;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3), 0 0 12px rgba(56, 189, 248, 0.25) !important;
-  transform: translateY(-2px);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .log, .chat-log {
   height: 440px;
   overflow: auto;
-  background: #060911;
-  border: 1px solid rgba(255,255,255,0.06);
+  background: #050912;
+  border: 1px solid var(--border-subtle);
   border-radius: 12px;
   padding: 10px 12px;
-  font: 12.5px/1.6 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+  font: 12.5px/1.6 var(--font-mono);
   white-space: pre-wrap;
   word-break: break-word;
-  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.6), 0 4px 16px rgba(0,0,0,0.3);
+  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.6), 0 4px 16px rgba(0, 0, 0, 0.3);
+  overscroll-behavior: contain;
   scrollbar-width: thin;
-  scrollbar-color: rgba(56, 189, 248, 0.25) transparent;
+  scrollbar-color: rgba(56, 189, 248, 0.30) transparent;
 }
-
-.log::-webkit-scrollbar, .chat-log::-webkit-scrollbar {
-  width: 5px;
-}
-.log::-webkit-scrollbar-thumb, .chat-log::-webkit-scrollbar-thumb {
-  background: rgba(56, 189, 248, 0.25);
-  border-radius: 99px;
-}
-
 .line {
   padding: 3px 8px;
   border-radius: 5px;
-  transition: background 0.12s ease;
+  transition: background-color 0.12s ease;
 }
-
-.line:hover {
-  background: rgba(255, 255, 255, 0.04);
-}
-
 .line-error { color: #f87171 !important; background: rgba(239, 68, 68, 0.08); border-left: 2px solid #ef4444; }
 .line-warn { color: #fbbf24 !important; background: rgba(245, 158, 11, 0.08); border-left: 2px solid #f59e0b; }
 .line-flow { color: #38bdf8 !important; border-left: 2px solid #0284c7; background: rgba(56, 189, 248, 0.04); }
 .line-chat { color: #e2e8f0 !important; }
 .line-success { color: #4ade80 !important; border-left: 2px solid #22c55e; background: rgba(34, 197, 94, 0.05); }
-.line-time { color: var(--muted, #64748b); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; margin-right: 6px; user-select: none; }
+.line-time { color: var(--text-dim); font-family: var(--font-mono); font-size: 11px; margin-right: 6px; user-select: none; }
 .chat-sender { color: #38bdf8; font-weight: 600; }
 .chat-badge { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 4px; padding: 0 5px; font-size: 11px; font-weight: 600; }
 .chat-server-badge { background: rgba(249, 115, 22, 0.15); color: #fb923c; border: 1px solid rgba(249, 115, 22, 0.3); border-radius: 4px; padding: 0 5px; font-size: 11px; font-weight: 600; }
@@ -1932,73 +2283,76 @@ input:focus, select:focus, textarea:focus {
 .chat-text { color: #f1f5f9; }
 
 .note {
-  margin-top: 8px;
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 12px;
-  line-height: 1.45;
+  line-height: 1.5;
+  margin-top: 8px;
 }
 
-@keyframes toastSlideIn {
-  from { opacity: 0; transform: translateY(20px) scale(0.96); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
+/* Remote GUI Card */
+#detailRemoteGuiCard {
+  overflow-x: auto;
+  max-width: 100%;
+}
+#detailRemoteGuiSlots {
+  max-width: 540px;
+  min-width: 0;
 }
 
+/* Toast Notification */
 .toast {
   position: fixed;
   right: 20px;
   bottom: 20px;
-  display: none;
-  max-width: 400px;
-  padding: 14px 18px 14px 22px;
-  border: 1px solid rgba(56, 189, 248, 0.35);
-  border-radius: 14px;
-  background: rgba(10, 18, 32, 0.97);
-  backdrop-filter: blur(20px) saturate(160%);
-  -webkit-backdrop-filter: blur(20px) saturate(160%);
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255,255,255,0.06);
-  z-index: 2000;
+  padding: 12px 18px;
+  border-radius: 12px;
+  background: rgba(11, 18, 34, 0.96);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border: 1px solid rgba(56, 189, 248, 0.42);
+  color: var(--text-primary);
   font-size: 13px;
   font-weight: 600;
-  animation: toastSlideIn 0.3s cubic-bezier(0.22, 1, 0.36, 1);
-  border-left: 4px solid var(--blue);
-  line-height: 1.45;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.6), 0 0 18px rgba(56, 189, 248, 0.22);
+  z-index: 1000010;
+  animation: toastSlideIn 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+  max-width: min(440px, calc(100dvw - 32px));
+}
+.toast.hidden {
+  display: none;
 }
 
-/* Inventory & Equipment Area - AAA Game Standard Architecture */
+/* ==========================================================================
+   INVENTORY, EQUIPMENT & DRAG/DROP TARGETS
+   ========================================================================== */
 .inventory-area {
-  display: flex;
-  flex-direction: column;
+  margin-top: 14px;
 }
-
 .inventory-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 14px;
 }
-
 .inventory-stat {
   padding: 10px 12px;
   border-radius: 11px;
   background: var(--card2);
-  border: 1px solid rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.05);
 }
-
 .inventory-stat .info-label {
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 10px;
   font-weight: 600;
   margin-bottom: 4px;
   text-transform: uppercase;
 }
-
 .inventory-stat .info-value {
   font-size: 14px;
   font-weight: 700;
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
-
 .bar {
   width: 100%;
   height: 10px;
@@ -2008,7 +2362,6 @@ input:focus, select:focus, textarea:focus {
   overflow: hidden;
   margin-top: 6px;
 }
-
 .bar > span, .bar>span {
   display: block;
   height: 100%;
@@ -2017,21 +2370,17 @@ input:focus, select:focus, textarea:focus {
   position: relative;
   overflow: hidden;
 }
-
 .bar > span::after, .bar>span::after {
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
-  animation: barShimmer 2.2s ease-in-out infinite;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.32), transparent);
 }
-
 .health-bar > span, .health-bar>span {
   background: linear-gradient(90deg, #ef4444, #f87171);
   box-shadow: 0 0 12px rgba(239, 68, 68, 0.55);
   border-radius: 999px;
 }
-
 .hunger-bar > span, .hunger-bar>span {
   background: linear-gradient(90deg, #f59e0b, #fbbf24);
   box-shadow: 0 0 12px rgba(245, 158, 11, 0.55);
@@ -2040,115 +2389,95 @@ input:focus, select:focus, textarea:focus {
 
 .equipment-row {
   display: grid;
-  grid-template-columns: repeat(5, minmax(60px, 1fr));
+  grid-template-columns: repeat(5, minmax(56px, 1fr));
   gap: 8px;
-  margin: 8px 0 14px;
+  margin: 12px 0;
 }
-
-/* 5 Equipment Slots & 36 Inventory Slots - Single Authoritative Specification */
 .equipment-slot, .inventory-slot {
-  background: linear-gradient(145deg, rgba(18, 27, 44, 0.92), rgba(10, 15, 26, 0.98)) !important;
-  border: 1px solid rgba(255, 255, 255, 0.08) !important;
-  border-radius: 10px;
-  min-height: 64px !important;
   position: relative;
-  padding: 8px 6px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 3px 8px rgba(0, 0, 0, 0.4);
+  min-height: 66px;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: rgba(15, 22, 34, 0.92);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.45);
   display: flex;
   flex-direction: column;
-  align-items: center;
   justify-content: center;
+  align-items: center;
   text-align: center;
   cursor: pointer;
-  overflow: hidden;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
   user-select: none;
+  min-width: 0;
 }
-
-.equipment-slot:hover, .inventory-slot:hover {
-  border-color: rgba(56, 189, 248, 0.45) !important;
-  transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5), 0 0 12px rgba(56, 189, 248, 0.15), inset 0 1px 0 rgba(255,255,255,0.1);
-}
-
-.equipment-slot .equip-label, .equip-label {
-  font-size: 8.5px;
-  color: var(--muted);
-  font-weight: 700;
+.equip-label {
+  font-size: 9px;
+  color: var(--text-muted);
   text-transform: uppercase;
-  margin-bottom: 5px;
-  letter-spacing: 0.3px;
+  font-weight: 700;
+  margin-bottom: 2px;
 }
-
-.inventory-slot:active, .inventory-slot.active {
-  transform: scale(0.96);
+.inventory-slot:active:not(.empty) {
+  transform: scale(0.95);
 }
-
-.inventory-slot.empty {
-  opacity: 0.6;
+.inventory-slot.active, .equipment-slot.active {
+  border-color: var(--green) !important;
+  background: rgba(16, 185, 129, 0.15) !important;
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.35), inset 0 1px 2px rgba(0, 0, 0, 0.3) !important;
 }
-
+.inventory-slot.empty, .equipment-slot.empty {
+  opacity: 0.45;
+  border-style: dashed;
+}
 .inventory-slot.selected {
-  border-color: #34d399 !important;
-  box-shadow: 0 0 16px rgba(52, 211, 153, 0.4), inset 0 0 6px rgba(52, 211, 153, 0.15) !important;
-  background: linear-gradient(145deg, rgba(16, 36, 26, 0.95), rgba(10, 24, 18, 0.98)) !important;
+  border-color: var(--yellow);
+  box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.3);
 }
-
 .inventory-slot.selected-for-move, .equipment-slot.selected-for-move {
-  outline: 2px solid #fbbf24 !important;
   border-color: #fbbf24 !important;
-  box-shadow: 0 0 18px rgba(251, 191, 36, 0.6), inset 0 0 8px rgba(251, 191, 36, 0.25) !important;
+  background: rgba(251, 191, 36, 0.18) !important;
+  box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.45), 0 0 18px rgba(251, 191, 36, 0.55) !important;
   transform: scale(1.04);
-  animation: movePulse 1.5s ease-in-out infinite;
   z-index: 5;
 }
-
-@keyframes movePulse {
-  0%, 100% { box-shadow: 0 0 12px rgba(251, 191, 36, 0.4), inset 0 0 6px rgba(251, 191, 36, 0.2); }
-  50% { box-shadow: 0 0 22px rgba(251, 191, 36, 0.8), inset 0 0 10px rgba(251, 191, 36, 0.35); }
-}
-
 .touch-move-hint {
-  background: rgba(251, 191, 36, 0.12);
-  border: 1px solid rgba(251, 191, 36, 0.35);
-  color: #fbbf24;
-  padding: 8px 14px;
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.16), rgba(56, 189, 248, 0.14));
+  border: 1px solid rgba(251, 191, 36, 0.42);
+  color: #fde68a;
+  padding: 9px 14px;
   border-radius: 10px;
   font-size: 12px;
   font-weight: 600;
-  margin-top: 10px;
+  margin: 8px 0 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
+  flex-wrap: wrap;
 }
-
-.equipment-slot.dragover, .inventory-slot.dragover, .inventory-slot.selected.dragover {
-  border-color: #38bdf8 !important;
-  background: rgba(18, 38, 58, 0.95) !important;
-  box-shadow: 0 0 14px rgba(56, 189, 248, 0.4) !important;
+.inventory-slot.dragover, .equipment-slot.dragover {
+  border-color: var(--blue) !important;
+  background: rgba(56, 189, 248, 0.22) !important;
+  box-shadow: 0 0 14px rgba(56, 189, 248, 0.35);
 }
-
 .slot-grid {
   display: grid;
   grid-template-columns: repeat(9, minmax(0, 1fr));
   gap: 6px;
-  margin-top: 10px;
 }
-
 .slot-index {
   position: absolute;
   top: 4px;
   left: 6px;
   font-size: 9px;
   font-weight: 700;
-  color: rgba(148, 163, 184, 0.5);
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  color: rgba(148, 163, 184, 0.58);
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   pointer-events: none;
   line-height: 1;
 }
-
 .slot-name {
   font-size: 10px !important;
   font-weight: 700 !important;
@@ -2158,12 +2487,12 @@ input:focus, select:focus, textarea:focus {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+  line-clamp: 2;
   overflow: hidden;
   word-break: break-word;
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-family: var(--font-mono);
   padding: 0 2px;
 }
-
 .slot-count {
   position: absolute;
   bottom: 4px;
@@ -2175,44 +2504,40 @@ input:focus, select:focus, textarea:focus {
   font-size: 9.5px;
   font-weight: 800;
   color: #38bdf8;
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   line-height: 1.2;
 }
-
 .drop-zone, #dropZone {
   margin-top: 14px;
   min-height: 52px;
   border: 2px dashed rgba(239, 68, 68, 0.35);
   border-radius: 12px;
-  background: rgba(22, 12, 16, 0.6);
+  background: rgba(22, 12, 16, 0.65);
   color: #fca5a5;
   display: flex;
   align-items: center;
   justify-content: center;
   text-align: center;
   padding: 10px;
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 700;
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  cursor: pointer;
 }
-
-.drop-zone:hover, .drop-zone.dragover, .drop-zone.drag-over, #dropZone:hover, #dropZone.drag-over {
+.drop-zone.dragover, .drop-zone.drag-over, #dropZone.drag-over {
   border-color: #ef4444 !important;
-  background: rgba(35, 12, 18, 0.8) !important;
+  background: rgba(35, 12, 18, 0.86) !important;
   box-shadow: 0 0 20px rgba(239, 68, 68, 0.25) !important;
   color: #fff;
 }
-
 .position-value, .revision {
   font-variant-numeric: tabular-nums;
 }
-
 .inventory-list {
   display: grid;
   gap: 6px;
 }
-
 .inventory-item-row {
   display: flex;
   justify-content: space-between;
@@ -2221,54 +2546,48 @@ input:focus, select:focus, textarea:focus {
   border-radius: 8px;
   background: var(--card2);
 }
-
 .inventory-item-name {
   font-size: 12px;
   font-weight: 600;
 }
 
-/* Settings & Schedules */
+/* ==========================================================================
+   SETTINGS, SCHEDULERS & CREDENTIALS
+   ========================================================================== */
 .setting-list {
   display: grid;
   gap: 8px;
   margin-bottom: 14px;
 }
-
 .check-row {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 9px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.025);
   font-size: 13px;
   cursor: pointer;
-  transition: background 0.18s, border-color 0.18s;
+  transition: background-color 0.18s, border-color 0.18s;
 }
-
-.check-row:hover {
-  background: rgba(255, 255, 255, 0.05);
-  border-color: rgba(255, 255, 255, 0.1);
-}
-
 .check-row input[type="checkbox"] {
   -webkit-appearance: none;
   appearance: none;
   width: 38px;
   height: 22px;
   min-width: 38px;
+  min-block-size: 22px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.12);
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.18);
   position: relative;
   cursor: pointer;
-  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: background-color 0.22s ease, border-color 0.22s ease;
   padding: 0;
   box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4);
   flex-shrink: 0;
 }
-
 .check-row input[type="checkbox"]::after {
   content: '';
   position: absolute;
@@ -2280,268 +2599,231 @@ input:focus, select:focus, textarea:focus {
   border-radius: 50%;
   background: #fff;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
-  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: left 0.22s cubic-bezier(0.16, 1, 0.3, 1);
 }
-
 .check-row input[type="checkbox"]:checked {
   background: linear-gradient(135deg, #10b981, #0ea5e9);
   border-color: rgba(16, 185, 129, 0.6);
   box-shadow: 0 0 10px rgba(16, 185, 129, 0.35), inset 0 1px 3px rgba(0, 0, 0, 0.2);
 }
-
 .check-row input[type="checkbox"]:checked::after {
   left: calc(100% - 19px);
 }
 
 .schedule-list {
   display: grid;
-  gap: 8px;
-  margin: 10px 0;
+  gap: 10px;
 }
-
 .schedule-row {
-  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 11px;
-  background: linear-gradient(180deg, rgba(21, 31, 41, 0.85) 0%, rgba(17, 26, 34, 0.85) 100%);
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
-  transition: border-color 0.18s, opacity 0.18s, transform 0.18s;
+  border-radius: 12px;
+  background: rgba(10, 16, 26, 0.65);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
-
-.schedule-row:hover {
-  border-color: rgba(77, 163, 255, 0.45);
-}
-
-.schedule-row.dragging {
-  opacity: 0.5;
-  transform: scale(0.98);
-}
-
 .schedule-row-top {
   display: grid;
   grid-template-columns: 26px minmax(0, 1fr) auto auto;
   gap: 8px;
   align-items: center;
 }
-
 .schedule-handle {
   width: 26px;
-  height: 30px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--muted);
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0d1624;
+  color: var(--text-muted);
   cursor: grab;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.03);
   user-select: none;
 }
-
-.schedule-handle:active {
-  cursor: grabbing;
-}
-
 .schedule-row-title {
-  font-size: 12px;
-  font-weight: 800;
-  min-width: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-
 .schedule-inline {
   display: flex;
-  gap: 6px;
+  gap: 8px;
   align-items: center;
-  min-width: 0;
   flex-wrap: wrap;
 }
-
-.schedule-inline input, .schedule-inline select {
-  padding: 7px 9px;
-  border-radius: 8px;
-  font-size: 11px;
-  min-width: 0;
+.schedule-inline .action-select {
+  width: 106px;
 }
-
-.schedule-inline .action-select { width: 94px; }
-.schedule-inline .time-input { width: 90px; }
-.schedule-inline .minutes-input { width: 106px; }
-
+.schedule-inline .time-input {
+  width: 94px;
+}
+.schedule-inline .minutes-input {
+  width: 90px;
+}
 .schedule-row-main {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
-  align-items: end;
-  margin-top: 8px;
 }
-
-.schedule-row-main textarea {
-  width: 100%;
-  min-height: 52px;
-  padding: 8px 10px;
-  border-radius: 9px;
-  font-size: 12px;
-  resize: vertical;
+.schedule-field {
+  display: grid;
+  gap: 4px;
 }
-
-.schedule-row-main .schedule-field, .schedule-field { display: grid; gap: 4px; }
-.schedule-row-main .schedule-field > span, .schedule-row-main .schedule-field>span, .schedule-field > span, .schedule-field>span { color: var(--muted); font-size: 10px; font-weight: 600; }
-.schedule-meta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; color: var(--muted); font-size: 10px; }
-
+.schedule-field label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.schedule-meta {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
 .scheduler-toolbar {
   display: flex;
-  align-items: center;
   justify-content: space-between;
+  align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  margin: 10px 0 8px;
+  margin-bottom: 10px;
 }
-
 .scheduler-mode-box {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 220px;
+  display: grid;
+  gap: 4px;
+  min-width: 190px;
+  flex: 1 1 200px;
 }
-
-.scheduler-mode-box > span, .scheduler-mode-box>span { color: var(--muted); font-size: 11px; font-weight: 600; }
-.scheduler-mode-box select { padding: 8px 10px; border-radius: 9px; font-size: 12px; }
-.scheduler-note { margin: 6px 0 10px; color: var(--muted); font-size: 10px; line-height: 1.5; }
-.compact-save { margin-top: 8px; }
-.hidden-field { display: none !important; }
+.scheduler-note {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin-bottom: 10px;
+}
+.compact-save {
+  margin-top: 10px;
+}
+.hidden-field {
+  display: none !important;
+}
 
 .credential-list {
   display: grid;
   gap: 10px;
-  max-height: 60vh;
-  overflow: auto;
 }
-
 .credential-card {
   padding: 12px;
-  border: 1px solid var(--border);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 12px;
-  background: var(--card2);
-}
-
-.credential-row {
+  background: rgba(10, 16, 26, 0.65);
   display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 8px;
-  margin-top: 8px;
+  gap: 6px;
 }
-
-.credential-value {
-  padding: 10px;
-  border-radius: 8px;
-  background: rgba(10, 16, 24, 0.85);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  word-break: break-all;
+.credential-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
   font-size: 12px;
+  flex-wrap: wrap;
+}
+.credential-value {
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+.dragging {
+  opacity: 0.45;
+  transform: scale(0.98);
 }
 
-.dragging { opacity: 0.55; }
+/* ==========================================================================
+   APP FOOTER & CHANGELOG MODAL
+   ========================================================================== */
 .app-footer {
-  margin-top: 36px;
+  margin-top: 28px;
   padding: 16px 20px;
-  background: rgba(15, 23, 42, 0.45);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 14px;
-  text-align: left;
-  color: var(--muted);
+  border-top: 1px solid var(--border-subtle);
+  background: rgba(8, 13, 24, 0.72);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
+  border-radius: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 .footer-recent-wrap {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
+  gap: 12px;
+  flex-wrap: wrap;
+  flex: 1 1 100%;
+}
+.footer-recent-left,
+.footer-recent-changes {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex-wrap: wrap;
 }
-.footer-recent-left {
+.footer-recent-tag {
+  background: rgba(16, 185, 129, 0.14);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 750;
+}
+.footer-recent-desc,
+.footer-recent-text {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.footer-actions {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  flex: 1;
-  min-width: 0;
-}
-.footer-recent-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 10.5px;
-  font-weight: 800;
-  letter-spacing: 0.5px;
-  padding: 3px 8px;
-  border-radius: 6px;
-  background: rgba(56, 189, 248, 0.15);
-  border: 1px solid rgba(56, 189, 248, 0.35);
-  color: #38bdf8;
-  white-space: nowrap;
-}
-.footer-recent-desc {
-  font-size: 12px;
-  color: #94a3b8;
-  line-height: 1.4;
 }
 .footer-changelog-btn {
-  background: rgba(255, 255, 255, 0.05) !important;
-  border: 1px solid rgba(255, 255, 255, 0.12) !important;
-  color: #cbd5e1 !important;
-  font-size: 11.5px !important;
-  font-weight: 650 !important;
-  padding: 6px 12px !important;
-  border-radius: 8px !important;
-  cursor: pointer !important;
-  transition: all 0.2s ease !important;
-  white-space: nowrap;
-  box-shadow: none !important;
-}
-.footer-changelog-btn:hover {
-  background: rgba(56, 189, 248, 0.15) !important;
-  border-color: rgba(56, 189, 248, 0.4) !important;
+  background: rgba(56, 189, 248, 0.12) !important;
+  border: 1px solid rgba(56, 189, 248, 0.32) !important;
   color: #38bdf8 !important;
-}
-.footer-discord-btn {
-  background: #5865F2 !important;
-  border: 1px solid #7983f5 !important;
-  color: #ffffff !important;
   font-size: 11.5px !important;
   font-weight: 700 !important;
   padding: 6px 12px !important;
   border-radius: 8px !important;
-  cursor: pointer !important;
-  transition: all 0.2s ease !important;
-  white-space: nowrap;
-  text-decoration: none !important;
-  display: inline-flex !important;
-  align-items: center !important;
-  gap: 6px !important;
-  box-shadow: 0 2px 8px rgba(88, 101, 242, 0.35) !important;
+  cursor: pointer;
 }
-.footer-discord-btn:hover {
-  background: #4752c4 !important;
-  border-color: #5865F2 !important;
-  color: #ffffff !important;
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(88, 101, 242, 0.5) !important;
+.footer-discord-btn {
+  background: rgba(88, 101, 242, 0.16) !important;
+  border: 1px solid rgba(88, 101, 242, 0.4) !important;
+  color: #c7d2fe !important;
+  font-size: 11.5px !important;
+  font-weight: 700 !important;
+  padding: 6px 12px !important;
+  border-radius: 8px !important;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 .footer-copy {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  color: var(--text-dim);
   font-size: 11px;
-  color: var(--muted);
-  text-align: center;
-  opacity: 0.65;
 }
 
-/* Changelog Timeline Modal */
 .changelog-card {
-  width: min(720px, 96vw);
-  max-height: 85vh;
+  width: min(720px, 100%);
+  max-height: 88dvh;
   display: flex;
   flex-direction: column;
 }
@@ -2549,13 +2831,13 @@ input:focus, select:focus, textarea:focus {
   overflow-y: auto;
   padding-right: 6px;
   margin: 12px 0;
-  max-height: calc(85vh - 120px);
+  max-height: calc(88dvh - 120px);
 }
 .timeline-item {
   position: relative;
   padding-left: 28px;
   padding-bottom: 22px;
-  border-left: 2px solid rgba(56, 189, 248, 0.2);
+  border-left: 2px solid rgba(56, 189, 248, 0.22);
 }
 .timeline-item:last-child {
   border-left: 2px solid transparent;
@@ -2590,7 +2872,7 @@ input:focus, select:focus, textarea:focus {
   color: #fff;
 }
 .timeline-badge {
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 800;
   padding: 2px 7px;
   border-radius: 999px;
@@ -2604,15 +2886,15 @@ input:focus, select:focus, textarea:focus {
 .timeline-badge.past {
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  color: #94a3b8;
+  color: var(--text-muted);
 }
 .timeline-content {
   background: rgba(255, 255, 255, 0.025);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 12px;
   padding: 10px 14px;
-  font-size: 12px;
-  color: #cbd5e1;
+  font-size: 12.5px;
+  color: var(--text-secondary);
   line-height: 1.65;
 }
 .timeline-content ul {
@@ -2626,313 +2908,59 @@ input:focus, select:focus, textarea:focus {
   color: #38bdf8;
 }
 
-.hidden { display: none !important; }
-
-/* Custom Scrollbars */
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.2); border-radius: 4px; }
-::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.16); border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.3); }
-
-@media (max-width: 900px) {
-  .grid { grid-template-columns: 1fr; }
+.hidden {
+  display: none !important;
 }
 
-@media (max-width: 680px) {
-  .bot-grid { grid-template-columns: 1fr; gap: 12px; }
-  .bot-card { width: 100%; max-width: 100%; padding: 12px; }
-  .info, .inventory-grid { grid-template-columns: 1fr; }
-  .equipment-row { grid-template-columns: repeat(5, minmax(48px, 1fr)); }
-  .bot-mini-btn {
-    min-height: 34px;
-    padding: 5px 9px;
-    font-size: 11px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-  }
-}
-
-.vip-pill {
-  font-size: 11px;
-  font-weight: 800;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: linear-gradient(135deg, rgba(245, 158, 11, 0.22) 0%, rgba(217, 119, 6, 0.3) 100%);
-  border: 1px solid rgba(245, 158, 11, 0.45);
-  color: #fbbf24;
-  letter-spacing: 0.05em;
-  box-shadow: 0 0 12px rgba(245, 158, 11, 0.2);
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.platform-pill {
-  font-size: 11px;
-  font-weight: 750;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: rgba(6, 182, 212, 0.15);
-  border: 1px solid rgba(6, 182, 212, 0.4);
-  color: #38bdf8;
-  letter-spacing: 0.04em;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.ram-pill {
-  font-size: 11px;
-  font-weight: 700;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: rgba(16, 185, 129, 0.15);
-  border: 1px solid rgba(16, 185, 129, 0.35);
-  color: #34d399;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.fleet-resource-bar {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 12px;
-  background: linear-gradient(135deg, rgba(16, 24, 38, 0.75) 0%, rgba(10, 16, 26, 0.85) 100%);
-  border: 1px solid rgba(56, 189, 248, 0.2);
-  border-radius: 14px;
-  padding: 14px 18px;
-  margin-bottom: 18px;
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.05);
-}
-
-.fleet-res-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 12px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.fleet-res-item:hover {
-  background: rgba(56, 189, 248, 0.06);
-  border-color: rgba(56, 189, 248, 0.3);
-  transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3);
-}
-
-.fleet-res-icon {
-  font-size: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
-  background: rgba(56, 189, 248, 0.08);
-  border: 1px solid rgba(56, 189, 248, 0.2);
-  box-shadow: 0 0 12px rgba(56, 189, 248, 0.15);
-  flex-shrink: 0;
-}
-
-.fleet-res-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin-bottom: 2px;
-}
-
-.fleet-res-val {
-  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
-  font-size: 15px;
-  font-weight: 800;
-  color: var(--text);
-  letter-spacing: -0.02em;
-}
-
-.eco-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  background: rgba(16, 185, 129, 0.18);
-  border: 1px solid rgba(16, 185, 129, 0.45);
-  color: #34d399;
-  font-size: 10px;
-  font-weight: 800;
-  padding: 2px 7px;
-  border-radius: 6px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  box-shadow: 0 0 10px rgba(16, 185, 129, 0.15);
-}
-
-.ram-meter-wrap {
-  margin-top: 8px;
-  padding: 6px 9px;
-  background: rgba(0, 0, 0, 0.28);
-  border-radius: 7px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
-}
-
-.ram-meter-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 10.5px;
-  font-weight: 700;
-  margin-bottom: 5px;
-}
-
-.ram-meter-bar {
-  width: 100%;
-  height: 5px;
-  background: rgba(255, 255, 255, 0.08);
-  border-radius: 999px;
-  overflow: hidden;
-}
-
-.ram-meter-fill {
-  height: 100%;
-  border-radius: 999px;
-  transition: width 0.4s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.4s ease;
-}
-
-@media (max-width: 768px) {
-  .fleet-resource-bar {
-    grid-template-columns: repeat(2, 1fr);
-    padding: 10px;
-    gap: 8px;
-  }
-  .fleet-res-item {
-    padding: 6px 8px;
-  }
-  .fleet-res-icon {
-    width: 34px;
-    height: 34px;
-    font-size: 18px;
-  }
-  .fleet-res-val {
-    font-size: 13px;
-  }
-  .card-quick-actions button {
-    min-height: 44px;
-  }
-  .top-actions button {
-    min-height: 44px;
-  }
-}
-
-@media (max-width: 480px) {
-  .fleet-resource-bar {
-    grid-template-columns: repeat(2, 1fr);
-  }
-  .toast {
-    left: 12px !important;
-    right: 12px !important;
-    bottom: 14px !important;
-    max-width: calc(100% - 24px) !important;
-    text-align: center;
-  }
-}
-
-/* ========================================================================== */
-/* KBOT COMMERCIAL SAAS PORTAL & LANDING STYLES (UI/UX PRO MAX)               */
-/* ========================================================================== */
+/* ==========================================================================
+   SPLIT LANDING PORTAL & ACCOUNT RESTRICTION OVERLAYS
+   ========================================================================== */
 .kbot-portal-wrapper {
   display: flex;
-  width: min(1080px, 96vw);
-  max-height: 90vh;
-  background: rgba(10, 18, 32, 0.95);
-  border: 1px solid rgba(56, 189, 248, 0.35);
-  border-radius: 26px;
-  box-shadow: 0 35px 80px rgba(0, 0, 0, 0.85), 0 0 50px rgba(56, 189, 248, 0.12), inset 0 1px 0 rgba(255,255,255,0.1);
+  width: min(940px, 100%);
+  max-width: 100%;
+  background: rgba(8, 13, 25, 0.72);
   backdrop-filter: blur(24px) saturate(180%);
   -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: 24px;
+  box-shadow: 0 36px 95px rgba(0, 0, 0, 0.82), 0 0 60px rgba(14, 165, 233, 0.10), inset 0 1px 0 rgba(255, 255, 255, 0.12);
   overflow: hidden;
+  animation: modalZoomIn 0.35s cubic-bezier(0.16, 1, 0.3, 1);
   position: relative;
-  animation: modalSpringIn 0.32s cubic-bezier(0.22, 1, 0.36, 1);
-}
-.kbot-portal-wrapper::before {
-  content: '';
-  position: absolute;
-  top: -40%;
-  left: -20%;
-  width: 500px;
-  height: 500px;
-  background: radial-gradient(circle, rgba(56, 189, 248, 0.15) 0%, transparent 70%);
-  filter: blur(60px);
-  pointer-events: none;
-  z-index: 0;
-  animation: auroraFloat 18s ease-in-out infinite alternate;
-}
-.kbot-portal-wrapper::after {
-  content: '';
-  position: absolute;
-  bottom: -40%;
-  right: -20%;
-  width: 500px;
-  height: 500px;
-  background: radial-gradient(circle, rgba(16, 185, 129, 0.12) 0%, transparent 70%);
-  filter: blur(60px);
-  pointer-events: none;
-  z-index: 0;
-  animation: auroraFloat 22s ease-in-out infinite alternate-reverse;
-}
-
-@media (max-width: 920px) {
-  .kbot-portal-wrapper {
-    flex-direction: column;
-    max-height: 94vh;
-    overflow-y: auto;
-  }
 }
 
 .kbot-landing-col {
   flex: 1.25;
   padding: 32px 30px;
-  overflow-y: auto;
+  background: linear-gradient(155deg, rgba(14, 24, 42, 0.78) 0%, rgba(9, 15, 28, 0.64) 100%);
+  border-right: 1px solid rgba(56, 189, 248, 0.12);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
   position: relative;
   z-index: 1;
-  border-right: 1px solid rgba(255, 255, 255, 0.07);
-  background: radial-gradient(circle at 10% 20%, rgba(16, 185, 129, 0.08) 0%, transparent 60%);
-}
-
-.kbot-landing-col::-webkit-scrollbar {
-  width: 5px;
-}
-.kbot-landing-col::-webkit-scrollbar-thumb {
-  background: rgba(56, 189, 248, 0.3);
-  border-radius: 10px;
 }
 
 .kbot-login-col {
   flex: 0.95;
   padding: 32px 28px;
   display: flex;
-  align-items: center;
+  flex-direction: column;
   justify-content: center;
+  background: rgba(6, 10, 20, 0.56);
   position: relative;
   z-index: 1;
-  background: rgba(15, 23, 42, 0.45);
 }
 
 .kbot-brand-badge {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 12px;
+  padding: 5px 12px;
   border-radius: 999px;
-  background: rgba(16, 185, 129, 0.15);
-  border: 1px solid rgba(16, 185, 129, 0.38);
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.35);
   color: #34d399;
   font-size: 11px;
   font-weight: 850;
@@ -2956,7 +2984,6 @@ input:focus, select:focus, textarea:focus {
   inset: 0;
   border-radius: 50%;
   background: #10b981;
-  animation: sonarPulse 2s ease-out infinite;
 }
 
 .kbot-landing-title {
@@ -2974,17 +3001,15 @@ input:focus, select:focus, textarea:focus {
   background-size: 200% auto;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-  animation: textShine 6s linear infinite;
 }
 
 .kbot-landing-desc {
   font-size: 13px;
   line-height: 1.6;
-  color: #94a3b8;
+  color: var(--text-muted);
   margin: 0 0 18px;
 }
 
-/* Discord CTA Button */
 .kbot-discord-btn {
   display: flex;
   align-items: center;
@@ -2999,14 +3024,9 @@ input:focus, select:focus, textarea:focus {
   transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
   margin-bottom: 22px;
 }
-.kbot-discord-btn:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 14px 30px rgba(88, 101, 242, 0.55);
-  filter: brightness(1.08);
-}
 .kbot-discord-icon {
   flex-shrink: 0;
-  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
 }
 .kbot-discord-text {
   flex: 1;
@@ -3021,14 +3041,14 @@ input:focus, select:focus, textarea:focus {
 }
 .kbot-discord-text small {
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.85);
+  color: rgba(255, 255, 255, 0.88);
   margin-top: 2px;
 }
 .kbot-discord-badge {
   background: rgba(255, 255, 255, 0.2);
   padding: 3px 8px;
   border-radius: 6px;
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 800;
   letter-spacing: 0.5px;
 }
@@ -3045,7 +3065,6 @@ input:focus, select:focus, textarea:focus {
   gap: 6px;
 }
 
-/* Benefits Grid */
 .kbot-benefits-grid {
   display: grid;
   grid-template-columns: 1fr;
@@ -3056,18 +3075,12 @@ input:focus, select:focus, textarea:focus {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 12px;
   padding: 10px 14px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.05);
   transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-}
-.kbot-benefit-card:hover {
-  background: rgba(56, 189, 248, 0.07);
-  border-color: rgba(56, 189, 248, 0.3);
-  transform: translateX(4px) translateY(-1px);
-  box-shadow: 0 8px 24px rgba(56, 189, 248, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 .kbot-benefit-icon {
   font-size: 18px;
@@ -3084,170 +3097,164 @@ input:focus, select:focus, textarea:focus {
 .kbot-benefit-info p {
   margin: 0;
   font-size: 11.5px;
-  color: #94a3b8;
+  color: var(--text-muted);
   line-height: 1.45;
 }
 
-/* 3-Steps Workflow */
 .kbot-steps-row {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 18px;
-  background: rgba(0, 0, 0, 0.25);
-  padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
-}
-@media (max-width: 600px) {
-  .kbot-steps-row {
-    flex-direction: column;
-    align-items: stretch;
-  }
+  margin-bottom: 16px;
 }
 .kbot-step-item {
   flex: 1;
-  font-size: 11px;
-  line-height: 1.4;
-  color: #cbd5e1;
+  background: rgba(56, 189, 248, 0.08);
+  border: 1px solid rgba(56, 189, 248, 0.18);
+  border-radius: 10px;
+  padding: 8px 10px;
+  text-align: center;
 }
 .kbot-step-num {
-  font-weight: 850;
-  color: #34d399;
-  margin-bottom: 2px;
-  text-transform: uppercase;
-  font-size: 10.5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #38bdf8;
+  color: #090d16;
+  font-weight: 900;
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+.kbot-step-item span {
+  display: block;
+  font-size: 11px;
+  font-weight: 650;
+  color: #e2e8f0;
+  line-height: 1.3;
 }
 .kbot-step-arrow {
-  color: var(--muted);
-  font-weight: bold;
+  color: #38bdf8;
+  font-weight: 800;
+  font-size: 14px;
+  opacity: 0.7;
 }
 
-/* Commitments Box */
 .kbot-commitments-box {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-@media (max-width: 600px) {
-  .kbot-commitments-box {
-    grid-template-columns: 1fr;
-  }
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 .kbot-commit-item {
+  font-size: 11px;
+  color: #cbd5e1;
+  font-weight: 600;
   display: flex;
   align-items: center;
-  gap: 8px;
-  background: rgba(16, 185, 129, 0.08);
-  border: 1px solid rgba(16, 185, 129, 0.22);
-  padding: 8px 10px;
-  border-radius: 10px;
+  gap: 5px;
 }
 .kbot-commit-icon {
-  font-size: 16px;
-}
-.kbot-commit-item strong {
-  display: block;
-  font-size: 11.5px;
-  font-weight: 750;
-  color: #34d399;
-}
-.kbot-commit-item small {
-  display: block;
-  font-size: 10px;
-  color: #94a3b8;
-  line-height: 1.35;
+  color: #10b981;
+  font-weight: 900;
 }
 
-/* ==========================================================================
-   V11.7 COMMERCIAL ENTERPRISE EDITION — GLOBAL NAV, OVERLAYS & FULL PAGE SECTIONS
-   ========================================================================== */
-
-/* Account Restriction Blur & Overlays */
+/* Account Locked / Expired Overlays */
 .account-restricted-blur {
   filter: blur(8px) brightness(0.65) !important;
   pointer-events: none !important;
   user-select: none !important;
   transition: filter 0.3s ease;
 }
-
 .account-restriction-overlay {
   position: fixed;
   inset: 0;
   z-index: 999999;
-  background: rgba(3, 7, 18, 0.82);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
   display: flex;
-  align-items: center;
+  align-items: safe center;
   justify-content: center;
+  background: rgba(4, 7, 15, 0.84);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
   padding: 20px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  animation: fadeUpIn 0.25s ease;
 }
 .account-restriction-overlay.hidden {
   display: none !important;
 }
 .restriction-card {
-  width: 100%;
-  max-width: 480px;
-  background: rgba(15, 23, 42, 0.96);
-  border: 1px solid rgba(239, 68, 68, 0.45);
-  box-shadow: 0 25px 60px rgba(0, 0, 0, 0.8), 0 0 35px rgba(239, 68, 68, 0.2);
-  border-radius: 20px;
-  padding: 30px 24px;
+  width: min(490px, 100%);
+  background: linear-gradient(155deg, rgba(19, 26, 40, 0.96) 0%, rgba(11, 16, 26, 0.98) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 24px;
+  padding: 32px 26px;
   text-align: center;
-  animation: modalZoomIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 32px 85px rgba(0, 0, 0, 0.88);
+  animation: modalSpringIn 0.32s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.restriction-card.locked {
+  border-color: rgba(239, 68, 68, 0.45);
+  box-shadow: 0 30px 80px rgba(239, 68, 68, 0.18), 0 0 0 1px rgba(239, 68, 68, 0.12);
+}
+.restriction-card.expired {
+  border-color: rgba(245, 158, 11, 0.45);
+  box-shadow: 0 30px 80px rgba(245, 158, 11, 0.18), 0 0 0 1px rgba(245, 158, 11, 0.12);
 }
 .restriction-icon {
-  font-size: 48px;
-  margin-bottom: 12px;
+  font-size: 52px;
+  line-height: 1;
+  margin-bottom: 14px;
+  display: inline-block;
+  filter: drop-shadow(0 0 18px rgba(255, 255, 255, 0.25));
 }
 .restriction-title {
-  font-size: 20px;
+  font-size: 22px;
   font-weight: 850;
-  color: #ef4444;
-  margin: 0 0 8px;
-  letter-spacing: 0.5px;
+  color: #fff;
+  margin: 0 0 10px;
 }
+.restriction-desc,
 .restriction-subtitle {
-  font-size: 13px;
-  color: #94a3b8;
-  line-height: 1.5;
-  margin-bottom: 18px;
+  font-size: 13.5px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  margin: 0 0 18px;
 }
 .restriction-reason-box {
   background: rgba(239, 68, 68, 0.1);
-  border: 1px dashed rgba(239, 68, 68, 0.35);
+  border: 1px solid rgba(239, 68, 68, 0.28);
   border-radius: 12px;
-  padding: 14px;
-  margin-bottom: 20px;
+  padding: 12px 14px;
+  font-size: 13px;
+  color: #fca5a5;
   text-align: left;
+  margin-bottom: 20px;
+  word-break: break-word;
 }
-.restriction-reason-box .reason-label {
+.reason-label {
   font-size: 11px;
   font-weight: 800;
+  letter-spacing: 0.4px;
   color: #f87171;
   margin-bottom: 6px;
 }
-.restriction-reason-box .reason-content {
-  font-size: 13.5px;
-  color: #f1f5f9;
-  font-weight: 600;
+.reason-content {
+  font-size: 13px;
+  color: #fecaca;
   line-height: 1.5;
-  word-break: break-word;
 }
 .expired-redeem-box {
-  background: rgba(56, 189, 248, 0.08);
-  border: 1px solid rgba(56, 189, 248, 0.3);
-  border-radius: 12px;
-  padding: 14px;
-  margin-bottom: 20px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 14px;
+  padding: 16px;
+  margin-bottom: 18px;
   text-align: left;
-}
-.expired-redeem-box label {
-  font-size: 11.5px;
-  font-weight: 800;
-  color: #38bdf8;
-  display: block;
 }
 .restriction-actions {
   display: flex;
@@ -3255,850 +3262,314 @@ input:focus, select:focus, textarea:focus {
   gap: 10px;
 }
 .btn-discord {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
+  background: linear-gradient(135deg, #5865F2 0%, #4752C4 100%) !important;
+  color: #fff !important;
   padding: 12px 18px;
-  background: #5865f2;
-  color: #fff;
-  border-radius: 10px;
+  border-radius: 12px;
   font-weight: 750;
-  font-size: 14px;
+  font-size: 13.5px;
   text-decoration: none;
-  transition: all 0.2s ease;
-}
-.btn-discord:hover {
-  background: #4752c4;
-  transform: translateY(-1px);
-  box-shadow: 0 4px 16px rgba(88, 101, 242, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  box-shadow: 0 6px 18px rgba(88, 101, 242, 0.35);
 }
 .btn-logout-overlay {
-  padding: 11px;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  color: #cbd5e1;
-  border-radius: 10px;
-  font-size: 13px;
-  font-weight: 700;
+  background: rgba(255, 255, 255, 0.06) !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  color: var(--text-secondary) !important;
+  padding: 10px 16px !important;
+  border-radius: 10px !important;
+  font-size: 12.5px !important;
+  font-weight: 650 !important;
   cursor: pointer;
-  transition: all 0.2s ease;
-}
-.btn-logout-overlay:hover {
-  background: rgba(239, 68, 68, 0.2);
-  border-color: rgba(239, 68, 68, 0.5);
-  color: #f87171;
 }
 
-/* Global Sticky Top Navigation Bar */
-.global-header {
-  position: sticky;
-  top: 0;
-  z-index: 100;
-  width: 100%;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 8px 16px;
-  background: rgba(10, 15, 30, 0.92);
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
-  border-bottom: 1px solid rgba(56, 189, 248, 0.2);
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
-  box-sizing: border-box;
-}
-.global-header-left {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.global-header-brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  user-select: none;
-}
-.global-logo {
-  font-size: 20px;
-}
-.global-brand-text {
-  font-weight: 850;
-  font-size: 16px;
-  letter-spacing: 0.5px;
-  background: linear-gradient(135deg, #38bdf8 0%, #818cf8 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-.vip-pill-mini {
-  font-size: 10px;
-  font-weight: 800;
-  padding: 2px 6px;
-  border-radius: 999px;
-  background: rgba(234, 179, 8, 0.15);
-  color: #eab308;
-  border: 1px solid rgba(234, 179, 8, 0.35);
-}
-.global-nav-pills {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: 12px;
-}
-.nav-pill-btn {
-  padding: 6px 12px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #cbd5e1;
-  font-size: 12.5px;
-  font-weight: 700;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-.nav-pill-btn:hover {
-  background: rgba(56, 189, 248, 0.15);
-  border-color: rgba(56, 189, 248, 0.4);
-  color: #fff;
-}
-.nav-pill-btn.active {
-  background: linear-gradient(135deg, #0ea5e9, #2563eb);
-  border-color: rgba(56, 189, 248, 0.6);
-  color: #fff;
-  box-shadow: 0 0 14px rgba(14, 165, 233, 0.45);
-}
-.global-header-right {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-/* Dropdown Top Logout Button */
-.dropdown-top-logout-wrap {
-  padding-bottom: 8px;
-  margin-bottom: 8px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-}
-.dropdown-top-logout-btn {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 10px;
-  border-radius: 10px;
-  background: rgba(239, 68, 68, 0.15);
-  border: 1px solid rgba(239, 68, 68, 0.4);
-  color: #f87171;
-  font-weight: 800;
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-.dropdown-top-logout-btn:hover {
-  background: #ef4444;
-  color: #fff;
-  box-shadow: 0 0 16px rgba(239, 68, 68, 0.5);
-}
-.profile-menu-section-title {
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.6px;
-  color: var(--muted);
-  padding: 6px 8px 4px;
-}
-.big-tab-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  margin-bottom: 4px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-.big-tab-item:hover {
-  background: rgba(56, 189, 248, 0.12) !important;
-  border-color: rgba(56, 189, 248, 0.3) !important;
-}
-.big-tab-item .menu-icon {
-  font-size: 20px;
-  flex-shrink: 0;
-}
-.big-tab-item .menu-text {
-  display: flex;
-  flex-direction: column;
-}
-.big-tab-item .menu-text strong {
-  font-size: 13px;
-  color: #f1f5f9;
-}
-.big-tab-item .menu-text small {
-  font-size: 10.5px;
-  color: #94a3b8;
-}
-
-/* Full Page Sections */
+/* ==========================================================================
+   FULL-PAGE ADMIN MANAGEMENT SECTIONS, SUB-TABS & AUDIT TABS
+   ========================================================================== */
 .full-page-section {
-  width: 100%;
-  max-width: 1400px;
-  margin: 0 auto;
-  padding: 20px 24px;
-  box-sizing: border-box;
   animation: fadeIn 0.2s ease;
+  min-width: 0;
+}
+.sub-panel {
+  min-width: 0;
 }
 .full-page-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
   gap: 14px;
+  margin-bottom: 18px;
   flex-wrap: wrap;
-  margin-bottom: 20px;
-  padding-bottom: 16px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 .full-page-title {
-  font-size: 22px;
+  font-size: 21px;
   font-weight: 850;
-  margin: 0 0 4px;
   color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 .full-page-subtitle {
-  font-size: 13px;
-  color: #94a3b8;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-top: 4px;
 }
-.sub-tab-bar {
+
+.sub-tab-bar,
+.audit-type-tabs {
   display: flex;
+  align-items: center;
   gap: 8px;
   margin-bottom: 16px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 10px;
+  flex-wrap: wrap;
 }
-.sub-tab-btn {
-  padding: 8px 18px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  color: #94a3b8;
-  font-weight: 750;
-  font-size: 13.5px;
+
+.sub-tab-btn,
+.audit-tab-btn {
+  padding: 8px 16px !important;
+  border-radius: 10px !important;
+  font-size: 12.5px !important;
+  font-weight: 700 !important;
+  background: rgba(255, 255, 255, 0.04) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--text-muted) !important;
   cursor: pointer;
-  transition: all 0.2s ease;
+  box-shadow: none !important;
 }
-.sub-tab-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+
+.sub-tab-btn.active,
+.audit-tab-btn.active {
+  background: rgba(56, 189, 248, 0.16) !important;
+  border-color: rgba(56, 189, 248, 0.48) !important;
+  color: #38bdf8 !important;
 }
-.sub-tab-btn.active {
-  background: rgba(56, 189, 248, 0.2);
-  border-color: #38bdf8;
-  color: #38bdf8;
-  box-shadow: 0 0 14px rgba(56, 189, 248, 0.25);
-}
+
 .mgmt-filter-bar {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 16px;
   flex-wrap: wrap;
-  background: rgba(255, 255, 255, 0.02);
-  padding: 10px 14px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid var(--border-subtle);
   border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
 }
+
 .filter-chip {
-  padding: 6px 12px;
-  border-radius: 20px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #94a3b8;
-  font-size: 12px;
-  font-weight: 700;
+  padding: 6px 12px !important;
+  border-radius: 999px !important;
+  font-size: 11.5px !important;
+  font-weight: 700 !important;
+  background: rgba(255, 255, 255, 0.05) !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  color: var(--text-muted) !important;
   cursor: pointer;
-  transition: all 0.15s ease;
-}
-.filter-chip:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: #fff;
+  box-shadow: none !important;
 }
 .filter-chip.active {
-  background: #0284c7;
-  border-color: #38bdf8;
-  color: #fff;
+  background: rgba(56, 189, 248, 0.2) !important;
+  border-color: #38bdf8 !important;
+  color: #38bdf8 !important;
 }
+
 .password-cell-wrap {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  font-family: monospace;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
 }
 .password-text.revealed {
-  color: #38bdf8;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  background: rgba(56, 189, 248, 0.1);
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.12);
   padding: 2px 6px;
   border-radius: 4px;
+  user-select: all;
 }
 .password-text.masked {
-  color: #94a3b8;
-  letter-spacing: 2px;
+  color: var(--text-dim);
+  letter-spacing: 1px;
 }
 .btn-peek {
-  background: none;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 6px;
-  padding: 2px 6px;
-  font-size: 13px;
+  padding: 2px 7px !important;
+  font-size: 11px !important;
+  border-radius: 5px !important;
+  background: rgba(255, 255, 255, 0.06) !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  color: var(--text-muted) !important;
   cursor: pointer;
-  color: #cbd5e1;
-  transition: all 0.2s;
+  min-block-size: 28px;
 }
-.btn-peek:hover {
-  background: rgba(255, 255, 255, 0.1);
-  border-color: rgba(255, 255, 255, 0.3);
-  color: #fff;
-}
+
 .quick-renew-row {
   display: flex;
-  gap: 4px;
   flex-wrap: wrap;
-  margin-top: 6px;
+  gap: 4px;
+  margin-top: 4px;
 }
 .quick-renew-btn {
-  padding: 4px 8px;
-  border-radius: 6px;
-  background: rgba(56, 189, 248, 0.12);
-  border: 1px solid rgba(56, 189, 248, 0.3);
-  color: #38bdf8;
-  font-size: 11px;
-  font-weight: 750;
+  padding: 3px 7px !important;
+  font-size: 10.5px !important;
+  font-weight: 750 !important;
+  border-radius: 5px !important;
+  background: rgba(16, 185, 129, 0.15) !important;
+  border: 1px solid rgba(16, 185, 129, 0.35) !important;
+  color: #34d399 !important;
   cursor: pointer;
-  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
-}
-.quick-renew-btn:hover {
-  background: #0284c7;
-  color: #fff;
-  border-color: #38bdf8;
-  transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(56, 189, 248, 0.3);
-}
-.quick-renew-btn:active {
-  transform: translateY(0);
+  min-block-size: 26px;
 }
 .quick-renew-btn.minus {
-  background: rgba(239, 68, 68, 0.12);
-  border-color: rgba(239, 68, 68, 0.3);
-  color: #f87171;
-}
-.quick-renew-btn.minus:hover {
-  background: #ef4444;
-  color: #fff;
-  border-color: #f87171;
-  box-shadow: 0 2px 8px rgba(239, 68, 68, 0.3);
+  background: rgba(239, 68, 68, 0.14) !important;
+  border-color: rgba(239, 68, 68, 0.35) !important;
+  color: #f87171 !important;
 }
 .quick-renew-btn.vip {
-  background: rgba(234, 179, 8, 0.15);
-  border-color: rgba(234, 179, 8, 0.4);
-  color: #eab308;
-}
-.quick-renew-btn.vip:hover {
-  background: linear-gradient(135deg, #eab308, #ca8a04);
-  color: #000;
-  border-color: #fde047;
-  box-shadow: 0 2px 8px rgba(234, 179, 8, 0.4);
+  background: rgba(245, 158, 11, 0.15) !important;
+  border-color: rgba(245, 158, 11, 0.4) !important;
+  color: #fbbf24 !important;
 }
 .quick-renew-btn.custom {
-  background: rgba(148, 163, 184, 0.15);
-  border-color: rgba(148, 163, 184, 0.3);
-  color: #cbd5e1;
+  background: rgba(167, 139, 250, 0.15) !important;
+  border-color: rgba(167, 139, 250, 0.4) !important;
+  color: #c4b5fd !important;
 }
-.quick-renew-btn.custom:hover {
-  background: rgba(255, 255, 255, 0.2);
-  color: #fff;
-  border-color: rgba(255, 255, 255, 0.4);
-}
+
 .bot-check-item.bot-occupied {
-  opacity: 0.65;
-  filter: grayscale(0.85);
-  border-style: dashed;
-  background: rgba(255, 255, 255, 0.02);
+  opacity: 0.6;
+  background: rgba(239, 68, 68, 0.05) !important;
+  border-color: rgba(239, 68, 68, 0.25) !important;
 }
 .badge-occupied {
-  display: block;
-  font-size: 10.5px;
-  color: #eab308;
+  font-size: 10px;
   font-weight: 700;
-  margin-top: 2px;
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.18);
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: auto;
 }
 .badge-lifetime {
-  background: rgba(234, 179, 8, 0.2);
-  color: #eab308;
-  border: 1px solid rgba(234, 179, 8, 0.4);
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
+  background: rgba(251, 191, 36, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 10.5px;
   font-weight: 800;
-  display: inline-block;
 }
 .badge-expired {
-  background: rgba(239, 68, 68, 0.2);
-  color: #ef4444;
-  border: 1px solid rgba(239, 68, 68, 0.4);
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 10.5px;
   font-weight: 800;
-  display: inline-block;
 }
 .badge-active {
-  background: rgba(16, 185, 129, 0.2);
+  background: rgba(16, 185, 129, 0.15);
   color: #34d399;
-  border: 1px solid rgba(16, 185, 129, 0.4);
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 10.5px;
   font-weight: 800;
-  display: inline-block;
 }
 .create-key-card {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid var(--border);
+  background: linear-gradient(135deg, rgba(14, 24, 42, 0.85), rgba(15, 23, 42, 0.94));
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  border-radius: 14px;
   padding: 16px;
-  border-radius: 12px;
-  margin-bottom: 16px;
-}
-
-@media (max-width: 768px) {
-  /* Layout & Viewport Ergonomics */
-  .app {
-    width: 100% !important;
-    max-width: 100% !important;
-    padding: 6px 8px 60px !important;
-    box-sizing: border-box !important;
-  }
-  .global-header {
-    flex-wrap: wrap;
-    padding: 8px 10px;
-    gap: 8px;
-  }
-  .global-header-left {
-    display: contents;
-  }
-  .global-header-brand {
-    order: 1;
-  }
-  .global-header-right {
-    order: 2;
-    gap: 6px;
-  }
-  .global-nav-pills {
-    display: flex !important;
-    order: 3;
-    width: 100%;
-    margin-left: 0;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-    flex-wrap: nowrap;
-    gap: 6px;
-    padding: 4px 2px 2px 2px;
-  }
-  .global-nav-pills::-webkit-scrollbar {
-    display: none;
-  }
-  .nav-pill-btn {
-    white-space: nowrap;
-    flex-shrink: 0;
-    padding: 7px 11px;
-    font-size: 11.5px;
-    min-height: 36px;
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .full-page-section {
-    padding: 10px 8px;
-  }
-  .mgmt-filter-bar {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 8px;
-  }
-
-  /* GPU Fill-rate & Mobile Lag Elimination */
-  .bot-card, .fleet-resource-bar, .user-table-wrap, .panel, .full-page-card, .modal-card, .kpi-card, .kbot-portal-wrapper {
-    backdrop-filter: blur(4px) !important;
-    -webkit-backdrop-filter: blur(4px) !important;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45) !important;
-    contain: content;
-  }
-  .app-cosmic-video, .cosmic-bg-video {
-    opacity: 0.12 !important;
-  }
-
-  /* Bento KPI Grid & Fleet Resources */
-  .fleet-resource-bar {
-    display: grid !important;
-    grid-template-columns: repeat(2, 1fr) !important;
-    gap: 8px !important;
-    padding: 8px !important;
-  }
-  .fleet-res-item {
-    padding: 6px 8px !important;
-  }
-  .kpi-grid {
-    display: grid !important;
-    grid-template-columns: repeat(2, 1fr) !important;
-    gap: 8px !important;
-    margin-bottom: 12px !important;
-  }
-  .kpi-card {
-    padding: 10px 12px !important;
-  }
-  .kpi-title {
-    font-size: 11px !important;
-  }
-  .kpi-value {
-    font-size: 19px !important;
-  }
-
-  /* Bot Cards & Control Buttons */
-  .bot-grid {
-    grid-template-columns: 1fr !important;
-    gap: 10px !important;
-  }
-  .bot-card {
-    padding: 14px 12px !important;
-    border-radius: 14px !important;
-  }
-  .bot-head {
-    flex-wrap: wrap !important;
-    gap: 6px !important;
-  }
-  .controls {
-    display: flex !important;
-    flex-wrap: wrap !important;
-    gap: 6px !important;
-    margin-top: 10px !important;
-    padding-top: 10px !important;
-  }
-  .controls button {
-    flex: 1 1 calc(50% - 6px) !important;
-    min-width: 0 !important;
-    min-height: 40px !important;
-    padding: 8px 10px !important;
-    font-size: 12px !important;
-  }
-
-  /* Minecraft GUI & Inventory Slot Grid */
-  #detailRemoteGuiCard {
-    overflow-x: auto !important;
-    -webkit-overflow-scrolling: touch !important;
-  }
-  #detailRemoteGuiSlots {
-    min-width: 440px !important;
-  }
-  .slot-grid {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    display: grid;
-    grid-template-columns: repeat(9, minmax(42px, 1fr));
-    padding-bottom: 8px;
-  }
-  .inventory-slot {
-    min-height: 56px;
-    min-width: 42px;
-  }
-
-  /* Tables & Responsive Scrolling */
-  .user-table-wrap {
-    overflow-x: auto !important;
-    -webkit-overflow-scrolling: touch !important;
-    margin: 10px 0 !important;
-    border-radius: 12px !important;
-  }
-  .user-table th, .user-table td {
-    padding: 8px 10px !important;
-    font-size: 12px !important;
-    white-space: nowrap !important;
-  }
-
-  /* Modals & Inputs */
-  .modal {
-    padding: 8px !important;
-  }
-  .modal-card {
-    width: 100% !important;
-    max-width: 100% !important;
-    padding: 16px 14px !important;
-    border-radius: 16px !important;
-    max-height: 90vh !important;
-  }
-  input, select, textarea {
-    font-size: 16px !important; /* Prevents auto-zoom on mobile */
-  }
-
-  /* Ergonomic Touch Targets & Responsive Polish */
-  .bot-mini-btn {
-    min-height: 44px;
-    min-width: 44px;
-    padding: 8px 12px;
-    font-size: 12px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .quick-renew-btn {
-    min-height: 44px;
-    padding: 8px 12px;
-    font-size: 12.5px;
-    display: inline-flex;
-    align-items: center;
-  }
-  .btn-peek {
-    min-height: 44px;
-    min-width: 44px;
-    padding: 6px 12px;
-    font-size: 14px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .password-toggle-btn {
-    min-width: 44px;
-    min-height: 44px;
-    font-size: 18px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .log, .chat-log {
-    height: min(320px, 42vh);
-  }
-  .slot-index, .slot-name, .equip-label, .vital-label, .summary-label {
-    font-size: 11px;
-  }
-}
-
-@media (max-width: 480px) {
-  /* Ultra-lightweight Mobile Mode */
-  .bot-card, .fleet-resource-bar, .user-table-wrap, .panel, .full-page-card, .modal-card, .kpi-card {
-    backdrop-filter: none !important;
-    -webkit-backdrop-filter: none !important;
-    background: rgba(9, 15, 28, 0.95) !important;
-  }
-  .app-cosmic-video, .cosmic-bg-video {
-    display: none !important;
-  }
-
-  /* Tinh chỉnh bố cục điện thoại nhỏ gọn, vừa mắt, không tràn màn hình */
-  .app {
-    padding: 4px 6px 60px !important;
-  }
-  .global-header {
-    padding: 6px 8px !important;
-    border-radius: 12px !important;
-  }
-  .global-header-brand span {
-    font-size: 13.5px !important;
-  }
-  .bot-card {
-    padding: 10px 10px !important;
-    border-radius: 12px !important;
-    min-height: auto !important;
-    margin-bottom: 8px !important;
-  }
-  .bot-head {
-    gap: 4px !important;
-    margin-bottom: 6px !important;
-  }
-  .bot-title {
-    font-size: 13px !important;
-  }
-  .bot-id-chip {
-    font-size: 9.5px !important;
-    padding: 1.5px 5px !important;
-  }
-  .status-pill {
-    font-size: 9.5px !important;
-    padding: 2px 6px !important;
-  }
-  .bot-vitals {
-    gap: 4px !important;
-  }
-  .vital-card {
-    padding: 4px 6px !important;
-    border-radius: 8px !important;
-  }
-  .vital-label {
-    font-size: 9px !important;
-  }
-  .vital-val {
-    font-size: 11px !important;
-  }
-  .controls {
-    gap: 4px !important;
-    margin-top: 6px !important;
-    padding-top: 6px !important;
-  }
-  .controls button {
-    min-height: 34px !important;
-    padding: 5px 6px !important;
-    font-size: 11px !important;
-    border-radius: 8px !important;
-  }
-  .kpi-grid {
-    gap: 6px !important;
-    margin-bottom: 8px !important;
-  }
-  .kpi-card {
-    padding: 7px 9px !important;
-    border-radius: 10px !important;
-  }
-  .kpi-title {
-    font-size: 10px !important;
-  }
-  .kpi-value {
-    font-size: 15px !important;
-  }
-  .fleet-resource-bar {
-    gap: 5px !important;
-    padding: 6px !important;
-    border-radius: 10px !important;
-  }
-  .fleet-res-item {
-    padding: 4px 6px !important;
-    gap: 5px !important;
-  }
-  .fleet-res-icon {
-    width: 26px !important;
-    height: 26px !important;
-    font-size: 13px !important;
-  }
-  .fleet-res-label {
-    font-size: 9px !important;
-  }
-  .fleet-res-val {
-    font-size: 11px !important;
-  }
-  .panel, .full-page-card {
-    padding: 10px 8px !important;
-    border-radius: 12px !important;
-    margin-bottom: 10px !important;
-  }
-  .panel-header h2, .full-page-card h2 {
-    font-size: 13px !important;
-  }
-  .nav-pill-btn {
-    padding: 5px 8px !important;
-    font-size: 10.5px !important;
-    min-height: 30px !important;
-  }
-  #userRentalBanner {
-    padding: 8px 10px !important;
-    border-radius: 12px !important;
-    font-size: 11.5px !important;
-  }
-  #btnUserLink4mReward, #btnExpiredLink4mReward {
-    padding: 6px 10px !important;
-    font-size: 11px !important;
-    border-radius: 8px !important;
-  }
-}
-
-/* Technical data: monospace tabular numbers */
-.vital-val, .bot-id-chip, .kpi-value, .position-value, .revision,
-.bot-ip-pill, .vip-pill, .platform-pill, .ram-pill,
-.slot-count, .slot-name, .slot-index {
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-variant-numeric: tabular-nums;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
-  }
-}
-
-button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible {
-  outline: 2px solid var(--cyan) !important;
-  outline-offset: 2px !important;
+  margin-bottom: 18px;
 }
 
 /* ==========================================================================
-   1. DUAL-INTENSITY GALAXY STAGE (HIGH DEPTH ON LOGIN / SUBTLE ON DASHBOARD)
+   COSMIC STAGE BACKDROP ENGINE & THEME VARIANTS
    ========================================================================== */
-body {
-  background: transparent !important;
-}
 .app-cosmic-stage {
-  position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none;
-  background: radial-gradient(ellipse at 50% 20%, #0d1b38 0%, #060d1e 60%, #02050c 100%);
-  transition: background 0.5s ease;
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  background: radial-gradient(ellipse at 18% 12%, rgba(14, 165, 233, 0.14) 0%, transparent 50%),
+              radial-gradient(ellipse at 85% 88%, rgba(99, 102, 241, 0.12) 0%, transparent 55%),
+              #03060f;
 }
 .app-cosmic-video {
-  position: absolute; inset: -2%; width: 104%; height: 104%; object-fit: cover;
-  /* Chế độ Dịu (Subtle Dashboard): Rõ chuyển động xoay không gian êm ái */
-  opacity: 0.35;
-  filter: saturate(1.3) contrast(1.1) brightness(0.85) hue-rotate(-6deg);
-  transition: opacity 0.5s ease, filter 0.5s ease;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.30;
+  filter: saturate(1.2) contrast(1.08) brightness(0.65);
+  transition: opacity 0.6s ease;
 }
 .app-cosmic-nebula {
-  position: absolute; border-radius: 50%; filter: blur(90px); mix-blend-mode: screen;
-  opacity: 0.35; transition: opacity 0.5s ease;
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(90px);
+  opacity: 0.30;
+  will-change: transform;
+  transition: opacity 0.6s ease, background 0.6s ease;
 }
 .app-cosmic-nebula.n1 {
-  top: -18%; left: -10%; width: 52vw; height: 52vw;
-  background: radial-gradient(circle, rgba(14, 165, 233, 0.38) 0%, transparent 70%);
+  width: 58vw;
+  height: 58vw;
+  top: -20vw;
+  left: -14vw;
+  background: radial-gradient(circle, rgba(14, 165, 233, 0.32), transparent 65%);
 }
 .app-cosmic-nebula.n2 {
-  bottom: -20%; right: -10%; width: 56vw; height: 56vw;
-  background: radial-gradient(circle, rgba(124, 58, 237, 0.32) 0%, transparent 70%);
+  width: 50vw;
+  height: 50vw;
+  bottom: -22vw;
+  right: -10vw;
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.30), transparent 65%);
 }
 .app-cosmic-canvas {
-  position: absolute; inset: 0; width: 100%; height: 100%;
-  opacity: 0.75; transition: opacity 0.5s ease;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0.72;
+  transition: opacity 0.6s ease;
 }
 .app-cosmic-scrim {
-  position: absolute; inset: 0;
-  background:
-    radial-gradient(circle at 50% 30%, rgba(4, 7, 17, 0.38) 0%, rgba(3, 6, 14, 0.68) 75%, rgba(2, 4, 10, 0.86) 100%),
-    linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
-  background-size: 100% 100%, 36px 36px, 36px 36px;
-  transition: background 0.5s ease;
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 50% 45%, rgba(4, 7, 17, 0.34) 0%, rgba(3, 6, 15, 0.80) 100%);
+  transition: background 0.6s ease;
 }
 
-/* CHẾ ĐỘ SÂU (VIVID) & CỔNG LOGIN GATE */
+/* Vivid / Subtle / Login Cosmic Modes */
 body.cosmic-mode-login .app-cosmic-video,
 body.cosmic-mode-vivid .app-cosmic-video {
-  opacity: 0.70 !important;
-  filter: saturate(1.5) contrast(1.18) brightness(0.95) hue-rotate(-4deg) !important;
+  opacity: 0.68 !important;
 }
 body.cosmic-mode-login .app-cosmic-nebula,
 body.cosmic-mode-vivid .app-cosmic-nebula {
-  opacity: 0.65 !important;
+  opacity: 0.60 !important;
 }
 body.cosmic-mode-login .app-cosmic-canvas,
 body.cosmic-mode-vivid .app-cosmic-canvas {
-  opacity: 1.0 !important;
+  opacity: 1 !important;
 }
 body.cosmic-mode-login .app-cosmic-scrim,
 body.cosmic-mode-vivid .app-cosmic-scrim {
-  background:
-    radial-gradient(circle at 50% 45%, rgba(4, 7, 17, 0.12) 0%, rgba(3, 6, 15, 0.50) 75%, rgba(2, 4, 10, 0.72) 100%),
-    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px) !important;
-  background-size: 100% 100%, 38px 38px, 38px 38px !important;
+  background: radial-gradient(circle at 50% 50%, rgba(4, 7, 17, 0.16) 0%, rgba(3, 6, 15, 0.64) 100%) !important;
 }
+body.cosmic-mode-subtle .app-cosmic-video { opacity: 0.24; }
 
-/* CHẾ ĐỘ TẮT (OFF - TỐI ƯU GPU/TIẾT KIỆM TÀI NGUYÊN) */
+/* Theme: Off / Minimal Obsidian */
 body.cosmic-mode-off .app-cosmic-stage,
 body.theme-off .app-cosmic-stage {
   background: #030712 !important;
@@ -4109,259 +3580,724 @@ body.cosmic-mode-off .app-cosmic-canvas,
 body.theme-off .app-cosmic-video,
 body.theme-off .app-cosmic-nebula,
 body.theme-off .app-cosmic-canvas {
-  display: none !important;
   opacity: 0 !important;
+  display: none !important;
 }
 body.cosmic-mode-off .app-cosmic-scrim,
 body.theme-off .app-cosmic-scrim {
-  background:
-    radial-gradient(circle at 50% 30%, rgba(6, 11, 24, 0.96) 0%, rgba(3, 7, 18, 0.98) 100%),
-    linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px) !important;
-  background-size: 100% 100%, 36px 36px, 36px 36px !important;
+  background: #030712 !important;
 }
 
-/* ==========================================================================
-   CHỦ ĐỀ 2: HOÀNG HÔN BỜ BIỂN (SUNSET COASTAL CHILL)
-   ========================================================================== */
+/* Theme: Sunset (Dusk Purple / Crimson / Gold Glow) */
 body.theme-sunset .app-cosmic-stage {
-  background:
-    radial-gradient(ellipse at 50% 64%, rgba(251, 146, 60, 0.42) 0%, rgba(194, 65, 12, 0.22) 38%, transparent 72%),
-    linear-gradient(180deg, #10061e 0%, #240a33 24%, #46112d 46%, #7c2d12 66%, #1a0e22 100%) !important;
-  transition: background 0.6s ease;
+  background: linear-gradient(135deg, #1b0a28 0%, #3d1239 45%, #7c2d12 100%) !important;
 }
-body.theme-sunset .app-cosmic-video {
-  display: none !important;
-}
+body.theme-sunset .app-cosmic-video { display: none !important; }
 body.theme-sunset .app-cosmic-nebula.n1 {
-  background: radial-gradient(circle, rgba(249, 115, 22, 0.42) 0%, rgba(234, 88, 12, 0.12) 50%, transparent 70%) !important;
-  top: 40% !important; left: 8% !important; width: 62vw !important; height: 62vw !important; opacity: 0.65 !important;
+  background: radial-gradient(circle, rgba(249, 115, 22, 0.42), rgba(236, 72, 153, 0.18) 55%, transparent 72%) !important;
+  top: -10vw !important; right: -8vw !important; left: auto !important; opacity: 0.72 !important;
 }
 body.theme-sunset .app-cosmic-nebula.n2 {
-  background: radial-gradient(circle, rgba(168, 85, 247, 0.30) 0%, transparent 70%) !important;
-  bottom: -12% !important; right: 6% !important; opacity: 0.58 !important;
+  background: radial-gradient(circle, rgba(168, 85, 247, 0.42), rgba(251, 146, 60, 0.15) 55%, transparent 72%) !important;
+  bottom: -18vw !important; left: -10vw !important; right: auto !important; opacity: 0.70 !important;
 }
 body.theme-sunset .app-cosmic-scrim {
-  background:
-    radial-gradient(circle at 50% 50%, rgba(14, 5, 27, 0.18) 0%, rgba(10, 4, 20, 0.58) 72%, rgba(7, 2, 14, 0.82) 100%),
-    linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px) !important;
-  background-size: 100% 100%, 36px 36px, 36px 36px !important;
+  background: radial-gradient(circle at 60% 25%, rgba(251, 146, 60, 0.10) 0%, rgba(16, 7, 26, 0.64) 100%) !important;
 }
-body.theme-sunset .card,
 body.theme-sunset .kpi-card,
 body.theme-sunset .bot-card,
+body.theme-sunset .panel,
 body.theme-sunset .fleet-toolbar,
-body.theme-sunset .fleet-welcome-header {
-  background: rgba(24, 11, 32, 0.76) !important;
-  border-color: rgba(251, 146, 60, 0.24) !important;
-  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.55), 0 0 28px rgba(234, 88, 12, 0.10) !important;
+body.theme-sunset .fleet-welcome-header,
+body.theme-sunset .fleet-resource-bar,
+body.theme-sunset .user-table-wrap,
+body.theme-sunset .modal-card {
+  background: rgba(24, 12, 34, 0.80);
+  border-color: rgba(249, 115, 22, 0.22);
 }
 body.theme-sunset .global-header {
-  background: rgba(18, 8, 26, 0.88) !important;
-  border-bottom-color: rgba(251, 146, 60, 0.26) !important;
-}
-body.theme-sunset .kpi-card:hover,
-body.theme-sunset .bot-card:hover {
-  border-color: rgba(251, 146, 60, 0.55) !important;
-  box-shadow: 0 20px 48px -4px rgba(0, 0, 0, 0.7), 0 0 32px rgba(251, 146, 60, 0.18) !important;
+  background: rgba(18, 9, 27, 0.84);
+  border-bottom-color: rgba(249, 115, 22, 0.25);
 }
 body.theme-sunset .cosmic-toggle-pill {
-  background: linear-gradient(135deg, rgba(234, 88, 12, 0.35) 0%, rgba(168, 85, 247, 0.25) 100%) !important;
-  border-color: rgba(251, 146, 60, 0.5) !important;
-  color: #fed7aa !important;
+  background: rgba(249, 115, 22, 0.18);
+  border-color: rgba(251, 146, 60, 0.45);
+  color: #fed7aa;
 }
 
-/* ==========================================================================
-   CHỦ ĐỀ 3: BÌNH MINH SINH THÁI (MORNING NATURE & BREEZE)
-   ========================================================================== */
+/* Theme: Morning (Dawn Sky / Crisp Teal / Emerald Glow) */
 body.theme-morning .app-cosmic-stage {
-  background:
-    radial-gradient(ellipse at 80% 20%, rgba(254, 240, 138, 0.38) 0%, rgba(56, 189, 248, 0.20) 45%, transparent 75%),
-    linear-gradient(180deg, #051a30 0%, #033252 24%, #026090 48%, #0ea5e9 74%, #064e3b 100%) !important;
-  transition: background 0.6s ease;
+  background: linear-gradient(150deg, #07192f 0%, #0d2b45 48%, #0d4a58 100%) !important;
 }
-body.theme-morning .app-cosmic-video {
-  display: none !important;
-}
+body.theme-morning .app-cosmic-video { display: none !important; }
 body.theme-morning .app-cosmic-nebula.n1 {
-  background: radial-gradient(circle, rgba(253, 224, 71, 0.28) 0%, rgba(250, 204, 21, 0.08) 50%, transparent 70%) !important;
-  top: -8% !important; right: -4% !important; left: auto !important; width: 56vw !important; height: 56vw !important; opacity: 0.65 !important;
+  background: radial-gradient(circle, rgba(56, 189, 248, 0.36), rgba(45, 212, 191, 0.18) 55%, transparent 72%) !important;
+  top: -14vw !important; right: -10vw !important; left: auto !important; opacity: 0.72 !important;
 }
 body.theme-morning .app-cosmic-nebula.n2 {
-  background: radial-gradient(circle, rgba(56, 189, 248, 0.26) 0%, transparent 70%) !important;
-  bottom: -15% !important; left: -8% !important; opacity: 0.55 !important;
+  background: radial-gradient(circle, rgba(16, 185, 129, 0.32), rgba(56, 189, 248, 0.14) 55%, transparent 72%) !important;
+  bottom: -15vw !important; left: -8vw !important; right: auto !important; opacity: 0.68 !important;
 }
 body.theme-morning .app-cosmic-scrim {
-  background:
-    radial-gradient(circle at 50% 40%, rgba(3, 20, 36, 0.16) 0%, rgba(2, 14, 26, 0.55) 75%, rgba(1, 10, 20, 0.78) 100%),
-    linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px) !important;
-  background-size: 100% 100%, 36px 36px, 36px 36px !important;
+  background: radial-gradient(circle at 50% 18%, rgba(125, 211, 252, 0.08) 0%, rgba(5, 18, 34, 0.56) 100%) !important;
 }
-body.theme-morning .card,
 body.theme-morning .kpi-card,
 body.theme-morning .bot-card,
+body.theme-morning .panel,
 body.theme-morning .fleet-toolbar,
-body.theme-morning .fleet-welcome-header {
-  background: rgba(7, 22, 38, 0.75) !important;
-  border-color: rgba(56, 189, 248, 0.24) !important;
-  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.5), 0 0 28px rgba(14, 165, 233, 0.12) !important;
+body.theme-morning .fleet-welcome-header,
+body.theme-morning .fleet-resource-bar,
+body.theme-morning .user-table-wrap,
+body.theme-morning .modal-card {
+  background: rgba(8, 24, 42, 0.78);
+  border-color: rgba(45, 212, 191, 0.24);
 }
 body.theme-morning .global-header {
-  background: rgba(6, 18, 32, 0.88) !important;
-  border-bottom-color: rgba(56, 189, 248, 0.28) !important;
-}
-body.theme-morning .kpi-card:hover,
-body.theme-morning .bot-card:hover {
-  border-color: rgba(56, 189, 248, 0.6) !important;
-  box-shadow: 0 20px 48px -4px rgba(0, 0, 0, 0.7), 0 0 32px rgba(56, 189, 248, 0.2) !important;
+  background: rgba(6, 20, 36, 0.84);
+  border-bottom-color: rgba(45, 212, 191, 0.24);
 }
 body.theme-morning .cosmic-toggle-pill {
-  background: linear-gradient(135deg, rgba(14, 165, 233, 0.35) 0%, rgba(16, 185, 129, 0.25) 100%) !important;
-  border-color: rgba(56, 189, 248, 0.5) !important;
-  color: #bae6fd !important;
+  background: rgba(20, 184, 166, 0.18);
+  border-color: rgba(45, 212, 191, 0.42);
+  color: #99f6e4;
 }
 
 /* ==========================================================================
-   2. LOGIN GATE & RESTRICTION OVERLAYS (OBSIDIAN SPECULAR GLASS)
+   LEGACY WEBKIT SCROLLBAR FALLBACK
    ========================================================================== */
-.login-gate {
-  background: rgba(3, 6, 15, 0.35) !important;
-  backdrop-filter: blur(4px);
-}
-.kbot-portal-wrapper {
-  background: linear-gradient(155deg, rgba(10, 18, 34, 0.74) 0%, rgba(5, 9, 20, 0.88) 100%) !important;
-  border: 1px solid rgba(56, 189, 248, 0.36) !important;
-  box-shadow: 0 40px 100px rgba(0, 0, 0, 0.88), 0 0 70px rgba(14, 165, 233, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.18) !important;
-  backdrop-filter: blur(28px) saturate(190%) !important; -webkit-backdrop-filter: blur(28px) saturate(190%) !important;
-}
-.kbot-landing-col {
-  background: radial-gradient(circle at 15% 15%, rgba(56, 189, 248, 0.08) 0%, rgba(124, 58, 237, 0.05) 45%, transparent 75%) !important;
-  border-right: 1px solid rgba(255, 255, 255, 0.09) !important;
-}
-.kbot-login-col {
-  background: linear-gradient(180deg, rgba(13, 23, 42, 0.55) 0%, rgba(7, 12, 24, 0.75) 100%) !important;
-}
-.kbot-benefit-card, .kbot-steps-row, .kbot-commitments-box {
-  background: rgba(8, 14, 28, 0.65) !important;
-  border: 1px solid rgba(255, 255, 255, 0.085) !important;
-  backdrop-filter: blur(12px) !important;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07) !important;
-}
-.account-restriction-overlay {
-  background: radial-gradient(circle at 50% 40%, rgba(8, 15, 32, 0.78) 0%, rgba(2, 5, 12, 0.94) 100%) !important;
-  backdrop-filter: blur(18px) saturate(160%) !important; -webkit-backdrop-filter: blur(18px) saturate(160%) !important;
-}
-.restriction-card {
-  background: linear-gradient(165deg, rgba(15, 25, 45, 0.92) 0%, rgba(8, 13, 26, 0.97) 100%) !important;
-  border: 1px solid rgba(56, 189, 248, 0.35) !important;
-  box-shadow: 0 32px 80px rgba(0, 0, 0, 0.85), 0 0 45px rgba(14, 165, 233, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.15) !important;
+@supports not (scrollbar-color: auto) {
+  .log::-webkit-scrollbar,
+  .chat-log::-webkit-scrollbar,
+  .user-table-wrap::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .log::-webkit-scrollbar-thumb,
+  .chat-log::-webkit-scrollbar-thumb,
+  .user-table-wrap::-webkit-scrollbar-thumb {
+    background: rgba(56, 189, 248, 0.28);
+    border-radius: 99px;
+  }
+  .log::-webkit-scrollbar-track,
+  .chat-log::-webkit-scrollbar-track,
+  .user-table-wrap::-webkit-scrollbar-track {
+    background: transparent;
+  }
 }
 
 /* ==========================================================================
-   3. DASHBOARD COMMAND CENTER (HIGH-CONTRAST, LOW-NOISE MANAGEMENT UI)
+   POINTER HOVER CAPABILITY & MOTION PREFERENCES
    ========================================================================== */
-#mainApp { position: relative; z-index: 1; }
-.global-header {
-  background: rgba(6, 11, 22, 0.85) !important;
-  backdrop-filter: blur(22px) saturate(180%) !important; -webkit-backdrop-filter: blur(22px) saturate(180%) !important;
-  border-bottom: 1px solid rgba(56, 189, 248, 0.22) !important;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55) !important;
+@media (hover: hover) {
+  button:hover:not(:disabled)::after {
+    transform: translateX(280%) skewX(-20deg);
+  }
+  button:hover:not(:disabled),
+  .btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+    border-color: rgba(56, 189, 248, 0.46);
+    box-shadow: 0 4px 14px rgba(56, 189, 248, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  }
+  button.primary:hover:not(:disabled),
+  .btn.primary:hover:not(:disabled) {
+    box-shadow: 0 6px 22px rgba(14, 165, 233, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  }
+  button.secondary:hover:not(:disabled),
+  .btn-secondary:hover:not(:disabled) {
+    background: rgba(56, 189, 248, 0.12);
+    border-color: rgba(56, 189, 248, 0.4);
+    color: #e0f2fe;
+  }
+  button.danger:hover:not(:disabled),
+  button.danger-btn:hover:not(:disabled),
+  .danger-btn:hover:not(:disabled) {
+    box-shadow: 0 6px 20px rgba(239, 68, 68, 0.42);
+  }
+  .nav-pill-btn:hover:not(.active) {
+    background: rgba(255, 255, 255, 0.08) !important;
+    color: #f8fafc !important;
+  }
+  .cosmic-toggle-pill:hover {
+    background: rgba(99, 102, 241, 0.28);
+    border-color: rgba(167, 139, 250, 0.6);
+    color: #fff;
+  }
+  #btnUserLink4mReward:hover:not(:disabled),
+  #btnExpiredLink4mReward:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 20px rgba(56, 189, 248, 0.32);
+    filter: brightness(1.08);
+  }
+  .kpi-card:hover {
+    transform: translateY(-3px);
+    border-color: rgba(56, 189, 248, 0.40);
+    box-shadow: 0 18px 42px -8px rgba(0, 0, 0, 0.68), 0 0 20px rgba(56, 189, 248, 0.14);
+  }
+  .bot-card:hover {
+    transform: translateY(-4px);
+    border-color: rgba(56, 189, 248, 0.48);
+    box-shadow: 0 22px 52px -6px rgba(0, 0, 0, 0.75), 0 0 28px rgba(56, 189, 248, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  }
+  .bot-tag-chip:hover {
+    background: rgba(167, 139, 250, 0.26);
+    border-color: rgba(167, 139, 250, 0.55);
+  }
+  .bot-mini-btn:hover {
+    background: rgba(255, 255, 255, 0.14);
+    color: #fff;
+  }
+  .bot-mini-btn.danger:hover {
+    background: #ef4444;
+    color: #fff;
+  }
+  .bot-action-chip:hover:not(:disabled) {
+    background: rgba(14, 165, 233, 0.36);
+    border-color: #38bdf8;
+    color: #fff;
+  }
+  .bot-ip-pill:hover {
+    background: rgba(192, 132, 252, 0.24);
+    border-color: #c084fc;
+  }
+  .vital-card:hover {
+    background: rgba(255, 255, 255, 0.055);
+    border-color: rgba(56, 189, 248, 0.28);
+  }
+  .card-quick-actions .card-btn:hover {
+    transform: translateY(-1.5px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  }
+  .detail-link-btn:hover {
+    background: #0284c7 !important;
+    border-color: #38bdf8 !important;
+    color: #fff !important;
+  }
+  .back-btn:hover {
+    background: rgba(56, 189, 248, 0.3) !important;
+    color: #fff !important;
+  }
+  .bot-check-item:hover {
+    background: rgba(56, 189, 248, 0.1);
+    border-color: rgba(56, 189, 248, 0.3);
+  }
+  .announcement-close-btn:hover {
+    background: rgba(239, 68, 68, 0.2) !important;
+    border-color: rgba(239, 68, 68, 0.4) !important;
+    color: #fca5a5 !important;
+  }
+  .announcement-ack-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 0 28px rgba(37, 99, 235, 0.6) !important;
+  }
+  .profile-menu-item:hover {
+    background: rgba(255, 255, 255, 0.08) !important;
+    border-color: rgba(255, 255, 255, 0.12) !important;
+    color: #fff !important;
+  }
+  .profile-menu-item.danger:hover {
+    background: rgba(239, 68, 68, 0.18) !important;
+    border-color: rgba(239, 68, 68, 0.35) !important;
+    color: #fca5a5 !important;
+  }
+  .dropdown-top-logout-btn:hover {
+    background: #ef4444;
+    color: #fff;
+    box-shadow: 0 0 16px rgba(239, 68, 68, 0.5);
+  }
+  .big-tab-item:hover {
+    background: rgba(56, 189, 248, 0.12) !important;
+    border-color: rgba(56, 189, 248, 0.3) !important;
+  }
+  .chip:hover {
+    background: rgba(56, 189, 248, 0.16);
+    border-color: rgba(56, 189, 248, 0.5);
+    color: #e0f2fe;
+    transform: translateY(-2px);
+    box-shadow: 0 0 12px rgba(56, 189, 248, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  }
+  .copyable:hover {
+    border-color: rgba(56, 189, 248, 0.5) !important;
+    background: rgba(56, 189, 248, 0.1) !important;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3), 0 0 12px rgba(56, 189, 248, 0.25) !important;
+    transform: translateY(-2px);
+  }
+  .line:hover {
+    background: rgba(255, 255, 255, 0.04);
+  }
+  .equipment-slot:hover,
+  .inventory-slot:hover:not(.empty) {
+    border-color: rgba(56, 189, 248, 0.45);
+    background: rgba(22, 34, 54, 0.96);
+    transform: translateY(-1px);
+  }
+  .drop-zone:hover, #dropZone:hover {
+    border-color: #ef4444 !important;
+    background: rgba(35, 12, 18, 0.85) !important;
+    box-shadow: 0 0 20px rgba(239, 68, 68, 0.25) !important;
+    color: #fff;
+  }
+  .check-row:hover {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+  .kbot-discord-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 14px 30px rgba(88, 101, 242, 0.55);
+    filter: brightness(1.08);
+  }
+  .kbot-benefit-card:hover {
+    background: rgba(56, 189, 248, 0.07);
+    border-color: rgba(56, 189, 248, 0.3);
+    transform: translateX(4px) translateY(-1px);
+  }
+  body.theme-sunset .kpi-card:hover,
+  body.theme-sunset .bot-card:hover {
+    border-color: rgba(249, 115, 22, 0.55);
+    box-shadow: 0 22px 52px -8px rgba(0, 0, 0, 0.7), 0 0 28px rgba(249, 115, 22, 0.18);
+  }
+  body.theme-morning .kpi-card:hover,
+  body.theme-morning .bot-card:hover {
+    border-color: rgba(45, 212, 191, 0.55);
+    box-shadow: 0 22px 52px -8px rgba(0, 0, 0, 0.7), 0 0 28px rgba(45, 212, 191, 0.18);
+  }
 }
-.cosmic-toggle-pill {
-  display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px;
-  font-size: 11.5px; font-weight: 700; border-radius: 999px;
-  background: rgba(124, 58, 237, 0.16); border: 1px solid rgba(167, 139, 250, 0.35);
-  color: #ddd6fe; cursor: pointer; transition: all 0.2s ease;
-}
-.cosmic-toggle-pill:hover {
-  background: rgba(124, 58, 237, 0.28); border-color: rgba(167, 139, 250, 0.6); color: #fff;
-}
-.fleet-welcome-header {
-  background: linear-gradient(135deg, rgba(12, 20, 38, 0.78) 0%, rgba(7, 12, 24, 0.9) 100%) !important;
-  border: 1px solid rgba(56, 189, 248, 0.18) !important;
-  box-shadow: 0 18px 45px -10px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.12) !important;
-}
-.fleet-resource-bar {
-  background: linear-gradient(90deg, rgba(11, 19, 35, 0.82) 0%, rgba(14, 24, 44, 0.78) 50%, rgba(11, 19, 35, 0.82) 100%) !important;
-  border: 1px solid rgba(56, 189, 248, 0.16) !important; border-radius: 16px !important;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
-}
-.user-rental-dashboard-banner {
-  background: linear-gradient(135deg, rgba(14, 26, 48, 0.86) 0%, rgba(9, 16, 32, 0.92) 100%) !important;
-  border: 1px solid rgba(56, 189, 248, 0.38) !important; border-radius: 16px !important;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45), 0 0 25px rgba(14, 165, 233, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.12) !important;
-}
-.kpi-card {
-  background: linear-gradient(175deg, rgba(14, 23, 42, 0.84) 0%, rgba(8, 13, 25, 0.94) 100%) !important;
-  border: 1px solid rgba(255, 255, 255, 0.085) !important;
-  box-shadow: 0 14px 36px -6px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.1) !important;
-}
-.kpi-value {
-  font-family: 'JetBrains Mono', ui-monospace, monospace !important;
-  font-variant-numeric: tabular-nums !important; font-weight: 850 !important;
-}
-.fleet-toolbar {
-  background: rgba(10, 17, 32, 0.84) !important;
-  border: 1px solid rgba(255, 255, 255, 0.08) !important; border-radius: 16px !important;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.07) !important;
-}
-.bot-card {
-  background: linear-gradient(168deg, rgba(13, 22, 38, 0.88) 0%, rgba(7, 12, 22, 0.96) 100%) !important;
-  backdrop-filter: blur(16px) saturate(150%); -webkit-backdrop-filter: blur(16px) saturate(150%);
-  border: 1px solid rgba(255, 255, 255, 0.085) !important; border-radius: 18px !important;
-  box-shadow: 0 14px 38px -6px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.09) !important;
-}
-.bot-card:hover {
-  transform: translateY(-4px) !important; border-color: rgba(56, 189, 248, 0.48) !important;
-  box-shadow: 0 22px 52px -6px rgba(0, 0, 0, 0.75), 0 0 28px rgba(56, 189, 248, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.15) !important;
-}
-.bot-card.status-afk { border-left: 3.5px solid #10b981 !important; }
-.bot-card.status-waiting { border-left: 3.5px solid #f59e0b !important; }
-.bot-card.status-offline { border-left: 3.5px solid #ef4444 !important; }
-.bot-card.status-unreachable { border-left: 3.5px solid #f97316 !important; }
 
-/* ==========================================================================
-   4. DETAIL PAGE PANELS, USER/AUDIT TABLES & ENTERPRISE MODALS
-   ========================================================================== */
-.panel, .full-page-card {
-  background: linear-gradient(170deg, rgba(12, 20, 36, 0.86) 0%, rgba(7, 12, 23, 0.94) 100%) !important;
-  border: 1px solid rgba(255, 255, 255, 0.085) !important; border-radius: 18px !important;
-  box-shadow: 0 16px 40px -8px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.09) !important;
-  backdrop-filter: blur(18px) saturate(160%) !important; -webkit-backdrop-filter: blur(18px) saturate(160%) !important;
+@media (prefers-reduced-motion: no-preference) {
+  .app-cosmic-nebula.n1 { animation: auroraFloat 22s ease-in-out infinite; }
+  .app-cosmic-nebula.n2 { animation: auroraFloat 28s ease-in-out infinite reverse; }
+  .pulse-status-dot::after,
+  .dot::after { animation: sonarPulse 2.2s ease-out infinite; }
+  .pulse-status-dot.yellow::after,
+  .dot.yellow::after { animation-duration: 1.8s; }
+  .pulse-status-dot.red::after,
+  .dot.red::after { animation-duration: 2.5s; }
+  .pulse-status-dot.blue::after,
+  .dot.blue::after { animation-duration: 3s; }
+  .hp-bar-fill::after,
+  .bar > span::after,
+  .bar>span::after { animation: barShimmer 2.4s ease-in-out infinite; }
+  .announcement-bell-badge { animation: bellFloat 3s ease-in-out infinite; }
+  .kbot-pulse-dot::after { animation: sonarPulse 2s ease-out infinite; }
+  .kbot-gradient-text { animation: textShine 6s linear infinite; }
+  .inventory-slot.selected-for-move,
+  .equipment-slot.selected-for-move { animation: movePulse 1.5s infinite; }
 }
-.info-item {
-  background: rgba(6, 11, 22, 0.72) !important;
-  border: 1px solid rgba(255, 255, 255, 0.065) !important; border-radius: 12px !important;
-}
-.user-table-wrap {
-  background: rgba(7, 12, 24, 0.84) !important;
-  border: 1px solid rgba(255, 255, 255, 0.09) !important; border-radius: 16px !important;
-  backdrop-filter: blur(16px) !important;
-}
-.user-table th {
-  background: rgba(11, 19, 35, 0.96) !important;
-  border-bottom: 1px solid rgba(56, 189, 248, 0.18) !important;
-}
-.modal {
-  background: rgba(2, 5, 14, 0.78) !important;
-  backdrop-filter: blur(14px) saturate(160%) !important; -webkit-backdrop-filter: blur(14px) saturate(160%) !important;
-}
-.modal-card {
-  background: linear-gradient(165deg, rgba(13, 22, 40, 0.94) 0%, rgba(7, 12, 24, 0.98) 100%) !important;
-  border: 1px solid rgba(56, 189, 248, 0.36) !important;
-  box-shadow: 0 32px 90px rgba(0, 0, 0, 0.88), 0 0 50px rgba(14, 165, 233, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.16) !important;
-}
+
 @media (prefers-reduced-motion: reduce) {
-  .app-cosmic-video, .app-cosmic-canvas { display: none !important; }
+  .app-cosmic-video,
+  .app-cosmic-canvas,
+  .app-cosmic-nebula {
+    display: none !important;
+  }
+  .modal-card,
+  .login-card,
+  .restriction-card,
+  .user-announcement-card,
+  .kbot-portal-wrapper,
+  .user-profile-dropdown,
+  .full-page-section,
+  .toast,
+  .account-restriction-overlay {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+  .spinner-sm {
+    animation-duration: 6s;
+  }
+}
+
+/* ==========================================================================
+   UNIFIED RESPONSIVE BREAKPOINTS & COARSE POINTER TARGETS
+   ========================================================================== */
+@media (max-width: 920px) {
+  .kbot-portal-wrapper {
+    flex-direction: column;
+    max-width: 560px;
+  }
+  .kbot-landing-col {
+    border-right: none;
+    border-bottom: 1px solid rgba(56, 189, 248, 0.12);
+    padding: 24px 20px;
+  }
+  .kbot-login-col {
+    padding: 24px 20px;
+  }
+}
+
+@media (max-width: 900px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  :root {
+    --target-size: 44px;
+  }
+  .app {
+    padding: 12px 12px 44px;
+  }
+  .global-header {
+    padding: 10px 12px;
+    gap: 8px;
+  }
+  .global-header-left {
+    width: 100%;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .global-nav-pills {
+    width: 100%;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    padding-bottom: 4px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .global-nav-pills::-webkit-scrollbar {
+    display: none;
+  }
+  .nav-pill-btn {
+    white-space: nowrap;
+    flex-shrink: 0;
+    min-height: 44px;
+    padding: 8px 14px !important;
+    font-size: 12px !important;
+  }
+  .global-header-right {
+    width: 100%;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .user-profile-dropdown {
+    right: 0;
+    max-width: calc(100dvw - 24px);
+  }
+  .fleet-welcome-header {
+    padding: 16px;
+    border-radius: 16px;
+  }
+  .fleet-welcome-title {
+    font-size: 17px;
+  }
+  .fleet-welcome-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .fleet-resource-bar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    padding: 12px 14px;
+  }
+  .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .kpi-card {
+    padding: 12px 14px;
+  }
+  .kpi-value {
+    font-size: 22px;
+  }
+  .fleet-toolbar {
+    padding: 10px 12px;
+  }
+  .fleet-toolbar-primary,
+  .fleet-toolbar-tools {
+    width: 100%;
+  }
+  .fleet-search-filter-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .fleet-search-sort-wrap {
+    width: 100%;
+    flex-basis: auto;
+  }
+  .search-box,
+  .sort-select {
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 0;
+  }
+  .bot-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .card-quick-actions button,
+  .controls button,
+  .bot-action-chip,
+  .tab-btn,
+  .sub-tab-btn,
+  .audit-tab-btn,
+  .filter-chip,
+  .chip,
+  .cosmic-toggle-pill,
+  .user-profile-btn {
+    min-height: 44px;
+  }
+  .controls button {
+    flex: 1 1 calc(50% - 8px);
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+  .bot-card-topbar {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .schedule-row-top {
+    grid-template-columns: 32px minmax(0, 1fr);
+  }
+  .schedule-inline {
+    grid-column: 1 / -1;
+  }
+  .schedule-inline .action-select,
+  .schedule-inline .time-input,
+  .schedule-inline .minutes-input {
+    flex: 1 1 90px;
+    width: auto;
+  }
+  #detailRemoteGuiSlots {
+    min-width: 340px;
+  }
+  .slot-grid {
+    grid-template-columns: repeat(9, minmax(34px, 1fr));
+    overflow-x: auto;
+    padding-bottom: 6px;
+  }
+  .user-table th,
+  .user-table td {
+    padding: 9px 10px;
+    font-size: 12px;
+  }
+  .modal {
+    padding: 10px;
+    align-items: flex-end;
+  }
+  .modal-card {
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: 92dvh;
+    border-radius: 20px 20px 14px 14px;
+    padding: 18px 16px;
+  }
+  .log, .chat-log {
+    height: 300px;
+    font-size: 11.5px;
+  }
+  .panel {
+    padding: 14px 12px;
+  }
+  .info,
+  .inventory-grid {
+    grid-template-columns: 1fr;
+  }
+  .summary-grid {
+    grid-template-columns: 1fr;
+  }
+  input, select, textarea {
+    font-size: 16px;
+  }
+}
+
+@media (max-width: 680px) {
+  .equipment-row {
+    grid-template-columns: repeat(5, minmax(46px, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  .kbot-steps-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .kbot-step-arrow {
+    transform: rotate(90deg);
+    text-align: center;
+  }
+  .kbot-commitments-box {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+}
+
+@media (max-width: 480px) {
+  /* Disable costly backdrop-filter & ambient stage layers on small mobile GPUs */
+  .global-header,
+  .fleet-welcome-header,
+  .fleet-resource-bar,
+  .user-rental-dashboard-banner,
+  .kpi-card,
+  .fleet-toolbar,
+  .bot-card,
+  .panel,
+  .user-table-wrap,
+  .modal,
+  .modal-card,
+  .user-announcement-card,
+  .login-card,
+  .kbot-portal-wrapper,
+  .user-profile-dropdown,
+  .chip,
+  .app-footer,
+  .account-restriction-overlay,
+  .toast {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  .global-header {
+    background: #070c1a;
+  }
+  .fleet-welcome-header,
+  .fleet-resource-bar,
+  .user-rental-dashboard-banner,
+  .kpi-card,
+  .fleet-toolbar,
+  .bot-card,
+  .panel,
+  .user-table-wrap,
+  .modal-card,
+  .login-card,
+  .kbot-portal-wrapper,
+  .user-profile-dropdown,
+  .app-footer {
+    background: rgba(9, 15, 28, 0.96);
+  }
+  .app-cosmic-video,
+  .app-cosmic-nebula {
+    display: none !important;
+  }
+
+  .app {
+    padding: 8px 8px 36px;
+  }
+  .global-brand-text {
+    font-size: 13.5px;
+  }
+  .bot-card {
+    padding: 12px 11px;
+    border-radius: 14px;
+  }
+  .bot-card-topbar {
+    gap: 6px;
+    margin-bottom: 6px;
+  }
+  .bot-card-name {
+    font-size: 14px;
+  }
+  .bot-status-pill {
+    font-size: 10.5px;
+    padding: 3px 7px;
+  }
+  .bot-vitals-matrix {
+    gap: 5px;
+  }
+  .vital-card {
+    padding: 6px 8px;
+  }
+  .vital-val {
+    font-size: 11px;
+  }
+  .card-quick-actions {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .card-quick-actions button {
+    flex: 1 1 calc(50% - 6px);
+    min-height: 44px;
+    font-size: 12px;
+  }
+  .controls button {
+    flex: 1 1 100%;
+    min-height: 44px;
+    font-size: 12.5px;
+  }
+  .nav-pill-btn {
+    min-height: 44px;
+    padding: 8px 12px !important;
+    font-size: 12px !important;
+  }
+  .bot-mini-btn {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 6px 10px;
+  }
+  .kpi-grid {
+    gap: 8px;
+  }
+  .kpi-card {
+    padding: 11px 12px;
+  }
+  .kpi-title {
+    font-size: 10px;
+  }
+  .kpi-value {
+    font-size: 19px;
+  }
+  .fleet-resource-bar {
+    gap: 8px;
+    padding: 10px;
+  }
+  .fleet-res-item {
+    font-size: 11px;
+    gap: 6px;
+  }
+  .user-rental-dashboard-banner {
+    padding: 12px !important;
+    flex-direction: column;
+    align-items: stretch !important;
+  }
+  #btnUserLink4mReward,
+  #btnExpiredLink4mReward {
+    width: 100%;
+    justify-content: center;
+    padding: 11px 14px !important;
+    font-size: 13px !important;
+  }
+  .user-profile-dropdown {
+    position: fixed;
+    top: 64px;
+    left: 12px;
+    right: 12px;
+    width: auto;
+    max-width: none;
+  }
+  .kbot-landing-col,
+  .kbot-login-col {
+    padding: 20px 14px;
+  }
+  .toast {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    max-width: none;
+  }
+}
+
+@media (pointer: coarse) {
+  button,
+  .btn,
+  .nav-pill-btn,
+  .tab-btn,
+  .sub-tab-btn,
+  .audit-tab-btn,
+  .filter-chip,
+  .chip,
+  .bot-action-chip,
+  .quick-renew-btn,
+  .btn-peek,
+  .password-toggle-btn,
+  .announcement-close-btn {
+    min-block-size: 44px;
+  }
 }
 </style>
 </head>
 <body>
 <div id="appCosmicStage" class="app-cosmic-stage" aria-hidden="true">
-  <video id="appGalaxyVideo" class="app-cosmic-video" autoplay loop muted playsinline preload="auto" onerror="this.style.display='none'">
-    <source src="https://cdn.pixabay.com/video/2020/04/18/36466-410655390_large.mp4" type="video/mp4">
+  <video id="appGalaxyVideo" class="app-cosmic-video" autoplay loop muted playsinline preload="auto">
     <source src="https://assets.mixkit.co/videos/preview/mixkit-stars-in-space-1610-large.mp4" type="video/mp4">
   </video>
   <div class="app-cosmic-nebula n1"></div>
@@ -4480,7 +4416,7 @@ body.theme-morning .cosmic-toggle-pill {
     <!-- CỘT PHẢI: FORM ĐĂNG NHẬP -->
     <div class="kbot-login-col">
       <div class="login-card" style="position:relative; width:100%; max-width:400px; box-shadow:none; padding:20px 10px; background:transparent; border:none;">
-        <button type="button" id="loginGateCloseBtn" onclick="if(currentUser) hideLoginGate();" style="display:none;position:absolute;top:-10px;right:0;background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;padding:4px 8px;" title="Đóng">✕</button>
+        <button type="button" id="loginGateCloseBtn" aria-label="Đóng cổng đăng nhập" onclick="if(currentUser) hideLoginGate();" style="display:none;position:absolute;top:-6px;right:-4px;min-width:44px;min-height:44px;background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;padding:8px;" title="Đóng">✕</button>
         <div class="login-header" style="margin-bottom:14px;">
           <div class="login-icon" style="font-size:32px;">🛡️</div>
           <h2 class="login-title" style="font-size:19px;">CỔNG ĐIỀU KHIỂN KBOT</h2>
@@ -4488,19 +4424,19 @@ body.theme-morning .cosmic-toggle-pill {
         </div>
 
         <!-- TAB SWITCHER: LOGIN vs REGISTER -->
-        <div style="display:flex;gap:6px;margin-bottom:14px;background:rgba(255,255,255,0.04);padding:4px;border-radius:10px;">
-          <button type="button" id="tabBtnLogin" onclick="switchLoginGateTab('login')" style="flex:1;padding:8px;border-radius:8px;font-size:13px;font-weight:750;background:rgba(56,189,248,0.2);color:#38bdf8;border:1px solid rgba(56,189,248,0.4);cursor:pointer;">
+        <div role="tablist" aria-label="Tùy chọn tài khoản" style="display:flex;gap:6px;margin-bottom:14px;background:rgba(255,255,255,0.04);padding:4px;border-radius:10px;">
+          <button type="button" id="tabBtnLogin" role="tab" aria-selected="true" aria-controls="loginForm" onclick="switchLoginGateTab('login')" style="flex:1;padding:8px;border-radius:8px;font-size:13px;font-weight:750;background:rgba(56,189,248,0.2);color:#38bdf8;border:1px solid rgba(56,189,248,0.4);cursor:pointer;">
             🚀 Đăng Nhập
           </button>
-          <button type="button" id="tabBtnRegister" onclick="switchLoginGateTab('register')" style="flex:1;padding:8px;border-radius:8px;font-size:13px;font-weight:750;background:transparent;color:#94a3b8;border:1px solid transparent;cursor:pointer;">
+          <button type="button" id="tabBtnRegister" role="tab" aria-selected="false" aria-controls="registerForm" onclick="switchLoginGateTab('register')" style="flex:1;padding:8px;border-radius:8px;font-size:13px;font-weight:750;background:transparent;color:#94a3b8;border:1px solid transparent;cursor:pointer;">
             📝 Đăng Ký Mới
           </button>
         </div>
 
-        <div id="loginAlert" class="login-alert hidden"></div>
+        <div id="loginAlert" class="login-alert hidden" role="alert" aria-atomic="true"></div>
 
         <!-- FORM ĐĂNG NHẬP -->
-        <form id="loginForm" onsubmit="handleLoginSubmit(event)" style="display:flex;flex-direction:column;gap:14px;text-align:left;">
+        <form id="loginForm" role="tabpanel" aria-labelledby="tabBtnLogin" onsubmit="handleLoginSubmit(event)" style="display:flex;flex-direction:column;gap:14px;text-align:left;">
           <div class="form-row" style="margin-bottom:0;">
             <label for="loginUsername">TÊN ĐĂNG NHẬP</label>
             <input id="loginUsername" type="text" autocomplete="username" placeholder="Nhập tên đăng nhập..." required autofocus>
@@ -4509,7 +4445,7 @@ body.theme-morning .cosmic-toggle-pill {
             <label for="loginPassword">MẬT KHẨU TRUY CẬP</label>
             <div class="password-input-wrap">
               <input id="loginPassword" type="password" autocomplete="current-password" placeholder="Nhập mật khẩu..." required>
-              <button type="button" class="password-toggle-btn" onclick="togglePasswordVisibility('loginPassword', this)">👁</button>
+              <button type="button" class="password-toggle-btn" aria-label="Hiện mật khẩu" aria-pressed="false" onclick="togglePasswordVisibility('loginPassword', this)">👁</button>
             </div>
           </div>
           <div class="form-row" style="margin-bottom:0;">
@@ -4530,23 +4466,23 @@ body.theme-morning .cosmic-toggle-pill {
         </form>
 
         <!-- FORM ĐĂNG KÝ -->
-        <form id="registerForm" onsubmit="handleInAppRegisterSubmit(event)" style="display:none;flex-direction:column;gap:14px;text-align:left;">
+        <form id="registerForm" role="tabpanel" aria-labelledby="tabBtnRegister" onsubmit="handleInAppRegisterSubmit(event)" style="display:none;flex-direction:column;gap:14px;text-align:left;">
           <div class="form-row" style="margin-bottom:0;">
             <label for="regUsername">TÊN ĐĂNG NHẬP MỚI</label>
             <input id="regUsername" type="text" autocomplete="username" placeholder="Chữ, số, gạch dưới (3-32 ký tự)..." required>
           </div>
           <div class="form-row" style="margin-bottom:0;">
-            <label for="regPassword">MẬT KHẨU (TỐI THIỂU 5 KÝ TỰ)</label>
+            <label for="regPassword">MẬT KHẨU (TỐI THIỂU 6 KÝ TỰ)</label>
             <div class="password-input-wrap">
-              <input id="regPassword" type="password" autocomplete="new-password" placeholder="Tối thiểu 5 ký tự (chữ hoặc số, phân biệt hoa thường)..." required>
-              <button type="button" class="password-toggle-btn" onclick="togglePasswordVisibility('regPassword', this)">👁</button>
+              <input id="regPassword" type="password" minlength="6" autocomplete="new-password" placeholder="Tối thiểu 6 ký tự (chữ hoặc số, phân biệt hoa thường)..." required>
+              <button type="button" class="password-toggle-btn" aria-label="Hiện mật khẩu" aria-pressed="false" onclick="togglePasswordVisibility('regPassword', this)">👁</button>
             </div>
           </div>
           <div class="form-row" style="margin-bottom:0;">
             <label for="regConfirmPassword">XÁC NHẬN MẬT KHẨU</label>
             <div class="password-input-wrap">
-              <input id="regConfirmPassword" type="password" autocomplete="new-password" placeholder="Nhập lại mật khẩu..." required>
-              <button type="button" class="password-toggle-btn" onclick="togglePasswordVisibility('regConfirmPassword', this)">👁</button>
+              <input id="regConfirmPassword" type="password" minlength="6" autocomplete="new-password" placeholder="Nhập lại mật khẩu..." required>
+              <button type="button" class="password-toggle-btn" aria-label="Hiện mật khẩu" aria-pressed="false" onclick="togglePasswordVisibility('regConfirmPassword', this)">👁</button>
             </div>
           </div>
           <div class="form-row" style="margin-bottom:0;">
@@ -4572,10 +4508,10 @@ body.theme-morning .cosmic-toggle-pill {
 </div>
 
 <!-- OVERLAY TẠM KHÓA TÀI KHOẢN (BLUR BACKGROUND) -->
-<div id="accountLockedOverlay" class="account-restriction-overlay hidden">
+<div id="accountLockedOverlay" class="account-restriction-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="lockedOverlayTitle">
   <div class="restriction-card">
-    <div class="restriction-icon">🔒</div>
-    <h2 class="restriction-title">TÀI KHOẢN ĐANG BỊ TẠM KHÓA</h2>
+    <div class="restriction-icon" aria-hidden="true">🔒</div>
+    <h2 id="lockedOverlayTitle" class="restriction-title">TÀI KHOẢN ĐANG BỊ TẠM KHÓA</h2>
     <div class="restriction-subtitle">Quyền truy cập bảng điều khiển của bạn đã bị Quản trị viên tạm dừng.</div>
     <div class="restriction-reason-box">
       <div class="reason-label">📢 LỜI NHẮN TỪ QUẢN TRỊ VIÊN:</div>
@@ -4593,18 +4529,18 @@ body.theme-morning .cosmic-toggle-pill {
 </div>
 
 <!-- OVERLAY HẾT HẠN THUÊ BOT (BLUR BACKGROUND) -->
-<div id="accountExpiredOverlay" class="account-restriction-overlay hidden">
+<div id="accountExpiredOverlay" class="account-restriction-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="expiredOverlayTitle">
   <div class="restriction-card">
-    <div class="restriction-icon">⏳</div>
-    <h2 class="restriction-title">GÓI THUÊ BOT ĐÃ HẾT HẠN</h2>
+    <div class="restriction-icon" aria-hidden="true">⏳</div>
+    <h2 id="expiredOverlayTitle" class="restriction-title">GÓI THUÊ BOT ĐÃ HẾT HẠN</h2>
     <div class="restriction-subtitle">Thời hạn sử dụng dịch vụ bot AFK của bạn đã kết thúc. Vui lòng nạp Mã Key để mở khóa hoặc liên hệ Discord.</div>
     <div class="expired-redeem-box">
-      <label>KÍCH HOẠT &amp; GIA HẠN NGAY BẰNG MÃ KEY</label>
+      <label for="expiredKeyInput">KÍCH HOẠT &amp; GIA HẠN NGAY BẰNG MÃ KEY</label>
       <div style="display:flex;gap:8px;margin-top:6px;">
         <input type="text" id="expiredKeyInput" placeholder="Nhập mã Key gia hạn..." style="text-transform:uppercase;flex:1;">
-        <button type="button" class="primary" onclick="redeemKeyFromExpiredOverlay()">🚀 Kích Hoạt</button>
+        <button type="button" id="expiredRedeemBtn" class="primary" onclick="redeemKeyFromExpiredOverlay()">🚀 Kích Hoạt</button>
       </div>
-      <div id="expiredKeyAlert" class="login-alert hidden" style="margin-top:8px;"></div>
+      <div id="expiredKeyAlert" class="login-alert hidden" role="alert" aria-atomic="true" style="margin-top:8px;"></div>
     </div>
 
     <!-- LINK4M REWARD BOX FOR EXPIRED ACCOUNTS -->
@@ -4659,14 +4595,14 @@ body.theme-morning .cosmic-toggle-pill {
 
       <!-- ACCOUNT MENU BUTTON - PINNED SAT GOC PHAI -->
       <div class="user-profile-menu-wrap" style="position:relative;">
-        <button id="globalUserProfileBtn" class="user-profile-btn" onclick="toggleGlobalProfileDropdown(event)">
+        <button type="button" id="globalUserProfileBtn" class="user-profile-btn" aria-haspopup="true" aria-expanded="false" aria-controls="globalUserProfileDropdown" onclick="toggleGlobalProfileDropdown(event)">
           <span class="user-avatar-badge" id="globalUserAvatarBadge">👑</span>
           <span class="user-profile-name" id="globalUserProfileName">admin</span>
           <span class="user-profile-arrow">▾</span>
         </button>
 
         <!-- DROPDOWN MENU (RIGHT: 0; EXPANDS SAFELY INWARD) -->
-        <div id="globalUserProfileDropdown" class="user-profile-dropdown hidden" onclick="event.stopPropagation()">
+        <div id="globalUserProfileDropdown" class="user-profile-dropdown hidden">
           <!-- DANG XUAT O NGAY DAU TAB PHIA TREN -->
           <div class="dropdown-top-logout-wrap">
             <button type="button" class="dropdown-top-logout-btn" onclick="logout()">
@@ -4686,34 +4622,34 @@ body.theme-morning .cosmic-toggle-pill {
 
           <div class="profile-dropdown-menu">
             <div class="profile-menu-section-title">CHUYỂN TRANG NHANH</div>
-            <div class="big-tab-item" onclick="navigateTo('dashboard'); closeGlobalProfileDropdown();">
+            <button type="button" class="big-tab-item" onclick="navigateTo('dashboard'); closeGlobalProfileDropdown();">
               <span class="menu-icon">📊</span>
               <div class="menu-text">
                 <strong>Dashboard</strong>
                 <small>Xem và điều khiển danh sách bot</small>
               </div>
-            </div>
-            <div class="big-tab-item admin-only" onclick="navigateTo('users'); closeGlobalProfileDropdown();">
+            </button>
+            <button type="button" class="big-tab-item admin-only" onclick="navigateTo('users'); closeGlobalProfileDropdown();">
               <span class="menu-icon">👥</span>
               <div class="menu-text">
                 <strong>Quản Lý User &amp; Key</strong>
                 <small>Cấp quyền, gia hạn, xem pass, khóa</small>
               </div>
-            </div>
-            <div class="big-tab-item admin-only" onclick="navigateTo('audit'); closeGlobalProfileDropdown();">
+            </button>
+            <button type="button" class="big-tab-item admin-only" onclick="navigateTo('audit'); closeGlobalProfileDropdown();">
               <span class="menu-icon">📋</span>
               <div class="menu-text">
                 <strong>Nhật Ký Hoạt Động (Audit)</strong>
                 <small>Lịch sử thao tác, lệnh và can thiệp</small>
               </div>
-            </div>
-            <div class="big-tab-item admin-only" onclick="openSupabaseModal(); closeGlobalProfileDropdown();">
+            </button>
+            <button type="button" class="big-tab-item admin-only" onclick="openSupabaseModal(); closeGlobalProfileDropdown();">
               <span class="menu-icon">☁️</span>
               <div class="menu-text">
                 <strong>Supabase Cloud Database</strong>
                 <small>Lưu trữ vĩnh viễn, chống mất dữ liệu khi restart</small>
               </div>
-            </div>
+            </button>
 
             <div class="profile-dropdown-divider admin-only"></div>
             <div class="profile-menu-section-title admin-only">TIỆN ÍCH QUẢN TRỊ</div>
@@ -4781,10 +4717,10 @@ body.theme-morning .cosmic-toggle-pill {
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-        <button id="btnUserLink4mReward" class="small secondary" onclick="startLink4mReward(this)" style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;font-weight:700;color:#38bdf8;border-color:rgba(56,189,248,0.4);background:rgba(56,189,248,0.12);" title="Vượt link quảng cáo để nhận thêm 12 giờ sử dụng">
+        <button type="button" id="btnUserLink4mReward" class="small secondary" onclick="startLink4mReward(this)" style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;font-weight:700;color:#38bdf8;border-color:rgba(56,189,248,0.4);background:rgba(56,189,248,0.12);" title="Vượt link quảng cáo để nhận thêm 12 giờ sử dụng">
           <span>⚡</span> Vượt link +12h <span id="link4mUsageBadge" style="font-size:11px;background:rgba(56,189,248,0.25);padding:2px 6px;border-radius:4px;color:#fff;">0/2 lượt</span>
         </button>
-        <button class="small primary" onclick="openRenewModal()" style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;font-weight:600;">
+        <button type="button" class="small primary" onclick="openRenewModal()" style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;font-weight:600;">
           <span>🎁</span> Nạp Key Gia Hạn
         </button>
       </div>
@@ -4884,36 +4820,36 @@ body.theme-morning .cosmic-toggle-pill {
     <!-- FLEET COMMAND CENTER: ROW 1 (PRIMARY BATCH CONTROLS & UTILITIES) -->
     <div class="fleet-toolbar">
       <div class="fleet-toolbar-primary">
-        <button id="allStartButton" class="primary" onclick="runAllAction('start')">▶ Chạy tất cả</button>
-        <button id="allStopButton" class="danger" onclick="runAllAction('stop')">⏹ Dừng tất cả</button>
-        <button id="allRestartButton" class="small" onclick="runAllAction('restart')">↻ Chạy lại tất cả</button>
-        <button class="small warning-btn" onclick="reconnectOfflineBots()" title="Chỉ kết nối lại các bot đang Offline hoặc Kicked">⚡ Reconnect lỗi</button>
-        <button id="btnCleanDeadBots" class="small danger-btn admin-only" onclick="cleanDeadBots()" title="Tự động phát hiện và dọn dẹp các bot chết (404/Unreachable)">🧹 Dọn bot chết</button>
+        <button type="button" id="allStartButton" class="primary" onclick="runAllAction('start')">▶ Chạy tất cả</button>
+        <button type="button" id="allStopButton" class="danger" onclick="runAllAction('stop')">⏹ Dừng tất cả</button>
+        <button type="button" id="allRestartButton" class="small" onclick="runAllAction('restart')">↻ Chạy lại tất cả</button>
+        <button type="button" class="small warning-btn" onclick="reconnectOfflineBots()" title="Chỉ kết nối lại các bot đang Offline hoặc Kicked">⚡ Reconnect lỗi</button>
+        <button type="button" id="btnCleanDeadBots" class="small danger-btn admin-only" onclick="cleanDeadBots()" title="Tự động phát hiện và dọn dẹp các bot chết (404/Unreachable)">🧹 Dọn bot chết</button>
       </div>
       <div class="fleet-toolbar-tools">
-        <button class="small" onclick="openBroadcastModal()" title="Bắn lệnh hàng loạt tới toàn bộ bot">📡 Broadcast</button>
-        <button id="soundAlertBtn" class="small sound-btn" onclick="toggleSoundAlert()">🔕 Cảnh báo: TẮT</button>
-        <button id="btnUserRenewKey" class="small user-only" onclick="openRenewModal()" title="Nhập mã key gia hạn hạn thuê">🎁 Nhập Key</button>
-        <button class="small admin-only" onclick="openKeyManagementModal()" title="Quản lý mã key kích hoạt / gia hạn">🎟️ Quản Lý Key</button>
-        <button class="small admin-only" onclick="openWebhookModal()" title="Cài đặt thông báo Discord / Telegram khi bot offline">🔔 Webhook</button>
-        <button class="small admin-only" onclick="exportBotList()" title="Sao lưu danh sách bot ra file JSON">📥 Backup</button>
-        <button class="small admin-only" onclick="triggerImport()" title="Khôi phục danh sách bot từ file JSON">📤 Restore</button>
+        <button type="button" class="small" onclick="openBroadcastModal()" title="Bắn lệnh hàng loạt tới toàn bộ bot">📡 Broadcast</button>
+        <button type="button" id="soundAlertBtn" class="small sound-btn" onclick="toggleSoundAlert()">🔕 Cảnh báo: TẮT</button>
+        <button type="button" id="btnUserRenewKey" class="small user-only" onclick="openRenewModal()" title="Nhập mã key gia hạn hạn thuê">🎁 Nhập Key</button>
+        <button type="button" class="small admin-only" onclick="openKeyManagementModal()" title="Quản lý mã key kích hoạt / gia hạn">🎟️ Quản Lý Key</button>
+        <button type="button" class="small admin-only" onclick="openWebhookModal()" title="Cài đặt thông báo Discord / Telegram khi bot offline">🔔 Webhook</button>
+        <button type="button" class="small admin-only" onclick="exportBotList()" title="Sao lưu danh sách bot ra file JSON">📥 Backup</button>
+        <button type="button" class="small admin-only" onclick="triggerImport()" title="Khôi phục danh sách bot từ file JSON">📤 Restore</button>
         <input type="file" id="importFileInput" accept=".json" style="display:none" onchange="handleImportFile(event)">
       </div>
     </div>
 
     <!-- FLEET SEARCH & FILTER: ROW 2 -->
     <div class="fleet-search-filter-row">
-      <div class="filter-tabs">
-        <button class="tab-btn active" id="tabAll" onclick="setStatusFilter('all')">Tất cả (<span id="countAll">0</span>)</button>
-        <button class="tab-btn" id="tabAfk" onclick="setStatusFilter('afk')">🟢 Đang AFK (<span id="countAfk">0</span>)</button>
-        <button class="tab-btn" id="tabOnline" onclick="setStatusFilter('online')">🟡 Online/Chờ (<span id="countOnline">0</span>)</button>
-        <button class="tab-btn" id="tabOffline" onclick="setStatusFilter('offline')">🔴 Offline/Kicked (<span id="countOffline">0</span>)</button>
-        <button class="tab-btn" id="tabUnreachable" onclick="setStatusFilter('unreachable')">⚠️ Lỗi/Unreachable (<span id="countUnreachable">0</span>)</button>
+      <div class="filter-tabs" role="tablist" aria-label="Lọc trạng thái bot">
+        <button type="button" class="tab-btn active" id="tabAll" onclick="setStatusFilter('all')">Tất cả (<span id="countAll">0</span>)</button>
+        <button type="button" class="tab-btn" id="tabAfk" onclick="setStatusFilter('afk')">🟢 Đang AFK (<span id="countAfk">0</span>)</button>
+        <button type="button" class="tab-btn" id="tabOnline" onclick="setStatusFilter('online')">🟡 Online/Chờ (<span id="countOnline">0</span>)</button>
+        <button type="button" class="tab-btn" id="tabOffline" onclick="setStatusFilter('offline')">🔴 Offline/Kicked (<span id="countOffline">0</span>)</button>
+        <button type="button" class="tab-btn" id="tabUnreachable" onclick="setStatusFilter('unreachable')">⚠️ Lỗi/Unreachable (<span id="countUnreachable">0</span>)</button>
       </div>
       <div class="fleet-search-sort-wrap">
-        <input id="searchInput" class="search-box" placeholder="🔍 Tìm bot (tên, user ingame, IP...)" oninput="filterBots()">
-        <select id="sortBotsSelect" class="sort-select" onchange="changeBotSort(this.value)">
+        <input id="searchInput" type="search" aria-label="Tìm kiếm bot theo tên, tài khoản ingame hoặc IP" class="search-box" placeholder="🔍 Tìm bot (tên, user ingame, IP...)" oninput="filterBots()">
+        <select id="sortBotsSelect" aria-label="Sắp xếp danh sách bot" class="sort-select" onchange="changeBotSort(this.value)">
           <option value="default">Sắp xếp: Mặc định</option>
           <option value="status">Sắp xếp: Ưu tiên AFK</option>
           <option value="uptime">Sắp xếp: Uptime cao nhất</option>
@@ -4935,7 +4871,7 @@ body.theme-morning .cosmic-toggle-pill {
   <section id="detailPage" class="hidden">
     <div class="detail-header">
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-        <button class="small back-btn" onclick="goHome()">← Quay về Dashboard</button>
+        <button type="button" class="small back-btn" onclick="goHome()">← Quay về Dashboard</button>
         <div class="title-wrap">
           <div style="display:flex;align-items:center;gap:10px;">
             <div id="detailTitle" class="detail-title">Bot</div>
@@ -4974,10 +4910,10 @@ body.theme-morning .cosmic-toggle-pill {
           <div class="info-item"><div class="info-label">RECONNECTS 🔄</div><div id="detailReconnects" class="info-value">-</div></div>
         </div>
         <div class="controls">
-          <button id="detailStartButton" class="primary" onclick="detailAction('start')">▶ Chạy</button>
-          <button id="detailStopButton" class="danger" onclick="detailAction('stop')">■ Dừng</button>
-          <button id="detailRestartButton" onclick="detailAction('restart')">↻ Chạy lại</button>
-          <button id="detailResetCustomerBtn" class="danger admin-only" onclick="resetCustomerBot()" style="margin-left:auto;background:rgba(239,68,68,0.2);border-color:rgba(239,68,68,0.5);" title="Dừng bot, xóa trắng tài khoản và lịch sử để bàn giao khách mới">🧹 Reset Bàn Giao Khách Mới</button>
+          <button type="button" id="detailStartButton" class="primary" onclick="detailAction('start')">▶ Chạy</button>
+          <button type="button" id="detailStopButton" class="danger" onclick="detailAction('stop')">■ Dừng</button>
+          <button type="button" id="detailRestartButton" onclick="detailAction('restart')">↻ Chạy lại</button>
+          <button type="button" id="detailResetCustomerBtn" class="danger admin-only" onclick="resetCustomerBot()" style="margin-left:auto;background:rgba(239,68,68,0.2);border-color:rgba(239,68,68,0.5);" title="Dừng bot, xóa trắng tài khoản và lịch sử để bàn giao khách mới">🧹 Reset Bàn Giao Khách Mới</button>
         </div>
         <div class="note" style="margin-top:12px;">
           <div style="font-weight:700;margin-bottom:6px;">Lịch sử tọa độ gần nhất</div>
@@ -5005,10 +4941,10 @@ body.theme-morning .cosmic-toggle-pill {
 
       <!-- PANEL 3: BẢNG CHAT (BÊN CẠNH EVENT LOG) -->
       <div class="panel">
-        <div class="chat-title-row"><h3>Chat</h3><button class="small danger" onclick="clearDetailChat()">Xóa lịch sử</button></div>
+        <div class="chat-title-row"><h3>Chat</h3><button type="button" class="small danger" onclick="clearDetailChat()">Xóa lịch sử</button></div>
         <div id="detailChatLogs" class="log"></div>
         <form class="chat-row chat-form" onsubmit="sendDetailMessage(event)">
-          <input id="detailMessageInput" autocomplete="off" placeholder="Nhập chat hoặc command... (↑↓ lịch sử)">
+          <input id="detailMessageInput" autocomplete="off" aria-label="Nhập chat hoặc lệnh điều khiển bot" placeholder="Nhập chat hoặc command... (↑↓ lịch sử)">
           <button class="primary" type="submit">Gửi</button>
         </form>
         <div class="chip-row">
@@ -5028,7 +4964,7 @@ body.theme-morning .cosmic-toggle-pill {
 
       <!-- PANEL 4: BẢNG EVENT LOG (BÊN CẠNH CHAT) -->
       <div class="panel">
-        <div class="chat-title-row"><h3>Event Log</h3><button class="small" onclick="exportBotLogs(event,selectedBotId)" style="margin-left:auto;margin-right:8px;">📥 Tải Log</button><button class="small danger" onclick="clearDetailLogs()">Xóa lịch sử</button></div>
+        <div class="chat-title-row"><h3>Event Log</h3><button type="button" class="small" onclick="exportBotLogs(event,selectedBotId)" style="margin-left:auto;margin-right:8px;">📥 Tải Log</button><button type="button" class="small danger" onclick="clearDetailLogs()">Xóa lịch sử</button></div>
         <div id="detailEventLogs" class="log"></div>
       </div>
 
@@ -5078,18 +5014,18 @@ body.theme-morning .cosmic-toggle-pill {
           <textarea id="detailSpawnCommands" rows="3" style="width:100%;box-sizing:border-box;border-radius:6px;padding:6px 8px;font-family:monospace;font-size:12px;background:rgba(15,23,42,0.6);border:1px solid var(--border);resize:vertical;" placeholder="/server town;&#10;/fly;&#10;/home afk" oninput="markDetailSettingsDirty()"></textarea>
           <div class="note" style="margin-top:4px;">Nếu hiển thị ******** nghĩa là tài khoản của bạn không có quyền đổi tài khoản Minecraft — giữ nguyên để không thay đổi cấu hình.</div>
         </div>
-        <button id="saveDetailSettingsButton" class="primary" onclick="saveDetailSettings()">Lưu setting</button>
+        <button type="button" id="saveDetailSettingsButton" class="primary" onclick="saveDetailSettings()">Lưu setting</button>
       </div>
 
       <div id="detailAutoChatPanel" class="panel">
-        <div class="chat-title-row"><h3>Auto Chat</h3><button class="small primary" onclick="addDetailAutoChatSchedule()">＋ Thêm</button></div>
+        <div class="chat-title-row"><h3>Auto Chat</h3><button type="button" class="small primary" onclick="addDetailAutoChatSchedule()">＋ Thêm</button></div>
         <div id="detailAutoChatSchedules" class="schedule-list"></div>
         <div class="note">Mỗi dòng là một lịch riêng. Kéo ⋮⋮ để đổi thứ tự; sửa trực tiếp rồi bấm Lưu Auto Chat.</div>
-        <button id="saveDetailAutoChatButton" class="primary compact-save" onclick="saveDetailAutoChat()">Lưu Auto Chat</button>
+        <button type="button" id="saveDetailAutoChatButton" class="primary compact-save" onclick="saveDetailAutoChat()">Lưu Auto Chat</button>
       </div>
 
       <div id="detailBotSchedulePanel" class="panel">
-        <div class="chat-title-row"><h3>Hẹn giờ Bot</h3><button class="small primary" onclick="addDetailBotSchedule()">＋ Thêm</button></div>
+        <div class="chat-title-row"><h3>Hẹn giờ Bot</h3><button type="button" class="small primary" onclick="addDetailBotSchedule()">＋ Thêm</button></div>
         <div class="scheduler-toolbar">
           <label class="scheduler-mode-box"><span>Chế độ</span>
             <select id="detailBotScheduleMode" onchange="detailBotScheduleModeChanged(this)">
@@ -5102,25 +5038,25 @@ body.theme-morning .cosmic-toggle-pill {
         <div id="detailBotScheduleModeNote" class="scheduler-note"></div>
         <div id="detailBotSchedules" class="schedule-list"></div>
         <div class="note">Chỉ có một chế độ tại một thời điểm. Ở Chu kỳ, thời gian mỗi dòng tính từ dòng kề trên; kéo đổi thứ tự thì cách tính cũng đổi theo.</div>
-        <button id="saveDetailBotSchedulesButton" class="primary compact-save" onclick="saveDetailBotSchedules()">Lưu hẹn giờ Bot</button>
+        <button type="button" id="saveDetailBotSchedulesButton" class="primary compact-save" onclick="saveDetailBotSchedules()">Lưu hẹn giờ Bot</button>
       </div>
 
       <div class="panel" id="detailAccountPanel">
         <h3>Tài khoản Minecraft Bot</h3>
         <div class="form-row">
-          <label>Username Ingame</label>
+          <label for="detailUsernameInput">Username Ingame</label>
           <input id="detailUsernameInput" autocomplete="off" placeholder="Username Minecraft bot...">
         </div>
         <div class="form-row">
-          <label>Mật khẩu /login</label>
+          <label for="detailPasswordInput">Mật khẩu /login</label>
           <div class="password-input-wrap">
             <input id="detailPasswordInput" type="password" autocomplete="new-password" placeholder="Mật khẩu /login bot...">
-            <button type="button" class="password-toggle-btn" onclick="togglePasswordVisibility('detailPasswordInput', this)">👁</button>
+            <button type="button" class="password-toggle-btn" aria-label="Hiện mật khẩu" aria-pressed="false" onclick="togglePasswordVisibility('detailPasswordInput', this)">👁</button>
           </div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:10px;">
-          <button class="primary" onclick="saveDetailAccount()">Lưu thay đổi</button>
-          <button class="small" onclick="saveAndRestartBot()" style="font-weight:700;">💾 Lưu & Chạy lại ngay</button>
+          <button type="button" class="primary" onclick="saveDetailAccount()">Lưu thay đổi</button>
+          <button type="button" class="small" onclick="saveAndRestartBot()" style="font-weight:700;">💾 Lưu & Chạy lại ngay</button>
         </div>
         <div class="note">Áp dụng ngay cho bot. Bấm "Lưu & Chạy lại ngay" để bot đăng nhập tài khoản mới lập tức.</div>
       </div>
@@ -5138,7 +5074,7 @@ body.theme-morning .cosmic-toggle-pill {
           </label>
         </div>
         <div class="form-row">
-          <label>Giao thức (Protocol)</label>
+          <label for="detailProxyProtocol">Giao thức (Protocol)</label>
           <select id="detailProxyProtocol" style="width:100%;box-sizing:border-box;">
             <option value="socks5">SOCKS5 (Khuyên dùng - Nhanh & Ẩn danh)</option>
             <option value="http">HTTP / HTTPS CONNECT Proxy</option>
@@ -5147,29 +5083,29 @@ body.theme-morning .cosmic-toggle-pill {
         </div>
         <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px;">
           <div class="form-row">
-            <label>Host / IP Proxy</label>
+            <label for="detailProxyHost">Host / IP Proxy</label>
             <input id="detailProxyHost" placeholder="vd: 103.152.112.5" autocomplete="off">
           </div>
           <div class="form-row">
-            <label>Port</label>
+            <label for="detailProxyPort">Port</label>
             <input id="detailProxyPort" type="number" placeholder="1080" min="1" max="65535">
           </div>
         </div>
         <div class="form-row">
-          <label>Username (nếu có)</label>
+          <label for="detailProxyUsername">Username (nếu có)</label>
           <input id="detailProxyUsername" placeholder="Để trống nếu không có auth" autocomplete="off">
         </div>
         <div class="form-row">
-          <label>Password (nếu có)</label>
+          <label for="detailProxyPassword">Password (nếu có)</label>
           <div class="password-input-wrap">
             <input id="detailProxyPassword" type="password" autocomplete="new-password" placeholder="Mật khẩu proxy...">
-            <button type="button" class="password-toggle-btn" onclick="togglePasswordVisibility('detailProxyPassword', this)">👁</button>
+            <button type="button" class="password-toggle-btn" aria-label="Hiện mật khẩu" aria-pressed="false" onclick="togglePasswordVisibility('detailProxyPassword', this)">👁</button>
           </div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap;">
-          <button class="primary" onclick="saveDetailProxy()">💾 Lưu Proxy</button>
-          <button class="small" onclick="testDetailProxy()" id="detailProxyTestBtn">🧪 Kiểm Tra Kết Nối</button>
-          <button class="small danger" onclick="clearDetailProxy()" style="margin-left:auto;">✕ Xóa Proxy</button>
+          <button type="button" class="primary" onclick="saveDetailProxy()">💾 Lưu Proxy</button>
+          <button type="button" class="small" onclick="testDetailProxy()" id="detailProxyTestBtn">🧪 Kiểm Tra Kết Nối</button>
+          <button type="button" class="small danger" onclick="clearDetailProxy()" style="margin-left:auto;">✕ Xóa Proxy</button>
         </div>
         <div id="detailProxyTestResult" class="note" style="margin-top:8px;">
           Proxy có thể dùng chung giữa các bot. Hỗ trợ SOCKS5 & HTTP. Khi bật, bot sẽ định tuyến qua Proxy này để đổi IP an toàn.
@@ -5182,7 +5118,7 @@ body.theme-morning .cosmic-toggle-pill {
   <section id="userManagementPage" class="full-page-section hidden">
     <div class="full-page-header">
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-        <button class="small" onclick="navigateTo('dashboard')">← Về Dashboard</button>
+        <button type="button" class="small" onclick="navigateTo('dashboard')">← Về Dashboard</button>
         <div>
           <h2 class="full-page-title">👥 Quản Lý Người Dùng &amp; Key Gia Hạn</h2>
           <div class="full-page-subtitle">Quản lý tài khoản khách thuê, phân quyền 1-Bot-1-User, gia hạn linh hoạt, xem mật khẩu và quản lý Key bản quyền.</div>
@@ -5190,11 +5126,11 @@ body.theme-morning .cosmic-toggle-pill {
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
         <div class="admin-only" style="display:inline-flex;align-items:center;gap:6px;background:rgba(15,23,42,0.6);border:1px solid rgba(56,189,248,0.3);border-radius:8px;padding:3px 8px;">
-          <button id="trialGiftToggleBtn" class="small" onclick="toggleTrialGiftSetting()" title="Bật/Tắt chế độ tặng dùng thử kèm bot trống cho người mới" style="background:transparent;border:none;color:#38bdf8;font-weight:700;padding:2px 4px;cursor:pointer;">
+          <button type="button" id="trialGiftToggleBtn" class="small" onclick="toggleTrialGiftSetting()" title="Bật/Tắt chế độ tặng dùng thử kèm bot trống cho người mới" style="background:transparent;border:none;color:#38bdf8;font-weight:700;padding:2px 4px;cursor:pointer;">
             <span id="trialGiftBtnLabel">🎁 Tặng Dùng Thử:</span> <span id="trialGiftStatusBadge">BẬT</span>
           </button>
           <span style="color:var(--border);">|</span>
-          <label style="font-size:12px;color:var(--muted);display:inline-flex;align-items:center;gap:4px;margin:0;">
+          <label for="trialDaysInput" style="font-size:12px;color:var(--muted);display:inline-flex;align-items:center;gap:4px;margin:0;">
             <span>Số ngày:</span>
             <input type="number" id="trialDaysInput" min="1" max="365" value="1" title="Số ngày dùng thử tặng khi đăng ký tài khoản mới" style="width:52px;padding:3px 6px;font-size:12px;border-radius:4px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);text-align:center;" onchange="saveTrialDaysSetting()">
             <span style="font-size:11px;">ngày</span>
@@ -5203,7 +5139,7 @@ body.theme-morning .cosmic-toggle-pill {
 
         <!-- CỤM CẤU HÌNH VƯỢT LINK +12H (ADMIN) -->
         <div class="admin-only" style="display:inline-flex;align-items:center;gap:6px;background:rgba(15,23,42,0.6);border:1px solid rgba(234,179,8,0.35);border-radius:8px;padding:3px 8px;">
-          <button id="link4mToggleBtn" class="small" onclick="toggleLink4mSetting()" title="Bật/Tắt tính năng vượt link Link4M nhận +12h" style="background:transparent;border:none;color:#facc15;font-weight:700;padding:2px 4px;cursor:pointer;">
+          <button type="button" id="link4mToggleBtn" class="small" onclick="toggleLink4mSetting()" title="Bật/Tắt tính năng vượt link Link4M nhận +12h" style="background:transparent;border:none;color:#facc15;font-weight:700;padding:2px 4px;cursor:pointer;">
             <span id="link4mBtnLabel">⚡ Vượt Link +12h:</span> <span id="link4mStatusBadge">TẮT</span>
           </button>
           <span style="color:var(--border);">|</span>
@@ -5211,35 +5147,35 @@ body.theme-morning .cosmic-toggle-pill {
             ⚙ Cấu hình Link
           </button>
         </div>
-        <button class="primary" onclick="openCreateUserModal()">＋ Thêm Người Dùng Mới</button>
-        <button class="secondary" onclick="switchUserMgmtSubTab('keys')">🎟️ Quản Lý Key</button>
-        <button class="small" onclick="refreshUserManagementPage()">↻ Làm mới</button>
+        <button type="button" class="primary" onclick="openCreateUserModal()">＋ Thêm Người Dùng Mới</button>
+        <button type="button" class="secondary" onclick="switchUserMgmtSubTab('keys')">🎟️ Quản Lý Key</button>
+        <button type="button" class="small" onclick="refreshUserManagementPage()">↻ Làm mới</button>
       </div>
     </div>
 
     <!-- SUB TABS: USER LIST vs KEY LIST -->
-    <div class="sub-tab-bar">
-      <button class="sub-tab-btn active" id="subTabUsers" onclick="switchUserMgmtSubTab('users')">
+    <div class="sub-tab-bar" role="tablist" aria-label="Phân mục quản lý tài khoản và key">
+      <button type="button" role="tab" aria-selected="true" aria-controls="subPanelUsers" class="sub-tab-btn active" id="subTabUsers" onclick="switchUserMgmtSubTab('users')">
         👥 Danh Sách Người Dùng (<span id="userMgmtTotalCount">0</span>)
       </button>
-      <button class="sub-tab-btn" id="subTabKeys" onclick="switchUserMgmtSubTab('keys')">
+      <button type="button" role="tab" aria-selected="false" aria-controls="subPanelKeys" class="sub-tab-btn" id="subTabKeys" onclick="switchUserMgmtSubTab('keys')">
         🎟️ Quản Lý Key Gia Hạn (<span id="keyMgmtTotalCount">0</span>)
       </button>
     </div>
 
     <!-- SUB-PANEL 1: DANH SÁCH USER -->
-    <div id="subPanelUsers" class="sub-panel">
+    <div id="subPanelUsers" class="sub-panel" role="tabpanel" aria-labelledby="subTabUsers">
       <!-- FILTERS & STATS -->
       <div class="mgmt-filter-bar">
         <div style="flex:1;min-width:220px;">
-          <input type="text" id="userFilterSearch" placeholder="🔍 Tìm theo username, ghi chú, gói..." class="search-box" style="margin:0;width:100%;box-sizing:border-box;" oninput="debounceUserFilter()">
+          <input type="search" id="userFilterSearch" aria-label="Tìm theo username, ghi chú, gói" placeholder="🔍 Tìm theo username, ghi chú, gói..." class="search-box" style="margin:0;width:100%;box-sizing:border-box;" oninput="debounceUserFilter()">
         </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button class="filter-chip active" id="userFilterAll" onclick="setUserStatusFilter('all')">Tất cả (<span id="statUserAll">0</span>)</button>
-          <button class="filter-chip" id="userFilterActive" onclick="setUserStatusFilter('active')">🟢 Hoạt động (<span id="statUserActive">0</span>)</button>
-          <button class="filter-chip" id="userFilterDisabled" onclick="setUserStatusFilter('disabled')">🔒 Tạm khóa (<span id="statUserDisabled">0</span>)</button>
-          <button class="filter-chip" id="userFilterExpired" onclick="setUserStatusFilter('expired')">⏳ Hết hạn (<span id="statUserExpired">0</span>)</button>
-          <button class="filter-chip" id="userFilterLifetime" onclick="setUserStatusFilter('lifetime')">👑 Vĩnh viễn (<span id="statUserLifetime">0</span>)</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;" role="group" aria-label="Lọc trạng thái người dùng">
+          <button type="button" class="filter-chip active" id="userFilterAll" aria-pressed="true" onclick="setUserStatusFilter('all')">Tất cả (<span id="statUserAll">0</span>)</button>
+          <button type="button" class="filter-chip" id="userFilterActive" aria-pressed="false" onclick="setUserStatusFilter('active')">🟢 Hoạt động (<span id="statUserActive">0</span>)</button>
+          <button type="button" class="filter-chip" id="userFilterDisabled" aria-pressed="false" onclick="setUserStatusFilter('disabled')">🔒 Tạm khóa (<span id="statUserDisabled">0</span>)</button>
+          <button type="button" class="filter-chip" id="userFilterExpired" aria-pressed="false" onclick="setUserStatusFilter('expired')">⏳ Hết hạn (<span id="statUserExpired">0</span>)</button>
+          <button type="button" class="filter-chip" id="userFilterLifetime" aria-pressed="false" onclick="setUserStatusFilter('lifetime')">👑 Vĩnh viễn (<span id="statUserLifetime">0</span>)</button>
         </div>
       </div>
 
@@ -5264,12 +5200,12 @@ body.theme-morning .cosmic-toggle-pill {
     </div>
 
     <!-- SUB-PANEL 2: QUẢN LÝ KEY GIA HẠN -->
-    <div id="subPanelKeys" class="sub-panel hidden">
+    <div id="subPanelKeys" class="sub-panel hidden" role="tabpanel" aria-labelledby="subTabKeys">
       <div class="create-key-card">
         <h4 style="margin:0 0 10px 0;font-size:14.5px;color:#38bdf8;font-weight:750;">🎟️ Tạo Mã Key & Giftcode Sự Kiện</h4>
         <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
           <div>
-            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">GÓI THUÊ:</label>
+            <label for="mgmtKeyDays" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">GÓI THUÊ:</label>
             <div style="display:flex;gap:4px;align-items:center;">
               <select id="mgmtKeyDays" onchange="onKeyDaysSelectChange('mgmt')" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;">
                 <option value="1">1 Ngày (Dùng thử)</option>
@@ -5281,23 +5217,23 @@ body.theme-morning .cosmic-toggle-pill {
                 <option value="lifetime">👑 Vĩnh Viễn</option>
                 <option value="custom">✏️ Tùy chỉnh ngày...</option>
               </select>
-              <input type="number" id="mgmtKeyCustomDays" min="1" max="3650" placeholder="Số ngày" style="display:none;width:75px;background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px;border-radius:8px;font-size:13px;" />
+              <input type="number" id="mgmtKeyCustomDays" aria-label="Số ngày gói thuê tùy chỉnh" min="1" max="3650" placeholder="Số ngày" style="display:none;width:75px;background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px;border-radius:8px;font-size:13px;" />
             </div>
           </div>
           <div>
-            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">TÊN GÓI:</label>
+            <label for="mgmtKeyPlan" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">TÊN GÓI:</label>
             <input type="text" id="mgmtKeyPlan" placeholder="VD: Gói Tuần VIP" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:130px;" />
           </div>
           <div>
-            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">MÃ TÙY CHỌN (GIFTCODE):</label>
+            <label for="mgmtKeyCustomKey" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">MÃ TÙY CHỌN (GIFTCODE):</label>
             <input type="text" id="mgmtKeyCustomKey" placeholder="Để trống = sinh ngẫu nhiên" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:160px;text-transform:uppercase;" />
           </div>
           <div>
-            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;" title="Số lượt dùng tối đa trên toàn server. Mỗi user chỉ được dùng 1 lần!">LƯỢT DÙNG:</label>
+            <label for="mgmtKeyMaxUses" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;" title="Số lượt dùng tối đa trên toàn server. Mỗi user chỉ được dùng 1 lần!">LƯỢT DÙNG:</label>
             <input type="number" id="mgmtKeyMaxUses" value="1" min="0" max="10000" title="1 = Key cá nhân, n = Giftcode nhiều người nhập, 0 = Không giới hạn" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:75px;" />
           </div>
           <div>
-            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">HẠN ÁP DỤNG:</label>
+            <label for="mgmtKeyValidDays" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">HẠN ÁP DỤNG:</label>
             <select id="mgmtKeyValidDays" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;">
               <option value="0" selected>Vô thời hạn</option>
               <option value="1">Trong 1 Ngày</option>
@@ -5307,14 +5243,14 @@ body.theme-morning .cosmic-toggle-pill {
             </select>
           </div>
           <div>
-            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;" title="Số lượng bot tối đa cấp độc quyền cho tài khoản sử dụng key này (mặc định 1 bot)">SỐ BOT:</label>
+            <label for="mgmtKeyBotCount" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;" title="Số lượng bot tối đa cấp độc quyền cho tài khoản sử dụng key này (mặc định 1 bot)">SỐ BOT:</label>
             <input type="number" id="mgmtKeyBotCount" value="1" min="1" max="50" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:60px;" />
           </div>
           <div>
-            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">SỐ KEY:</label>
+            <label for="mgmtKeyCount" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">SỐ KEY:</label>
             <input type="number" id="mgmtKeyCount" value="1" min="1" max="50" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:60px;" />
           </div>
-          <button class="primary" onclick="submitCreateKeysFromMgmt()" style="padding:9px 18px;font-weight:750;">+ Phát Hành Mã</button>
+          <button type="button" class="primary" onclick="submitCreateKeysFromMgmt()" style="padding:9px 18px;font-weight:750;">+ Phát Hành Mã</button>
         </div>
       </div>
 
@@ -5342,29 +5278,29 @@ body.theme-morning .cosmic-toggle-pill {
   <section id="auditPage" class="full-page-section hidden">
     <div class="full-page-header">
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-        <button class="small" onclick="navigateTo('dashboard')">← Về Dashboard</button>
+        <button type="button" class="small" onclick="navigateTo('dashboard')">← Về Dashboard</button>
         <div>
           <h2 class="full-page-title">📋 Nhật Ký Hoạt Động (Audit Trail Enterprise)</h2>
           <div class="full-page-subtitle">Theo dõi thời gian thực 100% mọi hành vi vận hành bot, can thiệp cấu hình, tài khoản và cấp phát license key.</div>
         </div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-        <button class="small" onclick="exportAuditLogs('csv')">📥 Xuất CSV</button>
-        <button class="small" onclick="exportAuditLogs('jsonl')">📥 Xuất JSONL</button>
-        <button class="small danger" onclick="clearAllAuditLogs()">🗑 Xóa Nhật Ký</button>
-        <button class="small" onclick="refreshAuditLogs(1)">↻ Làm mới</button>
+        <button type="button" class="small" onclick="exportAuditLogs('csv')">📥 Xuất CSV</button>
+        <button type="button" class="small" onclick="exportAuditLogs('jsonl')">📥 Xuất JSONL</button>
+        <button type="button" class="small danger" onclick="clearAllAuditLogs()">🗑 Xóa Nhật Ký</button>
+        <button type="button" class="small" onclick="refreshAuditLogs(1)">↻ Làm mới</button>
       </div>
     </div>
 
     <!-- TABS PHÂN LOẠI NHẬT KÝ (HỆ THỐNG / USER vs BOT VẬN HÀNH / COORDS) -->
-    <div class="audit-type-tabs" style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
-      <button type="button" id="auditTabSystem" class="audit-tab-btn active" onclick="switchAuditLogType('SYSTEM')">
+    <div class="audit-type-tabs" role="tablist" aria-label="Phân loại nhật ký hoạt động" style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+      <button type="button" role="tab" aria-selected="true" id="auditTabSystem" class="audit-tab-btn active" onclick="switchAuditLogType('SYSTEM')">
         🌐 Nhật Ký Hệ Thống &amp; Thao Tác Người Dùng
       </button>
-      <button type="button" id="auditTabBot" class="audit-tab-btn" onclick="switchAuditLogType('BOT')">
+      <button type="button" role="tab" aria-selected="false" id="auditTabBot" class="audit-tab-btn" onclick="switchAuditLogType('BOT')">
         🤖 Nhật Ký Vận Hành Bot &amp; Tài Khoản (Coords, Acc, Proxy)
       </button>
-      <button type="button" id="auditTabAll" class="audit-tab-btn" onclick="switchAuditLogType('')">
+      <button type="button" role="tab" aria-selected="false" id="auditTabAll" class="audit-tab-btn" onclick="switchAuditLogType('')">
         📋 Tất Cả Nhật Ký
       </button>
     </div>
@@ -5372,10 +5308,10 @@ body.theme-morning .cosmic-toggle-pill {
     <!-- FILTER TOOLBAR -->
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);padding:8px 12px;border-radius:8px;">
       <div style="flex:1;min-width:180px;">
-        <input id="auditLogSearchInput" placeholder="🔍 Tìm theo từ khóa, chi tiết, IP, user..." class="search-box" style="margin:0;padding:6px 12px;font-size:12px;width:100%;box-sizing:border-box;" oninput="debounceAuditFilter()">
+        <input type="search" id="auditLogSearchInput" aria-label="Tìm nhật ký theo từ khóa, chi tiết, IP, user" placeholder="🔍 Tìm theo từ khóa, chi tiết, IP, user..." class="search-box" style="margin:0;padding:6px 12px;font-size:12px;width:100%;box-sizing:border-box;" oninput="debounceAuditFilter()">
       </div>
       <div style="min-width:160px;">
-        <select id="auditLogCategoryFilter" style="margin:0;padding:6px 10px;font-size:12px;background:var(--card);border:1px solid var(--border);color:#fff;border-radius:6px;width:100%;" onchange="refreshAuditLogs(1)">
+        <select id="auditLogCategoryFilter" aria-label="Lọc theo danh mục nhật ký" style="margin:0;padding:6px 10px;font-size:12px;background:var(--card);border:1px solid var(--border);color:#fff;border-radius:6px;width:100%;" onchange="refreshAuditLogs(1)">
           <option value="">📂 Tất cả danh mục</option>
           <option value="AUTH">🔐 Xác thực &amp; Bảo mật (AUTH)</option>
           <option value="BOT_CONTROL">🎮 Điều khiển Bot (BOT)</option>
@@ -5389,7 +5325,7 @@ body.theme-morning .cosmic-toggle-pill {
         </select>
       </div>
       <div style="min-width:140px;">
-        <select id="auditLogStatusFilter" style="margin:0;padding:6px 10px;font-size:12px;background:var(--card);border:1px solid var(--border);color:#fff;border-radius:6px;width:100%;" onchange="refreshAuditLogs(1)">
+        <select id="auditLogStatusFilter" aria-label="Lọc theo trạng thái nhật ký" style="margin:0;padding:6px 10px;font-size:12px;background:var(--card);border:1px solid var(--border);color:#fff;border-radius:6px;width:100%;" onchange="refreshAuditLogs(1)">
           <option value="">⚡ Tất cả trạng thái</option>
           <option value="SUCCESS">🟢 Thành công (SUCCESS)</option>
           <option value="FAILED">🔴 Thất bại (FAILED)</option>
@@ -5398,7 +5334,7 @@ body.theme-morning .cosmic-toggle-pill {
         </select>
       </div>
       <div style="min-width:110px;">
-        <select id="auditLogLimitSelect" style="margin:0;padding:6px 10px;font-size:12px;background:var(--card);border:1px solid var(--border);color:#fff;border-radius:6px;width:100%;" onchange="refreshAuditLogs(1)">
+        <select id="auditLogLimitSelect" aria-label="Số dòng nhật ký mỗi trang" style="margin:0;padding:6px 10px;font-size:12px;background:var(--card);border:1px solid var(--border);color:#fff;border-radius:6px;width:100%;" onchange="refreshAuditLogs(1)">
           <option value="25">25 dòng/trang</option>
           <option value="50" selected>50 dòng/trang</option>
           <option value="100">100 dòng/trang</option>
@@ -5430,9 +5366,9 @@ body.theme-morning .cosmic-toggle-pill {
     <div class="modal-actions" style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.06);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
       <div id="auditLogPaginationInfo" style="color:var(--muted);font-size:11.5px;">Tổng cộng: 0 bản ghi</div>
       <div style="display:flex;align-items:center;gap:6px;">
-        <button id="auditLogPrevBtn" class="small" onclick="navigateAuditPage(-1)">‹ Trước</button>
+        <button type="button" id="auditLogPrevBtn" class="small" onclick="navigateAuditPage(-1)">‹ Trước</button>
         <span id="auditLogPageIndicator" style="font-size:11.5px;padding:0 6px;color:#fff;">Trang 1 / 1</span>
-        <button id="auditLogNextBtn" class="small" onclick="navigateAuditPage(1)">Sau ›</button>
+        <button type="button" id="auditLogNextBtn" class="small" onclick="navigateAuditPage(1)">Sau ›</button>
       </div>
     </div>
   </section>
@@ -5441,15 +5377,15 @@ body.theme-morning .cosmic-toggle-pill {
   <section id="backupPage" class="full-page-section hidden">
     <div class="full-page-header">
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-        <button class="small" onclick="navigateTo('dashboard')">← Về Dashboard</button>
+        <button type="button" class="small" onclick="navigateTo('dashboard')">← Về Dashboard</button>
         <div>
           <h2 class="full-page-title">💾 Quản Lý Bản Sao Lưu Supabase</h2>
           <div class="full-page-subtitle">Snapshot lưu trong Supabase, giữ tối đa 30 bản gần nhất; tạo định kỳ và trước các thao tác quan trọng.</div>
         </div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-        <button class="primary small" onclick="triggerCreateBackup()">⚡ Tạo Sao Lưu Ngay</button>
-        <button class="small" onclick="refreshBackupList()">↻ Làm mới</button>
+        <button type="button" class="primary small" onclick="triggerCreateBackup()">⚡ Tạo Sao Lưu Ngay</button>
+        <button type="button" class="small" onclick="refreshBackupList()">↻ Làm mới</button>
       </div>
     </div>
 
@@ -5480,11 +5416,11 @@ body.theme-morning .cosmic-toggle-pill {
 </div>
 
 <!-- MODAL TẠM KHÓA USER KÈM LỜI NHẮN (ADMIN) -->
-<div id="userLockReasonModal" class="modal hidden">
+<div id="userLockReasonModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="userLockReasonModalTitle">
   <div class="modal-card" style="max-width:440px;">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-      <h3 style="margin:0;color:#ef4444;display:flex;align-items:center;gap:8px;">🔒 Tạm Khóa Tài Khoản</h3>
-      <button class="small" onclick="closeUserLockReasonModal()">✕</button>
+      <h3 id="userLockReasonModalTitle" style="margin:0;color:#ef4444;display:flex;align-items:center;gap:8px;">🔒 Tạm Khóa Tài Khoản</h3>
+      <button type="button" class="small" onclick="closeUserLockReasonModal()" aria-label="Đóng">✕</button>
     </div>
     <p style="font-size:13px;color:var(--muted);margin-bottom:12px;">
       Bạn đang chuẩn bị tạm khóa tài khoản <strong id="lockTargetUsername" style="color:#fff;"></strong>.
@@ -5492,22 +5428,22 @@ body.theme-morning .cosmic-toggle-pill {
     </p>
     <input id="lockTargetUserId" type="hidden">
     <div class="form-row">
-      <label>Lời nhắn gửi đến người dùng (Hiển thị khi đăng nhập)</label>
+      <label for="lockReasonInput">Lời nhắn gửi đến người dùng (Hiển thị khi đăng nhập)</label>
       <textarea id="lockReasonInput" rows="3" placeholder="Ví dụ: Tài khoản bị tạm khóa do vi phạm nội quy / Đang chờ xác minh thanh toán..."></textarea>
     </div>
     <div class="modal-actions" style="margin-top:16px;">
-      <button onclick="closeUserLockReasonModal()">Hủy</button>
-      <button class="danger" onclick="submitLockUserWithReason()">🔒 Xác Nhận Khóa</button>
+      <button type="button" onclick="closeUserLockReasonModal()">Hủy</button>
+      <button type="button" class="danger" onclick="submitLockUserWithReason()">🔒 Xác Nhận Khóa</button>
     </div>
   </div>
 </div>
 
 <!-- MODAL CẤU HÌNH LINK4M (ADMIN) -->
-<div id="link4mSettingsModal" class="modal hidden">
+<div id="link4mSettingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="link4mSettingsModalTitle">
   <div class="modal-card" style="max-width:540px;width:100%;box-sizing:border-box;">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:10px;">
-      <h3 style="margin:0;color:#facc15;display:flex;align-items:center;gap:8px;">⚡ Cài Đặt Vượt Link +12h (Link4M)</h3>
-      <button type="button" class="small" onclick="closeLink4mConfigModal()">✕</button>
+      <h3 id="link4mSettingsModalTitle" style="margin:0;color:#facc15;display:flex;align-items:center;gap:8px;">⚡ Cài Đặt Vượt Link +12h (Link4M)</h3>
+      <button type="button" class="small" onclick="closeLink4mConfigModal()" aria-label="Đóng">✕</button>
     </div>
 
     <div style="display:flex;flex-direction:column;gap:14px;font-size:13px;">
@@ -5516,15 +5452,15 @@ body.theme-morning .cosmic-toggle-pill {
         Chính sách của Link4M cấm lưu lượng truy cập có thưởng trừ khi được thỏa thuận và phê duyệt trước. Vui lòng đảm bảo bạn đã xin phép Link4M và cấu hình <strong>Khóa bí mật Webhook Postback</strong> để hệ thống chỉ cộng giờ khi nhận tín hiệu hoàn tất thực sự từ server Link4M.
       </div>
       <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:rgba(15,23,42,0.6);border:1px solid var(--border);border-radius:8px;">
-        <div>
+        <label for="link4mModalEnabled" style="margin:0;cursor:pointer;">
           <strong style="color:var(--text);display:block;">Bật tính năng Vượt Link:</strong>
           <span style="font-size:11.5px;color:var(--muted);">Cho phép khách thuê tự vượt link nhận +12h vào tài khoản</span>
-        </div>
+        </label>
         <input type="checkbox" id="link4mModalEnabled" style="width:20px;height:20px;cursor:pointer;">
       </div>
 
       <div>
-        <label style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Chế độ tạo liên kết:</label>
+        <label for="link4mModalMode" style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Chế độ tạo liên kết:</label>
         <select id="link4mModalMode" style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);" onchange="updateLink4mModalFields()">
           <option value="custom_url">🔗 Link Rút Gọn Cố Định (Admin tự tạo link dán vào)</option>
           <option value="api">🤖 Tự Động Gọi API Link4M (Tạo link động cho từng lượt)</option>
@@ -5532,30 +5468,30 @@ body.theme-morning .cosmic-toggle-pill {
       </div>
 
       <div id="link4mCustomUrlGroup">
-        <label style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Đường dẫn Link rút gọn gán vào:</label>
+        <label for="link4mModalUrl" style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Đường dẫn Link rút gọn gán vào:</label>
         <input type="text" id="link4mModalUrl" placeholder="Ví dụ: https://link4m.co/abcxyz" style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
         <span style="font-size:11.5px;color:var(--muted);display:block;margin-top:4px;">Khi người dùng bấm vượt link, hệ thống sẽ mở link này.</span>
       </div>
 
       <div id="link4mApiTokenGroup" style="display:none;">
-        <label style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Link4M Publisher API Token:</label>
+        <label for="link4mModalApiToken" style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Link4M Publisher API Token:</label>
         <input type="text" id="link4mModalApiToken" placeholder="Nhập API Token từ tài khoản Link4M của bạn..." style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
         <span style="font-size:11.5px;color:var(--muted);display:block;margin-top:4px;">Backend sẽ tự gọi https://link4m.co/api để rút gọn link trả thưởng động.</span>
       </div>
 
       <div style="display:flex;gap:12px;">
         <div style="flex:1;">
-          <label style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Số giờ cộng mỗi lượt:</label>
+          <label for="link4mModalHours" style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Số giờ cộng mỗi lượt:</label>
           <input type="number" id="link4mModalHours" min="1" max="48" value="12" style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
         </div>
         <div style="flex:1;">
-          <label style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Giới hạn lượt / ngày (VN):</label>
+          <label for="link4mModalDailyLimit" style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Giới hạn lượt / ngày (VN):</label>
           <input type="number" id="link4mModalDailyLimit" min="1" max="10" value="2" style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
         </div>
       </div>
 
       <div>
-        <label style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Khóa bí mật Webhook Postback (Tùy chọn):</label>
+        <label for="link4mModalSecretKey" style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Khóa bí mật Webhook Postback (Tùy chọn):</label>
         <input type="text" id="link4mModalSecretKey" placeholder="Để trống nếu không dùng server postback..." style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
       </div>
     </div>
@@ -5568,18 +5504,18 @@ body.theme-morning .cosmic-toggle-pill {
 </div>
 
 <!-- MODAL TÙY CHỈNH HẠN THUÊ USER (ADMIN) -->
-<div id="customRenewModal" class="modal hidden">
+<div id="customRenewModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="customRenewModalTitle">
   <div class="modal-card" style="max-width:440px;">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-      <h3 style="margin:0;color:#38bdf8;display:flex;align-items:center;gap:8px;">⏱ Tùy Chỉnh Hạn Thuê Bot</h3>
-      <button class="small" onclick="closeCustomRenewModal()">✕</button>
+      <h3 id="customRenewModalTitle" style="margin:0;color:#38bdf8;display:flex;align-items:center;gap:8px;">⏱ Tùy Chỉnh Hạn Thuê Bot</h3>
+      <button type="button" class="small" onclick="closeCustomRenewModal()" aria-label="Đóng">✕</button>
     </div>
     <p style="font-size:13px;color:var(--muted);margin-bottom:12px;">
       Điều chỉnh thời hạn cho tài khoản <strong id="customRenewTargetUser" style="color:#fff;"></strong>:
     </p>
     <input id="customRenewTargetUserId" type="hidden">
     <div class="form-row">
-      <label>Hình thức điều chỉnh</label>
+      <label for="customRenewMode">Hình thức điều chỉnh</label>
       <select id="customRenewMode" onchange="handleCustomRenewModeChange()">
         <option value="add_days">Cộng thêm số ngày (+N ngày)</option>
         <option value="subtract_days">Trừ bớt số ngày (-N ngày)</option>
@@ -5588,34 +5524,34 @@ body.theme-morning .cosmic-toggle-pill {
       </select>
     </div>
     <div id="customRenewDaysGroup" class="form-row">
-      <label>Số ngày điều chỉnh</label>
+      <label for="customRenewDaysInput">Số ngày điều chỉnh</label>
       <input type="number" id="customRenewDaysInput" value="7" min="1" max="3650">
     </div>
     <div id="customRenewDateGroup" class="form-row" style="display:none;">
-      <label>Mốc ngày giờ hết hạn mới</label>
+      <label for="customRenewDateInput">Mốc ngày giờ hết hạn mới</label>
       <input type="datetime-local" id="customRenewDateInput">
     </div>
     <div class="form-row">
-      <label>Tên gói cước / Ghi chú hạn (Tùy chỉnh)</label>
+      <label for="customRenewPlanNameInput">Tên gói cước / Ghi chú hạn (Tùy chỉnh)</label>
       <input type="text" id="customRenewPlanNameInput" placeholder="Ví dụ: Gói Tuần VIP, 15 Ngày Khuyến Mãi...">
     </div>
     <div class="note" style="margin-top:10px;">
       * Lưu ý: Nếu tài khoản đang là Vĩnh viễn, khi cộng/trừ ngày hoặc đặt mốc mới, quyền Vĩnh viễn sẽ tự động hủy và chuyển sang mốc ngày giờ mới.
     </div>
     <div class="modal-actions" style="margin-top:16px;">
-      <button onclick="closeCustomRenewModal()">Hủy</button>
-      <button class="primary" onclick="submitCustomRenew()">💾 Cập Nhật Hạn</button>
+      <button type="button" onclick="closeCustomRenewModal()">Hủy</button>
+      <button type="button" class="primary" onclick="submitCustomRenew()">💾 Cập Nhật Hạn</button>
     </div>
   </div>
 </div>
 
 <!-- MODAL XÁC NHẬN CHUYỂN QUYỀN BOT 1-USER-1-BOT -->
-<div id="reassignBotConfirmModal" class="modal hidden" style="z-index:9999999;">
+<div id="reassignBotConfirmModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="reassignBotConfirmModalTitle" style="z-index:9999999;">
   <div class="modal-card" style="max-width:460px;border-color:rgba(234,179,8,0.5);">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
-      <span style="font-size:28px;">⚠️</span>
+      <span style="font-size:28px;" aria-hidden="true">⚠️</span>
       <div>
-        <h3 style="margin:0;color:#eab308;font-size:17px;">Xác Nhận Chuyển Quyền Sở Hữu Bot</h3>
+        <h3 id="reassignBotConfirmModalTitle" style="margin:0;color:#eab308;font-size:17px;">Xác Nhận Chuyển Quyền Sở Hữu Bot</h3>
         <div style="font-size:12px;color:var(--muted);">Nguyên tắc 1-Bot-1-User độc quyền</div>
       </div>
     </div>
@@ -5623,54 +5559,54 @@ body.theme-morning .cosmic-toggle-pill {
       Bot này hiện đang được cấp cho người dùng khác. Bạn có chắc chắn muốn hủy bot khỏi người dùng cũ để cấp cho người này không?
     </p>
     <div class="modal-actions">
-      <button onclick="closeReassignBotConfirmModal(false)">Hủy (Giữ nguyên)</button>
-      <button class="primary" style="background:#eab308;color:#000;font-weight:750;" onclick="closeReassignBotConfirmModal(true)">✓ Đồng Ý Chuyển Bot</button>
+      <button type="button" onclick="closeReassignBotConfirmModal(false)">Hủy (Giữ nguyên)</button>
+      <button type="button" class="primary" style="background:#eab308;color:#000;font-weight:750;" onclick="closeReassignBotConfirmModal(true)">✓ Đồng Ý Chuyển Bot</button>
     </div>
   </div>
 </div>
-<div id="addBotModal" class="modal hidden">
+<div id="addBotModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="addBotModalTitle">
   <div class="modal-card" style="max-width:520px;">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-      <h3 style="margin:0;color:#38bdf8;display:flex;align-items:center;gap:8px;">➕ Thêm Bot Con (Hỗ Trợ Thêm Hàng Loạt)</h3>
-      <button class="small" onclick="closeAddBotModal()">✕</button>
+      <h3 id="addBotModalTitle" style="margin:0;color:#38bdf8;display:flex;align-items:center;gap:8px;">➕ Thêm Bot Con (Hỗ Trợ Thêm Hàng Loạt)</h3>
+      <button type="button" class="small" onclick="closeAddBotModal()" aria-label="Đóng">✕</button>
     </div>
     <div class="form-row">
-      <label style="display:flex;justify-content:space-between;align-items:center;">
+      <label for="addBotUrl" style="display:flex;justify-content:space-between;align-items:center;">
         <span>Web URL của bot con (1 hoặc nhiều link)</span>
         <span id="addBotUrlCountBadge" style="font-size:11.5px;color:#38bdf8;font-weight:700;">0 link</span>
       </label>
       <textarea id="addBotUrl" rows="5" autocomplete="off" oninput="updateAddBotUrlCounter()" placeholder="Dán 1 hoặc nhiều link bot tại đây, phân biệt bằng dấu cách hoặc xuống dòng:&#10;https://kbot-1.onrender.com&#10;https://kbot-2.onrender.com" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:12.5px;padding:10px;resize:vertical;line-height:1.45;"></textarea>
     </div>
     <div class="form-row">
-      <label>Tên hiển thị / Tiền tố đặt tên (Không bắt buộc)</label>
+      <label for="addBotLabel">Tên hiển thị / Tiền tố đặt tên (Không bắt buộc)</label>
       <input id="addBotLabel" autocomplete="off" placeholder="Ví dụ: Bot (Để trống sẽ tự động lấy tên bot hoặc Bot #ID)">
     </div>
     <div class="note" style="line-height:1.5;">
       💡 <strong>Thêm hàng loạt & Tự động nhận diện 3-in-1:</strong> Bạn có thể dán nhiều link cùng lúc (ngăn cách bằng <strong>xuống dòng</strong> hoặc <strong>dấu cách</strong>). Hệ thống sẽ tự động kiểm tra, phát hiện cụm Worker 3-in-1 để tự bung 3 bot độc lập (Slot 1, 2, 3) cho từng link!
     </div>
     <div class="modal-actions" style="margin-top:16px;">
-      <button onclick="closeAddBotModal()">Hủy</button>
-      <button id="confirmAddBotButton" class="primary" onclick="addBotFromWeb()">➕ Thêm Bot</button>
+      <button type="button" onclick="closeAddBotModal()">Hủy</button>
+      <button type="button" id="confirmAddBotButton" class="primary" onclick="addBotFromWeb()">➕ Thêm Bot</button>
     </div>
   </div>
 </div>
-<div id="editBotModal" class="modal hidden">
+<div id="editBotModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="editBotModalTitle">
   <div class="modal-card" style="max-width:480px;">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-      <h3 style="margin:0;display:flex;align-items:center;gap:8px;">✏️ Chỉnh Sửa Thông Tin & Tag Bot</h3>
-      <button class="small" onclick="closeEditBotModal()">✕</button>
+      <h3 id="editBotModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">✏️ Chỉnh Sửa Thông Tin & Tag Bot</h3>
+      <button type="button" class="small" onclick="closeEditBotModal()" aria-label="Đóng">✕</button>
     </div>
     <input id="editBotId" type="hidden">
     <div class="form-row" style="margin-bottom:10px;">
-      <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">Tên hiển thị / Ghi chú</label>
+      <label for="editBotLabel" style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">Tên hiển thị / Ghi chú</label>
       <input id="editBotLabel" placeholder="Ví dụ: Bot Farm Lúa, Bot VIP..." autocomplete="off" style="width:100%;box-sizing:border-box;">
     </div>
     <div class="form-row admin-only" style="margin-bottom:10px;">
-      <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">Web URL bot con</label>
+      <label for="editBotUrl" style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">Web URL bot con</label>
       <input id="editBotUrl" placeholder="https://kbot-instance.onrender.com" autocomplete="off" style="width:100%;box-sizing:border-box;">
     </div>
     <div class="form-row admin-only" style="margin-bottom:10px;display:none;">
-      <label style="display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">
+      <label for="editBotSecretKey" style="display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">
         <span>Khóa bảo mật Worker (Secret Key)</span>
         <small style="color:var(--muted);font-weight:normal;">Bỏ trống để dùng mặc định</small>
       </label>
@@ -5683,7 +5619,7 @@ body.theme-morning .cosmic-toggle-pill {
       </div>
     </div>
     <div class="form-row" style="margin-bottom:12px;">
-      <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">🏷️ Nhóm Tags (ngăn cách bởi dấu phẩy)</label>
+      <label for="editBotTags" style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">🏷️ Nhóm Tags (ngăn cách bởi dấu phẩy)</label>
       <input id="editBotTags" placeholder="farm, afk, lobby, vip..." autocomplete="off" oninput="renderEditBotTagPreviews(this.value)" style="width:100%;box-sizing:border-box;">
       <div id="editBotTagsPreview" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;min-height:24px;"></div>
       <div id="editBotTagSuggestions" style="display:flex;flex-wrap:wrap;gap:5px;margin-top:8px;"></div>
@@ -5699,33 +5635,33 @@ body.theme-morning .cosmic-toggle-pill {
       <div id="editBotRentalStatus" style="font-size:12px;margin-top:6px;"></div>
     </div>
     <div class="modal-actions" style="margin-top:16px;">
-      <button onclick="closeEditBotModal()">Hủy</button>
-      <button class="primary" onclick="saveEditBot()">💾 Lưu Thay Đổi</button>
+      <button type="button" onclick="closeEditBotModal()">Hủy</button>
+      <button type="button" class="primary" onclick="saveEditBot()">💾 Lưu Thay Đổi</button>
     </div>
   </div>
 </div>
-<div id="adminModal" class="modal hidden">
+<div id="adminModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="adminModalTitle">
   <div class="modal-card modal-lg">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-      <h3 style="margin:0;display:flex;align-items:center;gap:8px;">🔑 Mật Khẩu Tài Khoản Bot (Tất cả Bot)</h3>
-      <button class="small" onclick="closeAdminModal()">✕</button>
+      <h3 id="adminModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">🔑 Mật Khẩu Tài Khoản Bot (Tất cả Bot)</h3>
+      <button type="button" class="small" onclick="closeAdminModal()" aria-label="Đóng">✕</button>
     </div>
     <div id="adminCredentialStep">
       <div id="adminCredentialList" class="credential-list">
         <div style="text-align:center;padding:24px;color:var(--muted);">⏳ Đang tải thông tin tài khoản bot...</div>
       </div>
       <div class="modal-actions" style="margin-top:16px;">
-        <button class="small" onclick="loadAdminCredentials()">🔄 Tải lại</button>
-        <button class="primary" onclick="closeAdminModal()">Đóng</button>
+        <button type="button" class="small" onclick="loadAdminCredentials()">🔄 Tải lại</button>
+        <button type="button" class="primary" onclick="closeAdminModal()">Đóng</button>
       </div>
     </div>
   </div>
 </div>
-<div id="announcementAdminModal" class="modal hidden">
+<div id="announcementAdminModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="announcementAdminModalTitle">
   <div class="modal-card modal-lg">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-      <h3 style="margin:0;display:flex;align-items:center;gap:8px;">📢 Quản Trị Thông Báo Người Dùng</h3>
-      <button class="small" onclick="closeAnnouncementAdminModal()">✕</button>
+      <h3 id="announcementAdminModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">📢 Quản Trị Thông Báo Người Dùng</h3>
+      <button type="button" class="small" onclick="closeAnnouncementAdminModal()" aria-label="Đóng">✕</button>
     </div>
     <div class="form-row">
       <label class="check-row" style="margin:0;padding:9px 12px;background:var(--card2);border:1px solid var(--border);border-radius:10px;cursor:pointer;">
@@ -5734,16 +5670,16 @@ body.theme-morning .cosmic-toggle-pill {
       </label>
     </div>
     <div class="form-row">
-      <label>Tiêu đề thông báo</label>
+      <label for="announcementTitle">Tiêu đề thông báo</label>
       <input id="announcementTitle" autocomplete="off" placeholder="Ví dụ: 📢 THÔNG BÁO TỪ QUẢN TRỊ VIÊN">
     </div>
     <div class="form-row">
-      <label>Nội dung thông báo (hỗ trợ xuống dòng, emoji, bullet points)</label>
+      <label for="announcementContent">Nội dung thông báo (hỗ trợ xuống dòng, emoji, bullet points)</label>
       <textarea id="announcementContent" rows="6" placeholder="Nhập nội dung thông báo hàng ngày hoặc thông tin bảo trì..."></textarea>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
       <div class="form-row">
-        <label>Chế độ hiển thị</label>
+        <label for="announcementMode">Chế độ hiển thị</label>
         <select id="announcementMode" onchange="handleAnnouncementModeChange()">
           <option value="daily">🗓️ Hằng ngày (Lần đầu vào trong ngày hiện 1 lần)</option>
           <option value="every_login">⚡ Mọi lần truy cập / đăng nhập</option>
@@ -5751,11 +5687,11 @@ body.theme-morning .cosmic-toggle-pill {
         </select>
       </div>
       <div id="announcementDateRangeGroup" class="form-row" style="display:none;">
-        <label>Khoảng ngày hiển thị</label>
+        <label for="announcementStartDate">Khoảng ngày hiển thị</label>
         <div style="display:flex;gap:6px;align-items:center;">
           <input id="announcementStartDate" type="date" style="padding:7px 9px;font-size:12px;">
           <span>đến</span>
-          <input id="announcementEndDate" type="date" style="padding:7px 9px;font-size:12px;">
+          <input id="announcementEndDate" type="date" aria-label="Ngày kết thúc hiển thị thông báo" style="padding:7px 9px;font-size:12px;">
         </div>
       </div>
     </div>
@@ -5765,40 +5701,40 @@ body.theme-morning .cosmic-toggle-pill {
     <div class="modal-actions" style="display:flex;justify-content:space-between;align-items:center;">
       <button type="button" class="small" onclick="previewAnnouncementModal()">👁️ Xem trước (Preview)</button>
       <div style="display:flex;gap:8px;">
-        <button onclick="closeAnnouncementAdminModal()">Hủy</button>
-        <button class="primary" onclick="saveAnnouncementConfig()">💾 Lưu Thông Báo</button>
+        <button type="button" onclick="closeAnnouncementAdminModal()">Hủy</button>
+        <button type="button" class="primary" onclick="saveAnnouncementConfig()">💾 Lưu Thông Báo</button>
       </div>
     </div>
   </div>
 </div>
 
-<div id="userAnnouncementModal" class="modal hidden" style="z-index:999999;">
+<div id="userAnnouncementModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="userAnnouncementTitle" style="z-index:999999;">
   <div class="modal-card user-announcement-card">
     <div class="user-announcement-header">
-      <div class="announcement-bell-badge">📢</div>
+      <div class="announcement-bell-badge" aria-hidden="true">📢</div>
       <div style="flex:1;">
         <div class="announcement-badge-pill">👑 THÔNG BÁO TỪ QUẢN TRỊ VIÊN</div>
         <h3 id="userAnnouncementTitle" class="announcement-main-title">THÔNG BÁO HỆ THỐNG</h3>
         <div id="userAnnouncementTime" class="announcement-sub-date">Cập nhật lúc --</div>
       </div>
-      <button class="announcement-close-btn" onclick="dismissUserAnnouncement()" title="Đóng">✕</button>
+      <button type="button" class="announcement-close-btn" onclick="dismissUserAnnouncement()" title="Đóng" aria-label="Đóng">✕</button>
     </div>
     <div id="userAnnouncementBody" class="user-announcement-body"></div>
     <div class="user-announcement-footer">
       <div id="userAnnouncementFreqNote" class="announcement-freq-note">
         🗓️ Thông báo này sẽ chỉ xuất hiện 1 lần trong ngày hôm nay.
       </div>
-      <button class="primary announcement-ack-btn" onclick="dismissUserAnnouncement()">
+      <button type="button" class="primary announcement-ack-btn" onclick="dismissUserAnnouncement()">
         ✨ ĐÃ HIỂU & ĐÓNG
       </button>
     </div>
   </div>
 </div>
-<div id="batchSettingsModal" class="modal hidden">
+<div id="batchSettingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="batchSettingsModalTitle">
   <div class="modal-card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-      <h3 style="margin:0;display:flex;align-items:center;gap:8px;">⚙️ Đồng bộ Cài đặt Hàng loạt</h3>
-      <button class="small" onclick="closeBatchSettingsModal()">✕</button>
+      <h3 id="batchSettingsModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">⚙️ Đồng bộ Cài đặt Hàng loạt</h3>
+      <button type="button" class="small" onclick="closeBatchSettingsModal()" aria-label="Đóng">✕</button>
     </div>
     <div style="margin-bottom:14px;">
       <label for="batchTargetTag" style="display:block;font-size:12px;color:var(--muted);margin-bottom:5px;font-weight:600;">🎯 Đối tượng áp dụng:</label>
@@ -5820,7 +5756,7 @@ body.theme-morning .cosmic-toggle-pill {
       </label>
       <div id="batchSpawnCommandsDetails" style="display:none;padding:10px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:6px;margin-top:6px;">
         <div style="font-size:11px;color:var(--muted);margin-bottom:6px;">Mỗi dòng một lệnh (/warp afk, /fix all, /feed) — chạy tuần tự khi bot vào trạng thái AFK:</div>
-        <textarea id="batchSpawnCommands" placeholder="/fix all&#10;/warp afk&#10;/feed" rows="2" style="width:100%;box-sizing:border-box;font-size:12px;padding:8px;background:rgba(0,0,0,0.3);color:var(--text);border:1px solid var(--border);border-radius:6px;font-family:monospace;resize:vertical;"></textarea>
+        <textarea id="batchSpawnCommands" aria-label="Danh sách lệnh tự động spawnCommands" placeholder="/fix all&#10;/warp afk&#10;/feed" rows="2" style="width:100%;box-sizing:border-box;font-size:12px;padding:8px;background:rgba(0,0,0,0.3);color:var(--text);border:1px solid var(--border);border-radius:6px;font-family:monospace;resize:vertical;"></textarea>
       </div>
     </div>
     <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
@@ -5834,7 +5770,7 @@ body.theme-morning .cosmic-toggle-pill {
           <span>Kích hoạt lịch hẹn giờ</span>
         </label>
         <div class="form-row" style="margin-bottom:10px;">
-          <label>Chế độ hẹn giờ</label>
+          <label for="batchScheduleMode">Chế độ hẹn giờ</label>
           <select id="batchScheduleMode" onchange="handleBatchScheduleModeChange()">
             <option value="fixed">Giờ cố định mỗi ngày</option>
             <option value="cycle">Chu kỳ lặp lại</option>
@@ -5843,11 +5779,11 @@ body.theme-morning .cosmic-toggle-pill {
         <div id="batchFixedSettings">
           <div style="display:flex;gap:10px;">
             <div class="form-row" style="flex:1;">
-              <label>Giờ Tắt (VD: 04:30)</label>
+              <label for="batchFixedStopTime">Giờ Tắt (VD: 04:30)</label>
               <input type="time" id="batchFixedStopTime" value="04:30">
             </div>
             <div class="form-row" style="flex:1;">
-              <label>Giờ Bật (VD: 05:30)</label>
+              <label for="batchFixedStartTime">Giờ Bật (VD: 05:30)</label>
               <input type="time" id="batchFixedStartTime" value="05:30">
             </div>
           </div>
@@ -5855,11 +5791,11 @@ body.theme-morning .cosmic-toggle-pill {
         <div id="batchCycleSettings" style="display:none;">
           <div style="display:flex;gap:10px;">
             <div class="form-row" style="flex:1;">
-              <label>Phút chạy trước khi Tắt</label>
+              <label for="batchCycleStopMinutes">Phút chạy trước khi Tắt</label>
               <input type="number" id="batchCycleStopMinutes" value="120" min="1" max="43200">
             </div>
             <div class="form-row" style="flex:1;">
-              <label>Phút nghỉ trước khi Bật</label>
+              <label for="batchCycleStartMinutes">Phút nghỉ trước khi Bật</label>
               <input type="number" id="batchCycleStartMinutes" value="300" min="1" max="43200">
             </div>
           </div>
@@ -5867,27 +5803,27 @@ body.theme-morning .cosmic-toggle-pill {
       </div>
     </div>
     <div class="modal-actions">
-      <button onclick="closeBatchSettingsModal()">Hủy</button>
-      <button class="primary" onclick="submitBatchSettings()">Áp dụng tất cả</button>
+      <button type="button" onclick="closeBatchSettingsModal()">Hủy</button>
+      <button type="button" class="primary" onclick="submitBatchSettings()">Áp dụng tất cả</button>
     </div>
   </div>
 </div>
-<div id="webhookModal" class="modal hidden">
+<div id="webhookModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="webhookModalTitle">
   <div class="modal-card">
-    <h3>🔔 Cài đặt Cảnh báo Webhook (Discord & Telegram)</h3>
+    <h3 id="webhookModalTitle">🔔 Cài đặt Cảnh báo Webhook (Discord & Telegram)</h3>
     <div style="margin:12px 0 16px;">
       <label class="check-row"><input id="webhookEnabled" type="checkbox"> <span style="font-weight:700;color:var(--green);">Kích hoạt hệ thống Cảnh báo Webhook</span></label>
     </div>
     <div class="form-row">
-      <label>Discord Webhook URL</label>
+      <label for="webhookDiscordUrl">Discord Webhook URL</label>
       <input id="webhookDiscordUrl" placeholder="https://discord.com/api/webhooks/...">
     </div>
     <div class="form-row">
-      <label>Telegram Bot Token (Tùy chọn)</label>
+      <label for="webhookTelegramToken">Telegram Bot Token (Tùy chọn)</label>
       <input id="webhookTelegramToken" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11">
     </div>
     <div class="form-row">
-      <label>Telegram Chat ID (Tùy chọn)</label>
+      <label for="webhookTelegramChatId">Telegram Chat ID (Tùy chọn)</label>
       <input id="webhookTelegramChatId" placeholder="-100123456789 hoặc ID cá nhân">
     </div>
     <div class="setting-list" style="margin:14px 0;">
@@ -5898,24 +5834,24 @@ body.theme-morning .cosmic-toggle-pill {
       <label class="check-row"><input id="webhookNotifyDeath" type="checkbox" checked> <span>💀 Cảnh báo khi Bot tử vong (chết trong game)</span></label>
     </div>
     <div class="form-row">
-      <label>Ngưỡng thời gian Offline để báo (Phút):</label>
+      <label for="webhookOfflineThreshold">Ngưỡng thời gian Offline để báo (Phút):</label>
       <input id="webhookOfflineThreshold" type="number" min="1" max="60" value="5" style="width:120px;">
     </div>
     <div class="modal-actions" style="margin-top:16px;">
-      <button onclick="closeWebhookModal()">Đóng</button>
-      <button class="secondary" onclick="testWebhookSettings()">🧪 Gửi thử (Test)</button>
-      <button class="primary" onclick="saveWebhookSettings()">💾 Lưu cài đặt</button>
+      <button type="button" onclick="closeWebhookModal()">Đóng</button>
+      <button type="button" class="secondary" onclick="testWebhookSettings()">🧪 Gửi thử (Test)</button>
+      <button type="button" class="primary" onclick="saveWebhookSettings()">💾 Lưu cài đặt</button>
     </div>
   </div>
 </div>
-<div id="userManagementModal" class="modal hidden">
+<div id="userManagementModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="userManagementModalTitle">
   <div class="modal-card modal-lg">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px;">
       <div>
-        <h3 style="margin:0 0 4px;font-size:18.5px;">👥 Quản lý Người dùng & Phân quyền Bot (RBAC)</h3>
+        <h3 id="userManagementModalTitle" style="margin:0 0 4px;font-size:18.5px;">👥 Quản lý Người dùng & Phân quyền Bot (RBAC)</h3>
         <div style="color:var(--muted);font-size:12px;">Tạo tài khoản và phân quyền vận hành bot cho từng thành viên.</div>
       </div>
-      <button class="primary" onclick="openCreateUserModal()">＋ Thêm Người Dùng Mới</button>
+      <button type="button" class="primary" onclick="openCreateUserModal()">＋ Thêm Người Dùng Mới</button>
     </div>
 
     <div class="user-table-wrap">
@@ -5931,34 +5867,34 @@ body.theme-morning .cosmic-toggle-pill {
           </tr>
         </thead>
         <tbody id="userTableBody">
-          <tr><td colspan="5" style="text-align:center;padding:24px;color:var(--muted);">Đang tải danh sách người dùng...</td></tr>
+          <tr><td colspan="6" style="text-align:center;padding:24px;color:var(--muted);">Đang tải danh sách người dùng...</td></tr>
         </tbody>
       </table>
     </div>
 
     <div class="modal-actions">
-      <button onclick="closeUserManagementModal()">Đóng</button>
+      <button type="button" onclick="closeUserManagementModal()">Đóng</button>
     </div>
   </div>
 </div>
 
-<div id="userEditModal" class="modal hidden">
+<div id="userEditModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="userEditModalTitle">
   <div class="modal-card" style="width:min(580px, 98vw);">
     <h3 id="userEditModalTitle">Thêm Người Dùng Mới</h3>
     <input id="userFormId" type="hidden">
     <div class="form-row">
-      <label>Tên đăng nhập (Username)</label>
+      <label for="userFormUsername">Tên đăng nhập (Username)</label>
       <input id="userFormUsername" autocomplete="off" placeholder="Ví dụ: operator1">
     </div>
     <div class="form-row">
-      <label>Mật khẩu (Password)</label>
+      <label for="userFormPassword">Mật khẩu (Password)</label>
       <div class="password-input-wrap">
-        <input id="userFormPassword" type="text" autocomplete="off" placeholder="Nhập mật khẩu (tối thiểu 5 ký tự, gồm cả chữ và số)...">
-        <button type="button" class="password-toggle-btn" onclick="generateRandomUserPassword()" title="Tạo mật khẩu ngẫu nhiên">🎲</button>
+        <input id="userFormPassword" type="text" autocomplete="off" placeholder="Nhập mật khẩu (tối thiểu 6 ký tự)...">
+        <button type="button" class="password-toggle-btn" onclick="generateRandomUserPassword()" title="Tạo mật khẩu ngẫu nhiên" aria-label="Tạo mật khẩu ngẫu nhiên">🎲</button>
       </div>
     </div>
     <div class="form-row">
-      <label>Trạng thái tài khoản</label>
+      <label for="userFormStatus">Trạng thái tài khoản</label>
       <select id="userFormStatus" class="search-box" style="width:100%;">
         <option value="active">🟢 Đang hoạt động (Cho phép đăng nhập)</option>
         <option value="expired">⚠️ Hết hạn thuê</option>
@@ -5967,16 +5903,16 @@ body.theme-morning .cosmic-toggle-pill {
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
       <div class="form-row">
-        <label>Tên gói cước</label>
+        <label for="userFormPlanName">Tên gói cước</label>
         <input id="userFormPlanName" placeholder="Ví dụ: Gói Tuần, VIP Tháng...">
       </div>
       <div class="form-row">
-        <label>Hạn thuê (Bỏ trống = Vĩnh viễn)</label>
+        <label for="userFormExpiresAt">Hạn thuê (Bỏ trống = Vĩnh viễn)</label>
         <input id="userFormExpiresAt" type="datetime-local">
       </div>
     </div>
     <div class="form-row">
-      <label>Ghi chú liên hệ (Zalo / Facebook / SĐT)</label>
+      <label for="userFormNote">Ghi chú liên hệ (Zalo / Facebook / SĐT)</label>
       <input id="userFormNote" placeholder="Ví dụ: Zalo: 0912345678 (Anh Nam)">
     </div>
     <div class="form-row" style="margin-top:6px;">
@@ -5988,7 +5924,7 @@ body.theme-morning .cosmic-toggle-pill {
 
     <div style="margin-top:14px;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
-        <label style="color:var(--muted);font-size:11.5px;font-weight:700;">DANH SÁCH BOT CẤP QUYỀN VẬN HÀNH</label>
+        <span style="color:var(--muted);font-size:11.5px;font-weight:700;">DANH SÁCH BOT CẤP QUYỀN VẬN HÀNH</span>
         <div style="display:flex;gap:8px;">
           <button type="button" class="small" onclick="toggleSelectAllUserBots(true)">Chọn hết</button>
           <button type="button" class="small" onclick="toggleSelectAllUserBots(false)">Bỏ hết</button>
@@ -5998,45 +5934,45 @@ body.theme-morning .cosmic-toggle-pill {
     </div>
 
     <div class="modal-actions" style="margin-top:20px;">
-      <button onclick="closeUserEditModal()">Hủy</button>
-      <button id="userFormSubmitBtn" class="primary" onclick="saveUserForm()">Lưu Người Dùng</button>
+      <button type="button" onclick="closeUserEditModal()">Hủy</button>
+      <button id="userFormSubmitBtn" type="button" class="primary" onclick="saveUserForm()">Lưu Người Dùng</button>
     </div>
   </div>
 </div>
 
-<div id="changePasswordModal" class="modal hidden">
+<div id="changePasswordModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="changePasswordModalTitle">
   <div class="modal-card" style="width:min(440px, 96vw);">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-      <h3 style="margin:0;display:flex;align-items:center;gap:8px;">🔑 Đổi Mật Khẩu Tài Khoản</h3>
-      <button class="small" onclick="closeChangePasswordModal()">✕</button>
+      <h3 id="changePasswordModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">🔑 Đổi Mật Khẩu Tài Khoản</h3>
+      <button type="button" class="small" onclick="closeChangePasswordModal()" aria-label="Đóng">✕</button>
     </div>
     <form id="changePasswordForm" onsubmit="submitChangePassword(event)" style="display:flex;flex-direction:column;gap:12px;">
       <div class="form-row" style="margin-bottom:0;">
-        <label>Tài khoản</label>
+        <label for="changePassUsernameDisplay">Tài khoản</label>
         <input id="changePassUsernameDisplay" type="text" disabled style="opacity:0.8;background:rgba(255,255,255,0.04);">
       </div>
       <div class="form-row" style="margin-bottom:0;">
-        <label>Mật khẩu hiện tại</label>
+        <label for="changePassOld">Mật khẩu hiện tại</label>
         <div class="password-input-wrap">
           <input id="changePassOld" type="password" autocomplete="current-password" placeholder="Nhập mật khẩu hiện tại..." required>
-          <button type="button" class="password-toggle-btn" onclick="togglePasswordVisibility('changePassOld', this)">👁</button>
+          <button type="button" class="password-toggle-btn" aria-label="Hiện hoặc ẩn mật khẩu hiện tại" aria-pressed="false" onclick="togglePasswordVisibility('changePassOld', this)">👁</button>
         </div>
       </div>
       <div class="form-row" style="margin-bottom:0;">
-        <label>Mật khẩu mới (tối thiểu 5 ký tự, gồm cả chữ và số)</label>
+        <label for="changePassNew">Mật khẩu mới (tối thiểu 6 ký tự)</label>
         <div class="password-input-wrap">
-          <input id="changePassNew" type="password" autocomplete="new-password" placeholder="Nhập mật khẩu mới..." required>
-          <button type="button" class="password-toggle-btn" onclick="togglePasswordVisibility('changePassNew', this)">👁</button>
+          <input id="changePassNew" type="password" minlength="6" autocomplete="new-password" placeholder="Nhập mật khẩu mới (tối thiểu 6 ký tự)..." required>
+          <button type="button" class="password-toggle-btn" aria-label="Hiện hoặc ẩn mật khẩu mới" aria-pressed="false" onclick="togglePasswordVisibility('changePassNew', this)">👁</button>
         </div>
       </div>
       <div class="form-row" style="margin-bottom:0;">
-        <label>Xác nhận mật khẩu mới</label>
+        <label for="changePassConfirm">Xác nhận mật khẩu mới</label>
         <div class="password-input-wrap">
-          <input id="changePassConfirm" type="password" autocomplete="new-password" placeholder="Nhập lại mật khẩu mới..." required>
-          <button type="button" class="password-toggle-btn" onclick="togglePasswordVisibility('changePassConfirm', this)">👁</button>
+          <input id="changePassConfirm" type="password" minlength="6" autocomplete="new-password" placeholder="Nhập lại mật khẩu mới..." required>
+          <button type="button" class="password-toggle-btn" aria-label="Hiện hoặc ẩn xác nhận mật khẩu" aria-pressed="false" onclick="togglePasswordVisibility('changePassConfirm', this)">👁</button>
         </div>
       </div>
-      <div id="changePassAlert" class="login-alert hidden" style="margin-top:4px;"></div>
+      <div id="changePassAlert" role="alert" aria-atomic="true" class="login-alert hidden" style="margin-top:4px;"></div>
       <div class="modal-actions" style="margin-top:12px;">
         <button type="button" onclick="closeChangePasswordModal()">Hủy</button>
         <button id="changePassSubmitBtn" type="submit" class="primary">💾 Cập Nhật Mật Khẩu</button>
@@ -6045,11 +5981,11 @@ body.theme-morning .cosmic-toggle-pill {
   </div>
 </div>
 
-<div id="discordLinkModal" class="modal hidden">
+<div id="discordLinkModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="discordLinkModalTitle">
   <div class="modal-card" style="width:min(460px, 96vw);">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-      <h3 style="margin:0;display:flex;align-items:center;gap:8px;">💬 Liên Kết Tài Khoản Discord</h3>
-      <button class="small" onclick="closeDiscordLinkModal()">✕</button>
+      <h3 id="discordLinkModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">💬 Liên Kết Tài Khoản Discord</h3>
+      <button type="button" class="small" onclick="closeDiscordLinkModal()" aria-label="Đóng">✕</button>
     </div>
     <div id="discordLinkContent" style="display:flex;flex-direction:column;gap:12px;">
       <div id="discordLinkStatusBox" style="padding:12px;border-radius:8px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);">
@@ -6077,14 +6013,14 @@ body.theme-morning .cosmic-toggle-pill {
     </div>
   </div>
 </div>
-<div id="changelogModal" class="modal hidden">
+<div id="changelogModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="changelogModalTitle">
   <div class="modal-card changelog-card">
     <div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:12px;border-bottom:1px solid rgba(255,255,255,0.08);">
       <div>
-        <h3 style="margin:0;display:flex;align-items:center;gap:8px;">📜 Nhật Ký Cập Nhật & Lịch Sử Phiên Bản</h3>
+        <h3 id="changelogModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">📜 Nhật Ký Cập Nhật & Lịch Sử Phiên Bản</h3>
         <div style="color:var(--muted);font-size:11.5px;margin-top:2px;">Hành trình tối ưu và nâng cấp KingMC Sentinel (V1.0 - V11.8 Pure Render)</div>
       </div>
-      <button class="small" onclick="closeChangelogModal()">✕</button>
+      <button type="button" class="small" onclick="closeChangelogModal()" aria-label="Đóng">✕</button>
     </div>
 
     <div class="changelog-body">
@@ -6447,38 +6383,38 @@ body.theme-morning .cosmic-toggle-pill {
     </div>
 
     <div class="modal-actions" style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.06);">
-      <button onclick="closeChangelogModal()">Đóng</button>
+      <button type="button" onclick="closeChangelogModal()">Đóng</button>
     </div>
 </div>
 </div>
 
-<div id="supabaseModal" class="modal hidden">
+<div id="supabaseModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="supabaseModalTitle">
   <div class="modal-card">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-      <h3 style="margin:0;font-size:18px;display:flex;align-items:center;gap:8px;">
-        <span>☁️</span> Cấu hình Supabase Cloud Database
+      <h3 id="supabaseModalTitle" style="margin:0;font-size:18px;display:flex;align-items:center;gap:8px;">
+        <span aria-hidden="true">☁️</span> Cấu hình Supabase Cloud Database
       </h3>
       <span id="supabaseStatusBadge" class="vip-pill" style="background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.3);">
         ⚪ Đang kiểm tra...
       </span>
     </div>
 
-    <div id="supabaseAlertBox" class="login-alert hidden" style="margin-bottom:14px;"></div>
+    <div id="supabaseAlertBox" role="alert" aria-atomic="true" class="login-alert hidden" style="margin-bottom:14px;"></div>
 
     <p style="font-size:12.5px;color:var(--muted);line-height:1.5;margin-bottom:16px;">
       Đồng bộ người dùng, License Key, hạm đội, phiên đăng nhập, cài đặt Bot và Audit Log lên Supabase PostgreSQL. Khi tạo project Supabase mới, sao chép SQL bên dưới và chạy một lần trong SQL Editor trước khi kết nối.
     </p>
 
     <div class="form-row">
-      <label>Supabase Project URL</label>
+      <label for="supabaseUrlInput">Supabase Project URL</label>
       <input id="supabaseUrlInput" type="text" placeholder="https://xyzcompany.supabase.co" autocomplete="off" spellcheck="false">
     </div>
 
     <div class="form-row">
-      <label>Supabase Service Role Key / API Key</label>
+      <label for="supabaseKeyInput">Supabase Service Role Key / API Key</label>
       <div class="password-input-wrap">
         <input id="supabaseKeyInput" type="password" placeholder="eyJh..." autocomplete="off">
-        <button type="button" class="password-toggle-btn" onclick="togglePasswordVisibility('supabaseKeyInput', this)">👁</button>
+        <button type="button" class="password-toggle-btn" aria-label="Hiện hoặc ẩn Supabase API key" aria-pressed="false" onclick="togglePasswordVisibility('supabaseKeyInput', this)">👁</button>
       </div>
       <small style="color:var(--muted);font-size:11px;margin-top:4px;display:block;">
         Khuyên dùng <strong>service_role secret</strong> từ Supabase Dashboard (Settings &gt; API) để có toàn quyền đồng bộ bảng.
@@ -6541,6 +6477,8 @@ let lastPositionHistoryRevision = -1;
 let lastPositionHistoryFetchedAt = 0;
 let eventLoading = false;
 let chatLoading = false;
+let eventLoadingGen = 0;
+let chatLoadingGen = 0;
 let uptimeSyncAt = Date.now();
 let detailRefreshQueued = false;
 let draggedBotId = null;
@@ -6637,7 +6575,9 @@ function setDetailBotScheduleDisabled(disabled) {
 }
 
 document.addEventListener('click', event => {
-  closeUserProfileDropdown();
+  if (!event.target?.closest?.('#globalUserProfileBtn') && !event.target?.closest?.('#globalUserProfileDropdown')) {
+    closeUserProfileDropdown();
+  }
   const copyIpBtn = event.target?.closest?.('.btn-copy-bot-ip');
   if (copyIpBtn && copyIpBtn.dataset.ip && copyIpBtn.dataset.ip !== '--') {
     event.stopPropagation();
@@ -6701,6 +6641,7 @@ function statusMeta(status, available=true, manuallyStopped=false, bot=null) {
   const map={
     online:['green','ONLINE','online'],
     afk:['green','AFK','afk'],
+    waking:['yellow','STARTING...','connecting'],
     connecting:['yellow','CONNECTING','connecting'],
     authenticating:['blue','AUTH','authenticating'],
     entering:['blue','ENTERING SERVER','entering'],
@@ -6785,6 +6726,7 @@ function botCardHtml(bot) {
     ? (Math.round(Number(posObj.x)) + ' ' + Math.round(Number(posObj.y)) + ' ' + Math.round(Number(posObj.z)))
     : '-';
   const id = Number.isFinite(Number(bot.id)) ? Number(bot.id) : String(bot.id);
+  const idArg = typeof id === 'number' ? String(id) : JSON.stringify(id);
   const totems = Number(bot.totemCount || 0);
   const isEco = bot.settings?.ecoMode !== false && bot.ecoMode !== false;
   const hw = bot.hostHardware;
@@ -6814,7 +6756,8 @@ function botCardHtml(bot) {
   const hpPercent = hpVal !== null ? Math.max(0, Math.min(100, Math.round((hpVal / 20) * 100))) : 0;
   const hpColor = hpVal === null ? '#94a3b8' : (hpVal <= 6 ? 'var(--red)' : hpVal <= 14 ? 'var(--yellow)' : 'var(--green)');
 
-  const kickWarning = bot.lastKickReason ? ('<div class="bot-kick-notice">⚠️ <strong>Bị kick:</strong> ' + escapeHtml(bot.lastKickReason) + '</div>') : '';
+  const lastKickReason = bot.lastKickReason || bot.summary?.lastKickReason || '';
+  const kickWarning = lastKickReason ? ('<div class="bot-kick-notice">⚠️ <strong>Bị kick:</strong> ' + escapeHtml(lastKickReason) + '</div>') : '';
   const rawIp = String(bot.ipAddress || '').trim();
   const isLoopback = rawIp === '127.0.0.1' || rawIp === 'localhost' || rawIp === '0.0.0.0' || rawIp === '::1';
   const ipDisplay = (!isLoopback && rawIp) ? rawIp : (bot.host ? bot.host : '--');
@@ -6822,20 +6765,20 @@ function botCardHtml(bot) {
   // Ownership badge (Hỗ trợ click để lọc theo tag trạng thái thuê)
   let ownerBadgeHtml = '';
   if (bot.rentable === false) {
-    ownerBadgeHtml = '<span class="bot-owner-pill blocked" onclick="event.stopPropagation(); filterByTag(\'sys:not-rentable\')" title="Bấm để lọc các bot Không Cho Thuê" style="background:rgba(148,163,184,0.15);color:var(--muted);border:1px solid rgba(148,163,184,0.3);font-size:11px;padding:2px 8px;border-radius:12px;cursor:pointer;">🚫 Không Cho Thuê</span>';
+    ownerBadgeHtml = '<button type="button" class="bot-owner-pill blocked" onclick="event.stopPropagation(); filterByTag(\'sys:not-rentable\')" title="Bấm để lọc các bot Không Cho Thuê" style="background:rgba(148,163,184,0.15);color:var(--muted);border:1px solid rgba(148,163,184,0.3);font-size:11px;padding:2px 8px;border-radius:12px;cursor:pointer;">🚫 Không Cho Thuê</button>';
   } else if (bot.assignedUsername) {
-    ownerBadgeHtml = '<span class="bot-owner-pill rented" onclick="event.stopPropagation(); filterByTag(\'sys:rented\')" title="Bấm để lọc các bot Đang Được Thuê (Thuộc: ' + escapeHtml(bot.assignedUsername) + ')" style="cursor:pointer;">' +
+    ownerBadgeHtml = '<button type="button" class="bot-owner-pill rented" onclick="event.stopPropagation(); filterByTag(\'sys:rented\')" title="Bấm để lọc các bot Đang Được Thuê (Thuộc: ' + escapeHtml(bot.assignedUsername) + ')" style="cursor:pointer;">' +
       '👤 Thuộc: <strong>' + escapeHtml(bot.assignedUsername) + '</strong>' +
       (bot.assignedPlan ? ' <small>(' + escapeHtml(bot.assignedPlan) + ')</small>' : '') +
-      '</span>';
+      '</button>';
   } else {
-    ownerBadgeHtml = '<span class="bot-owner-pill free" onclick="event.stopPropagation(); filterByTag(\'sys:rentable\')" title="Bấm để lọc các bot Sẵn Sàng Cho Thuê" style="cursor:pointer;">' +
+    ownerBadgeHtml = '<button type="button" class="bot-owner-pill free" onclick="event.stopPropagation(); filterByTag(\'sys:rentable\')" title="Bấm để lọc các bot Sẵn Sàng Cho Thuê" style="cursor:pointer;">' +
       '✨ Sẵn Sàng Cho Thuê' +
-      '</span>';
+      '</button>';
   }
 
   const isAFK = bot.status === 'afk';
-  const isOnlineWaiting = ['online', 'connecting', 'authenticating', 'entering'].includes(String(bot.status || '').toLowerCase());
+  const isOnlineWaiting = ['online', 'waking', 'connecting', 'authenticating', 'entering'].includes(String(bot.status || '').toLowerCase());
   const statusGlowClass = !bot.available ? 'status-unreachable' : (isAFK ? 'status-afk' : (isOnlineWaiting ? 'status-waiting' : 'status-offline'));
   const displayNum = bot.displayIndex !== undefined ? bot.displayIndex : id;
   const idStr = String(displayNum).padStart(2, '0');
@@ -6843,10 +6786,10 @@ function botCardHtml(bot) {
   const botTags = Array.isArray(bot.tags) ? bot.tags : [];
   const tagsHtml = botTags.length > 0
     ? ('<div class="bot-tags-wrap" style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;">' +
-        botTags.map(t => '<span class="bot-tag-chip" onclick="event.stopPropagation(); filterByTag(\'' + escapeHtml(t) + '\')" title="Lọc bot theo tag #' + escapeHtml(t) + '" style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(168,85,247,0.18);color:#c084fc;border:1px solid rgba(168,85,247,0.3);cursor:pointer;font-weight:600;">#' + escapeHtml(t) + '</span>').join('') +
-        (isAdmin ? '<button type="button" class="bot-mini-btn" onclick="event.stopPropagation(); editBotTags(' + id + ')" title="Chỉnh sửa tags" style="padding:1px 5px;font-size:10px;">🏷️</button>' : '') +
+        botTags.map(t => '<button type="button" class="bot-tag-chip" data-tag="' + escapeHtml(t) + '" onclick="event.stopPropagation(); filterByTag(this.dataset.tag)" title="Lọc bot theo tag #' + escapeHtml(t) + '" style="font-size:11px;padding:2px 6px;border-radius:4px;background:rgba(168,85,247,0.18);color:#c084fc;border:1px solid rgba(168,85,247,0.3);cursor:pointer;font-weight:600;">#' + escapeHtml(t) + '</button>').join('') +
+        (isAdmin ? '<button type="button" class="bot-mini-btn" onclick="event.stopPropagation(); editBotTags(' + escapeHtml(idArg) + ')" title="Chỉnh sửa tags" style="padding:2px 6px;font-size:11px;">🏷️</button>' : '') +
       '</div>')
-    : (isAdmin ? '<button type="button" class="bot-mini-btn" onclick="event.stopPropagation(); editBotTags(' + id + ')" title="Gắn tag phân loại bot (+tag)" style="padding:1px 5px;font-size:10px;opacity:0.6;">＋tag</button>' : '');
+    : (isAdmin ? '<button type="button" class="bot-mini-btn" onclick="event.stopPropagation(); editBotTags(' + escapeHtml(idArg) + ')" title="Gắn tag phân loại bot (+tag)" style="padding:2px 6px;font-size:11px;opacity:0.7;">＋tag</button>' : '');
 
   let errorBannerHtml = '';
   if (!bot.available) {
@@ -6855,7 +6798,7 @@ function botCardHtml(bot) {
     } else if (errorType === 'secret_mismatch') {
       errorBannerHtml = '<div class="bot-error-action-banner warning">' +
         '<div class="bot-error-text">⚠️ <strong>Lệch Secret Key (409):</strong> Worker từ chối lệnh do khóa bí mật không khớp với Manager.</div>' +
-        (isAdmin ? '<button type="button" class="bot-action-chip warning" onclick="event.stopPropagation(); openEditSecretModal(' + id + ')" title="Cập nhật Secret Key cho Bot #' + idStr + '">🔑 Sửa Secret Key</button>' : '') +
+        (isAdmin ? '<button type="button" class="bot-action-chip warning" onclick="event.stopPropagation(); openEditSecretModal(' + escapeHtml(idArg) + ')" title="Cập nhật Secret Key cho Bot #' + idStr + '">🔑 Sửa Secret Key</button>' : '') +
       '</div>';
     } else if (errorType === 'render_sleep') {
       const isRender = bot?.url ? String(bot.url).includes('.onrender.com') : true;
@@ -6864,14 +6807,14 @@ function botCardHtml(bot) {
       const sleepMsg = is521 ? 'Máy chủ Wispbyte đang khởi động hoặc kết nối lại qua Cloudflare edge (~10-20s)...' : (isRender ? 'Máy chủ Cloud đang khởi động từ chế độ ngủ đông (~30-50s) hoặc timeout.' : 'Worker phản hồi chậm hoặc đang tải nặng, đang tự động kết nối lại...');
       errorBannerHtml = '<div class="bot-error-action-banner sleep">' +
         '<div class="bot-error-text">💤 <strong>' + sleepLabel + '</strong> ' + sleepMsg + '</div>' +
-        '<button type="button" class="bot-action-chip info" onclick="event.stopPropagation(); quickBotAction(event,' + id + ',\'restart\')" title="Ping lại kết nối">⚡ Thử lại</button>' +
+        '<button type="button" class="bot-action-chip info" onclick="event.stopPropagation(); quickBotAction(event,' + escapeHtml(idArg) + ',\'restart\')" title="Ping lại kết nối">⚡ Thử lại</button>' +
       '</div>';
     } else if (errorType === 'not_found') {
       errorBannerHtml = '<div class="bot-error-action-banner danger">' +
         '<div class="bot-error-text">❌ <strong>URL không tồn tại (404):</strong> URL worker bị sai hoặc app đã bị xoá khỏi Render.</div>' +
         '<div style="display:flex;gap:4px;">' +
-          (isAdmin ? '<button type="button" class="bot-action-chip danger" onclick="event.stopPropagation(); deleteBot(event,' + id + ')" title="Xoá bot này khỏi registry">🗑 Xoá</button>' : '') +
-          (isAdmin ? '<button type="button" class="bot-action-chip" onclick="event.stopPropagation(); editBot(event,' + id + ')" title="Sửa lại URL">✏ Sửa URL</button>' : '') +
+          (isAdmin ? '<button type="button" class="bot-action-chip danger" onclick="event.stopPropagation(); deleteBot(event,' + escapeHtml(idArg) + ')" title="Xoá bot này khỏi registry">🗑 Xoá</button>' : '') +
+          (isAdmin ? '<button type="button" class="bot-action-chip" onclick="event.stopPropagation(); editBot(event,' + escapeHtml(idArg) + ')" title="Sửa lại URL">✏ Sửa URL</button>' : '') +
         '</div>' +
       '</div>';
     } else if (errorType === 'probing') {
@@ -6881,30 +6824,30 @@ function botCardHtml(bot) {
     } else {
       errorBannerHtml = '<div class="bot-error-action-banner danger">' +
         '<div class="bot-error-text">⚠️ <strong>Mất kết nối:</strong> ' + escapeHtml(bot.lastError || bot.error || 'Worker không phản hồi.') + '</div>' +
-        (isAdmin ? '<button type="button" class="bot-action-chip danger" onclick="event.stopPropagation(); deleteBot(event,' + id + ')" title="Xoá bot này khỏi registry">🗑 Xoá bot</button>' : '') +
+        (isAdmin ? '<button type="button" class="bot-action-chip danger" onclick="event.stopPropagation(); deleteBot(event,' + escapeHtml(idArg) + ')" title="Xoá bot này khỏi registry">🗑 Xoá bot</button>' : '') +
       '</div>';
     }
   }
 
-  return '<div class="bot-card ' + statusGlowClass + '" data-bot-id="' + id + '" draggable="' + (isAdmin ? 'true' : 'false') + '" ' +
-    (isAdmin ? 'ondragstart="startBotDrag(event,' + id + ')" ondragover="allowBotDrop(event)" ondrop="dropBot(event,' + id + ')"' : '') +
-    ' onclick="openBot(' + id + ')">' +
+  return '<div class="bot-card ' + statusGlowClass + '" data-bot-id="' + escapeHtml(id) + '" draggable="' + (isAdmin ? 'true' : 'false') + '" ' +
+    (isAdmin ? 'ondragstart="startBotDrag(event,' + escapeHtml(idArg) + ')" ondragover="allowBotDrop(event)" ondrop="dropBot(event,' + escapeHtml(idArg) + ')" ondragend="endBotDrag(event)"' : '') +
+    ' onclick="openBot(this.dataset.botId)">' +
 
     '<div class="bot-card-topbar">' +
       '<div class="bot-card-title-group">' +
         '<span class="bot-id-chip">#' + idStr + '</span>' +
         '<h2 class="bot-card-name" title="' + escapeHtml(bot.label) + '">' + escapeHtml(bot.label) + '</h2>' +
-        '<button type="button" class="bot-mini-btn btn-rename-alias" data-bot-id="' + id + '" data-bot-label="' + escapeHtml(bot.label) + '" onclick="event.stopPropagation(); handleRenameClick(this)" title="Đổi tên / Ghi chú hiển thị">✏</button>' +
+        '<button type="button" class="bot-mini-btn btn-rename-alias" data-bot-id="' + escapeHtml(id) + '" data-bot-label="' + escapeHtml(bot.label) + '" onclick="event.stopPropagation(); handleRenameClick(this)" title="Đổi tên / Ghi chú hiển thị">✏</button>' +
         '<div class="bot-card-quick-actions" style="display:inline-flex;margin-left:4px;" onclick="event.stopPropagation()">' +
           (isOffline ?
-            '<button type="button" class="bot-mini-btn" style="background:rgba(16,185,129,0.18);color:#34d399;border:1px solid rgba(16,185,129,0.45);font-weight:700;" onclick="quickCardAction(this,' + id + ',\'start\')" title="Chạy bot ngay">▶ Chạy</button>' :
-            '<button type="button" class="bot-mini-btn danger" onclick="quickCardAction(this,' + id + ',\'stop\')" title="Dừng bot ngay">■ Dừng</button>') +
+            '<button type="button" class="bot-mini-btn" style="background:rgba(16,185,129,0.18);color:#34d399;border:1px solid rgba(16,185,129,0.45);font-weight:700;" onclick="quickCardAction(this,' + escapeHtml(idArg) + ',\'start\')" title="Chạy bot ngay">▶ Chạy</button>' :
+            '<button type="button" class="bot-mini-btn danger" onclick="quickCardAction(this,' + escapeHtml(idArg) + ',\'stop\')" title="Dừng bot ngay">■ Dừng</button>') +
         '</div>' +
       '</div>' +
       (isAdmin ?
         '<div class="bot-card-admin-actions" onclick="event.stopPropagation()">' +
-          '<button type="button" class="bot-mini-btn" onclick="editBot(event,' + id + ')" title="Cấu hình bot">⚙ Sửa</button>' +
-          '<button type="button" class="bot-mini-btn danger" onclick="deleteBot(event,' + id + ')" title="Xóa bot khỏi hệ thống">🗑 Xóa</button>' +
+          '<button type="button" class="bot-mini-btn" onclick="editBot(event,' + escapeHtml(idArg) + ')" title="Cấu hình bot">⚙ Sửa</button>' +
+          '<button type="button" class="bot-mini-btn danger" onclick="deleteBot(event,' + escapeHtml(idArg) + ')" title="Xóa bot khỏi hệ thống">🗑 Xóa</button>' +
         '</div>' : '') +
     '</div>' +
 
@@ -6918,6 +6861,7 @@ function botCardHtml(bot) {
       tagsHtml +
     '</div>' +
     errorBannerHtml +
+    (isOffline && errorType !== 'stopped' ? kickWarning : '') +
 
     '<div class="bot-ingame-row">' +
       '<div class="bot-ingame-user" title="Nhân vật Minecraft ingame">' +
@@ -6981,12 +6925,12 @@ function botCardHtml(bot) {
       '</div>' : '') +
 
     '<div class="card-quick-actions" onclick="event.stopPropagation()">' +
-      '<button type="button" class="small card-btn" onclick="quickBotAction(event,' + id + ',\'restart\')">⚡ Restart</button>' +
+      '<button type="button" class="small card-btn" onclick="quickBotAction(event,' + escapeHtml(idArg) + ',\'restart\')">⚡ Restart</button>' +
       (isOffline ?
-        '<button type="button" class="small card-btn primary" onclick="quickBotAction(event,' + id + ',\'start\')">▶ Bật</button>' :
-        '<button type="button" class="small card-btn danger" onclick="quickBotAction(event,' + id + ',\'stop\')">⏹ Dừng</button>'
+        '<button type="button" class="small card-btn primary" onclick="quickBotAction(event,' + escapeHtml(idArg) + ',\'start\')">▶ Bật</button>' :
+        '<button type="button" class="small card-btn danger" onclick="quickBotAction(event,' + escapeHtml(idArg) + ',\'stop\')">⏹ Dừng</button>'
       ) +
-      '<button type="button" class="small card-btn detail-link-btn" onclick="openBot(' + id + ')">⚙ Chi Tiết →</button>' +
+      '<button type="button" class="small card-btn detail-link-btn" onclick="openBot(' + escapeHtml(idArg) + ')">⚙ Chi Tiết →</button>' +
     '</div>' +
 
   '</div>';
@@ -6997,11 +6941,16 @@ function startBotDrag(event,id){
   try{event.dataTransfer.setData('text/plain',String(id));event.dataTransfer.effectAllowed='move';}catch(_){}
   event.currentTarget.classList.add('dragging');
 }
+function endBotDrag(){
+  draggedBotId=null;
+  document.querySelectorAll('.bot-card.dragging').forEach(el=>el.classList.remove('dragging'));
+}
+window.endBotDrag = endBotDrag;
 function allowBotDrop(event){event.preventDefault();}
 async function dropBot(event,targetId){
   event.preventDefault();
   const sourceId=Number((()=>{try{return event.dataTransfer.getData('text/plain')||draggedBotId}catch(_){return draggedBotId}})());
-  draggedBotId=null;
+  endBotDrag();
   if(!Number.isInteger(sourceId)||sourceId===Number(targetId))return;
   const ids=bots.map(x=>Number(x.id));
   const from=ids.indexOf(sourceId);const to=ids.indexOf(Number(targetId));
@@ -7042,7 +6991,7 @@ function renderEditBotTagSuggestions() {
   let html = '<div style="font-size:11px;color:var(--muted);margin-bottom:4px;width:100%;">💡 <strong>Bấm chọn nhanh tag riêng đã có:</strong></div>';
   Array.from(allTags).sort().forEach(tag => {
     const isSelected = currentTagSet.has(tag);
-    html += '<button type="button" onclick="toggleEditBotTag(\'' + escapeHtml(tag) + '\')" style="padding:2px 8px;font-size:11px;border-radius:12px;cursor:pointer;transition:all 0.15s;font-weight:600;' +
+    html += '<button type="button" data-tag="' + escapeHtml(tag) + '" onclick="toggleEditBotTag(this.dataset.tag)" style="padding:2px 8px;font-size:11px;border-radius:12px;cursor:pointer;transition:all 0.15s;font-weight:600;' +
       (isSelected
         ? 'background:rgba(56,189,248,0.25);color:#38bdf8;border:1px solid #38bdf8;'
         : 'background:rgba(255,255,255,0.05);color:var(--muted);border:1px solid var(--border);') +
@@ -7257,13 +7206,20 @@ async function copyText(value){
 // HỆ THỐNG XÁC THỰC & PHÂN QUYỀN ĐA NGƯỜI DÙNG (CLIENT RBAC)
 // ============================================================================
 
+const kbotReducedMotionQuery = typeof window.matchMedia === 'function'
+  ? window.matchMedia('(prefers-reduced-motion: reduce)')
+  : { matches: false };
+
 function showLoginGate() {
   document.getElementById('loginGate')?.classList.remove('hidden');
   document.body.classList.add('cosmic-mode-login');
   const closeBtn = document.getElementById('loginGateCloseBtn');
   if (closeBtn) closeBtn.style.display = currentUser ? 'block' : 'none';
   const v = document.getElementById('appGalaxyVideo');
-  if (v) { v.playbackRate = 0.85; v.play().catch(() => {}); }
+  if (v && !kbotReducedMotionQuery.matches && !document.hidden) {
+    v.playbackRate = 0.85;
+    v.play().catch(() => {});
+  }
 }
 
 function hideLoginGate() {
@@ -7312,15 +7268,18 @@ function applyDashboardCosmicMode(mode) {
 
   var v = document.getElementById('appGalaxyVideo');
   if (v) {
-    if (effective === 'galaxy' && !document.body.classList.contains('cosmic-mode-off')) {
+    if (effective === 'galaxy' && !document.body.classList.contains('cosmic-mode-off') && !kbotReducedMotionQuery.matches) {
       v.style.display = 'block';
       v.style.transform = 'translate3d(0px,0px,0) scale(1.02)';
       v.playbackRate = 0.85;
-      v.play().catch(function() {});
+      if (!document.hidden) v.play().catch(function() {});
     } else {
       v.pause();
       v.style.display = 'none';
     }
+  }
+  if (typeof window.__kbotRefreshAppCosmicEngine === 'function') {
+    window.__kbotRefreshAppCosmicEngine();
   }
 }
 
@@ -7353,7 +7312,22 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
   var ctx = canvas.getContext('2d');
   var w = 0, h = 0;
   var animTime = 0;
+  var rafId = null;
   var isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (window.innerWidth <= 768);
+
+  var bgVideo = document.getElementById('appGalaxyVideo');
+  if (bgVideo) {
+    var hideAppVideo = function() {
+      bgVideo.style.display = 'none';
+      bgVideo.pause();
+    };
+    bgVideo.addEventListener('error', hideAppVideo);
+    var videoSources = bgVideo.querySelectorAll('source');
+    var lastVideoSource = videoSources && videoSources.length ? videoSources[videoSources.length - 1] : null;
+    if (lastVideoSource) {
+      lastVideoSource.addEventListener('error', hideAppVideo);
+    }
+  }
 
   function resize() {
     w = canvas.width = window.innerWidth;
@@ -7423,12 +7397,59 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
     });
   }
 
-  document.addEventListener('visibilitychange', function() {
+  function shouldRunCosmicLoop() {
+    var isOff = document.body.classList.contains('cosmic-mode-off') || document.body.classList.contains('theme-off');
+    return !document.hidden && !isOff && !kbotReducedMotionQuery.matches;
+  }
+
+  function stopCosmicLoop() {
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    if (ctx) ctx.clearRect(0, 0, w, h);
     var v = document.getElementById('appGalaxyVideo');
-    if (!v) return;
-    if (document.hidden) v.pause();
-    else if (localStorage.getItem('kbot_dashboard_theme') === 'galaxy') v.play().catch(function() {});
+    if (v) v.pause();
+  }
+
+  function startCosmicLoop() {
+    if (!shouldRunCosmicLoop()) {
+      stopCosmicLoop();
+      return;
+    }
+    var v = document.getElementById('appGalaxyVideo');
+    if (v && (localStorage.getItem('kbot_dashboard_theme') || 'galaxy') === 'galaxy') {
+      v.style.display = 'block';
+      v.play().catch(function() {});
+    }
+    if (rafId === null) {
+      rafId = requestAnimationFrame(render);
+    }
+  }
+
+  window.__kbotRefreshAppCosmicEngine = startCosmicLoop;
+
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden) {
+      stopCosmicLoop();
+    } else {
+      startCosmicLoop();
+    }
   });
+
+  var onReducedMotionChange = function(ev) {
+    if (ev.matches) {
+      stopCosmicLoop();
+    } else {
+      applyDashboardCosmicMode(localStorage.getItem('kbot_cosmic_mode') || 'subtle');
+      startCosmicLoop();
+    }
+  };
+  if (typeof kbotReducedMotionQuery.addEventListener === 'function') {
+    kbotReducedMotionQuery.addEventListener('change', onReducedMotionChange);
+  } else if (typeof kbotReducedMotionQuery.addListener === 'function') {
+    kbotReducedMotionQuery.addListener(onReducedMotionChange);
+  }
 
   function renderGalaxy(t) {
     for (var i = 0; i < stars.length; i++) {
@@ -7699,9 +7720,9 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
   }
 
   function render() {
-    var isOff = document.body.classList.contains('cosmic-mode-off') || document.body.classList.contains('theme-off');
-    if (document.hidden || isOff) {
-      setTimeout(function() { requestAnimationFrame(render); }, 800);
+    rafId = null;
+    if (!shouldRunCosmicLoop()) {
+      stopCosmicLoop();
       return;
     }
 
@@ -7718,9 +7739,9 @@ window.applyDashboardCosmicMode = applyDashboardCosmicMode;
       renderGalaxy(animTime);
     }
 
-    requestAnimationFrame(render);
+    rafId = requestAnimationFrame(render);
   }
-  render();
+  startCosmicLoop();
 })();
 
 function togglePasswordVisibility(inputId, btn) {
@@ -7728,10 +7749,18 @@ function togglePasswordVisibility(inputId, btn) {
   if (!input) return;
   if (input.type === 'password') {
     input.type = 'text';
-    if (btn) btn.textContent = '🙈';
+    if (btn) {
+      btn.textContent = '🙈';
+      btn.setAttribute('aria-pressed', 'true');
+      btn.setAttribute('aria-label', 'Ẩn mật khẩu');
+    }
   } else {
     input.type = 'password';
-    if (btn) btn.textContent = '👁';
+    if (btn) {
+      btn.textContent = '👁';
+      btn.setAttribute('aria-pressed', 'false');
+      btn.setAttribute('aria-label', 'Hiện mật khẩu');
+    }
   }
 }
 
@@ -7766,7 +7795,7 @@ async function handleLoginSubmit(event) {
     const res = await requestJson('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password, licenseKey, rememberMe })
+      body: JSON.stringify({ username, password, key: licenseKey, licenseKey, rememberMe })
     });
 
     if (!res.ok) {
@@ -7978,16 +8007,11 @@ function applyUserRoleUI() {
 }
 
 function toggleUserProfileDropdown(event) {
-  if (typeof toggleGlobalProfileDropdown === 'function') {
-    return toggleGlobalProfileDropdown(event);
-  }
-  if (event) event.stopPropagation();
-  const dropdown = document.getElementById('globalUserProfileDropdown');
-  if (dropdown) dropdown.classList.toggle('hidden');
+  return toggleGlobalProfileDropdown(event);
 }
 
 function closeUserProfileDropdown() {
-  document.getElementById('globalUserProfileDropdown')?.classList.add('hidden');
+  closeGlobalProfileDropdown();
 }
 
 function openChangePasswordModal() {
@@ -8014,29 +8038,34 @@ function closeChangePasswordModal() {
 }
 
 async function loadDiscordLinkStatus() {
+  const statusText = document.getElementById('discordLinkStatusText');
+  const details = document.getElementById('discordLinkDetails');
+  const linkedId = document.getElementById('discordLinkedId');
+  const linkedDate = document.getElementById('discordLinkedDate');
+  const unlinkBtn = document.getElementById('discordUnlinkBtn');
   try {
-    const res = await fetch('/api/user/discord-link');
-    const data = await res.json();
-    const statusText = document.getElementById('discordLinkStatusText');
-    const details = document.getElementById('discordLinkDetails');
-    const linkedId = document.getElementById('discordLinkedId');
-    const linkedDate = document.getElementById('discordLinkedDate');
-    const unlinkBtn = document.getElementById('discordUnlinkBtn');
-
-    if (data.ok && data.linked) {
-      if (statusText) statusText.innerHTML = '<span style="color:#10b981;">✅ Đã liên kết với Discord</span>';
+    const res = await requestJson('/api/user/discord-link');
+    const data = res.data || {};
+    if (res.ok && data.ok && data.linked) {
+      if (statusText) { statusText.style.color = '#10b981'; statusText.textContent = '✅ Đã liên kết với Discord'; }
       if (details) details.style.display = 'block';
       if (linkedId) linkedId.textContent = data.discordUserId || '---';
       if (linkedDate) linkedDate.textContent = data.linkedAt ? new Date(data.linkedAt).toLocaleString('vi-VN') : 'Không rõ';
       if (unlinkBtn) unlinkBtn.classList.remove('hidden');
-    } else {
-      if (statusText) statusText.innerHTML = '<span style="color:#f59e0b;">⚠️ Chưa liên kết Discord</span>';
+    } else if (res.ok && data.ok) {
+      if (statusText) { statusText.style.color = '#f59e0b'; statusText.textContent = '⚠️ Chưa liên kết Discord'; }
       if (details) details.style.display = 'none';
       if (unlinkBtn) unlinkBtn.classList.add('hidden');
+    } else {
+      throw new Error(data.error || 'Không thể kiểm tra trạng thái liên kết.');
     }
   } catch (e) {
-    const statusText = document.getElementById('discordLinkStatusText');
-    if (statusText) statusText.innerHTML = '<span style="color:#ef4444;">❌ Lỗi kiểm tra trạng thái</span>';
+    if (statusText) {
+      statusText.style.color = '#ef4444';
+      statusText.textContent = '❌ ' + (e && e.message ? e.message : 'Lỗi kiểm tra trạng thái');
+    }
+    if (details) details.style.display = 'none';
+    if (unlinkBtn) unlinkBtn.classList.add('hidden');
   }
 }
 
@@ -8055,20 +8084,24 @@ async function unlinkDiscordAccount() {
   if (!confirm('Bạn có chắc chắn muốn hủy liên kết tài khoản Discord này? Sau khi hủy, bạn sẽ không thể dùng Discord để điều khiển bot.')) {
     return;
   }
+  const btn = document.getElementById('discordUnlinkBtn');
+  if (btn) btn.disabled = true;
   try {
-    const res = await fetch('/api/user/discord-unlink', {
+    const res = await requestJson('/api/user/discord-unlink', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' }
     });
-    const data = await res.json();
-    if (data.ok) {
-      showToast('Đã hủy liên kết Discord thành công!');
-      loadDiscordLinkStatus();
+    const data = res.data || {};
+    if (res.ok && data.ok) {
+      showToast(data.message || 'Đã hủy liên kết Discord thành công!');
+      await loadDiscordLinkStatus();
     } else {
-      alert('Hủy liên kết thất bại: ' + (data.error || 'Lỗi không xác định'));
+      showToast('Hủy liên kết thất bại: ' + (data.error || 'Lỗi không xác định'), 'error');
     }
   } catch (err) {
-    alert('Lỗi kết nối: ' + err.message);
+    showToast('Lỗi kết nối: ' + (err && err.message ? err.message : 'Thất bại'), 'error');
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -8100,7 +8133,11 @@ function switchAuditLogType(logType) {
     ['auditTabAll', '']
   ];
   for (const [id, type] of tabs) {
-    document.getElementById(id)?.classList.toggle('active', auditLogType === type);
+    const el = document.getElementById(id);
+    if (el) {
+      el.classList.toggle('active', auditLogType === type);
+      el.setAttribute('aria-selected', auditLogType === type ? 'true' : 'false');
+    }
   }
 
   refreshAuditLogs(1);
@@ -8273,19 +8310,61 @@ function formatRelativeTime(date) {
   return diffDays + ' ngày trước';
 }
 
-function exportAuditLogs(format) {
+async function exportAuditLogs(format) {
   if (!format) format = 'csv';
   if (currentUser?.role !== 'admin') {
     showToast('Chỉ Quản trị viên mới có quyền xuất nhật ký.');
     return;
   }
-  showToast('Đang tải file xuất nhật ký (' + format.toUpperCase() + ')...');
-  const a = document.createElement('a');
-  a.href = '/api/manager/audit-logs/export?format=' + format;
-  a.target = '_blank';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+  const reqFormat = String(format).toLowerCase() === 'jsonl' ? 'jsonl' : 'csv';
+  showToast('Đang tải file xuất nhật ký (' + reqFormat.toUpperCase() + ')...');
+  try {
+    const headers = {};
+    try {
+      const localToken = localStorage.getItem('kingmc_session');
+      if (localToken) headers['Authorization'] = 'Bearer ' + localToken;
+    } catch (_) {}
+    const res = await fetch('/api/manager/audit-logs/export?format=' + encodeURIComponent(reqFormat), {
+      method: 'GET',
+      headers,
+      cache: 'no-store',
+      credentials: 'same-origin'
+    });
+    if (!res.ok) {
+      let errMsg = 'Không thể xuất nhật ký (' + res.status + ').';
+      try { const errJson = await res.json(); if (errJson?.error) errMsg = errJson.error; } catch (_) {}
+      throw new Error(errMsg);
+    }
+    let blob;
+    if (reqFormat === 'jsonl') {
+      const rawText = await res.text();
+      let content = rawText;
+      try {
+        const parsed = JSON.parse(rawText);
+        if (parsed && Array.isArray(parsed.logs)) {
+          content = parsed.logs.map(row => JSON.stringify(row)).join('\n');
+        }
+      } catch (_) {}
+      blob = new Blob([content], { type: 'application/x-ndjson;charset=utf-8' });
+    } else {
+      const csvText = await res.text();
+      blob = new Blob([csvText], { type: 'text/csv;charset=utf-8' });
+    }
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = objUrl;
+    a.download = 'audit_logs_' + new Date().toISOString().slice(0, 10) + '.' + reqFormat;
+    document.body.appendChild(a);
+    try {
+      a.click();
+    } finally {
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
+    }
+    showToast('✅ Đã tải xuống file nhật ký (' + reqFormat.toUpperCase() + ').');
+  } catch (err) {
+    showToast('❌ Lỗi xuất nhật ký: ' + (err.message || 'Thất bại'), 'error');
+  }
 }
 
 async function clearAllAuditLogs() {
@@ -8437,8 +8516,8 @@ async function submitChangePassword(event) {
     if (alertEl) { alertEl.className = 'login-alert error'; alertEl.textContent = 'Vui lòng nhập mật khẩu hiện tại.'; }
     return;
   }
-  if (!newPassword || newPassword.length < 5) {
-    if (alertEl) { alertEl.className = 'login-alert error'; alertEl.textContent = 'Mật khẩu mới phải từ 5 ký tự trở lên.'; }
+  if (!newPassword || newPassword.length < 6) {
+    if (alertEl) { alertEl.className = 'login-alert error'; alertEl.textContent = 'Mật khẩu mới phải từ 6 ký tự trở lên.'; }
     return;
   }
   if (newPassword !== confirmPassword) {
@@ -8457,7 +8536,7 @@ async function submitChangePassword(event) {
     const res = await requestJson('/api/auth/change-password', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ oldPassword, newPassword })
+      body: JSON.stringify({ currentPassword: oldPassword, oldPassword, newPassword })
     });
     if (!res.ok) {
       throw new Error(res.data?.error || 'Không thể đổi mật khẩu.');
@@ -8544,31 +8623,39 @@ window.navigateTo = navigateTo;
 function toggleGlobalProfileDropdown(event) {
   if (event) event.stopPropagation();
   const dropdown = document.getElementById('globalUserProfileDropdown');
-  if (dropdown) dropdown.classList.toggle('hidden');
+  const btn = document.getElementById('globalUserProfileBtn');
+  if (!dropdown) return;
+  const isNowHidden = dropdown.classList.toggle('hidden');
+  if (btn) btn.setAttribute('aria-expanded', String(!isNowHidden));
 }
 window.toggleGlobalProfileDropdown = toggleGlobalProfileDropdown;
 
 function closeGlobalProfileDropdown() {
-  document.getElementById('globalUserProfileDropdown')?.classList.add('hidden');
+  const dropdown = document.getElementById('globalUserProfileDropdown');
+  const btn = document.getElementById('globalUserProfileBtn');
+  if (dropdown) dropdown.classList.add('hidden');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
 }
 window.closeGlobalProfileDropdown = closeGlobalProfileDropdown;
 
-window.addEventListener('click', (e) => {
-  if (!e.target.closest('#globalUserProfileBtn') && !e.target.closest('#globalUserProfileDropdown')) {
-    closeGlobalProfileDropdown();
-  }
-});
-
-// ⌨️ ACCESSIBILITY: Đóng modal và menu khi nhấn phím Escape
+// ⌨️ ACCESSIBILITY: Đóng menu/cổng/modal khi nhấn phím Escape
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') {
+  if (e.key !== 'Escape') return;
+  const dropdown = document.getElementById('globalUserProfileDropdown');
+  if (dropdown && !dropdown.classList.contains('hidden')) {
     closeGlobalProfileDropdown();
-    const openModals = document.querySelectorAll('.modal:not(.hidden)');
-    openModals.forEach(modal => {
-      if (modal.id === 'loginGateModal' && !currentUser) return;
-      modal.classList.add('hidden');
-    });
+    document.getElementById('globalUserProfileBtn')?.focus();
+    return;
   }
+  const loginGate = document.getElementById('loginGate');
+  if (loginGate && !loginGate.classList.contains('hidden')) {
+    if (currentUser) hideLoginGate();
+    return;
+  }
+  const openModals = document.querySelectorAll('.modal:not(.hidden)');
+  openModals.forEach(modal => {
+    modal.classList.add('hidden');
+  });
 });
 
 // Chuyển tab Đăng nhập / Đăng ký tại Login Gate
@@ -8584,11 +8671,13 @@ function switchLoginGateTab(tab) {
     if (loginForm) loginForm.style.display = 'none';
     if (regForm) regForm.style.display = 'flex';
     if (btnReg) {
+      btnReg.setAttribute('aria-selected', 'true');
       btnReg.style.background = 'rgba(56,189,248,0.2)';
       btnReg.style.color = '#38bdf8';
       btnReg.style.borderColor = 'rgba(56,189,248,0.4)';
     }
     if (btnLogin) {
+      btnLogin.setAttribute('aria-selected', 'false');
       btnLogin.style.background = 'transparent';
       btnLogin.style.color = '#94a3b8';
       btnLogin.style.borderColor = 'transparent';
@@ -8597,11 +8686,13 @@ function switchLoginGateTab(tab) {
     if (loginForm) loginForm.style.display = 'flex';
     if (regForm) regForm.style.display = 'none';
     if (btnLogin) {
+      btnLogin.setAttribute('aria-selected', 'true');
       btnLogin.style.background = 'rgba(56,189,248,0.2)';
       btnLogin.style.color = '#38bdf8';
       btnLogin.style.borderColor = 'rgba(56,189,248,0.4)';
     }
     if (btnReg) {
+      btnReg.setAttribute('aria-selected', 'false');
       btnReg.style.background = 'transparent';
       btnReg.style.color = '#94a3b8';
       btnReg.style.borderColor = 'transparent';
@@ -8618,12 +8709,16 @@ async function handleInAppRegisterSubmit(event) {
   const username = String(document.getElementById('regUsername')?.value || '').trim();
   const password = String(document.getElementById('regPassword')?.value || '');
   const confirmPassword = String(document.getElementById('regConfirmPassword')?.value || '');
-  const licenseKey = String(document.getElementById('regLicenseKey')?.value || '').trim();
+  const licenseKey = String(document.getElementById('regLicenseKey')?.value || '').trim().toUpperCase();
 
   if (alertEl) { alertEl.classList.add('hidden'); alertEl.textContent = ''; }
 
   if (!username) {
     if (alertEl) { alertEl.className = 'login-alert error'; alertEl.textContent = 'Vui lòng nhập tên đăng nhập.'; alertEl.classList.remove('hidden'); }
+    return;
+  }
+  if (password.length < 6) {
+    if (alertEl) { alertEl.className = 'login-alert error'; alertEl.textContent = 'Mật khẩu phải có ít nhất 6 ký tự.'; alertEl.classList.remove('hidden'); }
     return;
   }
   if (password !== confirmPassword) {
@@ -8637,7 +8732,7 @@ async function handleInAppRegisterSubmit(event) {
     const res = await requestJson('/api/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password, licenseKey })
+      body: JSON.stringify({ username, password, confirmPassword, key: licenseKey, licenseKey })
     });
 
     if (!res.ok) {
@@ -8657,7 +8752,6 @@ async function handleInAppRegisterSubmit(event) {
     }
     showToast('🎉 ' + (data.message || 'Đăng ký thành công! Chào mừng ' + username + '.'));
 
-    // Chuyển cảnh mượt mà tức thì không reload trang, loại bỏ triệt để hiện tượng đơ Chrome do reload khi prompt lưu mật khẩu
     setTimeout(async () => {
       hideLoginGate();
       applyUserRoleUI();
@@ -8672,6 +8766,7 @@ async function handleInAppRegisterSubmit(event) {
       alertEl.textContent = '⚠️ ' + err.message;
       alertEl.classList.remove('hidden');
     }
+  } finally {
     if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '📝 TẠO TÀI KHOẢN & VÀO HỆ THỐNG'; }
   }
 }
@@ -8681,6 +8776,7 @@ window.handleInAppRegisterSubmit = handleInAppRegisterSubmit;
 async function redeemKeyFromExpiredOverlay() {
   const keyInput = document.getElementById('expiredKeyInput');
   const alertEl = document.getElementById('expiredKeyAlert');
+  const redeemBtn = document.getElementById('expiredRedeemBtn');
   const key = String(keyInput?.value || '').trim().toUpperCase();
 
   if (alertEl) { alertEl.classList.add('hidden'); alertEl.textContent = ''; }
@@ -8690,11 +8786,12 @@ async function redeemKeyFromExpiredOverlay() {
     return;
   }
 
+  if (redeemBtn) redeemBtn.disabled = true;
   try {
     const res = await requestJson('/api/manager/renew', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ licenseKey: key })
+      body: JSON.stringify({ key, licenseKey: key })
     });
     if (!res.ok) {
       throw new Error(res.data?.error || 'Mã Key không hợp lệ hoặc đã qua sử dụng.');
@@ -8707,6 +8804,8 @@ async function redeemKeyFromExpiredOverlay() {
       alertEl.textContent = '⚠️ ' + err.message;
       alertEl.classList.remove('hidden');
     }
+  } finally {
+    if (redeemBtn) redeemBtn.disabled = false;
   }
 }
 window.redeemKeyFromExpiredOverlay = redeemKeyFromExpiredOverlay;
@@ -8721,14 +8820,14 @@ function switchUserMgmtSubTab(subTab) {
   if (subTab === 'keys') {
     if (panelUsers) panelUsers.classList.add('hidden');
     if (panelKeys) panelKeys.classList.remove('hidden');
-    if (tabKeys) tabKeys.classList.add('active');
-    if (tabUsers) tabUsers.classList.remove('active');
+    if (tabKeys) { tabKeys.classList.add('active'); tabKeys.setAttribute('aria-selected', 'true'); }
+    if (tabUsers) { tabUsers.classList.remove('active'); tabUsers.setAttribute('aria-selected', 'false'); }
     refreshKeysTable();
   } else {
     if (panelUsers) panelUsers.classList.remove('hidden');
     if (panelKeys) panelKeys.classList.add('hidden');
-    if (tabUsers) tabUsers.classList.add('active');
-    if (tabKeys) tabKeys.classList.remove('active');
+    if (tabUsers) { tabUsers.classList.add('active'); tabUsers.setAttribute('aria-selected', 'true'); }
+    if (tabKeys) { tabKeys.classList.remove('active'); tabKeys.setAttribute('aria-selected', 'false'); }
     refreshUserManagementPage();
   }
 }
@@ -8762,6 +8861,7 @@ async function refreshUserManagementPage() {
     const res = await requestJson('/api/manager/users');
     if (!res.ok) throw new Error(res.data?.error || 'Không thể tải danh sách user.');
     userManagementList = (Array.isArray(res.data?.users) ? res.data.users : [])
+      .map(u => ({ ...u, id: u.id || u.userId }))
       .filter(u => u.role !== 'admin' && String(u.username || '').toLowerCase() !== 'admin');
     userManagementAvailableBots = Array.isArray(res.data?.availableBots) ? res.data.availableBots : [];
     userManagementBotOwnership = (res.data?.botOwnership && typeof res.data.botOwnership === 'object') ? res.data.botOwnership : {};
@@ -8769,10 +8869,10 @@ async function refreshUserManagementPage() {
     // Cập nhật các thống kê số liệu
     const total = userManagementList.length;
     const now = Date.now();
-    const activeCount = userManagementList.filter(u => u.status === 'active' && (!u.expiresAt || Date.parse(u.expiresAt) > now)).length;
+    const activeCount = userManagementList.filter(u => u.status === 'active' && (u.isPermanent || !u.expiresAt || Date.parse(u.expiresAt) > now)).length;
     const disabledCount = userManagementList.filter(u => u.status === 'disabled').length;
-    const expiredCount = userManagementList.filter(u => u.status === 'expired' || (u.expiresAt && Date.parse(u.expiresAt) <= now)).length;
-    const lifetimeCount = userManagementList.filter(u => !u.expiresAt).length;
+    const expiredCount = userManagementList.filter(u => !u.isPermanent && (u.status === 'expired' || (u.expiresAt && Date.parse(u.expiresAt) <= now))).length;
+    const lifetimeCount = userManagementList.filter(u => Boolean(u.isPermanent) || !u.expiresAt).length;
 
     const elTotal = document.getElementById('userMgmtTotalCount'); if (elTotal) elTotal.textContent = total;
     const elStatAll = document.getElementById('statUserAll'); if (elStatAll) elStatAll.textContent = total;
@@ -8801,7 +8901,10 @@ function setUserStatusFilter(status) {
     lifetime: document.getElementById('userFilterLifetime')
   };
   Object.keys(chipMap).forEach(k => {
-    if (chipMap[k]) chipMap[k].classList.toggle('active', k === status);
+    if (chipMap[k]) {
+      chipMap[k].classList.toggle('active', k === status);
+      chipMap[k].setAttribute('aria-pressed', k === status ? 'true' : 'false');
+    }
   });
   renderUserTable();
 }
@@ -8815,9 +8918,12 @@ window.debounceUserFilter = debounceUserFilter;
 
 // Bật / tắt hiển thị mật khẩu người dùng (Toggle Peek - On-Demand)
 async function toggleUserPasswordPeek(userId) {
-  const u = userManagementList.find(x => x.id === userId);
-  if (!userPassPeekMap[userId]) {
-    if (u && !u.password) {
+  const key = String(userId);
+  const u = userManagementList.find(x => String(x.id) === key);
+  if (!userPassPeekMap[key]) {
+    const storedPass = u && typeof u.password === 'string' ? u.password : '';
+    const needsReveal = !storedPass || /^(enc:v|aes256\$|enc\$|scrypt\$)/i.test(storedPass);
+    if (u && needsReveal) {
       try {
         const res = await requestJson('/api/manager/users/' + encodeURIComponent(userId) + '/reveal-password', { method: 'POST' });
         const pass = res.data?.password ?? res.password;
@@ -8834,14 +8940,49 @@ async function toggleUserPasswordPeek(userId) {
         return;
       }
     }
-    userPassPeekMap[userId] = true;
+    userPassPeekMap[key] = true;
   } else {
-    userPassPeekMap[userId] = false;
+    userPassPeekMap[key] = false;
   }
   renderUserTable();
 }
 window.toggleUserPasswordPeek = toggleUserPasswordPeek;
 window.togglePassPeek = (userId) => toggleUserPasswordPeek(userId);
+
+function attachUserTableDelegation(tbody) {
+  if (!tbody || tbody._userDelegationInit) return;
+  tbody._userDelegationInit = true;
+  tbody.addEventListener('click', function(e) {
+    const btn = e.target.closest('[data-user-action]');
+    if (!btn) return;
+    const action = btn.getAttribute('data-user-action');
+    const userId = btn.getAttribute('data-user-id');
+    const u = userId ? userManagementList.find(x => String(x.id) === String(userId)) : null;
+    const username = u ? u.username : (btn.getAttribute('data-username') || '');
+    if (action === 'copy-pass') {
+      if (u && u.password && u.password !== '—' && u.password !== '(trống)') {
+        copyToClipboard(u.password, 'Mật khẩu');
+      }
+    } else if (action === 'peek') {
+      if (userId) toggleUserPasswordPeek(userId);
+    } else if (action === 'quick-renew') {
+      const days = Number(btn.getAttribute('data-days'));
+      if (userId && Number.isFinite(days)) quickRenewUser(userId, days);
+    } else if (action === 'set-lifetime') {
+      if (userId) quickSetLifetimeUser(userId);
+    } else if (action === 'custom-renew') {
+      if (userId) openCustomRenewModal(userId, username);
+    } else if (action === 'unlock') {
+      if (userId) unlockUser(userId);
+    } else if (action === 'lock') {
+      if (userId) promptLockUser(userId, username);
+    } else if (action === 'edit') {
+      if (userId) openEditUserModal(userId);
+    } else if (action === 'delete') {
+      if (userId) deleteUserPrompt(userId, username);
+    }
+  });
+}
 
 // Render bảng User (áp dụng bộ lọc trạng thái và tìm kiếm thời gian thực)
 function renderUserTable() {
@@ -8849,6 +8990,7 @@ function renderUserTable() {
   const tbodyModal = document.getElementById('userTableBody');
   const targets = [tbodyFull, tbodyModal].filter(Boolean);
   if (!targets.length) return;
+  targets.forEach(attachUserTableDelegation);
 
   const searchQuery = String(document.getElementById('userFilterSearch')?.value || '').trim().toLowerCase();
   const now = Date.now();
@@ -8865,10 +9007,10 @@ function renderUserTable() {
     }
 
     // Lọc theo trạng thái
-    const isAct = u.status === 'active' && (!u.expiresAt || Date.parse(u.expiresAt) > now);
+    const isAct = u.status === 'active' && (u.isPermanent || !u.expiresAt || Date.parse(u.expiresAt) > now);
     const isDis = u.status === 'disabled';
-    const isExp = u.status === 'expired' || (u.expiresAt && Date.parse(u.expiresAt) <= now);
-    const isLife = !u.expiresAt;
+    const isExp = !u.isPermanent && (u.status === 'expired' || (u.expiresAt && Date.parse(u.expiresAt) <= now));
+    const isLife = Boolean(u.isPermanent || !u.expiresAt);
 
     if (currentUserStatusFilter === 'active') return isAct;
     if (currentUserStatusFilter === 'disabled') return isDis;
@@ -8886,10 +9028,11 @@ function renderUserTable() {
   }
 
   const rowsHtml = filtered.map(u => {
-    const isAct = u.status === 'active' && (!u.expiresAt || Date.parse(u.expiresAt) > now);
     const isDis = u.status === 'disabled';
-    const isExp = u.status === 'expired' || (u.expiresAt && Date.parse(u.expiresAt) <= now);
-    const isLife = !u.expiresAt;
+    const isExp = !u.isPermanent && (u.status === 'expired' || (u.expiresAt && Date.parse(u.expiresAt) <= now));
+    const isLife = Boolean(u.isPermanent || !u.expiresAt);
+    const uidAttr = escapeHtml(String(u.id));
+    const unameAttr = escapeHtml(String(u.username || ''));
 
     // Cột 1: Người dùng
     const isAdmin = u.role === 'admin';
@@ -8903,12 +9046,15 @@ function renderUserTable() {
     '</div>';
 
     // Cột 2: Mật khẩu (Peek Toggle)
-    const isPeek = !!userPassPeekMap[u.id];
+    const isPeek = !!userPassPeekMap[String(u.id)];
     const passDisplay = isPeek ? (u.password || '—') : '••••••••';
     const eyeIcon = isPeek ? '🙈' : '👁';
+    const canCopyPass = isPeek && u.password && u.password !== '—' && u.password !== '(trống)';
     const passCol = '<div class="password-cell-wrap">' +
-      '<span class="password-text ' + (isPeek ? 'revealed' : 'masked') + '" ' + (isPeek && u.password && u.password !== '—' && u.password !== '(trống)' ? 'onclick="copyToClipboard(\'' + escapeHtml(u.password) + '\', \'Mật khẩu\')" style="cursor:pointer;" title="Click để copy mật khẩu"' : '') + '>' + escapeHtml(passDisplay) + '</span>' +
-      '<button type="button" class="btn-peek" onclick="toggleUserPasswordPeek(\'' + u.id + '\')" title="' + (isPeek ? 'Ẩn mật khẩu' : 'Hiện mật khẩu') + '">' + eyeIcon + '</button>' +
+      (canCopyPass
+        ? '<button type="button" class="password-text revealed" data-user-action="copy-pass" data-user-id="' + uidAttr + '" style="background:transparent;border:none;padding:0;font:inherit;color:inherit;cursor:pointer;" title="Click để copy mật khẩu">' + escapeHtml(passDisplay) + '</button>'
+        : '<span class="password-text ' + (isPeek ? 'revealed' : 'masked') + '">' + escapeHtml(passDisplay) + '</span>') +
+      '<button type="button" class="btn-peek" data-user-action="peek" data-user-id="' + uidAttr + '" title="' + (isPeek ? 'Ẩn mật khẩu' : 'Hiện mật khẩu') + '" aria-label="' + (isPeek ? 'Ẩn mật khẩu ' : 'Hiện mật khẩu ') + unameAttr + '" aria-pressed="' + (isPeek ? 'true' : 'false') + '">' + eyeIcon + '</button>' +
     '</div>';
 
     // Cột 3: Hạn dùng & Gia hạn nhanh
@@ -8917,7 +9063,7 @@ function renderUserTable() {
       expBadge = '<span class="badge-lifetime">👑 Vĩnh Viễn</span>';
     } else if (isExp) {
       const expExact = typeof formatFullDateTime === 'function' ? formatFullDateTime(u.expiresAt) : new Date(u.expiresAt).toLocaleString('vi-VN');
-      expBadge = '<span class="badge-expired" title="Hết hạn: ' + expExact + '">⛔ Hết hạn (' + expExact + ')</span>';
+      expBadge = '<span class="badge-expired" title="Hết hạn: ' + escapeHtml(expExact) + '">⛔ Hết hạn (' + escapeHtml(expExact) + ')</span>';
     } else {
       const diffMs = Date.parse(u.expiresAt) - now;
       const totalHours = Math.floor(diffMs / 3600000);
@@ -8925,18 +9071,18 @@ function renderUserTable() {
       const hours = totalHours % 24;
       const expExact = typeof formatFullDateTime === 'function' ? formatFullDateTime(u.expiresAt) : new Date(u.expiresAt).toLocaleString('vi-VN');
       const timeRemaining = days > 0 ? (days + ' ngày ' + hours + ' giờ') : (totalHours + ' giờ');
-      expBadge = '<span class="badge-active" title="Hạn dùng: ' + expExact + '">⏳ Còn ' + timeRemaining + ' (' + expExact + ')</span>';
+      expBadge = '<span class="badge-active" title="Hạn dùng: ' + escapeHtml(expExact) + '">⏳ Còn ' + timeRemaining + ' (' + escapeHtml(expExact) + ')</span>';
     }
 
     const quickBtns = isAdmin ? '' : '<div class="quick-renew-row">' +
-      '<button type="button" class="quick-renew-btn" onclick="quickRenewUser(\'' + u.id + '\', 1)" title="Cộng 1 ngày">+1N</button>' +
-      '<button type="button" class="quick-renew-btn" onclick="quickRenewUser(\'' + u.id + '\', 3)" title="Cộng 3 ngày">+3N</button>' +
-      '<button type="button" class="quick-renew-btn" onclick="quickRenewUser(\'' + u.id + '\', 7)" title="Cộng 7 ngày">+7N</button>' +
-      '<button type="button" class="quick-renew-btn" onclick="quickRenewUser(\'' + u.id + '\', 15)" title="Cộng 15 ngày">+15N</button>' +
-      '<button type="button" class="quick-renew-btn" onclick="quickRenewUser(\'' + u.id + '\', 30)" title="Cộng 30 ngày">+30N</button>' +
-      '<button type="button" class="quick-renew-btn minus" onclick="quickRenewUser(\'' + u.id + '\', -1)" title="Trừ 1 ngày">-1N</button>' +
-      '<button type="button" class="quick-renew-btn vip" onclick="quickSetLifetimeUser(\'' + u.id + '\')" title="Đặt VIP Vĩnh viễn">👑 Vĩnh viễn</button>' +
-      '<button type="button" class="quick-renew-btn custom" onclick="openCustomRenewModal(\'' + u.id + '\', \'' + escapeHtml(u.username) + '\')" title="Tùy chỉnh ngày">⏱</button>' +
+      '<button type="button" class="quick-renew-btn" data-user-action="quick-renew" data-user-id="' + uidAttr + '" data-days="1" title="Cộng 1 ngày">+1N</button>' +
+      '<button type="button" class="quick-renew-btn" data-user-action="quick-renew" data-user-id="' + uidAttr + '" data-days="3" title="Cộng 3 ngày">+3N</button>' +
+      '<button type="button" class="quick-renew-btn" data-user-action="quick-renew" data-user-id="' + uidAttr + '" data-days="7" title="Cộng 7 ngày">+7N</button>' +
+      '<button type="button" class="quick-renew-btn" data-user-action="quick-renew" data-user-id="' + uidAttr + '" data-days="15" title="Cộng 15 ngày">+15N</button>' +
+      '<button type="button" class="quick-renew-btn" data-user-action="quick-renew" data-user-id="' + uidAttr + '" data-days="30" title="Cộng 30 ngày">+30N</button>' +
+      '<button type="button" class="quick-renew-btn minus" data-user-action="quick-renew" data-user-id="' + uidAttr + '" data-days="-1" title="Trừ 1 ngày">-1N</button>' +
+      '<button type="button" class="quick-renew-btn vip" data-user-action="set-lifetime" data-user-id="' + uidAttr + '" title="Đặt VIP Vĩnh viễn">👑 Vĩnh viễn</button>' +
+      '<button type="button" class="quick-renew-btn custom" data-user-action="custom-renew" data-user-id="' + uidAttr + '" data-username="' + unameAttr + '" title="Tùy chỉnh ngày" aria-label="Tùy chỉnh hạn dùng cho ' + unameAttr + '">⏱</button>' +
     '</div>';
 
     const expiryCol = '<div>' + expBadge + quickBtns + '</div>';
@@ -8947,17 +9093,17 @@ function renderUserTable() {
       statusCol = '<div>' +
         '<span style="color:#ef4444;font-weight:750;">🔒 Tạm khóa</span>' +
         (u.lockReason ? '<div style="font-size:10.5px;color:#fca5a5;margin-top:2px;max-width:140px;line-height:1.3;">💬 ' + escapeHtml(u.lockReason) + '</div>' : '') +
-        '<div style="margin-top:4px;"><button type="button" class="small" style="background:#059669;border-color:#10b981;color:#fff;padding:2px 8px;font-size:11px;" onclick="unlockUser(\'' + u.id + '\')">🔓 Mở Khóa</button></div>' +
+        '<div style="margin-top:4px;"><button type="button" class="small" style="background:#059669;border-color:#10b981;color:#fff;padding:2px 8px;font-size:11px;" data-user-action="unlock" data-user-id="' + uidAttr + '">🔓 Mở Khóa</button></div>' +
       '</div>';
     } else if (isExp) {
       statusCol = '<div>' +
         '<span style="color:#ef4444;font-weight:750;">⏳ Hết hạn</span>' +
-        (!isAdmin ? '<div style="margin-top:4px;"><button type="button" class="small danger" style="padding:2px 8px;font-size:11px;" onclick="promptLockUser(\'' + u.id + '\', \'' + escapeHtml(u.username) + '\')">🔒 Khóa</button></div>' : '') +
+        (!isAdmin ? '<div style="margin-top:4px;"><button type="button" class="small danger" style="padding:2px 8px;font-size:11px;" data-user-action="lock" data-user-id="' + uidAttr + '" data-username="' + unameAttr + '">🔒 Khóa</button></div>' : '') +
       '</div>';
     } else {
       statusCol = '<div>' +
         '<span style="color:#10b981;font-weight:750;">🟢 Hoạt động</span>' +
-        (!isAdmin ? '<div style="margin-top:4px;"><button type="button" class="small danger" style="padding:2px 8px;font-size:11px;" onclick="promptLockUser(\'' + u.id + '\', \'' + escapeHtml(u.username) + '\')">🔒 Tạm Khóa</button></div>' : '') +
+        (!isAdmin ? '<div style="margin-top:4px;"><button type="button" class="small danger" style="padding:2px 8px;font-size:11px;" data-user-action="lock" data-user-id="' + uidAttr + '" data-username="' + unameAttr + '">🔒 Tạm Khóa</button></div>' : '') +
       '</div>';
     }
 
@@ -8974,8 +9120,8 @@ function renderUserTable() {
 
     // Cột 6: Thao tác
     const actionsCol = '<div style="text-align:right;white-space:nowrap;">' +
-      '<button type="button" class="small" onclick="openEditUserModal(\'' + u.id + '\')">✏ Sửa</button> ' +
-      (isAdmin ? '' : '<button type="button" class="small danger" onclick="deleteUserPrompt(\'' + u.id + '\', \'' + escapeHtml(u.username) + '\')">🗑 Xóa</button>') +
+      '<button type="button" class="small" data-user-action="edit" data-user-id="' + uidAttr + '">✏ Sửa</button> ' +
+      (isAdmin ? '' : '<button type="button" class="small danger" data-user-action="delete" data-user-id="' + uidAttr + '" data-username="' + unameAttr + '">🗑 Xóa</button>') +
     '</div>';
 
     return '<tr>' +
@@ -9067,7 +9213,7 @@ async function quickSetLifetimeUser(userId) {
     const res = await requestJson('/api/manager/users/' + encodeURIComponent(userId) + '/renew-days', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ setPermanent: true })
+      body: JSON.stringify({ isPermanent: true, setPermanent: true })
     });
     if (!res.ok) throw new Error(res.data?.error || 'Đặt vĩnh viễn thất bại.');
     showToast(res.data?.message || 'Đã nâng cấp VIP Vĩnh Viễn!');
@@ -9144,6 +9290,7 @@ async function submitCustomRenew() {
     payload.planName = planName;
   }
   if (mode === 'set_permanent') {
+    payload.isPermanent = true;
     payload.setPermanent = true;
   } else if (mode === 'set_date') {
     if (!dateVal) { showToast('Vui lòng chọn ngày giờ hết hạn!'); return; }
@@ -9399,6 +9546,7 @@ window.onKeyDaysSelectChange = onKeyDaysSelectChange;
 
 // Phát hành mã Key từ Sub-panel Quản lý Key
 async function submitCreateKeysFromMgmt() {
+  if (keyMutationState.creating) return;
   const daysVal = document.getElementById('mgmtKeyDays')?.value;
   const customInp = document.getElementById('mgmtKeyCustomDays');
   const planName = document.getElementById('mgmtKeyPlan')?.value.trim();
@@ -9427,12 +9575,14 @@ async function submitCreateKeysFromMgmt() {
   const maxUses = maxUsesVal !== '' ? parseInt(maxUsesVal, 10) : 1;
   const validDays = parseInt(validDaysVal, 10) || 0;
 
+  keyMutationState.creating = true;
   try {
     const res = await requestJson('/api/manager/keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         days,
+        permanent: isPermanent,
         isPermanent,
         setPermanent: isPermanent,
         planName: planName || (isPermanent ? 'VIP Vĩnh Viễn' : ('Gói ' + days + ' Ngày')),
@@ -9449,6 +9599,8 @@ async function submitCreateKeysFromMgmt() {
     await refreshKeysTable();
   } catch (err) {
     showToast('Lỗi: ' + err.message);
+  } finally {
+    keyMutationState.creating = false;
   }
 }
 window.submitCreateKeysFromMgmt = submitCreateKeysFromMgmt;
@@ -9518,9 +9670,9 @@ window.setStatusFilter = setStatusFilter;
 function resetBotFilters() {
   const searchInput = document.getElementById('searchInput');
   if (searchInput) searchInput.value = '';
-  activeTagFilter = null;
+  activeTagFilter = '';
+  if (typeof updateTagPills === 'function') updateTagPills();
   setStatusFilter('all');
-  if (typeof renderTagFilterChips === 'function') renderTagFilterChips();
 }
 window.resetBotFilters = resetBotFilters;
 
@@ -9679,7 +9831,7 @@ window.changeBotSort = changeBotSort;
 function updateKpis() {
   const total = bots.length;
   const afk = bots.filter(b => b.available && b.status === 'afk').length;
-  const online = bots.filter(b => b.available && ['online','connecting','authenticating','entering'].includes(b.status)).length;
+  const online = bots.filter(b => b.available && ['online','waking','connecting','authenticating','entering'].includes(b.status)).length;
   const offline = bots.filter(b => !b.available || b.status === 'offline' || b.status === 'kicked').length;
   const unreachable = bots.filter(b => !b.available).length;
 
@@ -9814,27 +9966,27 @@ function updateTagPills() {
 
   // 1. Nút Tất cả
   const isAllAct = !activeTagFilter;
-  html += '<button type="button" class="tab-btn ' + (isAllAct ? 'active' : '') + '" onclick="filterByTag(\'\')" style="padding:3px 10px;font-size:11px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;" title="Xem toàn bộ bot">';
-  html += '<span>🌐 Tất cả</span> <span style="opacity:0.75;font-size:10px;">(' + totalCount + ')</span>';
+  html += '<button type="button" class="tab-btn ' + (isAllAct ? 'active' : '') + '" onclick="filterByTag(\'\')" style="padding:4px 10px;font-size:11px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;" title="Xem toàn bộ bot">';
+  html += '<span>🌐 Tất cả</span> <span style="opacity:0.75;font-size:11px;">(' + totalCount + ')</span>';
   html += '</button>';
 
   // 2. Nhóm trạng thái thuê:
   // Cho thuê
   const isRentableAct = activeTagFilter === 'sys:rentable' || activeTagFilter === 'rentable' || activeTagFilter === 'cho-thue';
-  html += '<button type="button" class="tab-btn ' + (isRentableAct ? 'active' : '') + '" onclick="filterByTag(\'sys:rentable\')" style="padding:3px 10px;font-size:11px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;' + (isRentableAct ? 'border-color:#38bdf8;' : '') + '" title="Lọc bot sẵn sàng cho thuê (chưa ai thuê)">';
-  html += '<span>✨ Cho thuê</span> <span style="opacity:0.85;font-size:10px;color:' + (isRentableAct ? '#7dd3fc' : 'var(--green)') + ';">(' + countRentable + ')</span>';
+  html += '<button type="button" class="tab-btn ' + (isRentableAct ? 'active' : '') + '" onclick="filterByTag(\'sys:rentable\')" style="padding:4px 10px;font-size:11px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;' + (isRentableAct ? 'border-color:#38bdf8;' : '') + '" title="Lọc bot sẵn sàng cho thuê (chưa ai thuê)">';
+  html += '<span>✨ Cho thuê</span> <span style="opacity:0.85;font-size:11px;color:' + (isRentableAct ? '#7dd3fc' : 'var(--green)') + ';">(' + countRentable + ')</span>';
   html += '</button>';
 
   // Đang được thuê
   const isRentedAct = activeTagFilter === 'sys:rented' || activeTagFilter === 'rented' || activeTagFilter === 'dang-thue';
-  html += '<button type="button" class="tab-btn ' + (isRentedAct ? 'active' : '') + '" onclick="filterByTag(\'sys:rented\')" style="padding:3px 10px;font-size:11px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;' + (isRentedAct ? 'border-color:#a855f7;' : '') + '" title="Lọc bot hiện đang được khách thuê">';
-  html += '<span>👤 Đang thuê</span> <span style="opacity:0.85;font-size:10px;color:' + (isRentedAct ? '#d8b4fe' : '#c084fc') + ';">(' + countRented + ')</span>';
+  html += '<button type="button" class="tab-btn ' + (isRentedAct ? 'active' : '') + '" onclick="filterByTag(\'sys:rented\')" style="padding:4px 10px;font-size:11px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;' + (isRentedAct ? 'border-color:#a855f7;' : '') + '" title="Lọc bot hiện đang được khách thuê">';
+  html += '<span>👤 Đang thuê</span> <span style="opacity:0.85;font-size:11px;color:' + (isRentedAct ? '#d8b4fe' : '#c084fc') + ';">(' + countRented + ')</span>';
   html += '</button>';
 
   // Không cho thuê
   const isNotRentableAct = activeTagFilter === 'sys:not-rentable' || activeTagFilter === 'not-rentable' || activeTagFilter === 'khong-cho-thue';
-  html += '<button type="button" class="tab-btn ' + (isNotRentableAct ? 'active' : '') + '" onclick="filterByTag(\'sys:not-rentable\')" style="padding:3px 10px;font-size:11px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;' + (isNotRentableAct ? 'border-color:#f59e0b;' : '') + '" title="Lọc bot không cho thuê (dùng riêng / nội bộ)">';
-  html += '<span>🚫 Không cho thuê</span> <span style="opacity:0.85;font-size:10px;color:' + (isNotRentableAct ? '#fde047' : 'var(--muted)') + ';">(' + countNotRentable + ')</span>';
+  html += '<button type="button" class="tab-btn ' + (isNotRentableAct ? 'active' : '') + '" onclick="filterByTag(\'sys:not-rentable\')" style="padding:4px 10px;font-size:11px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;' + (isNotRentableAct ? 'border-color:#f59e0b;' : '') + '" title="Lọc bot không cho thuê (dùng riêng / nội bộ)">';
+  html += '<span>🚫 Không cho thuê</span> <span style="opacity:0.85;font-size:11px;color:' + (isNotRentableAct ? '#fde047' : 'var(--muted)') + ';">(' + countNotRentable + ')</span>';
   html += '</button>';
 
   // Vạch phân cách nếu có tag riêng tự tạo
@@ -9846,8 +9998,8 @@ function updateTagPills() {
   const sortedTags = Array.from(tagMap.values()).sort((a, b) => a.display.localeCompare(b.display));
   sortedTags.forEach(t => {
     const isAct = activeTagFilter === t.display.toLowerCase();
-    html += '<button type="button" class="tab-btn ' + (isAct ? 'active' : '') + '" onclick="filterByTag(\'' + escapeHtml(t.display) + '\')" style="padding:3px 9px;font-size:11px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;' + (isAct ? 'border-color:#ec4899;' : '') + '" title="Lọc theo tag #' + escapeHtml(t.display) + '">';
-    html += '<span>#' + escapeHtml(t.display) + '</span> <span style="opacity:0.75;font-size:10px;">(' + t.count + ')</span>';
+    html += '<button type="button" class="tab-btn ' + (isAct ? 'active' : '') + '" data-tag="' + escapeHtml(t.display) + '" onclick="filterByTag(this.dataset.tag)" style="padding:4px 10px;font-size:11px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;' + (isAct ? 'border-color:#ec4899;' : '') + '" title="Lọc theo tag #' + escapeHtml(t.display) + '">';
+    html += '<span>#' + escapeHtml(t.display) + '</span> <span style="opacity:0.75;font-size:11px;">(' + t.count + ')</span>';
     html += '</button>';
   });
 
@@ -9875,7 +10027,7 @@ function filterBots() {
   const filtered = bots.filter(b => {
     // 1. Lọc theo Tab trạng thái
     if (activeStatusFilter === 'afk' && b.status !== 'afk') return false;
-    if (activeStatusFilter === 'online' && !['online','connecting','authenticating','entering'].includes(b.status)) return false;
+    if (activeStatusFilter === 'online' && !['online','waking','connecting','authenticating','entering'].includes(b.status)) return false;
     if (activeStatusFilter === 'offline' && b.available && b.status !== 'offline' && b.status !== 'kicked') return false;
     if (activeStatusFilter === 'unreachable' && b.available) return false;
 
@@ -9909,7 +10061,7 @@ function filterBots() {
 
   // 3. Sắp xếp theo chế độ được chọn
   if (currentSortMode === 'status') {
-    const order = { afk: 1, entering: 2, authenticating: 3, connecting: 4, online: 5, offline: 6, kicked: 7 };
+    const order = { afk: 1, entering: 2, authenticating: 3, connecting: 4, waking: 5, online: 6, offline: 7, kicked: 8 };
     filtered.sort((a, b) => (order[a.status] || 99) - (order[b.status] || 99));
   } else if (currentSortMode === 'uptime') {
     filtered.sort((a, b) => (b.uptimeSeconds || 0) - (a.uptimeSeconds || 0));
@@ -9953,7 +10105,7 @@ function reconcileBotCards(filtered) {
     if (!nextIds.has(id)) card.remove();
   }
 
-  // Update existing cards or append new cards in order
+  // Update existing cards or insert new cards in exact sorted order
   filtered.forEach((b, idx) => {
     const id = String(b.id);
     const existing = currentMap.get(id);
@@ -9977,11 +10129,18 @@ function reconcileBotCards(filtered) {
           existing.className = fresh.className;
         }
       }
+      const refNode = grid.children[idx] || null;
+      if (refNode !== existing) {
+        grid.insertBefore(existing, refNode);
+      }
     } else {
       const temp = document.createElement('div');
       temp.innerHTML = newHtml;
       const fresh = temp.firstElementChild;
-      if (fresh) grid.appendChild(fresh);
+      if (fresh) {
+        const refNode = grid.children[idx] || null;
+        grid.insertBefore(fresh, refNode);
+      }
     }
   });
 }
@@ -10420,19 +10579,27 @@ function generateSparklineSvg(points, strokeColor = '#38bdf8', width = 44, heigh
 
 async function exportBotLogs(event, botId) {
   if(event) event.stopPropagation();
+  let url = '';
   try {
     showToast('Đang lấy dữ liệu log của Bot ' + botId + '...');
     const result = await requestJson('/api/manager/bot/' + encodeURIComponent(String(botId)) + '/logs');
     if(!result.ok) throw new Error(result.data?.error || 'Không thể lấy log.');
     const logLines = (result.data?.logs || []).join('\n') || 'Chưa có dữ liệu log.';
     const blob = new Blob([logLines], { type: 'text/plain;charset=utf-8' });
+    url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
+    a.href = url;
     a.download = 'bot-' + botId + '-logs-' + new Date().toISOString().slice(0, 10) + '.txt';
+    document.body.appendChild(a);
     a.click();
+    a.remove();
     showToast('✅ Đã tải file log về máy.');
   } catch(err) {
     showToast('Lỗi tải log: ' + (err.message || 'Không thành công.'));
+  } finally {
+    if (url) {
+      setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} }, 1000);
+    }
   }
 }
 
@@ -10730,6 +10897,7 @@ function toggleEditSecretKeyVisibility() {
 function openBot(id) {
   selectedBotId=Number.isFinite(Number(id)) ? Number(id) : String(id);
   invalidateDetailReads();
+  cancelDetailSlotSelection();
   // Reset all detail UI fields to prevent stale ghost data
   const dChat = document.getElementById('detailChatLogs'); if (dChat) dChat.innerHTML = '<div style="color:var(--muted);padding:8px;">Đang tải lịch sử chat...</div>';
   const dEvt = document.getElementById('detailEventLogs'); if (dEvt) dEvt.innerHTML = '<div style="color:var(--muted);padding:8px;">Đang tải nhật ký sự kiện...</div>';
@@ -10749,8 +10917,8 @@ function openBot(id) {
   document.getElementById('detailPage').classList.remove('hidden');
   lastEventRevision=-1;
   lastChatRevision=-1;
-lastPositionHistoryRevision=-1;
-lastPositionHistoryFetchedAt=0;
+  lastPositionHistoryRevision=-1;
+  lastPositionHistoryFetchedAt=0;
   detailInventory=null;
   detailSettingsDirty=false;
   detailAutoChatDirty=false;
@@ -10762,6 +10930,7 @@ lastPositionHistoryFetchedAt=0;
 
 function goHome() {
   invalidateDetailReads();
+  cancelDetailSlotSelection();
   selectedBotId=null;
   const url=new URL(window.location.href);
   url.searchParams.delete('bot');
@@ -10878,13 +11047,14 @@ function detailStatusHtml() {
   if(!detailBot) return;
   const isAdmin = Boolean(currentUser && currentUser.role === 'admin');
   const numId = selectedBotId || detailBot.id;
+  const numIdArg = Number.isFinite(Number(numId)) ? String(Number(numId)) : JSON.stringify(String(numId));
   const [color,label,errorType]=statusMeta(detailBot.status,detailBot.available,!!detailBot.manuallyStopped,detailBot);
   let statusDetailHtml = '<span class="dot '+color+'"></span>'+escapeHtml(label);
   if (!detailBot.available) {
     if (errorType === 'secret_mismatch') {
       statusDetailHtml += '<div style="font-size:12px;color:#fb923c;margin-top:8px;font-weight:600;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">' +
         '<span>⚠️ Worker từ chối lệnh do lệch Secret Key (409).</span>' +
-        '<button type="button" class="small warning-btn" onclick="openEditSecretModal(' + numId + ')" style="padding:2px 8px;font-size:11px;">🔑 Cập nhật Key</button>' +
+        '<button type="button" class="small warning-btn" onclick="openEditSecretModal(' + escapeHtml(numIdArg) + ')" style="padding:2px 8px;font-size:11px;">🔑 Cập nhật Key</button>' +
       '</div>';
     } else if (errorType === 'render_sleep') {
       statusDetailHtml += '<div style="font-size:12px;color:#c084fc;margin-top:8px;font-weight:600;">' +
@@ -10893,8 +11063,8 @@ function detailStatusHtml() {
     } else if (errorType === 'not_found') {
       statusDetailHtml += '<div style="font-size:12px;color:#f87171;margin-top:8px;font-weight:600;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">' +
         '<span>❌ Địa chỉ bot trả về 404 Not Found (URL sai hoặc app bị xoá).</span>' +
-        '<button type="button" class="small danger" onclick="deleteBot(event,' + numId + ')" style="padding:2px 8px;font-size:11px;">🗑 Xoá Bot</button>' +
-        '<button type="button" class="small" onclick="editBot(event,' + numId + ')" style="padding:2px 8px;font-size:11px;">✏ Sửa URL</button>' +
+        '<button type="button" class="small danger" onclick="deleteBot(event,' + escapeHtml(numIdArg) + ')" style="padding:2px 8px;font-size:11px;">🗑 Xoá Bot</button>' +
+        '<button type="button" class="small" onclick="editBot(event,' + escapeHtml(numIdArg) + ')" style="padding:2px 8px;font-size:11px;">✏ Sửa URL</button>' +
       '</div>';
     }
   }
@@ -11037,7 +11207,7 @@ function detailStatusHtml() {
   // 5. Uptime & Reconnects
   const uptimeEl = document.getElementById('detailUptime');
   if (uptimeEl) {
-    const sec = Number(detailBot.uptimeSeconds || 0);
+    const sec = Math.max(0, Math.floor(Number(detailBot.uptimeSeconds || 0)));
     const h = Math.floor(sec / 3600);
     const m = Math.floor((sec % 3600) / 60);
     const s = sec % 60;
@@ -11211,8 +11381,9 @@ async function submitRenewKey() {
       box.style.color = partial ? 'var(--yellow)' : 'var(--green)';
       box.textContent = (partial ? '⚠️ ' : '') + (res.data?.warning || res.data?.message || 'Gia hạn thành công!');
       showToast((partial ? '⚠️ ' : '🎉 ') + (res.data?.warning || 'Kích hoạt Key gia hạn thành công!'));
-      if (currentUser && res.data.expiresAt) {
-        currentUser.expiresAt = res.data.expiresAt;
+      if (currentUser && (res.data.expiresAt !== undefined || res.data.isPermanent)) {
+        currentUser.isPermanent = Boolean(res.data.isPermanent);
+        if (res.data.expiresAt !== undefined) currentUser.expiresAt = res.data.expiresAt;
         if (res.data.planName) currentUser.planName = res.data.planName;
         if (Array.isArray(res.data.assignedBotIds)) currentUser.assignedBotIds = res.data.assignedBotIds;
         currentUser.status = 'active';
@@ -11374,7 +11545,7 @@ async function submitCreateKeys() {
     const res = await requestJson('/api/manager/keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ days, isPermanent, setPermanent: isPermanent, planName, count, botCount, maxUses })
+      body: JSON.stringify({ days, permanent: isPermanent, isPermanent, setPermanent: isPermanent, planName, count, botCount, maxUses })
     });
     if (!res.ok) throw new Error(res.data?.error || 'Lỗi tạo key');
     showToast(res.data?.message || 'Đã tạo key thành công!');
@@ -11675,12 +11846,21 @@ window.formatRentalCountdown = formatRentalCountdown;
 window.updateUserHeaderCountdown = updateUserHeaderCountdown;
 
 let detailLastRevMap = new Map();
+let detailRequestPromise = null;
+let detailQueuedPromise = null;
+let detailQueuedResolve = null;
 
 async function refreshDetail(force=false) {
   if(selectedBotId===null) return;
   if(detailRequestInFlight){
-    if(force) detailRefreshQueued=true;
-    return;
+    if(force) {
+      detailRefreshQueued=true;
+      if(!detailQueuedPromise){
+        detailQueuedPromise = new Promise(resolve => { detailQueuedResolve = resolve; });
+      }
+      return detailQueuedPromise;
+    }
+    return detailRequestPromise;
   }
 
   const requestGeneration = detailRefreshGeneration;
@@ -11691,101 +11871,145 @@ async function refreshDetail(force=false) {
     requestGeneration === detailRefreshGeneration &&
     requestBotId === selectedBotId;
 
-  try {
-    const lastRev = detailLastRevMap.get(requestBotId);
-    const snapshotPath = (!force && lastRev)
-      ? ('/snapshot?rev=' + encodeURIComponent(lastRev))
-      : '/snapshot';
-    const snapshot=await detailGet(snapshotPath);
-    if(!isCurrentRequest()) return;
+  const runPromise = (async () => {
+    try {
+      const lastRev = detailLastRevMap.get(requestBotId);
+      const snapshotPath = (!force && lastRev)
+        ? ('/snapshot?rev=' + encodeURIComponent(lastRev))
+        : '/snapshot';
+      const snapshot=await detailGet(snapshotPath);
+      if(!isCurrentRequest()) return;
 
-    if(snapshot && snapshot.unchanged){
+      if(snapshot && snapshot.unchanged){
+        uptimeSyncAt=Date.now();
+        updateDetailUptime();
+        await loadDetailLogs(force, requestGeneration, requestBotId);
+        if(!isCurrentRequest()) return;
+        await loadDetailChat(force, requestGeneration, requestBotId);
+        return;
+      }
+
+      if(snapshot && snapshot.rev){
+        detailLastRevMap.set(requestBotId, snapshot.rev);
+      }
+
+      if(snapshot && snapshot.bot){
+        detailBot=snapshot.bot;
+        detailInventory=snapshot.inventory||null;
+        if(!detailSettingsDirty && snapshot.settings) renderDetailSettings(snapshot.settings);
+        if(!detailAutoChatDirty && Array.isArray(snapshot.autoChatSchedules)) renderDetailAutoChatSchedules(snapshot.autoChatSchedules);
+        if(!detailBotScheduleDirty && Array.isArray(snapshot.botSchedules)) renderDetailBotSchedules(snapshot.botSchedules);
+      } else {
+        const fallbackBot=await detailGet('/state');
+        if(!isCurrentRequest()) return;
+        const fallbackInventory=await detailGet('/inventory');
+        if(!isCurrentRequest()) return;
+        const settingsData=await detailGet('/settings');
+        if(!isCurrentRequest()) return;
+        const autoChatData=await detailGet('/autoChat');
+        if(!isCurrentRequest()) return;
+        const scheduleData=await detailGet('/botSchedules');
+        if(!isCurrentRequest()) return;
+        detailBot=fallbackBot;
+        detailInventory=fallbackInventory;
+        if(!detailSettingsDirty) renderDetailSettings(settingsData);
+        if(!detailAutoChatDirty) renderDetailAutoChatSchedules(autoChatData.autoChatSchedules||[]);
+        if(!detailBotScheduleDirty) renderDetailBotSchedules(scheduleData.botSchedules||[]);
+      }
+
+      if(!isCurrentRequest()) return;
+      if (detailBot) {
+        const bIdx = bots.findIndex(b => Number(b.id) === Number(requestBotId));
+        if (bIdx !== -1) {
+          bots[bIdx] = { ...bots[bIdx], ...detailBot };
+          if (typeof renderHome === 'function') renderHome();
+        }
+      }
       uptimeSyncAt=Date.now();
-      updateDetailUptime();
+      detailStatusHtml();
+      renderDetailInventory();
       await loadDetailLogs(force, requestGeneration, requestBotId);
       if(!isCurrentRequest()) return;
       await loadDetailChat(force, requestGeneration, requestBotId);
-      return;
-    }
-
-    if(snapshot && snapshot.rev){
-      detailLastRevMap.set(requestBotId, snapshot.rev);
-    }
-
-    if(snapshot && snapshot.bot){
-      detailBot=snapshot.bot;
-      detailInventory=snapshot.inventory||null;
-      if(!detailSettingsDirty && snapshot.settings) renderDetailSettings(snapshot.settings);
-      if(!detailAutoChatDirty && Array.isArray(snapshot.autoChatSchedules)) renderDetailAutoChatSchedules(snapshot.autoChatSchedules);
-      if(!detailBotScheduleDirty && Array.isArray(snapshot.botSchedules)) renderDetailBotSchedules(snapshot.botSchedules);
-    } else {
-      const fallbackBot=await detailGet('/state');
       if(!isCurrentRequest()) return;
-      const fallbackInventory=await detailGet('/inventory');
+      await loadDetailPositionHistory(force, requestGeneration, requestBotId);
+    } catch(err) {
       if(!isCurrentRequest()) return;
-      const settingsData=await detailGet('/settings');
-      if(!isCurrentRequest()) return;
-      const autoChatData=await detailGet('/autoChat');
-      if(!isCurrentRequest()) return;
-      const scheduleData=await detailGet('/botSchedules');
-      if(!isCurrentRequest()) return;
-      detailBot=fallbackBot;
-      detailInventory=fallbackInventory;
-      if(!detailSettingsDirty) renderDetailSettings(settingsData);
-      if(!detailAutoChatDirty) renderDetailAutoChatSchedules(autoChatData.autoChatSchedules||[]);
-      if(!detailBotScheduleDirty) renderDetailBotSchedules(scheduleData.botSchedules||[]);
-    }
-
-    if(!isCurrentRequest()) return;
-    if (detailBot) {
-      const bIdx = bots.findIndex(b => Number(b.id) === Number(requestBotId));
-      if (bIdx !== -1) {
-        bots[bIdx] = { ...bots[bIdx], ...detailBot };
-        if (typeof renderHome === 'function') renderHome();
+      if(err && err.status===404){
+        showToast('Bot này không còn tồn tại trong Manager.');
+        goHome();
+        return;
+      }
+      if(
+        err &&
+        err.status===503 &&
+        err.data &&
+        err.data.label
+      ) {
+        detailBot=err.data;
+        uptimeSyncAt=Date.now();
+        detailStatusHtml();
+      }
+    } finally {
+      detailRequestInFlight=false;
+      if(detailRequestPromise === runPromise) detailRequestPromise = null;
+      if(detailRefreshQueued && selectedBotId!==null){
+        detailRefreshQueued=false;
+        const queuedResolve = detailQueuedResolve;
+        detailQueuedPromise = null;
+        detailQueuedResolve = null;
+        const nextPromise = refreshDetail(true);
+        if(queuedResolve) Promise.resolve(nextPromise).then(queuedResolve, queuedResolve);
+      } else if(detailQueuedResolve){
+        const queuedResolve = detailQueuedResolve;
+        detailQueuedPromise = null;
+        detailQueuedResolve = null;
+        queuedResolve();
       }
     }
-    uptimeSyncAt=Date.now();
-    detailStatusHtml();
-    renderDetailInventory();
-    await loadDetailLogs(force, requestGeneration, requestBotId);
-    if(!isCurrentRequest()) return;
-    await loadDetailChat(force, requestGeneration, requestBotId);
-    if(!isCurrentRequest()) return;
-    await loadDetailPositionHistory(force, requestGeneration, requestBotId);
-  } catch(err) {
-    if(!isCurrentRequest()) return;
-    if(err && err.status===404){
-      showToast('Bot này không còn tồn tại trong Manager.');
-      goHome();
-      return;
-    }
-    if(
-      err &&
-      err.status===503 &&
-      err.data &&
-      err.data.label
-    ) {
-      detailBot=err.data;
-      uptimeSyncAt=Date.now();
-      detailStatusHtml();
-    }
-  } finally {
-    detailRequestInFlight=false;
-    if(detailRefreshQueued && selectedBotId!==null){detailRefreshQueued=false;void refreshDetail(true);}
-  }
+  })();
+  detailRequestPromise = runPromise;
+  return runPromise;
 }
 
-function nearBottom(box){return box.scrollHeight-box.scrollTop-box.clientHeight<24;}
+function nearBottom(box){return !!(box && (box.scrollHeight-box.scrollTop-box.clientHeight<24));}
 
+function formatDetailLogEntryText(entry, includeTypeTag = false) {
+  if (typeof entry === 'string') return entry;
+  if (!entry || typeof entry !== 'object') return '';
+  const msg = String(entry.message || entry.reason || entry.text || entry.line || '').trim();
+  if (!msg) return '';
+  let timePrefix = '';
+  const rawTs = entry.occurredAt || entry.timestamp || entry.createdAt;
+  if (rawTs && !/^\d{2}:\d{2}:\d{2}\b/.test(msg)) {
+    const d = new Date(rawTs);
+    if (!Number.isNaN(d.getTime())) {
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      const ss = String(d.getSeconds()).padStart(2, '0');
+      timePrefix = hh + ':' + mm + ':' + ss;
+    }
+  }
+  const typeTag = includeTypeTag && entry.type && !msg.startsWith('[')
+    ? '[' + String(entry.type).trim() + ']'
+    : '';
+  return [timePrefix, typeTag, msg].filter(Boolean).join(' ');
+}
+
+let eventLoadingToken = 0;
 async function loadDetailLogs(force=false, expectedGeneration=detailRefreshGeneration, expectedBotId=selectedBotId) {
-  if(eventLoading) return;
+  const targetGen = (expectedGeneration !== null && expectedGeneration !== undefined) ? Number(expectedGeneration) : detailRefreshGeneration;
+  if(eventLoading && eventLoadingGen === targetGen && !force) return;
   const currentBotRev = (detailBot && detailBot.logRevision !== undefined && detailBot.logRevision !== null)
     ? Number(detailBot.logRevision)
     : null;
   if(!force && currentBotRev !== null && Number.isFinite(currentBotRev) && lastEventRevision === currentBotRev) return;
   eventLoading=true;
+  eventLoadingGen=targetGen;
+  const reqToken = ++eventLoadingToken;
   try {
     const data=await detailGet('/logs');
+    if(reqToken !== eventLoadingToken) return;
     if(!currentUser || (expectedGeneration!==null && (expectedGeneration!==detailRefreshGeneration || expectedBotId!==selectedBotId))) return;
     const box=document.getElementById('detailEventLogs');
     const sel = typeof window.getSelection === 'function' ? window.getSelection() : null;
@@ -11793,7 +12017,8 @@ async function loadDetailLogs(force=false, expectedGeneration=detailRefreshGener
       return;
     }
     const keep=nearBottom(box);
-    function formatLogLineHtml(line) {
+    function formatLogLineHtml(entry) {
+      const line = formatDetailLogEntryText(entry, true);
       if (!line) return '';
       let cls = 'line';
       const lower = line.toLowerCase();
@@ -11828,18 +12053,25 @@ async function loadDetailLogs(force=false, expectedGeneration=detailRefreshGener
       ? currentBotRev
       : Number(data.revision || 0);
     if(keep && box) box.scrollTop=box.scrollHeight;
-  } finally {eventLoading=false;}
+  } finally {
+    if(reqToken === eventLoadingToken) eventLoading=false;
+  }
 }
 
+let chatLoadingToken = 0;
 async function loadDetailChat(force=false, expectedGeneration=detailRefreshGeneration, expectedBotId=selectedBotId) {
-  if(chatLoading) return;
+  const targetGen = (expectedGeneration !== null && expectedGeneration !== undefined) ? Number(expectedGeneration) : detailRefreshGeneration;
+  if(chatLoading && chatLoadingGen === targetGen && !force) return;
   const currentChatRev = (detailBot && detailBot.chatLogRevision !== undefined && detailBot.chatLogRevision !== null)
     ? Number(detailBot.chatLogRevision)
     : null;
   if(!force && currentChatRev !== null && Number.isFinite(currentChatRev) && lastChatRevision >= 0 && lastChatRevision === currentChatRev) return;
   chatLoading=true;
+  chatLoadingGen=targetGen;
+  const reqToken = ++chatLoadingToken;
   try {
     const data=await detailGet('/chat-logs');
+    if(reqToken !== chatLoadingToken) return;
     if(!currentUser || (expectedGeneration!==null && (expectedGeneration!==detailRefreshGeneration || expectedBotId!==selectedBotId))) return;
     const box=document.getElementById('detailChatLogs');
     const sel = typeof window.getSelection === 'function' ? window.getSelection() : null;
@@ -11847,7 +12079,8 @@ async function loadDetailChat(force=false, expectedGeneration=detailRefreshGener
       return;
     }
     const keep=nearBottom(box);
-    function formatChatLineHtml(line) {
+    function formatChatLineHtml(entry) {
+      const line = formatDetailLogEntryText(entry, false);
       if (!line) return '';
       let cls = 'line line-chat';
       const timeMatch = line.match(/^(\d{2}:\d{2}:\d{2})\s*(.*)$/);
@@ -11907,7 +12140,9 @@ async function loadDetailChat(force=false, expectedGeneration=detailRefreshGener
       ? currentChatRev
       : Number(data.revision || 0);
     if(keep && box) box.scrollTop=box.scrollHeight;
-  } finally {chatLoading=false;}
+  } finally {
+    if(reqToken === chatLoadingToken) chatLoading=false;
+  }
 }
 
 async function loadDetailPositionHistory(force=false, expectedGeneration=detailRefreshGeneration, expectedBotId=selectedBotId) {
@@ -12011,19 +12246,22 @@ function handleDetailEquipmentClick(dest) {
   }
 }
 
-function handleDetailDropZoneClick() {
+async function handleDetailDropZoneClick() {
   if (selectedDetailMoveSlot !== null) {
     const fromSlot = selectedDetailMoveSlot;
     cancelDetailSlotSelection();
     if (detailInventoryBusy || !detailInventory) return;
     detailInventoryBusy = true;
-    detailPost('/inventory/drop', { sourceSlot: fromSlot, revision: detailInventory.revision }).then(function(result) {
+    try {
+      const result = await detailPost('/inventory/drop', { sourceSlot: fromSlot, revision: detailInventory.revision });
       if (result.data?.inventory) { detailInventory = result.data.inventory; renderDetailInventory(); }
       showToast(result.data?.message || result.data?.error || 'Đã xử lý.');
-      if (!result.ok) refreshDetail(true);
-    }).finally(function() {
+      if (!result.ok) await refreshDetail(true);
+    } catch (err) {
+      showToast(err.message || 'Lỗi khi vứt vật phẩm.', 'error');
+    } finally {
       detailInventoryBusy = false;
-    });
+    }
   }
 }
 
@@ -12081,6 +12319,15 @@ function renderDetailInventory(){
   const hotBox=document.getElementById('detailHotbar');hotBox.innerHTML='';
   const selected=Number(detailInventory.selectedHotbar??detailInventory.selectedSlot??0);
   for(let slot=36;slot<=44;slot++) hotBox.appendChild(createDetailSlot(slots[String(slot)]||null,slot,slot-36===selected));
+  if (selectedDetailMoveSlot !== null) {
+    if (slots[String(selectedDetailMoveSlot)]) {
+      const selEl = document.querySelector('#detailPage .inventory-slot[data-slot="' + selectedDetailMoveSlot + '"]');
+      if (selEl) selEl.classList.add('selected-for-move');
+      updateDetailTouchHint();
+    } else {
+      cancelDetailSlotSelection();
+    }
+  }
 }
 
 function allowDrop(event){
@@ -12330,8 +12577,8 @@ function collectDetailBotSchedules(){
   return items.length?[{id:current.id||String(Date.now()),enabled:!!document.getElementById('detailBotScheduleEnabled')?.checked,mode,items}]:[];
 }
 function validateDetailBotSchedules(schedules){if(!schedules.length)return'';if(schedules.length!==1)return'Chỉ được lưu một chế độ hẹn giờ Bot cùng lúc.';const s=schedules[0];if(!s.items.length)return'Hẹn giờ Bot chưa có dòng nào.';for(let i=0;i<s.items.length;i++){if(s.items[i].action==='command'&&!String(s.items[i].command||'').trim())return'Dòng #'+(i+1)+' chọn hành động Lệnh nhưng chưa nhập lệnh.';}if(s.mode==='fixed'){const seen=new Set();for(let i=0;i<s.items.length;i++){if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(s.items[i].time))return'Dòng #'+(i+1)+' có giờ không hợp lệ.';if(seen.has(s.items[i].time))return'Dòng #'+(i+1)+' bị trùng giờ '+s.items[i].time+'.';seen.add(s.items[i].time);}}else for(let i=0;i<s.items.length;i++){const v=Number(s.items[i].afterMinutes);if(!Number.isFinite(v)||v<1||v>43200)return'Dòng #'+(i+1)+' có thời gian chờ không hợp lệ.';}return'';}
-function detailBotScheduleModeChanged(select){const current=collectDetailBotSchedules();const s=normalizeDetailBotScheduler(current.length?current:detailBotSchedules);const mode=select?.value==='cycle'?'cycle':'fixed';const items=s.items.map((item,i)=>mode==='fixed'?{id:item.id,action:item.action,time:detailDefaultFixedTime(i),...(item.action==='command'?{command:item.command}:{})}:{id:item.id,action:item.action,afterMinutes:i===0?120:300,...(item.action==='command'?{command:item.command}:{})});detailBotSchedules=[{id:s.id||String(Date.now()),enabled:!!document.getElementById('detailBotScheduleEnabled')?.checked,mode,items}];detailBotScheduleDirty=true;renderDetailBotSchedules(detailBotSchedules);}
-function addDetailBotSchedule(){const current=collectDetailBotSchedules();const s=normalizeDetailBotScheduler(current.length?current:detailBotSchedules);const i=s.items.length;const item=s.mode==='fixed'?{id:Date.now()+'-'+Math.random().toString(36).slice(2,8),action:'stop',time:detailDefaultFixedTime(i)}:{id:Date.now()+'-'+Math.random().toString(36).slice(2,8),action:i%2===0?'stop':'start',afterMinutes:i===0?120:300};s.items.push(item);detailBotSchedules=[s];detailBotScheduleDirty=true;renderDetailBotSchedules(detailBotSchedules);}
+function detailBotScheduleModeChanged(select){if(detailBotScheduleSaveInFlight)return;const current=collectDetailBotSchedules();const s=normalizeDetailBotScheduler(current.length?current:detailBotSchedules);const mode=select?.value==='cycle'?'cycle':'fixed';const items=s.items.map((item,i)=>mode==='fixed'?{id:item.id,action:item.action,time:detailDefaultFixedTime(i),...(item.action==='command'?{command:item.command}:{})}:{id:item.id,action:item.action,afterMinutes:i===0?120:300,...(item.action==='command'?{command:item.command}:{})});detailBotSchedules=[{id:s.id||String(Date.now()),enabled:!!document.getElementById('detailBotScheduleEnabled')?.checked,mode,items}];detailBotScheduleDirty=true;renderDetailBotSchedules(detailBotSchedules);}
+function addDetailBotSchedule(){if(detailBotScheduleSaveInFlight)return;const current=collectDetailBotSchedules();const s=normalizeDetailBotScheduler(current.length?current:detailBotSchedules);const i=s.items.length;const item=s.mode==='fixed'?{id:Date.now()+'-'+Math.random().toString(36).slice(2,8),action:'stop',time:detailDefaultFixedTime(i)}:{id:Date.now()+'-'+Math.random().toString(36).slice(2,8),action:i%2===0?'stop':'start',afterMinutes:i===0?120:300};s.items.push(item);detailBotSchedules=[s];detailBotScheduleDirty=true;renderDetailBotSchedules(detailBotSchedules);}
 function removeDetailBotSchedule(index){if(detailBotScheduleSaveInFlight)return;const s=normalizeDetailBotScheduler(collectDetailBotSchedules());s.items.splice(index,1);detailBotSchedules=s.items.length?[s]:[];detailBotScheduleDirty=true;renderDetailBotSchedules(detailBotSchedules);}
 let draggedDetailBotScheduleIndex=null;
 function dragDetailBotSchedule(event,index){draggedDetailBotScheduleIndex=index;event.dataTransfer.effectAllowed='move';event.dataTransfer.setData('text/plain',String(index));event.currentTarget.classList.add('dragging');}
@@ -12430,6 +12677,9 @@ async function detailAction(action){
   const buttons=['detailStartButton','detailStopButton','detailRestartButton'];
   const activeBtn=document.getElementById(action==='start'?'detailStartButton':action==='stop'?'detailStopButton':'detailRestartButton');
   const prevBtnText=activeBtn?activeBtn.textContent:'';
+  const prevDetailState = detailBot ? { status: detailBot.status, manuallyStopped: detailBot.manuallyStopped, available: detailBot.available } : null;
+  const bIdx = bots.findIndex(function(b) { return Number(b.id) === Number(selectedBotId); });
+  const prevBotState = bIdx !== -1 ? { status: bots[bIdx].status, manuallyStopped: bots[bIdx].manuallyStopped, available: bots[bIdx].available } : null;
 
   try{
     if(activeBtn)activeBtn.textContent=action==='start'?'⏳ Đang chạy...':action==='stop'?'⏳ Đang dừng...':'⏳ Đang chạy lại...';
@@ -12449,7 +12699,6 @@ async function detailAction(action){
       }
       detailStatusHtml();
     }
-    const bIdx = bots.findIndex(function(b) { return Number(b.id) === Number(selectedBotId); });
     if (bIdx !== -1) {
       if (action === 'start') {
         bots[bIdx].manuallyStopped = false;
@@ -12475,6 +12724,9 @@ async function detailAction(action){
       setTimeout(function() { if (selectedBotId !== null) refreshDetail(true); }, 800);
       setTimeout(function() { if (selectedBotId !== null) refreshDetail(true); }, 2000);
     } else {
+      if (detailBot && prevDetailState) Object.assign(detailBot, prevDetailState);
+      if (bIdx !== -1 && prevBotState) Object.assign(bots[bIdx], prevBotState);
+      if (typeof detailStatusHtml === 'function') detailStatusHtml();
       var err = result.data?.error || 'Không thể thực hiện thao tác.';
       if (action === 'start' && (err.indexOf('username') !== -1 || err.indexOf('password') !== -1 || err.indexOf('chưa có') !== -1)) {
         showToast('⚠️ ' + err + ' Vui lòng nhập Username Ingame bên dưới và bấm "Lưu & Chạy lại ngay"!', 'warning', 6000);
@@ -12488,6 +12740,9 @@ async function detailAction(action){
       }
     }
   }catch(err){
+    if (detailBot && prevDetailState) Object.assign(detailBot, prevDetailState);
+    if (bIdx !== -1 && prevBotState) Object.assign(bots[bIdx], prevBotState);
+    if (typeof detailStatusHtml === 'function') detailStatusHtml();
     showToast(err.message||'Không thể thực hiện thao tác.', 'error');
     lastHomeSig = '';
     if (selectedBotId !== null) detailLastRevMap.delete(selectedBotId);
@@ -13325,7 +13580,7 @@ window.saveTrialDaysSetting = saveTrialDaysSetting;
 
 function updateDetailUptime(){
   if(!detailBot||detailBot.status!=='afk')return;
-  const base=Number(detailBot.uptimeSeconds||0);
+  const base=Math.max(0,Math.floor(Number(detailBot.uptimeSeconds||0)));
   const extra=Math.floor((Date.now()-uptimeSyncAt)/1000);
   const seconds=Math.min(base+extra,3596399);
   const h=Math.floor(seconds/3600);const m=Math.floor((seconds%3600)/60);const s=seconds%60;
@@ -13667,16 +13922,22 @@ async function resolveAllPendingResets() {
   if (btn) btn.disabled = true;
   try {
     showToast('⏳ Đang xử lý hoàn tất các reset treo...', 'info', 5000);
-    await requestJson('/api/manager/pending-resets/all/resolve', {
+    const firstRes = await requestJson('/api/manager/pending-resets/all/resolve', {
       method: 'POST',
       body: { action: 'resume' }
     });
+    if (!firstRes.ok) {
+      throw new Error(firstRes.data?.error || firstRes.data?.message || 'Không thể xử lý reset treo.');
+    }
     const checkRes = await requestJson('/api/manager/pending-resets');
     if (checkRes.ok && checkRes.data && checkRes.data.conflicts > 0) {
-      await requestJson('/api/manager/pending-resets/all/resolve', {
+      const discardRes = await requestJson('/api/manager/pending-resets/all/resolve', {
         method: 'POST',
         body: { action: 'discard', confirmOwnerCheck: true }
       });
+      if (!discardRes.ok) {
+        throw new Error(discardRes.data?.error || discardRes.data?.message || 'Không thể xóa xung đột reset.');
+      }
     }
     showToast('✅ Đã dọn dẹp và gỡ bỏ xung đột reset thành công!', 'success', 5000);
     await Promise.allSettled([refreshHome(), refreshUserManagementPage()]);
@@ -13939,6 +14200,7 @@ function scheduleNextManagerPoll() {
 }
 
 document.addEventListener('visibilitychange', () => {
+  if (!currentUser) return;
   if (!document.hidden) {
     lastUserActivityAt = Date.now();
     lastHomeSig = ''; // Force immediate fresh reconciliation on tab focus
@@ -13965,6 +14227,7 @@ window.addEventListener('offline', () => {
 window.addEventListener('online', () => {
   const banner = document.getElementById('offlineBanner');
   if (banner) banner.style.display = 'none';
+  if (!currentUser) return;
   showToast('✅ Đã kết nối lại mạng — Đồng bộ thành công!');
   lastUserActivityAt = Date.now();
   if (selectedBotId === null) refreshHome();
@@ -13990,11 +14253,11 @@ setInterval(updateUserHeaderCountdown, 5000);
 </script>
 
   <!-- MODAL BROADCAST LỆNH -->
-  <div id="broadcastModal" class="modal hidden">
+  <div id="broadcastModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="broadcastModalTitle">
     <div class="modal-card" style="max-width:480px;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-        <h3 style="margin:0;display:flex;align-items:center;gap:8px;">📡 Broadcast Lệnh Hàng Loạt</h3>
-        <button class="small" onclick="closeBroadcastModal()">✕</button>
+        <h3 id="broadcastModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">📡 Broadcast Lệnh Hàng Loạt</h3>
+        <button type="button" class="small" onclick="closeBroadcastModal()" aria-label="Đóng">✕</button>
       </div>
       <p style="font-size:13px;color:var(--muted);margin-bottom:12px;">Gửi đồng loạt 1 lệnh chat hoặc câu lệnh server (/bal, /menu, /spawn,...) tới toàn bộ các bot trong quyền quản lý của bạn:</p>
       <div style="margin-bottom:12px;">
@@ -14004,6 +14267,7 @@ setInterval(updateUserHeaderCountdown, 5000);
         </select>
       </div>
       <div style="margin-bottom:14px;">
+        <label for="broadcastCommandInput" class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;">Lệnh hoặc tin nhắn Broadcast</label>
         <input type="text" id="broadcastCommandInput" placeholder="Ví dụ: /bal hoặc /menu hoặc Tin nhắn..." style="width:100%;box-sizing:border-box;" />
       </div>
       <div class="chip-row" style="margin-bottom:14px;display:flex;gap:6px;flex-wrap:wrap;">
@@ -14012,46 +14276,46 @@ setInterval(updateUserHeaderCountdown, 5000);
         <button type="button" class="small" onclick="document.getElementById('broadcastCommandInput').value='/spawn'">/spawn</button>
         <button type="button" class="small" onclick="document.getElementById('broadcastCommandInput').value='/team chat'">/team chat</button>
       </div>
-      <div id="broadcastResultBox" style="display:none;font-size:12px;margin-bottom:12px;padding:8px;border-radius:6px;"></div>
+      <div id="broadcastResultBox" role="status" aria-live="polite" style="display:none;font-size:12px;margin-bottom:12px;padding:8px;border-radius:6px;"></div>
       <div class="modal-actions" style="margin-top:16px;">
-        <button onclick="closeBroadcastModal()">Hủy</button>
-        <button class="primary" onclick="submitBroadcastCommand()">🚀 Bắn Lệnh Ngay</button>
+        <button type="button" onclick="closeBroadcastModal()">Hủy</button>
+        <button type="button" class="primary" onclick="submitBroadcastCommand()">🚀 Bắn Lệnh Ngay</button>
       </div>
     </div>
   </div>
 
   <!-- MODAL GIA HẠN BẰNG KEY (USER) -->
-  <div id="renewModal" class="modal hidden">
+  <div id="renewModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="renewModalTitle">
     <div class="modal-card" style="max-width:440px;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-        <h3 style="margin:0;display:flex;align-items:center;gap:8px;">🎁 Gia Hạn Gói Thuê Bằng Mã Key</h3>
-        <button class="small" onclick="closeRenewModal()">✕</button>
+        <h3 id="renewModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">🎁 Gia Hạn Gói Thuê Bằng Mã Key</h3>
+        <button type="button" class="small" onclick="closeRenewModal()" aria-label="Đóng">✕</button>
       </div>
       <p style="font-size:13px;color:var(--muted);margin-bottom:14px;">Nhập mã kích hoạt (License Key/Giftcode) được cấp bởi Quản trị viên để gia hạn thời gian sử dụng bot:</p>
       <div style="margin-bottom:14px;">
-        <label style="font-size:12px;color:var(--muted);font-weight:600;display:block;margin-bottom:4px;">MÃ KEY GIA HẠN:</label>
+        <label for="renewKeyInput" style="font-size:12px;color:var(--muted);font-weight:600;display:block;margin-bottom:4px;">MÃ KEY GIA HẠN:</label>
         <input type="text" id="renewKeyInput" placeholder="VD: KINGMC-7D-ABC123" style="width:100%;box-sizing:border-box;text-transform:uppercase;" />
       </div>
-      <div id="renewResultBox" style="display:none;font-size:12px;margin-bottom:12px;padding:8px;border-radius:6px;"></div>
+      <div id="renewResultBox" role="status" aria-live="polite" style="display:none;font-size:12px;margin-bottom:12px;padding:8px;border-radius:6px;"></div>
       <div class="modal-actions" style="margin-top:16px;">
-        <button onclick="closeRenewModal()">Đóng</button>
-        <button class="primary" onclick="submitRenewKey()">Kích Hoạt Ngay</button>
+        <button type="button" onclick="closeRenewModal()">Đóng</button>
+        <button type="button" class="primary" onclick="submitRenewKey()">Kích Hoạt Ngay</button>
       </div>
     </div>
   </div>
 
   <!-- MODAL QUẢN LÝ KEY GIA HẠN (ADMIN ONLY) -->
-  <div id="keyManagementModal" class="modal hidden">
+  <div id="keyManagementModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="keyManagementModalTitle">
     <div class="modal-card" style="max-width:750px;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-        <h3 style="margin:0;display:flex;align-items:center;gap:8px;">🎟️ Quản Lý Mã Key Gia Hạn (License Keys)</h3>
-        <button class="small" onclick="closeKeyManagementModal()">✕</button>
+        <h3 id="keyManagementModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">🎟️ Quản Lý Mã Key Gia Hạn (License Keys)</h3>
+        <button type="button" class="small" onclick="closeKeyManagementModal()" aria-label="Đóng">✕</button>
       </div>
       <div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);padding:14px;border-radius:8px;margin-bottom:16px;">
         <h4 style="margin:0 0 10px 0;font-size:14px;">Tạo Mã Key Mới</h4>
         <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
           <div>
-            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">GÓI THUÊ (NGÀY):</label>
+            <label for="createKeyDays" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">GÓI THUÊ (NGÀY):</label>
             <div style="display:flex;gap:4px;align-items:center;">
               <select id="createKeyDays" onchange="onKeyDaysSelectChange('modal')" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px;border-radius:6px;font-size:13px;">
                 <option value="1">1 Ngày (Dùng thử)</option>
@@ -14062,26 +14326,26 @@ setInterval(updateUserHeaderCountdown, 5000);
                 <option value="lifetime">👑 Vĩnh Viễn</option>
                 <option value="custom">✏️ Tùy chỉnh ngày...</option>
               </select>
-              <input type="number" id="createKeyCustomDays" min="1" max="3650" placeholder="Số ngày" style="display:none;width:75px;background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px;border-radius:6px;font-size:13px;" />
+              <input type="number" id="createKeyCustomDays" aria-label="Số ngày gói thuê tùy chỉnh" min="1" max="3650" placeholder="Số ngày" style="display:none;width:75px;background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px;border-radius:6px;font-size:13px;" />
             </div>
           </div>
           <div>
-            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">TÊN GÓI:</label>
+            <label for="createKeyPlan" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">TÊN GÓI:</label>
             <input type="text" id="createKeyPlan" placeholder="VD: Gói Tuần VIP" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 10px;border-radius:6px;font-size:13px;width:130px;" />
           </div>
           <div>
-            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">SỐ BOT:</label>
+            <label for="createKeyBotCount" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">SỐ BOT:</label>
             <input type="number" id="createKeyBotCount" value="1" min="1" max="50" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 10px;border-radius:6px;font-size:13px;width:60px;" />
           </div>
           <div>
-            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">LƯỢT DÙNG (0=∞):</label>
+            <label for="createKeyMaxUses" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">LƯỢT DÙNG (0=∞):</label>
             <input type="number" id="createKeyMaxUses" value="1" min="0" max="10000" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 10px;border-radius:6px;font-size:13px;width:72px;" />
           </div>
           <div>
-            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">SỐ LƯỢNG KEY:</label>
+            <label for="createKeyCount" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">SỐ LƯỢNG KEY:</label>
             <input type="number" id="createKeyCount" value="1" min="1" max="10" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 10px;border-radius:6px;font-size:13px;width:60px;" />
           </div>
-          <button class="primary" onclick="submitCreateKeys()" style="padding:8px 16px;">+ Tạo Key</button>
+          <button type="button" class="primary" onclick="submitCreateKeys()" style="padding:8px 16px;">+ Tạo Key</button>
         </div>
       </div>
 
@@ -14101,7 +14365,7 @@ setInterval(updateUserHeaderCountdown, 5000);
         </table>
       </div>
       <div class="modal-actions" style="margin-top:16px;">
-        <button onclick="closeKeyManagementModal()">Đóng</button>
+        <button type="button" onclick="closeKeyManagementModal()">Đóng</button>
       </div>
     </div>
   </div>

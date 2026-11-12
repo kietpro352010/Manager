@@ -375,7 +375,7 @@ class SupabaseAdapter {
                     '/rpc/acquire_manager_lock', '/rpc/release_manager_lock', '/rpc/renew_manager_lock', '/rpc/verify_manager_lock_fencing',
                     '/rpc/read_manager_users_snapshot', '/rpc/save_manager_users_snapshot',
                     '/rpc/insert_manager_users_if_absent', '/rpc/redeem_manager_key_and_save_users',
-                    '/rpc/read_manager_session', '/rpc/read_manager_authorization', '/rpc/create_manager_user_session', '/rpc/revoke_manager_session',
+                    '/rpc/read_manager_session', '/rpc/read_manager_authorization', '/rpc/create_manager_user_session', '/rpc/revoke_manager_session', '/rpc/revoke_manager_user_sessions',
                     '/rpc/claim_manager_link4m_reward', '/rpc/start_manager_link4m_attempt',
                     '/rpc/patch_manager_registry', '/rpc/set_bot_log_clear_cutoff',
                     '/rpc/rollback_manager_link4m_attempt', '/rpc/update_manager_link4m_sync_status',
@@ -1283,7 +1283,6 @@ class SupabaseAdapter {
     }
 
     async deleteSession(tokenHash) {
-        invalidateAuthCache(tokenHash);
         if (!this.isEnabled() || !tokenHash) return false;
         try {
             const data = await this.callRpc('revoke_manager_session', { p_token_hash: String(tokenHash) }, 5000);
@@ -1291,6 +1290,18 @@ class SupabaseAdapter {
         } catch (err) {
             console.error('[SUPABASE] Lỗi thu hồi session trên Cloud:', err.message);
             return false;
+        }
+    }
+
+    async revokeUserSessions(userId) {
+        if (!this.isEnabled() || !userId) return { ok: false, revokedCount: 0 };
+        try {
+            const data = await this.callRpc('revoke_manager_user_sessions', { p_user_id: String(userId) }, 6000);
+            const result = Array.isArray(data) ? data[0] : data;
+            return (result && typeof result === 'object') ? result : { ok: Boolean(result), revokedCount: 0 };
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi thu hồi toàn bộ session của user trên Cloud:', err.message);
+            return { ok: false, error: err.message || String(err), revokedCount: 0 };
         }
     }
 

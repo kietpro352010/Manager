@@ -2191,6 +2191,691 @@ async function testFailClosedMissingAtomicRpcAndHealthReadiness() {
   console.log('✅ 13. Fail-Closed Atomic RPC Enforcement & Health/Readiness verified.');
 }
 
+async function testSessionRevocationFailClosedMiddleware() {
+  console.log('14. Testing Session Revocation, Deleted/Disabled Cache Eviction & Multi-Process Fail-Closed Middleware...');
+  const { encryptUserPassword } = require('../src/utils/secrets');
+  const usersByName = new Map();
+  const usersById = new Map();
+
+  const aliceRec = {
+    id: 'usr_alice',
+    userId: 'usr_alice',
+    username: 'alice',
+    password: encryptUserPassword('alice-pass-123'),
+    role: 'user',
+    status: 'active',
+    isPermanent: false,
+    expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    workerIds: ['01']
+  };
+  usersByName.set('alice', aliceRec);
+  usersById.set('usr_alice', aliceRec);
+
+  const memStore = {
+    async getUser(username) {
+      const u = usersByName.get(String(username || '').toLowerCase());
+      return u ? { ...u, workerIds: [...u.workerIds] } : null;
+    },
+    async getAccess(identifier) {
+      const key = String(identifier || '');
+      const u = usersById.get(key) || usersByName.get(key.toLowerCase());
+      return u ? { ...u, workerIds: [...u.workerIds] } : null;
+    },
+    async setAccess(identifier, values) {
+      const key = String(identifier || '');
+      const cur = usersById.get(key) || usersByName.get(key.toLowerCase());
+      if (!cur) return null;
+      const next = { ...cur, ...values };
+      usersById.set(cur.id, next);
+      usersByName.set(cur.username.toLowerCase(), next);
+      return { ...next };
+    },
+    async removeAccess(identifier) {
+      const key = String(identifier || '');
+      const cur = usersById.get(key) || usersByName.get(key.toLowerCase());
+      if (!cur) return false;
+      usersById.delete(cur.id);
+      usersByName.delete(cur.username.toLowerCase());
+      return true;
+    },
+    async addAudit() {},
+    invalidateCache() {}
+  };
+
+  // A. Local/cached middleware mode: evicts activeSessions immediately when user is disabled, deleted, or getAccess fails
+  const appLocal = createApp({
+    store: memStore,
+    registry: {
+      store: {},
+      list: async () => [],
+      getAdminPassword: () => null,
+      verifyBotSecretSync: () => false
+    },
+    broker: {},
+    config: { adminUsername: 'admin', adminPassword: 'admin-secret-password', discordToken: '' },
+    logger: createSilentLogger()
+  });
+
+  const serverLocal = http.createServer(appLocal);
+  await new Promise((resolve) => serverLocal.listen(0, resolve));
+  try {
+    const port = serverLocal.address().port;
+    const base = `http://127.0.0.1:${port}`;
+
+    // Login user -> active session cached
+    const loginRes = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'alice-pass-123' })
+    });
+    const loginJson = await loginRes.json();
+    assert.strictEqual(loginJson.ok, true);
+    const aliceToken = loginJson.token;
+    assert.ok(aliceToken);
+
+    const meActive = await fetch(`${base}/api/auth/me`, {
+      headers: { authorization: `Bearer ${aliceToken}` }
+    });
+    assert.strictEqual(meActive.status, 200);
+
+    // Expired non-disabled user stays allowed so they can renew via Link4M / key
+    await memStore.setAccess('usr_alice', { status: 'expired' });
+    const meExpired = await fetch(`${base}/api/auth/me`, {
+      headers: { authorization: `Bearer ${aliceToken}` }
+    });
+    assert.strictEqual(meExpired.status, 200);
+    const meExpiredJson = await meExpired.json();
+    assert.strictEqual(meExpiredJson.user.status, 'expired');
+
+    // Login as env-var admin and disable alice via Admin API
+    const adminLoginRes = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: 'admin-secret-password' })
+    });
+    const adminToken = (await adminLoginRes.json()).token;
+    assert.ok(adminToken);
+
+    const disableRes = await fetch(`${base}/api/manager/users/usr_alice`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ status: 'disabled' })
+    });
+    assert.strictEqual(disableRes.status, 200);
+
+    const meDisabled = await fetch(`${base}/api/auth/me`, {
+      headers: { authorization: `Bearer ${aliceToken}` }
+    });
+    assert.strictEqual(meDisabled.status, 401, 'Disabled user token must be rejected immediately');
+
+    // Env admin cached session remains intact
+    const meAdmin = await fetch(`${base}/api/auth/me`, {
+      headers: { authorization: `Bearer ${adminToken}` }
+    });
+    assert.strictEqual(meAdmin.status, 200);
+
+    // Re-enable, login again, delete user, verify fail-closed + error fail-closed
+    await memStore.setAccess('usr_alice', { status: 'active' });
+    const relogin = await (await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'alice-pass-123' })
+    })).json();
+    const deleteRes = await fetch(`${base}/api/manager/users`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ action: 'delete', userId: 'usr_alice' })
+    });
+    assert.strictEqual(deleteRes.status, 200);
+
+    const meDeleted = await fetch(`${base}/api/auth/me`, {
+      headers: { authorization: `Bearer ${relogin.token}` }
+    });
+    assert.strictEqual(meDeleted.status, 401, 'Deleted user token must be rejected immediately');
+  } finally {
+    await new Promise((resolve) => serverLocal.close(resolve));
+  }
+
+  // B. Multi-process DB auth mode: Manager A warms activeSessions, Manager B deletes user in DB -> Manager A rejects immediately
+  const sharedDbSessions = new Map();
+  let bobDbUser = {
+    id: 'usr_bob',
+    userId: 'usr_bob',
+    username: 'bob',
+    password: encryptUserPassword('bob-pass-123'),
+    role: 'user',
+    status: 'active',
+    isPermanent: true,
+    assignedBotIds: ['02'],
+    workerIds: ['02']
+  };
+  let getAccessThrows = false;
+  const dbBackedStore = {
+    adapter: {
+      isEnabled: () => true,
+      async createManagerUserSession(session) {
+        sharedDbSessions.set(session.tokenHash, { ...session });
+        return true;
+      },
+      async fetchManagerAuthorization(tokenHash) {
+        const s = sharedDbSessions.get(tokenHash) || null;
+        return {
+          ok: Boolean(s),
+          session: s ? { ...s } : null,
+          user: bobDbUser ? { ...bobDbUser } : null
+        };
+      },
+      async revokeUserSessions(userId) {
+        for (const [k, s] of sharedDbSessions.entries()) {
+          if (s.userId === userId || s.username === userId) sharedDbSessions.delete(k);
+        }
+        return { ok: true, revokedCount: 1 };
+      },
+      async deleteSession(tokenHash) {
+        return sharedDbSessions.delete(tokenHash);
+      }
+    },
+    async getUser(username) {
+      return bobDbUser && username === 'bob' ? { ...bobDbUser } : null;
+    },
+    async getAccess(userId) {
+      if (getAccessThrows) throw new Error('simulated_db_error');
+      return bobDbUser && (userId === 'usr_bob' || userId === 'bob') ? { ...bobDbUser } : null;
+    },
+    async addAudit() {},
+    invalidateCache() {}
+  };
+
+  const appProcA = createApp({
+    store: dbBackedStore,
+    registry: { store: {}, list: async () => [], getAdminPassword: () => null, verifyBotSecretSync: () => false },
+    broker: {},
+    config: { adminUsername: 'admin', adminPassword: 'admin-secret-password', discordToken: '' },
+    logger: createSilentLogger()
+  });
+  const serverProcA = http.createServer(appProcA);
+  await new Promise((resolve) => serverProcA.listen(0, resolve));
+  try {
+    const baseA = `http://127.0.0.1:${serverProcA.address().port}`;
+    const loginBob = await (await fetch(`${baseA}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'bob', password: 'bob-pass-123' })
+    })).json();
+    assert.strictEqual(loginBob.ok, true);
+
+    assert.strictEqual((await fetch(`${baseA}/api/auth/me`, {
+      headers: { authorization: `Bearer ${loginBob.token}` }
+    })).status, 200);
+
+    // Transient DB lookup error fails closed
+    getAccessThrows = true;
+    assert.strictEqual((await fetch(`${baseA}/api/auth/me`, {
+      headers: { authorization: `Bearer ${loginBob.token}` }
+    })).status, 401);
+    getAccessThrows = false;
+    assert.strictEqual((await fetch(`${baseA}/api/auth/me`, {
+      headers: { authorization: `Bearer ${loginBob.token}` }
+    })).status, 200);
+
+    // Simulate external Manager B deleting bob + revoking DB session WITHOUT calling Proc A directly
+    bobDbUser = null;
+    sharedDbSessions.clear();
+
+    const afterExternalDelete = await fetch(`${baseA}/api/auth/me`, {
+      headers: { authorization: `Bearer ${loginBob.token}` }
+    });
+    assert.strictEqual(afterExternalDelete.status, 401, 'Manager A must reject session immediately when DB auth loses user');
+  } finally {
+    await new Promise((resolve) => serverProcA.close(resolve));
+  }
+
+  console.log('✅ 14. Session Revocation, Cache Eviction & Multi-Process Fail-Closed Middleware verified.');
+}
+
+async function testPublicLoginViewSecurityAccessibilityAndApiContract() {
+  const vm = require('node:vm');
+  const { PUBLIC_LOGIN_HTML } = require('../src/http/views/login-html');
+
+  // 1. Static security, a11y, reduced-motion, and emoji invariants
+  const scriptMatch = PUBLIC_LOGIN_HTML.match(/<script>([\s\S]*?)<\/script>/);
+  assert.ok(scriptMatch && scriptMatch[1], 'PUBLIC_LOGIN_HTML must contain an inline <script>');
+  const scriptCode = scriptMatch[1];
+  const htmlWithoutScript = PUBLIC_LOGIN_HTML.replace(/<script>[\s\S]*?<\/script>/g, '');
+
+  new vm.Script(scriptCode); // Throws SyntaxError if malformed
+
+  assert.strictEqual(/\p{Extended_Pictographic}/u.test(PUBLIC_LOGIN_HTML), false, 'PUBLIC_LOGIN_HTML must not contain raw emoji pictographs');
+  assert.strictEqual(/\.innerHTML\b/.test(scriptCode), false, 'Login script must not use .innerHTML');
+  assert.strictEqual(/\son[a-z]+\s*=/i.test(htmlWithoutScript), false, 'Login HTML must not use inline on* event handlers');
+  assert.strictEqual(PUBLIC_LOGIN_HTML.includes('animation-duration: 0.01ms'), false, 'Must not apply blanket 0.01ms reduced-motion override');
+  assert.ok(PUBLIC_LOGIN_HTML.includes('@media (prefers-reduced-motion: no-preference)'), 'Animations must opt in under prefers-reduced-motion: no-preference');
+  assert.strictEqual(PUBLIC_LOGIN_HTML.includes('>Hệ Thống Trực Tuyến 24/7<'), false, 'Header pill must start with neutral telemetry check state instead of static online text');
+
+  // Required ARIA tablist/tab/tabpanel attributes
+  for (const snippet of [
+    'role="tablist"',
+    'id="tabPublicLoginBtn"',
+    'aria-controls="publicLoginForm"',
+    'id="tabPublicRegisterBtn"',
+    'aria-controls="publicRegisterForm"',
+    'id="publicLoginForm" role="tabpanel" aria-labelledby="tabPublicLoginBtn"',
+    'id="publicRegisterForm" class="hidden" role="tabpanel" aria-labelledby="tabPublicRegisterBtn" hidden'
+  ]) {
+    assert.ok(PUBLIC_LOGIN_HTML.includes(snippet), `Missing ARIA/HTML contract snippet: ${snippet}`);
+  }
+
+  // 2. Real HTTP backend setup (GET /, /api/public/system-info, /health, /api/auth/register, /api/auth/login)
+  const usersByName = new Map();
+  const usersById = new Map();
+  const memStore = {
+    async listAccess() { return [...usersById.values()]; },
+    async getUser(username) {
+      return usersByName.get(String(username || '').toLowerCase()) || null;
+    },
+    async getAccess(identifier) {
+      const k = String(identifier || '');
+      return usersById.get(k) || usersByName.get(k.toLowerCase()) || null;
+    },
+    async setAccess(identifier, values) {
+      const existing = usersById.get(identifier) || {};
+      const next = { ...existing, ...values };
+      usersById.set(next.id || identifier, next);
+      if (next.username) usersByName.set(next.username.toLowerCase(), next);
+      return { ...next };
+    },
+    async addAudit() {},
+    invalidateCache() {}
+  };
+
+  const app = createApp({
+    store: memStore,
+    registry: {
+      store: {},
+      list: async () => [],
+      getAdminPassword: () => null,
+      verifyBotSecretSync: () => false
+    },
+    broker: {},
+    config: { adminUsername: 'admin', adminPassword: 'admin-secret-password', discordToken: '', trialDays: 3 },
+    logger: createSilentLogger()
+  });
+
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    const getRootRes = await fetch(`${baseUrl}/`);
+    assert.strictEqual(getRootRes.status, 200);
+    const rootHtml = await getRootRes.text();
+    assert.strictEqual(rootHtml, PUBLIC_LOGIN_HTML, 'GET / must serve updated PUBLIC_LOGIN_HTML');
+
+    // Minimal DOM simulator for executing the extracted <script> cleanly
+    function runLoginDomScript({ reducedMotion = false, fetchOverride = null } = {}) {
+      const elementsById = new Map();
+      function makeEl(tagName, id = '', initialAttrs = {}, initialClasses = []) {
+        const listeners = new Map();
+        const attrs = new Map(Object.entries(initialAttrs));
+        if (id) attrs.set('id', id);
+        const classes = new Set(initialClasses);
+        const el = {
+          tagName: tagName.toUpperCase(),
+          id,
+          children: [],
+          parentNode: null,
+          hidden: Boolean(attrs.has('hidden')),
+          value: attrs.get('value') || '',
+          type: attrs.get('type') || 'text',
+          checked: Boolean(attrs.has('checked')),
+          disabled: false,
+          placeholder: attrs.get('placeholder') || '',
+          style: {},
+          playbackRate: 1,
+          paused: false,
+          width: 0,
+          height: 0,
+          _text: '',
+          content: null,
+          classList: {
+            add: (...names) => names.forEach((n) => n && classes.add(n)),
+            remove: (...names) => names.forEach((n) => classes.delete(n)),
+            toggle: (name, force) => {
+              const has = classes.has(name);
+              const next = force === undefined ? !has : Boolean(force);
+              if (next) classes.add(name);
+              else classes.delete(name);
+              return next;
+            },
+            contains: (name) => classes.has(name)
+          },
+          get className() { return [...classes].join(' '); },
+          set className(val) {
+            classes.clear();
+            String(val || '').split(/\s+/).filter(Boolean).forEach((c) => classes.add(c));
+          },
+          get textContent() {
+            if (el.children.length === 0) return el._text;
+            return el.children.map((c) => c.textContent || c._text || '').join('');
+          },
+          set textContent(v) {
+            el.children = [];
+            el._text = String(v ?? '');
+          },
+          setAttribute: (k, v) => {
+            attrs.set(k, String(v));
+            if (k === 'hidden') el.hidden = true;
+          },
+          getAttribute: (k) => (attrs.has(k) ? attrs.get(k) : null),
+          removeAttribute: (k) => {
+            attrs.delete(k);
+            if (k === 'hidden') el.hidden = false;
+          },
+          hasAttribute: (k) => attrs.has(k),
+          appendChild: (child) => {
+            if (child && typeof child === 'object') {
+              child.parentNode = el;
+              el.children.push(child);
+            }
+            return child;
+          },
+          replaceChildren: (...nodes) => {
+            el.children = [];
+            el._text = '';
+            nodes.forEach((n) => el.appendChild(n));
+          },
+          cloneNode: () => {
+            const copy = makeEl(el.tagName, '', Object.fromEntries(attrs), [...classes]);
+            copy._text = el._text;
+            copy.children = el.children.map((c) => (c.cloneNode ? c.cloneNode(true) : { ...c }));
+            return copy;
+          },
+          addEventListener: (ev, fn) => {
+            if (!listeners.has(ev)) listeners.set(ev, []);
+            listeners.get(ev).push(fn);
+          },
+          dispatchEvent: (ev) => {
+            const eventObj = { preventDefault: () => {}, ...(ev || {}) };
+            for (const fn of (listeners.get(eventObj.type) || [])) {
+              fn(eventObj);
+            }
+          },
+          focus: () => { doc.activeElement = el; },
+          play: () => { el.paused = false; return Promise.resolve(); },
+          pause: () => { el.paused = true; },
+          getContext: () => ({
+            clearRect: () => { ctxStats.clears++; },
+            beginPath: () => {},
+            arc: () => {},
+            fill: () => {},
+            moveTo: () => {},
+            lineTo: () => {},
+            stroke: () => {},
+            createLinearGradient: () => ({ addColorStop: () => {} })
+          }),
+          querySelector: (sel) => {
+            const matches = el.querySelectorAll(sel);
+            return matches[0] || null;
+          },
+          querySelectorAll: (sel) => {
+            const found = [];
+            const walk = (node) => {
+              for (const c of (node.children || [])) {
+                if (sel === '[role="tab"]' && c.getAttribute && c.getAttribute('role') === 'tab') found.push(c);
+                else if (sel === '.btn-icon' && c.classList && c.classList.contains('btn-icon')) found.push(c);
+                else if (sel === '.btn-label' && c.classList && c.classList.contains('btn-label')) found.push(c);
+                else if (sel === '.icon-eye' && c.classList && c.classList.contains('icon-eye')) found.push(c);
+                else if (sel === '.icon-eye-off' && c.classList && c.classList.contains('icon-eye-off')) found.push(c);
+                walk(c);
+              }
+            };
+            walk(el);
+            return found;
+          }
+        };
+        if (id) elementsById.set(id, el);
+        return el;
+      }
+
+      const ctxStats = { clears: 0, rafScheduled: 0, rafCancelled: 0, replacedLocation: null, requests: [] };
+      const tabList = makeEl('div', '', { role: 'tablist' }, ['auth-tabs']);
+      const tabLogin = makeEl('button', 'tabPublicLoginBtn', { role: 'tab', 'aria-selected': 'true', 'aria-controls': 'publicLoginForm', tabindex: '0', 'data-auth-tab': 'login' }, ['auth-tab-btn', 'active']);
+      const tabReg = makeEl('button', 'tabPublicRegisterBtn', { role: 'tab', 'aria-selected': 'false', 'aria-controls': 'publicRegisterForm', tabindex: '-1', 'data-auth-tab': 'register' }, ['auth-tab-btn']);
+      tabList.appendChild(tabLogin);
+      tabList.appendChild(tabReg);
+
+      const loginForm = makeEl('form', 'publicLoginForm', { role: 'tabpanel', 'aria-labelledby': 'tabPublicLoginBtn' });
+      const regForm = makeEl('form', 'publicRegisterForm', { role: 'tabpanel', 'aria-labelledby': 'tabPublicRegisterBtn', hidden: '' }, ['hidden']);
+
+      const pubUser = makeEl('input', 'publicUsername', { type: 'text' });
+      const pubPass = makeEl('input', 'publicPassword', { type: 'password' });
+      const pubPassToggle = makeEl('button', 'pubPassToggle', { 'data-toggle-target': 'publicPassword', 'aria-pressed': 'false' }, ['password-toggle-btn']);
+      pubPassToggle.appendChild(makeEl('svg', '', {}, ['ui-icon', 'icon-eye']));
+      pubPassToggle.appendChild(makeEl('svg', '', {}, ['ui-icon', 'icon-eye-off', 'hidden']));
+
+      const pubKey = makeEl('input', 'publicLicenseKey', { type: 'text' }, ['key-input']);
+      const pubRemember = makeEl('input', 'publicRememberMe', { type: 'checkbox', checked: '' });
+      const pubBtn = makeEl('button', 'publicSubmitBtn', { type: 'submit' }, ['primary-cta']);
+      pubBtn.appendChild(makeEl('span', '', {}, ['btn-icon']));
+      pubBtn.appendChild(makeEl('span', '', {}, ['btn-label']));
+
+      const regUser = makeEl('input', 'regUsername', { type: 'text' });
+      const regPass = makeEl('input', 'regPassword', { type: 'password' });
+      const regPass2 = makeEl('input', 'regPasswordConfirm', { type: 'password' });
+      const regKey = makeEl('input', 'regLicenseKey', { type: 'text' }, ['key-input']);
+      const regBtn = makeEl('button', 'publicRegSubmitBtn', { type: 'submit' }, ['primary-cta']);
+      regBtn.appendChild(makeEl('span', '', {}, ['btn-icon']));
+      regBtn.appendChild(makeEl('span', '', {}, ['btn-label']));
+
+      makeEl('p', 'publicUsernameErr', { hidden: '' });
+      makeEl('p', 'publicPasswordErr', { hidden: '' });
+      makeEl('p', 'regUsernameErr', { hidden: '' });
+      makeEl('p', 'regPasswordErr', { hidden: '' });
+      makeEl('p', 'regPasswordConfirmErr', { hidden: '' });
+
+      makeEl('div', 'publicLoginAlert', { hidden: '' }, ['login-alert', 'hidden']);
+      makeEl('div', 'publicTrialCalloutBadge');
+      makeEl('div', 'publicTrialCalloutText');
+      makeEl('span', 'regLicenseKeyHint');
+      makeEl('span', 'serverStatusPill', {}, ['server-pulse-tag', 'is-checking']);
+      makeEl('span', 'serverStatusText');
+
+      const canvas = makeEl('canvas', 'publicStarfieldCanvas');
+      const video = makeEl('video', 'publicGalaxyVideo');
+
+      for (const tplId of ['tplIconLogin', 'tplIconRegister', 'tplIconSpinner', 'tplIconWarn', 'tplIconLock', 'tplIconSuccess']) {
+        const tpl = makeEl('template', tplId);
+        const svgChild = makeEl('svg');
+        tpl.content = { firstElementChild: svgChild };
+      }
+
+      const motionListeners = [];
+      let currentReducedMotion = reducedMotion;
+      const motionQueryObj = {
+        get matches() { return currentReducedMotion; },
+        addEventListener: (ev, fn) => { if (ev === 'change') motionListeners.push(fn); }
+      };
+
+      const docListeners = [];
+      const doc = {
+        hidden: false,
+        activeElement: null,
+        getElementById: (id) => elementsById.get(id) || null,
+        querySelector: (sel) => (sel.includes('tablist') ? tabList : null),
+        querySelectorAll: (sel) => (sel.includes('password-toggle-btn') ? [pubPassToggle] : []),
+        createElement: (tag) => makeEl(tag),
+        createTextNode: (txt) => ({ nodeType: 3, textContent: String(txt), cloneNode: function() { return { ...this }; } }),
+        addEventListener: (ev, fn) => docListeners.push({ ev, fn })
+      };
+
+      const storageMap = new Map();
+      const win = {
+        innerWidth: 1280,
+        innerHeight: 800,
+        location: { search: '', replace: (u) => { ctxStats.replacedLocation = u; } },
+        matchMedia: () => motionQueryObj,
+        addEventListener: () => {}
+      };
+      win.window = win;
+
+      let nextRafId = 1;
+      const sandbox = {
+        window: win,
+        document: doc,
+        navigator: { userAgent: 'Mozilla/5.0' },
+        URLSearchParams,
+        localStorage: {
+          setItem: (k, v) => storageMap.set(k, String(v)),
+          getItem: (k) => storageMap.get(k) || null
+        },
+        fetch: async (url, opts) => {
+          ctxStats.requests.push({ url, opts });
+          if (fetchOverride) return fetchOverride(url, opts);
+          return fetch(`${baseUrl}${url}`, opts);
+        },
+        requestAnimationFrame: () => {
+          ctxStats.rafScheduled += 1;
+          return nextRafId++;
+        },
+        cancelAnimationFrame: () => {
+          ctxStats.rafCancelled += 1;
+        },
+        setTimeout,
+        clearTimeout,
+        console,
+        Math, Number, String, Boolean, JSON, Array, Promise, Error
+      };
+
+      vm.runInNewContext(scriptCode, sandbox);
+      return {
+        sandbox, win, doc, elementsById, tabList, tabLogin, tabReg, loginForm, regForm,
+        pubUser, pubPass, pubPassToggle, pubKey, pubBtn, regUser, regPass, regPass2, regKey, regBtn,
+        canvas, video, ctxStats, storageMap,
+        triggerReducedMotionChange: (nextVal) => {
+          currentReducedMotion = nextVal;
+          motionListeners.forEach((fn) => fn({ matches: nextVal }));
+        }
+      };
+    }
+
+    // 2a. Reduced Motion initially ON -> never schedules animation frame & pauses video
+    const simReduced = runLoginDomScript({
+      reducedMotion: true,
+      fetchOverride: async () => { throw new Error('offline'); }
+    });
+    assert.strictEqual(simReduced.ctxStats.rafScheduled, 0, 'Reduced motion ON must not start canvas RAF loop');
+    assert.strictEqual(simReduced.video.paused, true, 'Reduced motion ON must pause background video');
+    await new Promise((r) => setTimeout(r, 30));
+    assert.strictEqual(simReduced.elementsById.get('serverStatusPill').classList.contains('is-offline'), true);
+    assert.strictEqual(simReduced.elementsById.get('serverStatusText').textContent, 'Không thể kết nối máy chủ');
+
+    // 2b. Reduced Motion initially OFF -> runs loop, then switching ON dynamically stops loop & clears canvas
+    let healthDegraded = true;
+    const simDynamic = runLoginDomScript({
+      reducedMotion: false,
+      fetchOverride: async (url) => {
+        if (url === '/api/public/system-info') {
+          return {
+            ok: true,
+            json: async () => ({
+              ok: true,
+              trialGiftEnabled: true,
+              trialDays: '<img src=x onerror=alert(1)>',
+              totalBots: 5,
+              onlineBots: 3
+            })
+          };
+        }
+        if (url === '/health') {
+          return {
+            ok: true,
+            json: async () => ({ ok: true, degraded: healthDegraded })
+          };
+        }
+        return { ok: false, json: async () => ({}) };
+      }
+    });
+    assert.ok(simDynamic.ctxStats.rafScheduled >= 1, 'Motion allowed should start canvas animation loop');
+    simDynamic.triggerReducedMotionChange(true);
+    assert.ok(simDynamic.ctxStats.rafCancelled >= 1, 'Switching to reduced motion must cancel animation frame');
+    assert.strictEqual(simDynamic.video.paused, true, 'Switching to reduced motion must pause video');
+    assert.ok(simDynamic.ctxStats.clears >= 1, 'Switching to reduced motion must clear starfield canvas');
+
+    await new Promise((r) => setTimeout(r, 30));
+    // Verify XSS mitigation & safe DOM rendering for malicious trialDays
+    const trialNode = simDynamic.elementsById.get('publicTrialCalloutText');
+    assert.strictEqual(trialNode.children.some((c) => c.tagName === 'IMG'), false, 'Must not inject HTML tags from trialDays');
+    assert.ok(trialNode.textContent.includes('1 NGÀY DÙNG THỬ MIỄN PHÍ'), 'Malformed trialDays must clamp safely to 1');
+    assert.strictEqual(simDynamic.elementsById.get('serverStatusPill').classList.contains('is-degraded'), true);
+    assert.ok(simDynamic.elementsById.get('serverStatusText').textContent.includes('Hoạt động giới hạn'));
+
+    // Verify healthy bots telemetry updates pill to online
+    healthDegraded = false;
+    await simDynamic.sandbox.loadPublicSystemInfo();
+    assert.strictEqual(simDynamic.elementsById.get('serverStatusPill').classList.contains('is-online'), true);
+    assert.strictEqual(simDynamic.elementsById.get('serverStatusText').textContent, 'Trực tuyến • 3/5 Bot');
+
+    // 2c. Keyboard ARIA tabs & password toggle checks
+    simDynamic.tabLogin.focus();
+    simDynamic.tabList.dispatchEvent({ type: 'keydown', key: 'ArrowRight' });
+    assert.strictEqual(simDynamic.tabReg.getAttribute('aria-selected'), 'true');
+    assert.strictEqual(simDynamic.tabReg.getAttribute('tabindex'), '0');
+    assert.strictEqual(simDynamic.tabLogin.getAttribute('aria-selected'), 'false');
+    assert.strictEqual(simDynamic.tabLogin.getAttribute('tabindex'), '-1');
+    assert.strictEqual(simDynamic.regForm.hidden, false);
+    assert.strictEqual(simDynamic.loginForm.hidden, true);
+    assert.strictEqual(simDynamic.doc.activeElement, simDynamic.tabReg);
+
+    simDynamic.pubPassToggle.dispatchEvent({ type: 'click' });
+    assert.strictEqual(simDynamic.pubPass.type, 'text');
+    assert.strictEqual(simDynamic.pubPassToggle.getAttribute('aria-pressed'), 'true');
+    assert.strictEqual(simDynamic.pubPassToggle.children.length, 2, 'Password toggle must preserve SVG icons instead of overwriting textContent');
+
+    // 2d. Real HTTP Register & Login end-to-end compatibility check against real createApp server
+    const simReal = runLoginDomScript({ reducedMotion: true });
+    await new Promise((r) => setTimeout(r, 40));
+    assert.strictEqual(simReal.elementsById.get('serverStatusPill').classList.contains('is-online'), true);
+
+    simReal.regUser.value = 'webtest_user';
+    simReal.regPass.value = 'SecretPass123';
+    simReal.regPass2.value = 'SecretPass123';
+    await simReal.sandbox.handlePublicRegisterSubmit();
+
+    const regReq = simReal.ctxStats.requests.find((r) => r.url === '/api/auth/register');
+    assert.ok(regReq, 'Must submit to /api/auth/register');
+    const regBody = JSON.parse(regReq.opts.body);
+    assert.strictEqual(regBody.username, 'webtest_user');
+    assert.strictEqual(regBody.password, 'SecretPass123');
+    assert.strictEqual(regBody.confirmPassword, 'SecretPass123', 'Register request must include confirmPassword required by auth-api.js');
+    assert.strictEqual(regBody.key, '', 'Register request must include key field expected by auth-api.js');
+    assert.ok(simReal.storageMap.get('kingmc_session'), 'Successful web registration must store session token');
+    await new Promise((r) => setTimeout(r, 420));
+    assert.strictEqual(simReal.ctxStats.replacedLocation, '/', 'Successful web registration must redirect to /');
+    assert.ok(await memStore.getUser('webtest_user'), 'User must actually be persisted in backend store after web submit');
+
+    // Verify real login submit sends key + licenseKey + rememberMe and authenticates against backend
+    simReal.ctxStats.replacedLocation = null;
+    simReal.pubUser.value = 'webtest_user';
+    simReal.pubPass.value = 'SecretPass123';
+    simReal.pubKey.value = '';
+    await simReal.sandbox.handlePublicLoginSubmit();
+    const loginReq = simReal.ctxStats.requests.find((r) => r.url === '/api/auth/login');
+    assert.ok(loginReq, 'Must submit to /api/auth/login');
+    const loginBody = JSON.parse(loginReq.opts.body);
+    assert.strictEqual(loginBody.username, 'webtest_user');
+    assert.strictEqual(loginBody.password, 'SecretPass123');
+    assert.strictEqual(loginBody.key, '');
+    assert.strictEqual(loginBody.licenseKey, '');
+    assert.strictEqual(loginBody.rememberMe, true);
+    await new Promise((r) => setTimeout(r, 360));
+    assert.strictEqual(simReal.ctxStats.replacedLocation, '/', 'Successful web login must redirect to /');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  console.log('✅ 15. Public Login Security, Telemetry, Reduced-Motion, ARIA Tabs & API Contract verified.');
+}
+
 let completedAll = false;
 process.on('beforeExit', (code) => {
   if (code === 0 && !completedAll) {
@@ -2214,6 +2899,8 @@ async function runTests() {
   await testStalledLeaseExpiryTakeoverAndFencingRejection();
   await testManagerRestartMidFlightRecovery();
   await testFailClosedMissingAtomicRpcAndHealthReadiness();
+  await testSessionRevocationFailClosedMiddleware();
+  await testPublicLoginViewSecurityAccessibilityAndApiContract();
   completedAll = true;
   console.log('🎉 ALL MANAGER SERVICES WIRING TESTS PASSED 100%!');
 }

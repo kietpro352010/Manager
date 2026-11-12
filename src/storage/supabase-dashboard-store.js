@@ -267,10 +267,12 @@ class SupabaseDashboardStore {
     return this.setAccess(userId, { ...(access || { role: 'user', status: 'active', isPermanent: false }), workerIds }, actorId);
   }
 
-  async getAccess(userId) {
+  async getAccess(userId, { bypassCache = false } = {}) {
     if (!userId) return null;
-    const cached = this.getCached(`access:${userId}`);
-    if (cached) return cached;
+    if (!bypassCache) {
+      const cached = this.getCached(`access:${userId}`);
+      if (cached) return cached;
+    }
 
     // 1. Thử đọc từ manager_users (id hoặc username)
     const userData = await this.resolveUserRow(userId);
@@ -393,6 +395,10 @@ class SupabaseDashboardStore {
       }
       const { data, error } = await this.client.from(USERS).upsert(userRow, { onConflict: 'username' }).select('*').maybeSingle();
       if (!error && data) {
+        if (String(userRow.status).toLowerCase() === 'disabled' && typeof this.adapter?.revokeUserSessions === 'function') {
+          await this.adapter.revokeUserSessions(userId).catch(() => false);
+        }
+        this.invalidateCache();
         return {
           userId: data.id || ('usr_' + data.username),
           username: data.username,
@@ -423,6 +429,7 @@ class SupabaseDashboardStore {
       p_actor_id: String(actorId || '')
     });
     if (error) throw error;
+    this.invalidateCache();
     const rpcRow = unwrapRpc(data);
     return {
       ...(rpcRow ? mapFrom(rpcRow, ACCESS_FIELDS) : {}),
@@ -437,49 +444,88 @@ class SupabaseDashboardStore {
     const clean = String(userId || '').trim();
     if (!clean) return false;
 
-    if (typeof this.client?.rpc === 'function') {
-      const { data, error } = await this.client.rpc('manager_delete_user_access', { p_user_id: clean });
-      if (!error) {
-        const res = unwrapRpc(data);
-        return Boolean(res?.deleted ?? res === true);
-      }
-      if (!isMissingRpcError(error) && !isMissingSchemaError(error)) {
-        throw error;
-      }
-    }
-
-    const lower = clean.toLowerCase();
-    const bare = lower.startsWith('usr_') ? lower.slice(4) : lower;
-    let deletedAny = false;
-
-    const assignQ = this.client.from(ASSIGNMENTS).delete();
-    const candidates = [...new Set([clean, lower, bare].filter(Boolean))];
-    if (candidates.length > 1 && typeof assignQ.in === 'function') {
-      await assignQ.in('user_id', candidates);
-    } else {
-      await assignQ.eq('user_id', clean);
-    }
-
     try {
-      const userQ = this.client.from(USERS).delete();
-      const userRes = typeof userQ.or === 'function'
-        ? await userQ.or(`id.eq.${clean},username.eq.${lower},username.eq.${bare}`).select('username')
-        : await userQ.eq('id', clean).select('username');
-      if (userRes?.error && !isMissingSchemaError(userRes.error) && String(userRes.error.code || '') !== '42501') {
-        throw userRes.error;
+      if (typeof this.client?.rpc === 'function') {
+        const { data, error } = await this.client.rpc('manager_delete_user_access', { p_user_id: clean });
+        if (!error) {
+          const res = unwrapRpc(data);
+          return Boolean(res?.deleted ?? res === true);
+        }
+        if (!isMissingRpcError(error) && !isMissingSchemaError(error)) {
+          throw error;
+        }
       }
-      if (userRes?.data?.length) deletedAny = true;
-    } catch (err) {
-      if (!isMissingSchemaError(err) && String(err?.code || '') !== '42501') throw err;
-    }
 
-    try {
-      const { data, error } = await this.client.from(ACCESS).delete().eq('user_id', clean).select('user_id');
-      if (error && !isMissingSchemaError(error) && String(error.code || '') !== '42501') throw error;
-      return deletedAny || Boolean(data?.length);
-    } catch (err) {
-      if (!isMissingSchemaError(err) && String(err?.code || '') !== '42501') throw err;
-      return deletedAny;
+      const lower = clean.toLowerCase();
+      const bare = lower.startsWith('usr_') ? lower.slice(4) : lower;
+      const candidates = [...new Set([clean, lower, bare, bare ? `usr_${bare}` : ''].filter(Boolean))];
+      let deletedAny = false;
+
+      // 1. Delete assignments FIRST and fail-closed on any non-missing-schema error so we never leave orphaned assignments
+      const assignQ = this.client.from(ASSIGNMENTS).delete();
+      const assignRes = (candidates.length > 1 && typeof assignQ.in === 'function')
+        ? await assignQ.in('user_id', candidates)
+        : await assignQ.eq('user_id', clean);
+      if (assignRes?.error && !isMissingSchemaError(assignRes.error)) {
+        throw assignRes.error;
+      }
+
+      // 2. Clean up Discord links & active sessions before removing user record
+      try {
+        const linkQ = this.client.from('manager_discord_links').delete();
+        const linkRes = (candidates.length > 1 && typeof linkQ.in === 'function')
+          ? await linkQ.in('manager_user_id', candidates)
+          : await linkQ.eq('manager_user_id', clean);
+        if (linkRes?.error && !isMissingSchemaError(linkRes.error) && String(linkRes.error.code || '') !== '42501') {
+          throw linkRes.error;
+        }
+      } catch (err) {
+        if (!isMissingSchemaError(err) && String(err?.code || '') !== '42501') throw err;
+      }
+
+      if (typeof this.adapter?.revokeUserSessions === 'function') {
+        try {
+          await this.adapter.revokeUserSessions(clean);
+        } catch (err) {
+          if (!isMissingRpcError(err) && !isMissingSchemaError(err)) throw err;
+        }
+      }
+
+      try {
+        const sessQ = this.client.from('manager_sessions').delete();
+        const sessRes = (candidates.length > 1 && typeof sessQ.in === 'function')
+          ? await sessQ.in('user_id', candidates)
+          : await sessQ.eq('user_id', clean);
+        if (sessRes?.error && !isMissingSchemaError(sessRes.error) && String(sessRes.error.code || '') !== '42501') {
+          throw sessRes.error;
+        }
+      } catch (err) {
+        if (!isMissingSchemaError(err) && String(err?.code || '') !== '42501') throw err;
+      }
+
+      try {
+        const userQ = this.client.from(USERS).delete();
+        const userRes = typeof userQ.or === 'function'
+          ? await userQ.or(`id.eq.${clean},username.eq.${lower},username.eq.${bare}`).select('username')
+          : await userQ.eq('id', clean).select('username');
+        if (userRes?.error && !isMissingSchemaError(userRes.error) && String(userRes.error.code || '') !== '42501') {
+          throw userRes.error;
+        }
+        if (userRes?.data?.length) deletedAny = true;
+      } catch (err) {
+        if (!isMissingSchemaError(err) && String(err?.code || '') !== '42501') throw err;
+      }
+
+      try {
+        const { data, error } = await this.client.from(ACCESS).delete().eq('user_id', clean).select('user_id');
+        if (error && !isMissingSchemaError(error) && String(error.code || '') !== '42501') throw error;
+        return deletedAny || Boolean(data?.length);
+      } catch (err) {
+        if (!isMissingSchemaError(err) && String(err?.code || '') !== '42501') throw err;
+        return deletedAny;
+      }
+    } finally {
+      this.invalidateCache();
     }
   }
 

@@ -1089,6 +1089,15 @@ BEGIN
     AND NOT EXISTS (
       SELECT 1 FROM public.manager_session_revocations AS r
       WHERE r.token_hash = s.token_hash
+    )
+    AND (
+      s.role = 'admin'
+      OR EXISTS (
+        SELECT 1 FROM public.manager_users AS u
+        WHERE u.id = s.user_id
+          AND lower(u.username) = lower(s.username)
+          AND lower(COALESCE(u.status, 'active')) <> 'disabled'
+      )
     );
   RETURN jsonb_build_object('ok', true, 'session', v_session);
 END;
@@ -1100,7 +1109,8 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_session public.manager_sessions%ROWTYPE;
-  v_user jsonb;
+  v_user public.manager_users%ROWTYPE;
+  v_user_json jsonb;
 BEGIN
   IF COALESCE(btrim(p_token_hash), '') = '' THEN
     RETURN jsonb_build_object('ok', false, 'error', 'INVALID_TOKEN_HASH');
@@ -1117,18 +1127,36 @@ BEGIN
     RETURN jsonb_build_object('ok', true, 'session', NULL, 'user', NULL);
   END IF;
   IF v_session.role <> 'admin' THEN
-    SELECT jsonb_build_object(
-      'id', u.id, 'username', u.username, 'status', u.status,
-      'assigned_bot_ids', u.assigned_bot_ids, 'expires_at', u.expires_at,
-      'plan_name', u.plan_name, 'allow_account_change', u.allow_account_change,
-      'is_permanent', u.is_permanent,
-      'lock_reason', u.lock_reason
-    ) INTO v_user
+    SELECT * INTO v_user
     FROM public.manager_users AS u
     WHERE u.id = v_session.user_id
       AND lower(u.username) = lower(v_session.username);
+
+    IF NOT FOUND THEN
+      INSERT INTO public.manager_session_revocations(token_hash, revoked_at)
+      VALUES (p_token_hash, now())
+      ON CONFLICT (token_hash) DO NOTHING;
+      DELETE FROM public.manager_sessions WHERE token_hash = p_token_hash;
+      RETURN jsonb_build_object('ok', true, 'session', NULL, 'user', NULL, 'revoked', true, 'reason', 'USER_NOT_FOUND');
+    END IF;
+
+    v_user_json := jsonb_build_object(
+      'id', v_user.id, 'username', v_user.username, 'status', v_user.status,
+      'assigned_bot_ids', v_user.assigned_bot_ids, 'expires_at', v_user.expires_at,
+      'plan_name', v_user.plan_name, 'allow_account_change', v_user.allow_account_change,
+      'is_permanent', v_user.is_permanent,
+      'lock_reason', v_user.lock_reason
+    );
+
+    IF lower(COALESCE(v_user.status, 'active')) = 'disabled' THEN
+      INSERT INTO public.manager_session_revocations(token_hash, revoked_at)
+      VALUES (p_token_hash, now())
+      ON CONFLICT (token_hash) DO NOTHING;
+      DELETE FROM public.manager_sessions WHERE token_hash = p_token_hash;
+      RETURN jsonb_build_object('ok', true, 'session', NULL, 'user', v_user_json, 'revoked', true, 'reason', 'USER_DISABLED');
+    END IF;
   END IF;
-  RETURN jsonb_build_object('ok', true, 'session', to_jsonb(v_session), 'user', v_user);
+  RETURN jsonb_build_object('ok', true, 'session', to_jsonb(v_session), 'user', v_user_json);
 END;
 $$;
 
@@ -1145,6 +1173,75 @@ BEGIN
   RETURN true;
 END;
 $$;
+
+CREATE OR REPLACE FUNCTION public.revoke_manager_user_sessions(p_user_id text)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $revoke_user_sessions$
+DECLARE
+  v_clean text := trim(COALESCE(p_user_id, ''));
+  v_lower text := lower(v_clean);
+  v_bare text := CASE WHEN left(v_lower, 4) = 'usr_' THEN substring(v_lower FROM 5) ELSE v_lower END;
+  v_user public.manager_users;
+  v_candidates text[];
+  v_revoked integer := 0;
+BEGIN
+  IF v_clean = '' THEN
+    RETURN jsonb_build_object('ok', true, 'revokedCount', 0, 'userId', '');
+  END IF;
+
+  SELECT * INTO v_user
+  FROM public.manager_users
+  WHERE id = v_clean
+     OR lower(username) = v_lower
+     OR lower(username) = v_bare
+     OR discord_user_id = v_clean
+  LIMIT 1;
+
+  v_candidates := ARRAY(
+    SELECT DISTINCT val
+    FROM unnest(ARRAY[
+      v_clean,
+      v_lower,
+      v_bare,
+      CASE WHEN v_bare <> '' THEN 'usr_' || v_bare ELSE NULL END,
+      v_user.id,
+      v_user.username,
+      lower(COALESCE(v_user.username, '')),
+      NULLIF(trim(COALESCE(v_user.discord_user_id, '')), '')
+    ]) AS val
+    WHERE val IS NOT NULL AND val <> ''
+  );
+
+  WITH doomed AS (
+    DELETE FROM public.manager_sessions AS s
+    WHERE s.role <> 'admin'
+      AND (
+        s.user_id = ANY(v_candidates)
+        OR lower(s.username) = ANY(v_candidates)
+      )
+    RETURNING s.token_hash
+  ),
+  recorded AS (
+    INSERT INTO public.manager_session_revocations(token_hash, revoked_at)
+    SELECT d.token_hash, now()
+    FROM doomed d
+    WHERE COALESCE(btrim(d.token_hash), '') <> ''
+    ON CONFLICT (token_hash) DO UPDATE
+      SET revoked_at = EXCLUDED.revoked_at
+    RETURNING token_hash
+  )
+  SELECT count(*)::integer INTO v_revoked FROM recorded;
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'revokedCount', COALESCE(v_revoked, 0),
+    'userId', COALESCE(NULLIF(v_user.id, ''), v_clean)
+  );
+END;
+$revoke_user_sessions$;
 
 CREATE OR REPLACE FUNCTION public.create_manager_user_session(
   p_expected_revision bigint,
@@ -1579,6 +1676,7 @@ REVOKE ALL ON FUNCTION public.read_manager_users_snapshot() FROM PUBLIC, anon, a
 REVOKE ALL ON FUNCTION public.read_manager_session(text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.read_manager_authorization(text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.revoke_manager_session(text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.revoke_manager_user_sessions(text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.create_manager_user_session(bigint,jsonb) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.apply_manager_users_snapshot_locked(bigint,jsonb,boolean) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.save_manager_users_snapshot(bigint,uuid,jsonb,boolean) FROM PUBLIC, anon, authenticated;
@@ -1588,6 +1686,7 @@ GRANT EXECUTE ON FUNCTION public.read_manager_users_snapshot() TO service_role;
 GRANT EXECUTE ON FUNCTION public.read_manager_session(text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.read_manager_authorization(text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.revoke_manager_session(text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.revoke_manager_user_sessions(text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.create_manager_user_session(bigint,jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.save_manager_users_snapshot(bigint,uuid,jsonb,boolean) TO service_role;
 GRANT EXECUTE ON FUNCTION public.insert_manager_users_if_absent(jsonb) TO service_role;
@@ -3031,6 +3130,7 @@ DECLARE
   v_user public.manager_users;
   v_target_username text;
   v_target_id text;
+  v_effective_status text;
   v_worker_json jsonb := to_jsonb(COALESCE(p_worker_ids, ARRAY[]::text[]));
   v_worker_count integer := COALESCE(array_length(p_worker_ids, 1), 0);
   v_now timestamptz := now();
@@ -3135,6 +3235,15 @@ BEGIN
     END IF;
   END IF;
 
+  SELECT lower(COALESCE(status, 'active')) INTO v_effective_status
+  FROM public.manager_users
+  WHERE id = v_target_id OR username = v_target_username
+  LIMIT 1;
+
+  IF v_effective_status = 'disabled' THEN
+    PERFORM public.revoke_manager_user_sessions(v_target_id);
+  END IF;
+
   RETURN QUERY SELECT * FROM public.manager_users WHERE id = v_target_id OR username = v_target_username LIMIT 1;
 END;
 $set_access$;
@@ -3157,9 +3266,10 @@ DECLARE
   v_user public.manager_users;
   v_candidates text[];
   v_deleted integer := 0;
+  v_session_rev jsonb;
 BEGIN
   IF v_clean = '' THEN
-    RETURN jsonb_build_object('ok', true, 'deleted', false, 'userId', '');
+    RETURN jsonb_build_object('ok', true, 'deleted', false, 'userId', '', 'revokedSessions', 0);
   END IF;
 
   SELECT * INTO v_user
@@ -3167,12 +3277,24 @@ BEGIN
   WHERE id = v_clean
      OR lower(username) = v_lower
      OR lower(username) = v_bare
+     OR discord_user_id = v_clean
   FOR UPDATE
   LIMIT 1;
 
+  v_session_rev := public.revoke_manager_user_sessions(COALESCE(NULLIF(v_user.id, ''), v_clean));
+
   v_candidates := ARRAY(
     SELECT DISTINCT val
-    FROM unnest(ARRAY[v_clean, v_lower, v_bare, v_user.id, v_user.username, lower(COALESCE(v_user.username, ''))]) AS val
+    FROM unnest(ARRAY[
+      v_clean,
+      v_lower,
+      v_bare,
+      CASE WHEN v_bare <> '' THEN 'usr_' || v_bare ELSE NULL END,
+      v_user.id,
+      v_user.username,
+      lower(COALESCE(v_user.username, '')),
+      NULLIF(trim(COALESCE(v_user.discord_user_id, '')), '')
+    ]) AS val
     WHERE val IS NOT NULL AND val <> ''
   );
 
@@ -3181,7 +3303,8 @@ BEGIN
 
   DELETE FROM public.manager_discord_links
   WHERE manager_user_id = ANY(v_candidates)
-     OR lower(username) = ANY(v_candidates);
+     OR lower(username) = ANY(v_candidates)
+     OR discord_user_id = ANY(v_candidates);
 
   IF to_regclass('public.manager_access') IS NOT NULL THEN
     EXECUTE 'DELETE FROM public.manager_access WHERE user_id = ANY($1)' USING v_candidates;
@@ -3195,7 +3318,8 @@ BEGIN
   RETURN jsonb_build_object(
     'ok', true,
     'deleted', v_deleted > 0,
-    'userId', COALESCE(NULLIF(v_user.id, ''), v_clean)
+    'userId', COALESCE(NULLIF(v_user.id, ''), v_clean),
+    'revokedSessions', COALESCE((v_session_rev->>'revokedCount')::integer, 0)
   );
 END;
 $del_access$;
@@ -3697,7 +3821,8 @@ VALUES
   ('20261110000000_atomic_worker_settings'),
   ('20261111000000_worker_reset_data'),
   ('20261111120000_command_two_phase_sync'),
-  ('20261112000000_reconcile_full_manager_schema')
+  ('20261112000000_reconcile_full_manager_schema'),
+  ('20261112120000_session_revocation_and_migration_guards')
 ON CONFLICT (version) DO NOTHING;
 
 COMMIT;

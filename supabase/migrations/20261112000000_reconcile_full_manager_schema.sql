@@ -1,14 +1,18 @@
 -- ============================================================================
 -- Migration: 20261112000000_reconcile_full_manager_schema.sql
--- Purpose:   Zero-data-loss convergence from legacy 10-table Discord schema
+-- Purpose:   Data-preserving convergence from legacy 10-table Discord schema
 --            or partial schemas to the Single Source of Truth canonical schema
 --            (27 base tables, 4 security_invoker views, 1 sequence, 5 triggers,
---             51 SECURITY DEFINER functions with SET search_path = public, pg_temp).
+--             51 base SECURITY DEFINER functions; see 20261112120000 for 52nd RPC).
 -- Safety:    - NO destructive DROP DATABASE / TRUNCATE / DROP SCHEMA / CASCADE.
 --            - Preserves manager_access / manager_worker_assignments / manager_counters
 --              as frozen legacy backup tables (locked down behind RLS) if present.
---            - Safely migrates legacy manager_audit table rows into audit_logs
---              before replacing manager_audit with the canonical compatibility view.
+--            - Performs controlled replacement of legacy base table public.manager_audit
+--              (DROP TABLE public.manager_audit) ONLY AFTER verifying zero foreign
+--              view/FK dependencies and backfilling all rows into public.audit_logs,
+--              then recreates public.manager_audit as a compatibility view.
+--            - Drops specific conflicting legacy CHECK/FK constraints only after
+--              preflight range/uniqueness/dependency guards pass cleanly.
 -- ============================================================================
 
 BEGIN;
@@ -84,14 +88,39 @@ CREATE TABLE IF NOT EXISTS public.manager_discord_links (
 DO $$
 DECLARE
   v_relkind "char";
+  v_audit_oid oid;
+  v_dep_count integer := 0;
+  v_src_count bigint := 0;
+  v_dst_count bigint := 0;
 BEGIN
-  SELECT c.relkind INTO v_relkind
+  SELECT c.oid, c.relkind INTO v_audit_oid, v_relkind
   FROM pg_class c
   JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE n.nspname = 'public'
     AND c.relname = 'manager_audit';
 
   IF v_relkind IN ('r', 'p') THEN
+    SELECT count(*) INTO v_dep_count
+    FROM pg_depend d
+    JOIN pg_rewrite rw ON rw.oid = d.objid
+    JOIN pg_class dep ON dep.oid = rw.ev_class
+    WHERE d.refobjid = v_audit_oid
+      AND d.classid = 'pg_rewrite'::regclass
+      AND dep.oid <> v_audit_oid;
+
+    IF v_dep_count > 0 THEN
+      RAISE EXCEPTION 'PRECHECK FAILED: % view/rule object(s) depend on base table public.manager_audit. Inspect pg_depend before replacing it with a compatibility view.', v_dep_count;
+    END IF;
+
+    IF EXISTS (
+      SELECT 1 FROM pg_constraint
+      WHERE confrelid = v_audit_oid AND contype = 'f'
+    ) THEN
+      RAISE EXCEPTION 'PRECHECK FAILED: External foreign key constraint(s) reference public.manager_audit. Drop or migrate referencing FKs before replacing manager_audit.';
+    END IF;
+
+    EXECUTE 'SELECT count(*)::bigint FROM public.manager_audit' INTO v_src_count;
+
     EXECUTE $migrate_audit$
       INSERT INTO public.audit_logs (
         id, bot_id, log_type, category, action, action_label,
@@ -99,21 +128,34 @@ BEGIN
       )
       SELECT
         'legacy_audit_' || ma.id::text,
-        NULLIF(ma.details->>'botId', ''),
+        NULLIF(COALESCE(ma.details->>'botId', ma.details->>'workerId', ''), ''),
         'DISCORD',
         'LEGACY_MIGRATED',
-        COALESCE(ma.action, ''),
-        COALESCE(ma.action, ''),
-        COALESCE(NULLIF(ma.actor_id, ''), 'system'),
+        COALESCE(ma.action::text, ''),
+        COALESCE(ma.action::text, ''),
+        COALESCE(NULLIF(ma.actor_id::text, ''), 'system'),
         'system',
         '',
-        jsonb_build_object('target', COALESCE(ma.target, ''), 'details', COALESCE(ma.details, '{}'::jsonb)),
-        COALESCE(NULLIF(ma.target, ''), ma.details::text, ''),
+        jsonb_build_object('target', COALESCE(ma.target::text, ''), 'details', COALESCE(ma.details, '{}'::jsonb)),
+        COALESCE(NULLIF(ma.target::text, ''), ma.details::text, ''),
         'SUCCESS',
         COALESCE(ma.created_at, now())
       FROM public.manager_audit ma
       ON CONFLICT (id) DO NOTHING
     $migrate_audit$;
+
+    EXECUTE $count_audit$
+      SELECT count(*)::bigint
+      FROM public.manager_audit ma
+      WHERE EXISTS (
+        SELECT 1 FROM public.audit_logs al
+        WHERE al.id = 'legacy_audit_' || ma.id::text
+      )
+    $count_audit$ INTO v_dst_count;
+
+    IF v_dst_count < v_src_count THEN
+      RAISE EXCEPTION 'PRECHECK FAILED: audit_logs backfill count (%) is less than source public.manager_audit row count (%). Aborting DROP TABLE.', v_dst_count, v_src_count;
+    END IF;
 
     DROP TABLE public.manager_audit;
   END IF;
@@ -222,8 +264,10 @@ DO $$
 DECLARE
   v_con record;
   v_bot_num_type text;
+  v_min_bot bigint := 0;
   v_max_bot bigint := 0;
   v_counter_val bigint := 0;
+  v_dep_views text;
 BEGIN
   IF to_regclass('public.manager_workers') IS NOT NULL THEN
     FOR v_con IN
@@ -247,6 +291,30 @@ BEGIN
     WHERE table_schema = 'public' AND table_name = 'manager_workers' AND column_name = 'bot_number';
 
     IF v_bot_num_type IS NOT NULL AND v_bot_num_type <> 'integer' THEN
+      SELECT min(bot_number)::bigint, max(bot_number)::bigint
+      INTO v_min_bot, v_max_bot
+      FROM public.manager_workers
+      WHERE bot_number IS NOT NULL;
+
+      IF (v_max_bot IS NOT NULL AND v_max_bot > 2147483647)
+         OR (v_min_bot IS NOT NULL AND v_min_bot < -2147483648) THEN
+        RAISE EXCEPTION 'PRECHECK FAILED: manager_workers.bot_number range [%, %] exceeds 32-bit integer bounds. Reassign overflowing bot_number values before migration.', v_min_bot, v_max_bot;
+      END IF;
+
+      SELECT string_agg(DISTINCT dep.relname, ', ')
+      INTO v_dep_views
+      FROM pg_depend d
+      JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+      JOIN pg_rewrite rw ON rw.oid = d.objid
+      JOIN pg_class dep ON dep.oid = rw.ev_class
+      WHERE d.refobjid = 'public.manager_workers'::regclass
+        AND a.attname = 'bot_number'
+        AND dep.relkind IN ('v', 'm');
+
+      IF COALESCE(v_dep_views, '') <> '' THEN
+        RAISE EXCEPTION 'PRECHECK FAILED: Dependent view(s)/materialized view(s) [%] reference manager_workers.bot_number. Recreate after altering column type.', v_dep_views;
+      END IF;
+
       ALTER TABLE public.manager_workers ALTER COLUMN bot_number TYPE integer USING bot_number::integer;
     END IF;
 
@@ -285,19 +353,34 @@ BEGIN
 END
 $$;
 
--- A5. Convert legacy manager_keys (text[] -> jsonb, key_id -> id, relax narrow CHECKs)
+-- A5. Convert legacy manager_keys (text[] -> jsonb, key_id -> id, drop conflicting legacy CHECKs)
 DO $$
 DECLARE
   v_con record;
   v_worker_ids_type text;
   v_used_users_type text;
+  v_dup_ids integer := 0;
+  v_fk_refs text;
 BEGIN
   IF to_regclass('public.manager_keys') IS NOT NULL THEN
     FOR v_con IN
-      SELECT conname
+      SELECT conname, pg_get_constraintdef(oid) AS condef
       FROM pg_constraint
       WHERE conrelid = 'public.manager_keys'::regclass
         AND contype = 'c'
+        AND (
+          conname IN (
+            'manager_keys_code_hash_check',
+            'manager_keys_code_suffix_check',
+            'manager_keys_status_check',
+            'manager_keys_days_check',
+            'manager_keys_bot_count_check',
+            'manager_keys_plan_name_check',
+            'manager_keys_max_uses_check',
+            'manager_keys_used_count_check'
+          )
+          OR pg_get_constraintdef(oid) ~* '(code_hash|code_suffix|status|days|bot_count|plan_name|max_uses|used_count)'
+        )
     LOOP
       EXECUTE format('ALTER TABLE public.manager_keys DROP CONSTRAINT IF EXISTS %I', v_con.conname);
     END LOOP;
@@ -352,17 +435,17 @@ BEGIN
     END LOOP;
 
     UPDATE public.manager_keys
-    SET id = COALESCE(NULLIF(id, ''), key_id),
-        key_id = COALESCE(NULLIF(key_id, ''), id),
+    SET id = COALESCE(NULLIF(btrim(id), ''), NULLIF(btrim(key_id), ''), md5(ctid::text || COALESCE(code, '') || COALESCE(code_hash, ''))),
+        key_id = COALESCE(NULLIF(btrim(key_id), ''), NULLIF(btrim(id), '')),
         duration_days = COALESCE(duration_days, days),
         duration_ms = COALESCE(duration_ms, CASE WHEN COALESCE(days, 0) > 0 THEN days::bigint * 86400000 ELSE 0 END),
         bot_ids = CASE WHEN bot_ids IS NULL OR bot_ids = '[]'::jsonb THEN COALESCE(worker_ids, '[]'::jsonb) ELSE bot_ids END,
         assigned_bot_ids = CASE WHEN assigned_bot_ids IS NULL OR assigned_bot_ids = '[]'::jsonb THEN COALESCE(worker_ids, '[]'::jsonb) ELSE assigned_bot_ids END,
         used = COALESCE(used, false) OR status = 'used' OR (COALESCE(max_uses, 1) > 0 AND COALESCE(used_count, 0) >= COALESCE(max_uses, 1)),
         updated_at = COALESCE(updated_at, last_used_at, created_at, now())
-    WHERE id IS NULL OR id = '' OR duration_days IS NULL;
+    WHERE id IS NULL OR btrim(id) = '' OR duration_days IS NULL;
 
-    -- Promote id to PRIMARY KEY if legacy table was keyed on key_id (drop PK before dropping NOT NULL on key_id)
+    -- Promote id to PRIMARY KEY if legacy table was keyed on key_id (preflight FKs & uniqueness first)
     IF EXISTS (
       SELECT 1
       FROM pg_index i
@@ -371,6 +454,23 @@ BEGIN
         AND i.indisprimary
         AND a.attname = 'key_id'
     ) THEN
+      SELECT count(*) INTO v_dup_ids
+      FROM (
+        SELECT id FROM public.manager_keys GROUP BY id HAVING count(*) > 1 OR id IS NULL OR btrim(id) = ''
+      ) dup;
+      IF v_dup_ids > 0 THEN
+        RAISE EXCEPTION 'PRECHECK FAILED: manager_keys contains % NULL/duplicate id group(s); deduplicate before promoting id to PRIMARY KEY.', v_dup_ids;
+      END IF;
+
+      SELECT string_agg(conname || ' ON ' || conrelid::regclass::text, ', ')
+      INTO v_fk_refs
+      FROM pg_constraint
+      WHERE confrelid = 'public.manager_keys'::regclass
+        AND contype = 'f';
+      IF COALESCE(v_fk_refs, '') <> '' THEN
+        RAISE EXCEPTION 'PRECHECK FAILED: Foreign key constraint(s) [%] reference public.manager_keys(key_id). Migrate references before swapping PK to id.', v_fk_refs;
+      END IF;
+
       ALTER TABLE public.manager_keys DROP CONSTRAINT IF EXISTS manager_keys_pkey;
       ALTER TABLE public.manager_keys ALTER COLUMN key_id DROP NOT NULL;
       ALTER TABLE public.manager_keys ALTER COLUMN id SET NOT NULL;
@@ -393,6 +493,15 @@ BEGIN
       FROM pg_constraint
       WHERE conrelid = 'public.manager_link4m_attempts'::regclass
         AND contype = 'c'
+        AND (
+          conname IN (
+            'manager_link4m_attempts_user_id_check',
+            'manager_link4m_attempts_token_hash_check',
+            'manager_link4m_attempts_reward_hours_check',
+            'manager_link4m_attempts_status_check'
+          )
+          OR pg_get_constraintdef(oid) ~* '(user_id\s*~|token_hash\s*~|reward_hours|status\s*(=|IN|ANY))'
+        )
     LOOP
       EXECUTE format('ALTER TABLE public.manager_link4m_attempts DROP CONSTRAINT IF EXISTS %I', v_con.conname);
     END LOOP;
@@ -449,13 +558,28 @@ END
 $$;
 
 -- A7. Relax overly narrow legacy CHECK / FK constraints where canonical schema is wider
+-- (manager_commands_worker_id_fkey is dropped intentionally so commands targeting env/dynamic
+--  bot IDs that have not populated manager_workers yet can be queued/reconciled safely)
 DO $$
+DECLARE
+  v_con record;
 BEGIN
   IF to_regclass('public.manager_settings') IS NOT NULL THEN
     ALTER TABLE public.manager_settings DROP CONSTRAINT IF EXISTS manager_settings_key_check;
   END IF;
   IF to_regclass('public.manager_commands') IS NOT NULL THEN
     ALTER TABLE public.manager_commands DROP CONSTRAINT IF EXISTS manager_commands_worker_id_fkey;
+    IF to_regclass('public.manager_workers') IS NOT NULL THEN
+      FOR v_con IN
+        SELECT conname
+        FROM pg_constraint
+        WHERE conrelid = 'public.manager_commands'::regclass
+          AND contype = 'f'
+          AND confrelid = 'public.manager_workers'::regclass
+      LOOP
+        EXECUTE format('ALTER TABLE public.manager_commands DROP CONSTRAINT IF EXISTS %I', v_con.conname);
+      END LOOP;
+    END IF;
   END IF;
 END
 $$;

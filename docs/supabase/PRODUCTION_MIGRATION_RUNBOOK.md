@@ -1,9 +1,10 @@
 # Production Migration Runbook (Phase 7)
 
-Step-by-step operator guide for safely applying [`supabase/migrations/20261112000000_reconcile_full_manager_schema.sql`](file:///D:/manager%20deploy/supabase/migrations/20261112000000_reconcile_full_manager_schema.sql) to an existing Supabase production database.
+Step-by-step operator guide for safely applying [`supabase/migrations/20261112000000_reconcile_full_manager_schema.sql`](file:///D:/manager%20deploy/supabase/migrations/20261112000000_reconcile_full_manager_schema.sql) followed by [`supabase/migrations/20261112120000_session_revocation_and_migration_guards.sql`](file:///D:/manager%20deploy/supabase/migrations/20261112120000_session_revocation_and_migration_guards.sql) to an existing Supabase production database.
 
 > [!CAUTION]
 > **NEVER** run [`supabase/reset_and_setup.sql`](file:///D:/manager%20deploy/supabase/reset_and_setup.sql) against production — Part 1 permanently drops all Manager/Bot tables, views, sequences, and functions with `CASCADE`.
+> **NOTE**: `20261112000000_reconcile_full_manager_schema.sql` performs a single controlled replacement `DROP TABLE public.manager_audit` *only after* verifying dependencies and backfilling rows into `public.audit_logs`, immediately replacing it with `VIEW public.manager_audit`, and drops narrow legacy CHECK/FK constraints with preflight checks.
 > **NEVER** store database passwords, `service_role` keys, or `.env` secrets inside git-tracked files, terminal logs, or pasted runbook examples.
 
 ---
@@ -11,7 +12,7 @@ Step-by-step operator guide for safely applying [`supabase/migrations/2026111200
 ## 1. Preconditions & Maintenance Window
 
 1. Confirm all CI checks on the target commit pass on GitHub Actions (`.github/workflows/ci.yml`), including `tests/postgres-real.test.js`.
-2. Ensure the Manager codebase deployed (or staged to deploy immediately alongside the migration) includes Phase 6 runtime updates (`SupabaseAdapter.testConnection()` 26 tables / 46 RPCs, `manager_delete_user_access`, `audit_logs` route/store alignment, `manager_pending_allocations` columns).
+2. Ensure the Manager codebase deployed (or staged to deploy immediately alongside the migrations) includes Phase 6–8 runtime updates (`SupabaseAdapter.testConnection()` 26 tables / 47 RPCs, `revoke_manager_user_sessions`, `manager_delete_user_access`, `audit_logs` route/store alignment, `manager_pending_allocations` columns, fail-closed auth revalidation).
 3. Pause or drain Manager instances briefly during the maintenance window to prevent concurrent table lock contention (`ACCESS EXCLUSIVE` during legacy column conversions).
 
 ---
@@ -51,11 +52,38 @@ WHERE username IS NULL OR btrim(username) = '';
 
 -- (Optional if manager_access exists instead of manager_users)
 -- SELECT count(*) AS access_rows, count(DISTINCT user_id) AS distinct_users FROM public.manager_access;
+
+-- 6) Preflight migration-safety checks (legacy dependencies, overflow, duplicate keys, orphan commands)
+SELECT max(bot_number) AS max_bot_number, min(bot_number) AS min_bot_number
+FROM public.manager_workers;
+
+SELECT c.relname AS dependent_object, c.relkind, d.refobjid::regclass AS referenced_table
+FROM pg_depend d
+JOIN pg_rewrite rw ON rw.oid = d.objid
+JOIN pg_class c ON c.oid = rw.ev_class
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND d.refobjid IN (to_regclass('public.manager_audit'), to_regclass('public.manager_workers'))
+  AND c.relname <> 'manager_audit';
+
+SELECT conname AS external_fk_name, conrelid::regclass AS referencing_table, confrelid::regclass AS referenced_table
+FROM pg_constraint
+WHERE contype = 'f'
+  AND confrelid IN (to_regclass('public.manager_audit'), to_regclass('public.manager_keys'));
+
+SELECT count(*) AS total_keys, count(DISTINCT COALESCE(NULLIF(btrim(id), ''), NULLIF(btrim(key_id), ''))) AS distinct_ids
+FROM public.manager_keys;
+
+SELECT count(*) AS orphan_command_workers
+FROM public.manager_commands mc
+LEFT JOIN public.manager_workers mw ON mw.worker_id = mc.worker_id
+WHERE mc.worker_id IS NOT NULL AND mw.worker_id IS NULL;
 ```
 
 **Preflight Stop Conditions**:
 - If an existing `manager_commands` row contains a non-standard `status` outside `('queued', 'delivered', 'execution_completed', 'state_sync_pending', 'state_sync_failed', 'completed', 'failed', 'expired')`, inspect and normalize those rows before running the migration (otherwise `ADD CONSTRAINT manager_commands_status_check` will abort the transaction safely).
-- If an existing `manager_workers.bot_number` exceeds 32-bit signed integer (`2,147,483,647`), investigate before promoting `bigint -> integer`.
+- If an existing `manager_workers.bot_number` exceeds 32-bit signed integer (`-2,147,483,648` .. `2,147,483,647`), investigate before promoting `bigint -> integer` (the migration checks this automatically and aborts cleanly).
+- If external views or foreign keys depend on legacy `public.manager_audit` or `public.manager_keys_pkey`, or if duplicate `manager_keys.id` values exist, resolve those dependencies before running `20261112000000`.
 
 ---
 
@@ -75,18 +103,19 @@ pg_dump "$SUPABASE_DB_URL" --format=custom --no-owner --no-acl -f "manager_prod_
 
 ---
 
-## 4. Step 3 — Execute Convergence Migration in Production
+## 4. Step 3 — Execute Convergence Migrations in Production
 
-Apply [`supabase/migrations/20261112000000_reconcile_full_manager_schema.sql`](file:///D:/manager%20deploy/supabase/migrations/20261112000000_reconcile_full_manager_schema.sql) as a **single atomic transaction**.
+Apply [`supabase/migrations/20261112000000_reconcile_full_manager_schema.sql`](file:///D:/manager%20deploy/supabase/migrations/20261112000000_reconcile_full_manager_schema.sql) followed immediately by [`supabase/migrations/20261112120000_session_revocation_and_migration_guards.sql`](file:///D:/manager%20deploy/supabase/migrations/20261112120000_session_revocation_and_migration_guards.sql), each as an **atomic transaction**.
 
 - **Option A (Recommended — `psql` CLI with explicit error halt)**:
 ```bash
 psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f supabase/migrations/20261112000000_reconcile_full_manager_schema.sql
+psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f supabase/migrations/20261112120000_session_revocation_and_migration_guards.sql
 ```
 - **Option B (Supabase Dashboard SQL Editor)**:
   1. Open Supabase Dashboard -> **SQL Editor** -> New Query.
-  2. Paste the **entire contents** of `supabase/migrations/20261112000000_reconcile_full_manager_schema.sql` (`BEGIN;` through `NOTIFY pgrst, 'reload schema';`).
-  3. Click **Run** and confirm success with zero SQL errors.
+  2. Paste and run the **entire contents** of `supabase/migrations/20261112000000_reconcile_full_manager_schema.sql`, confirm zero errors.
+  3. Open a New Query, paste and run the **entire contents** of `supabase/migrations/20261112120000_session_revocation_and_migration_guards.sql`, and confirm zero SQL errors.
 
 ---
 
@@ -95,7 +124,7 @@ psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f supabase/migrations/20261112000000
 Run these read-only queries immediately after Step 3 commits:
 
 ```sql
--- 1) Canonical object inventory check (expect: base_tables >= 27, views = 4, sequence >= 1, triggers = 5, functions = 51)
+-- 1) Canonical object inventory check (expect: base_tables >= 27, views = 4, sequence >= 1, triggers = 5, functions = 52)
 SELECT
   (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
    WHERE n.nspname = 'public' AND c.relkind = 'r'
@@ -153,7 +182,7 @@ SELECT
 1. Deploy / start the reconciled Manager application build (with updated `supabase-client.js`, `supabase-dashboard-store.js`, `supabase-worker-store.js`, `entitlement-service.js`, `link4m-service.js`, `admin-api.js`).
 2. Verify HTTP readiness and health probes:
    - `GET /health` -> HTTP `200`, JSON contains `"ok": true`, `"degraded": false`, `"status": "healthy"`, `"checks": { "link4m": ..., "commandSyncRpc": { "ok": true, ... } }`.
-   - `GET /ready` (or `GET /api/ready`) -> HTTP `200` (proves `testConnection()` verified all **26** `SUPABASE_REQUIRED_TABLES` + all **46** runtime RPCs and Discord Gateway readiness if configured).
+   - `GET /ready` (or `GET /api/ready`) -> HTTP `200` (proves `testConnection()` verified all **26** `SUPABASE_REQUIRED_TABLES` + all **47** runtime RPCs and Discord Gateway readiness if configured).
 3. Perform 1 safe read/write smoke cycle in staging or controlled admin action (e.g., open audit logs in Admin UI, inspect `/ready`, confirm zero `PGRST202` / `PGRST204` / `42501` warnings in logs).
 
 ---

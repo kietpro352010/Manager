@@ -6,10 +6,11 @@ This document establishes the authoritative schema architecture and anti-drift c
 
 ## 1. Authoritative Source of Truth Model
 
-### 1.1 Production Upgrades: `supabase/migrations/` (Ordered, Additive, Non-Destructive)
+### 1.1 Production Upgrades: `supabase/migrations/` (Ordered, Additive, Guarded)
 - Every existing or production Supabase database is upgraded exclusively by running **ordered SQL migrations** in [`supabase/migrations/`](file:///D:/manager%20deploy/supabase/migrations/) and recording each applied version in `public.manager_schema_migrations(version, applied_at)`.
-- All migrations MUST be idempotent, non-destructive (`CREATE TABLE IF NOT EXISTS`, `CREATE OR REPLACE FUNCTION`, guarded `ALTER TABLE` / data backfills inside `DO $$ ... END $$;`), and MUST end with `NOTIFY pgrst, 'reload schema';`.
-- `20261112000000_reconcile_full_manager_schema.sql` serves as the convergence migration bridging legacy 10-table databases (`20261107`–`20261111120000`) and partial production schemas to the canonical target state with **zero data loss**.
+- Migrations MUST be idempotent, guarded inside transactions (`BEGIN; ... COMMIT;` + `DO $$ ... END $$;`), and MUST end with `NOTIFY pgrst, 'reload schema';`.
+- `20261112000000_reconcile_full_manager_schema.sql` bridges legacy 10-table databases (`20261107`–`20261111120000`) and partial production schemas to the canonical target state while preserving customer data (performing a controlled backfill + replacement `DROP TABLE public.manager_audit` -> view, preflight-checked `bot_number` conversion, and narrow legacy CHECK/PK/FK drops).
+- `20261112120000_session_revocation_and_migration_guards.sql` adds atomic `revoke_manager_user_sessions(text)`, hardens `read_manager_session`, `read_manager_authorization`, `manager_set_user_access`, and `manager_delete_user_access` against stale sessions after user deletion/disable, cleans up pre-existing orphaned/disabled `manager_sessions` rows, and verifies post-convergence schema invariants.
 
 ### 1.2 Full Target DDL Definition: `src/storage/schema-sql.js` (Exported as Runtime Schema)
 - [`src/storage/schema-sql.js`](file:///D:/manager%20deploy/src/storage/schema-sql.js) is the canonical programmatic representation of the full target PostgreSQL schema exposed via `/api/manager/supabase/schema` and referenced by runtime stores.
@@ -18,7 +19,7 @@ This document establishes the authoritative schema architecture and anti-drift c
   - **4 security-invoker compatibility views**: `manager_audit`, `backups`, `system_settings`, `bot_schedules`.
   - **1 sequence**: `public.manager_bot_number_seq`.
   - **5 triggers**: `trg_sync_bot_schedules`, `reject_cleared_event_log`, `reject_cleared_chat_log`, `manager_users_revision_after_write`, `manager_sessions_reject_revoked`.
-  - **51 canonical functions**: 50 existing canonical functions + `manager_delete_user_access(text)` (atomic `SECURITY DEFINER` user deletion RPC required because `service_role` direct `DELETE` on `manager_users` is revoked), ALL hardened with:
+  - **52 canonical functions**: 51 previous canonical functions + `revoke_manager_user_sessions(text)` (atomic `SECURITY DEFINER` session revocation on user delete/disable), ALL hardened with:
     - `SECURITY DEFINER`
     - `SET search_path = public, pg_temp`
     - `REVOKE ALL ON FUNCTION ... FROM PUBLIC, anon, authenticated;`
@@ -78,5 +79,5 @@ All 26 runtime tables MUST be listed in [`SUPABASE_REQUIRED_TABLES`](file:///D:/
 
 Every commit touching SQL or storage contracts MUST pass both structural tests (`tests/storage-sql.test.js`) AND real PostgreSQL integration & parity tests (`tests/postgres-real.test.js`):
 1. Executing **Method A** (ordered `supabase/migrations/*.sql` cleanly on an empty database), **Method B** (`supabase/setup.sql`), **Method C** (`src/storage/schema-sql.js`), and **Method D** (`supabase/reset_and_setup.sql`) MUST produce **identical `pg_catalog` tables, columns, column types, views, triggers, sequence, and function signatures** (ignoring legacy-only backup tables if upgraded from an older snapshot).
-2. Applying `supabase/migrations/20261112000000_reconcile_full_manager_schema.sql` on top of a pre-populated legacy `20261107`–`20261111120000` database MUST converge to exact parity on all 27 canonical tables, 4 views, 5 triggers, and 51 functions with zero row loss.
+2. Applying `supabase/migrations/20261112000000_reconcile_full_manager_schema.sql` followed by `supabase/migrations/20261112120000_session_revocation_and_migration_guards.sql` on top of a pre-populated legacy `20261107`–`20261111120000` database MUST converge to exact parity on all 27 canonical tables, 4 views, 5 triggers, and 52 functions with customer data preserved.
 3. Static security & SQL syntax checks MUST verify zero missing `$$` blocks, zero duplicate function/index definitions in `setup.sql`, zero `SET search_path` functions omitting `pg_temp`, and `SUPABASE_REQUIRED_TABLES` matching all 26 runtime tables.

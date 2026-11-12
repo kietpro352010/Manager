@@ -3,7 +3,7 @@
 const assert = require('node:assert');
 const crypto = require('node:crypto');
 const schemaSql = require('../src/storage/schema-sql');
-const { SUPABASE_REQUIRED_TABLES } = require('../src/storage/supabase-client');
+const { SUPABASE_REQUIRED_TABLES, SupabaseAdapter } = require('../src/storage/supabase-client');
 const SupabaseDashboardStore = require('../src/storage/supabase-dashboard-store');
 const SupabaseCommandStore = require('../src/storage/supabase-command-store');
 const SupabaseWorkerStore = require('../src/storage/supabase-worker-store');
@@ -1357,19 +1357,24 @@ async function testReconciledSchemaAndRuntimeContracts() {
     assert.ok(SUPABASE_REQUIRED_TABLES.includes(requiredTbl), `Missing ${requiredTbl} in SUPABASE_REQUIRED_TABLES`);
   }
 
-  // 7b. Cross-file object & hardening parity across all 4 reconciled SQL sources
+  // 7b. Cross-file object & hardening parity across all reconciled SQL sources
   const setupSql = fs.readFileSync(path.join(__dirname, '../supabase/setup.sql'), 'utf8');
   const resetSetupSql = fs.readFileSync(path.join(__dirname, '../supabase/reset_and_setup.sql'), 'utf8');
   const reconcileSql = fs.readFileSync(
     path.join(__dirname, '../supabase/migrations/20261112000000_reconcile_full_manager_schema.sql'),
     'utf8'
   );
+  const sessionRevocationSql = fs.readFileSync(
+    path.join(__dirname, '../supabase/migrations/20261112120000_session_revocation_and_migration_guards.sql'),
+    'utf8'
+  );
+  const combinedMigrationsSql = `${reconcileSql}\n${sessionRevocationSql}`;
 
   const canonicalFiles = [
-    ['src/storage/schema-sql.js', schemaSql],
-    ['supabase/setup.sql', setupSql],
-    ['supabase/reset_and_setup.sql', resetSetupSql],
-    ['supabase/migrations/20261112000000_reconcile_full_manager_schema.sql', reconcileSql]
+    ['src/storage/schema-sql.js', schemaSql, 52],
+    ['supabase/setup.sql', setupSql, 52],
+    ['supabase/reset_and_setup.sql', resetSetupSql, 52],
+    ['20261112000000+20261112120000 migrations', combinedMigrationsSql, null]
   ];
 
   const extractSet = (text, regex) => new Set([...text.matchAll(regex)].map((m) => m[1].toLowerCase()));
@@ -1381,22 +1386,25 @@ async function testReconciledSchemaAndRuntimeContracts() {
     '20261110000000_atomic_worker_settings',
     '20261111000000_worker_reset_data',
     '20261111120000_command_two_phase_sync',
-    '20261112000000_reconcile_full_manager_schema'
+    '20261112000000_reconcile_full_manager_schema',
+    '20261112120000_session_revocation_and_migration_guards'
   ];
 
   let refTables = null;
   let refFuncs = null;
 
-  for (const [label, sqlText] of canonicalFiles) {
+  for (const [label, sqlText, expectedHeaderCount] of canonicalFiles) {
     assert.ok(!/^\s*DO\s+(?!\$\$|\$[a-z0-9_]*\$)(?:DECLARE|BEGIN)\b/im.test(sqlText), `${label} contains malformed DO block without $$`);
 
-    // Duplicate index check on CREATE INDEX
-    const idxMatches = [...sqlText.matchAll(/CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:public\.)?([a-z0-9_]+)/gi)];
-    const seenIdx = new Set();
-    for (const m of idxMatches) {
-      const idxName = m[1].toLowerCase();
-      assert.ok(!seenIdx.has(idxName), `${label} declares duplicate index ${idxName}`);
-      seenIdx.add(idxName);
+    // Duplicate index check on CREATE INDEX (excluding intentional conditional re-declarations across sequential migrations)
+    if (expectedHeaderCount !== null) {
+      const idxMatches = [...sqlText.matchAll(/CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:public\.)?([a-z0-9_]+)/gi)];
+      const seenIdx = new Set();
+      for (const m of idxMatches) {
+        const idxName = m[1].toLowerCase();
+        assert.ok(!seenIdx.has(idxName), `${label} declares duplicate index ${idxName}`);
+        seenIdx.add(idxName);
+      }
     }
 
     for (const viewName of expectedViews) {
@@ -1406,7 +1414,11 @@ async function testReconciledSchemaAndRuntimeContracts() {
 
     // Check every public function definition uses SECURITY DEFINER SET search_path = public, pg_temp
     const fnHeaders = [...sqlText.matchAll(/CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\.([a-z0-9_]+)\s*\(([\s\S]*?)AS\s+\$/gi)];
-    assert.strictEqual(fnHeaders.length, 51, `${label} expected 51 public functions, got ${fnHeaders.length}`);
+    if (expectedHeaderCount !== null) {
+      assert.strictEqual(fnHeaders.length, expectedHeaderCount, `${label} expected ${expectedHeaderCount} public functions, got ${fnHeaders.length}`);
+    } else {
+      assert.ok(fnHeaders.length >= 52, `${label} expected >= 52 function definitions across migrations`);
+    }
     for (const match of fnHeaders) {
       assert.match(match[2], /\bSECURITY\s+DEFINER\b/i, `${label} ${match[1]} must be SECURITY DEFINER`);
       assert.match(match[2], /\bSET\s+search_path\s*=\s*public,\s*pg_temp\b/i, `${label} ${match[1]} must set search_path = public, pg_temp`);
@@ -1415,7 +1427,7 @@ async function testReconciledSchemaAndRuntimeContracts() {
     const tables = extractSet(sqlText, /CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+public\.([a-z0-9_]+)/gi);
     const funcs = extractSet(sqlText, /CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\.([a-z0-9_]+)\s*\(/gi);
     assert.strictEqual(tables.size, 27, `${label} expected 27 base tables, got ${tables.size}`);
-    assert.strictEqual(funcs.size, 51, `${label} expected 51 unique function names, got ${funcs.size}`);
+    assert.strictEqual(funcs.size, 52, `${label} expected 52 unique function names, got ${funcs.size}`);
 
     if (!refTables) {
       refTables = tables;
@@ -1427,10 +1439,15 @@ async function testReconciledSchemaAndRuntimeContracts() {
   }
 
   for (const ver of expectedMigrations) {
-    assert.ok(reconcileSql.includes(`'${ver}'`), `Convergence migration must record ${ver} in manager_schema_migrations`);
+    assert.ok(combinedMigrationsSql.includes(`'${ver}'`), `Migrations must record ${ver} in manager_schema_migrations`);
   }
+  assert.match(
+    sessionRevocationSql,
+    /GRANT\s+EXECUTE\s+ON\s+FUNCTION\s+public\.revoke_manager_user_sessions\(text\)\s+TO\s+service_role/i,
+    '20261112120000 must grant execute on revoke_manager_user_sessions(text) to service_role'
+  );
 
-  // 7c. removeAccess RPC-first & fail-closed behavior
+  // 7c. removeAccess RPC-first, fallback failure guard & adapter session revocation
   let rpcCalledWith = null;
   const rpcStore = new SupabaseDashboardStore({
     rpc: async (fn, params) => {
@@ -1461,6 +1478,45 @@ async function testReconciledSchemaAndRuntimeContracts() {
   assert.strictEqual(await missingRpcFallbackStore.removeAccess('usr_test1'), true);
   assert.ok(deletedTables.includes('manager_assignments'));
   assert.ok(deletedTables.includes('manager_users'));
+
+  // Negative test: if fallback delete on manager_assignments fails, removeAccess MUST abort BEFORE touching manager_users/manager_access/links/sessions
+  const touchedAfterAssignmentFail = [];
+  const failedAssignmentFallbackStore = new SupabaseDashboardStore({
+    rpc: async () => ({ data: null, error: { code: 'PGRST202', message: 'Could not find function' } }),
+    from: (tbl) => createTableBuilder(() => [{ id: 'usr_fail1', user_id: 'usr_fail1', username: 'fail1' }], {
+      onDelete: () => {
+        touchedAfterAssignmentFail.push(tbl);
+        if (tbl === 'manager_assignments') {
+          return { data: null, error: { code: '42501', message: 'assignments delete blocked' } };
+        }
+        return { data: [], error: null };
+      }
+    })
+  });
+  await assert.rejects(() => failedAssignmentFallbackStore.removeAccess('usr_fail1'), {
+    code: '42501',
+    message: 'assignments delete blocked'
+  });
+  assert.deepStrictEqual(
+    touchedAfterAssignmentFail,
+    ['manager_assignments'],
+    'Fallback removeAccess must abort before deleting manager_users/manager_access/discord/sessions when assignment delete fails'
+  );
+
+  // SupabaseAdapter.deleteSession must not throw ReferenceError and revokeUserSessions calls revoke_manager_user_sessions
+  const adapterCalls = [];
+  const adapter = new SupabaseAdapter({ url: 'https://supabase.test', key: 'sb_secret_test' });
+  adapter.callRpc = async (fn, params) => {
+    adapterCalls.push({ fn, params });
+    return fn === 'revoke_manager_session' ? true : { ok: true, revokedCount: 2 };
+  };
+  assert.strictEqual(await adapter.deleteSession('hash_abc'), true);
+  const revokeAllRes = await adapter.revokeUserSessions('usr_abc');
+  assert.deepStrictEqual(revokeAllRes, { ok: true, revokedCount: 2 });
+  assert.deepStrictEqual(adapterCalls, [
+    { fn: 'revoke_manager_session', params: { p_token_hash: 'hash_abc' } },
+    { fn: 'revoke_manager_user_sessions', params: { p_user_id: 'usr_abc' } }
+  ]);
 
   // 7d. Audit log adapter + direct table contract (audit_logs instead of manager_audit view)
   let insertedAudit = null;

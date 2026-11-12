@@ -3,6 +3,7 @@
 const assert = require('node:assert');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const http = require('node:http');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
@@ -10,10 +11,14 @@ const { pathToFileURL } = require('node:url');
 const { Pool, Client } = require('pg');
 
 const schemaSql = require('../src/storage/schema-sql');
-const { SUPABASE_REQUIRED_TABLES } = require('../src/storage/supabase-client');
+const { SUPABASE_REQUIRED_TABLES, SupabaseAdapter } = require('../src/storage/supabase-client');
 const SupabaseWorkerStore = require('../src/storage/supabase-worker-store');
 const SupabaseCommandStore = require('../src/storage/supabase-command-store');
 const SupabaseDashboardStore = require('../src/storage/supabase-dashboard-store');
+const { createApp } = require('../src/http/app');
+const { PUBLIC_LOGIN_HTML } = require('../src/http/views/login-html');
+const { HTML: DASHBOARD_HTML } = require('../src/http/views/dashboard-html');
+const { encryptUserPassword } = require('../src/utils/secrets');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const CMD_UUID_RE = /^cmd_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -619,7 +624,7 @@ function assertCanonicalCatalog(catalog, label, { allowLegacyTables = false } = 
 
   assert.deepStrictEqual(catalog.sequences, ['manager_bot_number_seq'], `${label}: unexpected sequences`);
   assert.strictEqual(catalog.triggers.length, 5, `${label}: expected 5 triggers`);
-  assert.strictEqual(catalog.functions.length, 51, `${label}: expected 51 functions`);
+  assert.strictEqual(catalog.functions.length, 52, `${label}: expected 52 functions`);
 
   for (const fn of catalog.functions) {
     assert.strictEqual(fn.prosecdef, true, `${label}: ${fn.name} must be SECURITY DEFINER`);
@@ -642,7 +647,7 @@ async function runSuiteAFreshInstalls(harness) {
   console.log('A. Testing fresh SQL installs (schema-sql.js, setup.sql, reset_and_setup.sql, ordered migrations) on real PG 16...');
   const migDir = path.join(REPO_ROOT, 'supabase/migrations');
   const orderedMigrations = fs.readdirSync(migDir).filter((f) => f.endsWith('.sql')).sort();
-  assert.strictEqual(orderedMigrations.length, 7, 'Expected 7 SQL files in supabase/migrations');
+  assert.strictEqual(orderedMigrations.length, 8, 'Expected 8 SQL files in supabase/migrations');
 
   const cases = [
     ['schema-sql.js', [schemaSql]],
@@ -675,7 +680,7 @@ async function runSuiteAFreshInstalls(harness) {
 
       if (label !== 'schema-sql.js') {
         const migRes = await db.pool.query('SELECT version FROM public.manager_schema_migrations ORDER BY version');
-        assert.strictEqual(migRes.rows.length, 7, `${label}: expected 7 migration records`);
+        assert.strictEqual(migRes.rows.length, 8, `${label}: expected 8 migration records`);
       }
 
       // Idempotent re-execution check
@@ -687,7 +692,7 @@ async function runSuiteAFreshInstalls(harness) {
       await db.close();
     }
   }
-  console.log('✅ Suite A: All 4 fresh installs & idempotent re-runs match PG 16 catalog identically (27 tables, 4 views, 1 seq, 5 triggers, 51 fns).');
+  console.log('✅ Suite A: All 4 fresh installs & idempotent re-runs match PG 16 catalog identically (27 tables, 4 views, 1 seq, 5 triggers, 52 fns).');
 }
 
 // ----------------------------------------------------------------------------
@@ -741,8 +746,34 @@ async function runSuiteBLegacyUpgrade(harness) {
     const reconcileSql = fs.readFileSync(path.join(migDir, '20261112000000_reconcile_full_manager_schema.sql'), 'utf8');
     await db.pool.query(reconcileSql);
 
-    // Also test idempotent re-run on already-converged DB
+    // Seed stale orphaned & disabled sessions pre-20261112120000 to verify upgrade cleanup
+    const orphanHash = '1'.repeat(64);
+    const disabledUserHash = '2'.repeat(64);
+    await db.pool.query(`
+      INSERT INTO public.manager_users (id, username, role, status)
+      VALUES ('usr_disabled_pre', 'disabled_pre', 'user', 'disabled');
+      INSERT INTO public.manager_sessions (token_hash, user_id, username, role, expires_at, status)
+      VALUES
+        ('${orphanHash}', 'usr_deleted_pre', 'deleted_pre', 'user', (extract(epoch FROM now()) * 1000)::bigint + 600000, 'active'),
+        ('${disabledUserHash}', 'usr_disabled_pre', 'disabled_pre', 'user', (extract(epoch FROM now()) * 1000)::bigint + 600000, 'active');
+    `);
+
+    // 3. Apply session revocation & guard migration 20261112120000 + idempotent re-run
+    const sessionMigSql = fs.readFileSync(path.join(migDir, '20261112120000_session_revocation_and_migration_guards.sql'), 'utf8');
+    await db.pool.query(sessionMigSql);
     await db.pool.query(reconcileSql);
+    await db.pool.query(sessionMigSql);
+
+    const remainingStale = await db.pool.query(
+      `SELECT token_hash FROM public.manager_sessions WHERE token_hash = ANY($1::text[])`,
+      [[orphanHash, disabledUserHash]]
+    );
+    assert.strictEqual(remainingStale.rows.length, 0, '20261112120000 must purge pre-existing orphaned/disabled sessions');
+    const revokedPre = await db.pool.query(
+      `SELECT token_hash FROM public.manager_session_revocations WHERE token_hash = ANY($1::text[])`,
+      [[orphanHash, disabledUserHash]]
+    );
+    assert.strictEqual(revokedPre.rows.length, 2, '20261112120000 must record revoked stale hashes');
 
     const catalog = await inspectPublicCatalog(db.pool);
     assertCanonicalCatalog(catalog, 'legacy_upgraded', { allowLegacyTables: true });
@@ -756,7 +787,9 @@ async function runSuiteBLegacyUpgrade(harness) {
     assert.strictEqual(viewRows.rows[0].actor_username, 'admin_legacy');
 
     // Verify legacy manager_access & manager_worker_assignments preserved AND backfilled
-    const usersRes = await db.pool.query('SELECT id, username, discord_user_id, plan_name FROM public.manager_users');
+    const usersRes = await db.pool.query(
+      `SELECT id, username, discord_user_id, plan_name FROM public.manager_users WHERE id <> 'usr_disabled_pre'`
+    );
     assert.strictEqual(usersRes.rows.length, 1);
     assert.strictEqual(usersRes.rows[0].discord_user_id, '111222333444555666');
 
@@ -832,7 +865,9 @@ async function runSuiteBLegacyUpgrade(harness) {
       VALUES ('${legacyUuid}'::uuid, '01', 'status', 'completed', now() + interval '1 hour');
     `);
     const reconcileSql = fs.readFileSync(path.join(migDir, '20261112000000_reconcile_full_manager_schema.sql'), 'utf8');
+    const sessionMigSql = fs.readFileSync(path.join(migDir, '20261112120000_session_revocation_and_migration_guards.sql'), 'utf8');
     await db2.pool.query(reconcileSql);
+    await db2.pool.query(sessionMigSql);
 
     const existing = await db2.pool.query(`SELECT command_id, pg_typeof(command_id)::text AS col_type FROM public.manager_commands`);
     assert.strictEqual(existing.rows.length, 1);
@@ -1331,10 +1366,225 @@ async function runSuiteFSecurityAndIsolation(harness) {
     // Delete via RPC succeeds even though direct DELETE is blocked for service_role
     assert.strictEqual(await dash.removeAccess('usr_sec_2'), true);
     assert.strictEqual(await dash.removeAccess('usr_sec_1'), true);
+
+    // 5. Real PG 16 Atomic Session Revocation & Dual-Manager Multi-Process Enforcement
+    for (const restrictedRole of ['anon', 'authenticated']) {
+      const restricted = createPgSupabaseClient(db.pool, restrictedRole);
+      const revRpc = await restricted.rpc('revoke_manager_user_sessions', { p_user_id: 'usr_sec_3' });
+      assert.ok(revRpc.error && revRpc.error.code === '42501', `Expected 42501 for ${restrictedRole} on revoke_manager_user_sessions`);
+    }
+
+    // Wire real SupabaseAdapter RPC layer directly onto PG 16 client
+    const pgAdapter = new SupabaseAdapter({ url: 'https://pg-real.local', key: 'sb_secret_pg_real' });
+    pgAdapter.callRpc = async (fnName, params) => {
+      const res = await svc.rpc(fnName, params);
+      if (res.error) throw Object.assign(new Error(res.error.message || fnName), { code: res.error.code });
+      return res.data;
+    };
+    pgAdapter.fetchUserAuthorization = async (userId, username) => {
+      const q = svc.from('manager_users').select('*');
+      const { data, error } = userId
+        ? await q.eq('id', String(userId)).limit(2)
+        : await q.eq('username', String(username || '').toLowerCase()).limit(2);
+      if (error || !Array.isArray(data) || data.length !== 1) return { ok: false };
+      const row = data[0];
+      return {
+        ok: true,
+        user: {
+          id: row.id,
+          userId: row.id,
+          username: row.username,
+          password: row.password,
+          role: row.role || 'user',
+          status: row.status || 'active',
+          assignedBotIds: Array.isArray(row.assigned_bot_ids) ? row.assigned_bot_ids.map(Number) : [],
+          expiresAt: row.expires_at,
+          planName: row.plan_name || 'VIP',
+          isPermanent: Boolean(row.is_permanent),
+          allowAccountChange: row.allow_account_change !== false,
+          botCount: row.bot_count || 1
+        }
+      };
+    };
+    svc.adapter = pgAdapter;
+
+    const dashA = new SupabaseDashboardStore(svc);
+    const dashB = new SupabaseDashboardStore(svc);
+    const seedUsersRes = await svc.rpc('insert_manager_users_if_absent', {
+      p_users: [
+        {
+          id: 'usr_sec_3',
+          username: 'secuser3',
+          password: encryptUserPassword('secuser3-pass'),
+          role: 'user',
+          status: 'active',
+          assigned_bot_ids: ['01'],
+          is_permanent: true,
+          plan_name: 'VIP'
+        },
+        {
+          id: 'usr_sec_4',
+          username: 'secuser4',
+          password: encryptUserPassword('secuser4-pass'),
+          role: 'user',
+          status: 'active',
+          assigned_bot_ids: [],
+          is_permanent: false,
+          expires_at: new Date(Date.now() + 3600_000).toISOString(),
+          plan_name: 'PRO'
+        },
+        {
+          id: 'usr_sec_5',
+          username: 'secuser5',
+          password: encryptUserPassword('secuser5-pass'),
+          role: 'user',
+          status: 'active',
+          assigned_bot_ids: [],
+          is_permanent: true,
+          plan_name: 'FREE'
+        }
+      ]
+    });
+    assert.strictEqual(seedUsersRes.error, null);
+    assert.strictEqual(seedUsersRes.data.ok, true, `Failed seeding test users: ${JSON.stringify(seedUsersRes.data)}`);
+
+    const mockRegistry = {
+      store: {},
+      list: async () => [],
+      getBots: () => [],
+      getAdminPassword: () => null,
+      verifyBotSecretSync: () => false
+    };
+    const appA = createApp({
+      store: dashA,
+      registry: mockRegistry,
+      broker: {},
+      config: { adminUsername: 'admin', adminPassword: 'pg-admin-password', discordToken: '' },
+      logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} }
+    });
+    const appB = createApp({
+      store: dashB,
+      registry: mockRegistry,
+      broker: {},
+      config: { adminUsername: 'admin', adminPassword: 'pg-admin-password', discordToken: '' },
+      logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} }
+    });
+
+    const srvA = http.createServer(appA);
+    const srvB = http.createServer(appB);
+    await new Promise((resolve) => srvA.listen(0, resolve));
+    await new Promise((resolve) => srvB.listen(0, resolve));
+    try {
+      const urlA = `http://127.0.0.1:${srvA.address().port}`;
+      const urlB = `http://127.0.0.1:${srvB.address().port}`;
+
+      // Admin logs into Manager B
+      const adminBLogin = await (await fetch(`${urlB}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: 'admin', password: 'pg-admin-password' })
+      })).json();
+      assert.strictEqual(adminBLogin.ok, true);
+
+      // secuser3 logs into Manager A (warms activeSessions A & persists session into PG manager_sessions)
+      const u3Login = await (await fetch(`${urlA}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: 'secuser3', password: 'secuser3-pass' })
+      })).json();
+      assert.strictEqual(u3Login.ok, true);
+      const u3TokenHash = crypto.createHash('sha256').update(u3Login.token).digest('hex');
+
+      assert.strictEqual((await fetch(`${urlA}/api/auth/me`, {
+        headers: { authorization: `Bearer ${u3Login.token}` }
+      })).status, 200);
+      assert.strictEqual(await (await fetch(`${urlA}/`, {
+        headers: { authorization: `Bearer ${u3Login.token}` }
+      })).text(), DASHBOARD_HTML);
+
+      // Delete secuser3 via Manager B -> must revoke PG session & Manager A must immediately deny
+      const delResp = await fetch(`${urlB}/api/manager/users/usr_sec_3`, {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${adminBLogin.token}` }
+      });
+      assert.strictEqual(delResp.status, 200);
+
+      const sessAfterDel = await db.pool.query(`SELECT token_hash FROM public.manager_sessions WHERE token_hash = $1`, [u3TokenHash]);
+      assert.strictEqual(sessAfterDel.rows.length, 0, 'manager_delete_user_access must remove manager_sessions rows');
+      const revAfterDel = await db.pool.query(`SELECT token_hash FROM public.manager_session_revocations WHERE token_hash = $1`, [u3TokenHash]);
+      assert.strictEqual(revAfterDel.rows.length, 1, 'manager_delete_user_access must record hash in manager_session_revocations');
+
+      const rpcAuthDel = await svc.rpc('read_manager_authorization', { p_token_hash: u3TokenHash });
+      assert.strictEqual(rpcAuthDel.data.session, null);
+      assert.strictEqual(rpcAuthDel.data.user, null);
+
+      assert.strictEqual((await fetch(`${urlA}/api/auth/me`, {
+        headers: { authorization: `Bearer ${u3Login.token}` }
+      })).status, 401, 'Manager A must reject deleted user session immediately even if activeSessions had cached it');
+      assert.strictEqual((await fetch(`${urlA}/api/manager/bots`, {
+        headers: { authorization: `Bearer ${u3Login.token}` }
+      })).status, 401);
+      assert.strictEqual(await (await fetch(`${urlA}/`, {
+        headers: { authorization: `Bearer ${u3Login.token}` }
+      })).text(), PUBLIC_LOGIN_HTML);
+
+      // secuser4 logs into Manager A; expired non-disabled keeps working; disabling via Manager B revokes PG + Manager A denies
+      const u4Login = await (await fetch(`${urlA}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: 'secuser4', password: 'secuser4-pass' })
+      })).json();
+      assert.strictEqual(u4Login.ok, true);
+      const u4TokenHash = crypto.createHash('sha256').update(u4Login.token).digest('hex');
+
+      await dashB.setAccess('usr_sec_4', { status: 'expired', expiresAt: new Date(Date.now() - 60_000).toISOString() }, 'admin');
+      const u4ExpiredMe = await fetch(`${urlA}/api/auth/me`, { headers: { authorization: `Bearer ${u4Login.token}` } });
+      assert.strictEqual(u4ExpiredMe.status, 200, 'Non-disabled expired account must keep session for Link4M/key renewal');
+      assert.strictEqual((await u4ExpiredMe.json()).user.status, 'expired');
+
+      const disableResp = await fetch(`${urlB}/api/manager/users/usr_sec_4`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${adminBLogin.token}` },
+        body: JSON.stringify({ status: 'disabled' })
+      });
+      assert.strictEqual(disableResp.status, 200);
+
+      const sessAfterDisable = await db.pool.query(`SELECT token_hash FROM public.manager_sessions WHERE token_hash = $1`, [u4TokenHash]);
+      assert.strictEqual(sessAfterDisable.rows.length, 0);
+      const rpcAuthDisabled = await svc.rpc('read_manager_authorization', { p_token_hash: u4TokenHash });
+      assert.strictEqual(rpcAuthDisabled.data.session, null);
+      assert.strictEqual((await fetch(`${urlA}/api/auth/me`, {
+        headers: { authorization: `Bearer ${u4Login.token}` }
+      })).status, 401, 'Manager A must reject disabled user session immediately');
+
+      // secuser5 logs in -> POST /api/auth/logout calls deleteSession without ReferenceError & revokes in PG
+      const u5Login = await (await fetch(`${urlA}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: 'secuser5', password: 'secuser5-pass' })
+      })).json();
+      assert.strictEqual(u5Login.ok, true);
+      const u5TokenHash = crypto.createHash('sha256').update(u5Login.token).digest('hex');
+      const logoutResp = await fetch(`${urlA}/api/auth/logout`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${u5Login.token}` }
+      });
+      assert.strictEqual(logoutResp.status, 200);
+      const revAfterLogout = await db.pool.query(`SELECT token_hash FROM public.manager_session_revocations WHERE token_hash = $1`, [u5TokenHash]);
+      assert.strictEqual(revAfterLogout.rows.length, 1, 'POST /api/auth/logout must revoke tokenHash via PG RPC without ReferenceError');
+      assert.strictEqual((await fetch(`${urlA}/api/auth/me`, {
+        headers: { authorization: `Bearer ${u5Login.token}` }
+      })).status, 401);
+      assert.strictEqual(await dashB.removeAccess('usr_sec_4'), true);
+      assert.strictEqual(await dashB.removeAccess('usr_sec_5'), true);
+    } finally {
+      await new Promise((resolve) => srvA.close(resolve));
+      await new Promise((resolve) => srvB.close(resolve));
+    }
   } finally {
     await db.close();
   }
-  console.log('✅ Suite F: Role privileges, search_path pg_temp defense & tenant isolation verified on real PG 16.');
+  console.log('✅ Suite F: Role privileges, search_path pg_temp defense, tenant isolation & PG 16 session revocation verified.');
 }
 
 (async () => {

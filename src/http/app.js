@@ -151,6 +151,48 @@ function createApp({
     next();
   });
 
+  // Helper: Evict local cached sessions for a deleted or disabled user
+  function invalidateUserSessions(identifier) {
+    const raw = String(identifier || '').trim();
+    if (!raw) return 0;
+    const lower = raw.toLowerCase();
+    const bare = lower.startsWith('usr_') ? lower.slice(4) : lower;
+    let removed = 0;
+    for (const [hash, cached] of activeSessions.entries()) {
+      if (!cached || cached.role === 'admin') continue;
+      const sId = String(cached.userId || '').trim().toLowerCase();
+      const sUser = String(cached.username || '').trim().toLowerCase();
+      const sBare = sId.startsWith('usr_') ? sId.slice(4) : sId;
+      if (
+        sId === lower ||
+        (bare && (sId === `usr_${bare}` || sBare === bare || sUser === bare)) ||
+        sUser === lower
+      ) {
+        activeSessions.delete(hash);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
+  function applyFreshAccessToSession(targetSession, userRec) {
+    const freshAssigned = Array.isArray(userRec.workerIds) && userRec.workerIds.length
+      ? userRec.workerIds
+      : (Array.isArray(userRec.assignedBotIds) ? userRec.assignedBotIds : []);
+    targetSession.assignedBotIds = freshAssigned.map(String);
+    if (userRec.expiresAt !== undefined) targetSession.expiresAtRental = userRec.expiresAt;
+    if (userRec.role) targetSession.role = userRec.role;
+    if (userRec.planName) targetSession.planName = userRec.planName;
+    targetSession.isPermanent = Boolean(userRec.isPermanent);
+    targetSession.allowAccountChange = userRec.allowAccountChange !== false;
+    const rawStatus = String(userRec.status || targetSession.status || 'active').toLowerCase();
+    const effExpiresAt = userRec.expiresAt || targetSession.expiresAtRental;
+    const isTimeExpired = !targetSession.isPermanent && effExpiresAt && Date.parse(effExpiresAt) <= Date.now();
+    targetSession.status = rawStatus === 'disabled'
+      ? 'disabled'
+      : ((rawStatus === 'expired' || isTimeExpired) ? 'expired' : 'active');
+  }
+
   // 5. Dynamic Session Authentication Middleware
   app.use(async (req, _res, next) => {
     req.managerAuthChecked = true;
@@ -162,38 +204,109 @@ function createApp({
     if (!rawToken) return next();
 
     const tokenHash = hashSessionToken(rawToken);
-    let session = activeSessions.get(tokenHash);
+    const cachedSession = activeSessions.get(tokenHash) || null;
+    const useDbAuth = typeof store.adapter?.fetchManagerAuthorization === 'function' &&
+      (typeof store.adapter.isEnabled !== 'function' || store.adapter.isEnabled());
+    const isEnvAdminCached = Boolean(
+      cachedSession &&
+      cachedSession.role === 'admin' &&
+      !String(cachedSession.userId || '').toLowerCase().startsWith('usr_')
+    );
+    let session = null;
 
-    if (!session && store.adapter?.fetchManagerAuthorization) {
+    if (isEnvAdminCached) {
+      if (Number(cachedSession.expiresAt) <= Date.now()) {
+        activeSessions.delete(tokenHash);
+      } else {
+        session = cachedSession;
+      }
+    } else if (useDbAuth) {
       try {
         const authData = await store.adapter.fetchManagerAuthorization(tokenHash);
-        if (authData?.ok && authData.session) {
-          session = authData.session;
-          activeSessions.set(tokenHash, session);
+        const dbSession = authData?.ok ? authData.session : null;
+        const dbUser = authData?.ok ? authData.user : null;
+
+        if (dbSession && Number(dbSession.expiresAt) > Date.now()) {
+          if (dbSession.role === 'admin') {
+            session = dbSession;
+            activeSessions.set(tokenHash, session);
+          } else if (
+            dbUser &&
+            String(dbUser.status || '').toLowerCase() !== 'disabled' &&
+            (!dbUser.id || !dbSession.userId || String(dbUser.id) === String(dbSession.userId)) &&
+            (!dbUser.username || !dbSession.username || String(dbUser.username).toLowerCase() === String(dbSession.username).toLowerCase())
+          ) {
+            const candidate = { ...dbSession };
+            applyFreshAccessToSession(candidate, dbUser);
+
+            if (typeof store.getAccess === 'function') {
+              try {
+                const userRec = await store.getAccess(candidate.userId, { bypassCache: true });
+                const idMismatch = Boolean(
+                  userRec &&
+                  candidate.userId &&
+                  userRec.userId &&
+                  String(candidate.userId).startsWith('usr_') &&
+                  String(userRec.userId) !== String(candidate.userId)
+                );
+                if (!userRec || idMismatch || String(userRec.status || '').toLowerCase() === 'disabled') {
+                  session = null;
+                } else {
+                  applyFreshAccessToSession(candidate, userRec);
+                  session = candidate;
+                }
+              } catch (_) {
+                session = null;
+              }
+            } else {
+              session = candidate;
+            }
+          }
         }
-      } catch (_) {}
+      } catch (_) {
+        session = null;
+      }
+
+      if (session) {
+        activeSessions.set(tokenHash, session);
+      } else {
+        activeSessions.delete(tokenHash);
+        if (typeof store.invalidateCache === 'function') store.invalidateCache();
+      }
+    } else if (cachedSession) {
+      if (Number(cachedSession.expiresAt) <= Date.now()) {
+        activeSessions.delete(tokenHash);
+      } else if (cachedSession.role === 'admin' && !String(cachedSession.userId || '').toLowerCase().startsWith('usr_')) {
+        session = cachedSession;
+      } else if (typeof store.getAccess === 'function') {
+        try {
+          const userRec = await store.getAccess(cachedSession.userId, { bypassCache: true });
+          const idMismatch = Boolean(
+            userRec &&
+            cachedSession.userId &&
+            userRec.userId &&
+            String(cachedSession.userId).startsWith('usr_') &&
+            String(userRec.userId) !== String(cachedSession.userId)
+          );
+          if (!userRec || idMismatch || String(userRec.status || '').toLowerCase() === 'disabled') {
+            activeSessions.delete(tokenHash);
+            if (typeof store.invalidateCache === 'function') store.invalidateCache();
+            session = null;
+          } else {
+            applyFreshAccessToSession(cachedSession, userRec);
+            session = cachedSession;
+          }
+        } catch (_) {
+          activeSessions.delete(tokenHash);
+          session = null;
+        }
+      } else {
+        session = cachedSession;
+      }
     }
 
     if (session) {
-      if (Number(session.expiresAt) <= Date.now()) {
-        activeSessions.delete(tokenHash);
-      } else {
-        if (session.userId && session.role !== 'admin' && typeof store.getAccess === 'function') {
-          try {
-            const userRec = await store.getAccess(session.userId);
-            if (userRec) {
-              const freshAssigned = Array.isArray(userRec.workerIds) && userRec.workerIds.length
-                ? userRec.workerIds
-                : (Array.isArray(userRec.assignedBotIds) ? userRec.assignedBotIds : []);
-              session.assignedBotIds = freshAssigned.map(String);
-              if (userRec.status) session.status = userRec.status;
-              if (userRec.expiresAt) session.expiresAtRental = userRec.expiresAt;
-              if (userRec.role) session.role = userRec.role;
-            }
-          } catch (_) {}
-        }
-        req.managerAuthSession = session;
-      }
+      req.managerAuthSession = session;
     }
     next();
   });
@@ -333,7 +446,8 @@ function createApp({
     fleetOperations,
     adminNotifier,
     config,
-    logger
+    logger,
+    invalidateUserSessions
   });
   app.use('/api/manager', adminRouter);
 
