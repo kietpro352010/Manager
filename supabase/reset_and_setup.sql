@@ -95,13 +95,15 @@ END $$;
 COMMIT;
 
 -- ============================================================================
--- PHẦN 2: THIẾT LẬP TOÀN BỘ SCHEMA CHUẨN THEO MANAGER (26 BẢNG, 4 VIEWS, 50 RPCS)
+-- PHẦN 2: THIẾT LẬP TOÀN BỘ SCHEMA CHUẨN THEO MANAGER (27 BẢNG, 4 VIEWS, 51 RPCS)
 -- ============================================================================
+
+BEGIN;
 
 -- KingMC Bot Manager storage contract, aligned with manager.js and bot.js.
 -- Safe to run more than once. Keeps legacy columns/rows and adds the current API schema.
 --
--- SCHEMA VERSION: 2026-10-30-v11.9 (Audit V4 Master Directive)
+-- SCHEMA VERSION: 2026-11-12-v12.0 (Unified Reconciled Canonical Schema)
 --   - Link4M RPC chỉ chặn user 'disabled'; user 'expired' ĐƯỢC vượt link để hồi sinh.
 --   - claim_manager_link4m_reward revive 'expired' -> 'active' ATOMIC (cùng UPDATE với
 --     expires_at), chỉ chạy sau khi attempt đã được xác minh (token/status/expiry).
@@ -111,7 +113,13 @@ COMMIT;
 --   riêng BUG-09: khôi phục guard chặn trạng thái khác active ở cả hai RPC và bỏ dòng
 --   `status = CASE WHEN v_user.status = 'expired' ...` trong UPDATE manager_users của claim.
 --
-BEGIN;
+CREATE TABLE IF NOT EXISTS public.manager_schema_migrations (
+  version text PRIMARY KEY,
+  applied_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE public.manager_schema_migrations ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.manager_schema_migrations FROM PUBLIC, anon, authenticated;
+GRANT ALL ON TABLE public.manager_schema_migrations TO service_role;
 
 CREATE TABLE IF NOT EXISTS public.manager_users (
   id text,
@@ -380,7 +388,7 @@ ALTER TABLE public.bot_settings ADD COLUMN IF NOT EXISTS updated_at timestamptz 
 
 CREATE OR REPLACE FUNCTION public.sync_bot_schedules_column()
 RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 BEGIN
   IF NEW.schedules IS NOT NULL AND (NEW.bot_schedules IS NULL OR NEW.bot_schedules = '[]'::jsonb) AND NEW.schedules <> '[]'::jsonb THEN
@@ -400,6 +408,7 @@ DROP TRIGGER IF EXISTS trg_sync_bot_schedules ON public.bot_settings;
 CREATE TRIGGER trg_sync_bot_schedules
 BEFORE INSERT OR UPDATE ON public.bot_settings
 FOR EACH ROW EXECUTE FUNCTION public.sync_bot_schedules_column();
+REVOKE ALL ON FUNCTION public.sync_bot_schedules_column() FROM PUBLIC, anon, authenticated;
 
 CREATE TABLE IF NOT EXISTS public.audit_logs (
   id text PRIMARY KEY,
@@ -562,7 +571,7 @@ ALTER TABLE public.manager_backups ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.manager_users, public.manager_keys, public.bot_registry,
   public.manager_sessions, public.bot_settings, public.audit_logs,
   public.bot_chat_logs, public.bot_event_logs, public.bot_position_state,
-  public.bot_position_logs, public.manager_backups FROM anon, authenticated;
+  public.bot_position_logs, public.manager_backups FROM PUBLIC, anon, authenticated;
 GRANT ALL ON public.manager_users, public.manager_keys, public.bot_registry,
   public.manager_sessions, public.bot_settings, public.audit_logs,
   public.bot_chat_logs, public.bot_event_logs, public.bot_position_state,
@@ -644,10 +653,6 @@ $$;
 REVOKE ALL ON FUNCTION public.record_bot_position_change(text,text,timestamptz,jsonb,text,text,text,text,double precision) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.record_bot_position_change(text,text,timestamptz,jsonb,text,text,text,text,double precision) TO service_role;
 
-COMMIT;
-
-BEGIN;
-
 CREATE TABLE IF NOT EXISTS public.manager_locks (
   lock_key text PRIMARY KEY,
   owner_id text NOT NULL,
@@ -687,7 +692,7 @@ CREATE OR REPLACE FUNCTION public.acquire_manager_lock(
   p_owner_id text,
   p_lease_seconds integer DEFAULT 900
 ) RETURNS jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_lease_interval interval;
@@ -731,7 +736,7 @@ $$;
 
 CREATE OR REPLACE FUNCTION public.release_manager_lock(p_lock_key text, p_owner_id text)
 RETURNS boolean
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 DECLARE affected integer;
 BEGIN
@@ -746,7 +751,7 @@ CREATE OR REPLACE FUNCTION public.renew_manager_lock(
   p_owner_id text,
   p_lease_seconds integer DEFAULT 900
 ) RETURNS boolean
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 DECLARE affected integer;
 BEGIN
@@ -764,7 +769,7 @@ CREATE OR REPLACE FUNCTION public.verify_manager_lock_fencing(
   p_owner_id text,
   p_fencing_token bigint
 ) RETURNS boolean
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_valid boolean := false;
@@ -786,7 +791,7 @@ CREATE OR REPLACE FUNCTION public.patch_manager_registry(
   p_pending_reset_patch jsonb DEFAULT '{}'::jsonb,
   p_pending_reset_deletes text[] DEFAULT '{}'::text[]
 ) RETURNS jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_data jsonb;
@@ -814,7 +819,7 @@ CREATE OR REPLACE FUNCTION public.set_bot_log_clear_cutoff(
   p_kind text,
   p_cutoff timestamptz
 ) RETURNS jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 DECLARE v_cutoff timestamptz;
 BEGIN
@@ -842,7 +847,7 @@ $$;
 
 CREATE OR REPLACE FUNCTION public.reject_cleared_bot_log()
 RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 DECLARE v_cutoff timestamptz;
 BEGIN
@@ -867,7 +872,7 @@ FOR EACH ROW EXECUTE FUNCTION public.reject_cleared_bot_log();
 
 CREATE OR REPLACE FUNCTION public.consume_manager_key_usage(p_code text, p_username text, p_transaction_id text)
 RETURNS jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_key public.manager_keys%ROWTYPE;
@@ -964,12 +969,6 @@ GRANT EXECUTE ON FUNCTION public.patch_manager_registry(jsonb,jsonb,text[]) TO s
 GRANT EXECUTE ON FUNCTION public.set_bot_log_clear_cutoff(text,text,timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.consume_manager_key_usage(text,text,text) TO service_role;
 
-COMMIT;
-
-NOTIFY pgrst, 'reload schema';
-
-BEGIN;
-
 -- User entitlement fields were previously accepted by Manager but not persisted.
 ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS allow_account_change boolean NOT NULL DEFAULT true;
 ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS lock_reason text NOT NULL DEFAULT '';
@@ -1013,7 +1012,7 @@ GRANT SELECT ON TABLE public.manager_users TO service_role;
 
 CREATE OR REPLACE FUNCTION public.bump_manager_users_revision()
 RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 BEGIN
   UPDATE public.manager_user_state
@@ -1030,7 +1029,7 @@ FOR EACH STATEMENT EXECUTE FUNCTION public.bump_manager_users_revision();
 
 CREATE OR REPLACE FUNCTION public.reject_revoked_manager_session()
 RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 BEGIN
   IF EXISTS (
@@ -1050,7 +1049,7 @@ FOR EACH ROW EXECUTE FUNCTION public.reject_revoked_manager_session();
 
 CREATE OR REPLACE FUNCTION public.read_manager_users_snapshot()
 RETURNS jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_result jsonb;
@@ -1076,7 +1075,7 @@ $$;
 
 CREATE OR REPLACE FUNCTION public.read_manager_session(p_token_hash text)
 RETURNS jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 DECLARE v_session jsonb;
 BEGIN
@@ -1097,7 +1096,7 @@ $$;
 
 CREATE OR REPLACE FUNCTION public.read_manager_authorization(p_token_hash text)
 RETURNS jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_session public.manager_sessions%ROWTYPE;
@@ -1135,7 +1134,7 @@ $$;
 
 CREATE OR REPLACE FUNCTION public.revoke_manager_session(p_token_hash text)
 RETURNS boolean
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 BEGIN
   IF COALESCE(btrim(p_token_hash), '') = '' THEN RETURN false; END IF;
@@ -1151,7 +1150,7 @@ CREATE OR REPLACE FUNCTION public.create_manager_user_session(
   p_expected_revision bigint,
   p_session jsonb
 ) RETURNS jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_revision bigint;
@@ -1202,7 +1201,7 @@ CREATE OR REPLACE FUNCTION public.apply_manager_users_snapshot_locked(
   p_users jsonb,
   p_allow_empty boolean DEFAULT false
 ) RETURNS jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_revision bigint;
@@ -1355,7 +1354,7 @@ CREATE OR REPLACE FUNCTION public.save_manager_users_snapshot(
   p_users jsonb,
   p_allow_empty boolean DEFAULT false
 ) RETURNS jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_existing public.manager_users_write_transactions%ROWTYPE;
@@ -1384,7 +1383,7 @@ $$;
 
 CREATE OR REPLACE FUNCTION public.insert_manager_users_if_absent(p_users jsonb)
 RETURNS jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_user jsonb;
@@ -1497,7 +1496,7 @@ CREATE OR REPLACE FUNCTION public.redeem_manager_key_and_save_users(
   p_users jsonb,
   p_allow_empty boolean DEFAULT false
 ) RETURNS jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_key public.manager_keys%ROWTYPE;
@@ -1595,9 +1594,9 @@ GRANT EXECUTE ON FUNCTION public.insert_manager_users_if_absent(jsonb) TO servic
 GRANT EXECUTE ON FUNCTION public.redeem_manager_key_and_save_users(text,text,text,bigint,jsonb,boolean) TO service_role;
 
 -- Compatibility views for alternative table names & aliases
-CREATE OR REPLACE VIEW public.manager_audit AS SELECT * FROM public.audit_logs;
-CREATE OR REPLACE VIEW public.backups AS SELECT * FROM public.manager_backups;
-CREATE OR REPLACE VIEW public.system_settings AS
+CREATE OR REPLACE VIEW public.manager_audit WITH (security_invoker = true) AS SELECT * FROM public.audit_logs;
+CREATE OR REPLACE VIEW public.backups WITH (security_invoker = true) AS SELECT * FROM public.manager_backups;
+CREATE OR REPLACE VIEW public.system_settings WITH (security_invoker = true) AS
 SELECT
   id,
   (data->'systemSettings') AS settings,
@@ -1605,7 +1604,7 @@ SELECT
 FROM public.bot_registry
 WHERE id = 'default';
 
-CREATE OR REPLACE VIEW public.bot_schedules AS
+CREATE OR REPLACE VIEW public.bot_schedules WITH (security_invoker = true) AS
 SELECT
   bot_id,
   COALESCE(bot_schedules, schedules) AS schedules,
@@ -1616,7 +1615,7 @@ GRANT ALL ON public.manager_audit TO service_role;
 GRANT ALL ON public.backups TO service_role;
 GRANT ALL ON public.system_settings TO service_role;
 GRANT ALL ON public.bot_schedules TO service_role;
-REVOKE ALL ON public.manager_audit, public.backups, public.system_settings, public.bot_schedules FROM anon, authenticated;
+REVOKE ALL ON public.manager_audit, public.backups, public.system_settings, public.bot_schedules FROM PUBLIC, anon, authenticated;
 
 
 
@@ -2184,7 +2183,6 @@ CREATE TABLE IF NOT EXISTS public.manager_workers (
   created_at timestamptz DEFAULT now(),
   updated_at timestamptz DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_manager_workers_enabled ON public.manager_workers(enabled);
 ALTER TABLE public.manager_workers ADD COLUMN IF NOT EXISTS bot_number integer;
 CREATE INDEX IF NOT EXISTS idx_manager_workers_enabled ON public.manager_workers(enabled);
 CREATE INDEX IF NOT EXISTS idx_manager_workers_bot_number ON public.manager_workers(bot_number);
@@ -2224,7 +2222,7 @@ CREATE TABLE IF NOT EXISTS public.manager_commands (
   delivered_at timestamptz,
   completed_at timestamptz
 );
-DO 
+DO $$
 BEGIN
   IF EXISTS (
     SELECT 1
@@ -2239,7 +2237,28 @@ BEGIN
       USING command_id::text;
   END IF;
 END
-;
+$$;
+
+ALTER TABLE public.manager_commands DROP CONSTRAINT IF EXISTS manager_commands_action_check;
+ALTER TABLE public.manager_commands ADD CONSTRAINT manager_commands_action_check
+  CHECK (action IN (
+    'start', 'stop', 'restart', 'resume', 'status', 'chat', 'reset', 'set-afk-mode', 'set-proxy',
+    'reconnect', 'respawn', 'inventory', 'look', 'toss', 'window_click', 'window_close'
+  ))
+  NOT VALID;
+
+ALTER TABLE public.manager_commands DROP CONSTRAINT IF EXISTS manager_commands_status_check;
+ALTER TABLE public.manager_commands ADD CONSTRAINT manager_commands_status_check
+  CHECK (status IN (
+    'queued',
+    'delivered',
+    'execution_completed',
+    'state_sync_pending',
+    'state_sync_failed',
+    'completed',
+    'failed',
+    'expired'
+  ));
 CREATE INDEX IF NOT EXISTS idx_manager_commands_worker_status ON public.manager_commands(worker_id, status);
 CREATE INDEX IF NOT EXISTS idx_manager_commands_expires ON public.manager_commands(expires_at);
 CREATE INDEX IF NOT EXISTS idx_manager_commands_state_sync ON public.manager_commands(created_at ASC) WHERE status IN ('execution_completed', 'state_sync_pending');
@@ -2308,6 +2327,7 @@ BEGIN
   UPDATE public.manager_workers
   SET settings = '{}'::jsonb,
       status = '{"state":"offline","online":false}'::jsonb,
+      events = '[]'::jsonb,
       last_event = NULL,
       updated_at = now()
   WHERE worker_id = p_worker_id;
@@ -2329,13 +2349,23 @@ AS $append_evt$
 BEGIN
   UPDATE public.manager_workers
   SET last_event = p_event,
-      events = CASE
-        WHEN jsonb_typeof(events) = 'array' THEN (events || p_event)
-        ELSE jsonb_build_array(p_event)
-      END,
+      events = (
+        SELECT COALESCE(jsonb_agg(item ORDER BY ordinal), '[]'::jsonb)
+        FROM (
+          SELECT item, ordinal
+          FROM jsonb_array_elements(
+            CASE
+              WHEN jsonb_typeof(events) = 'array' THEN (events || jsonb_build_array(p_event))
+              ELSE jsonb_build_array(p_event)
+            END
+          ) WITH ORDINALITY AS appended(item, ordinal)
+          ORDER BY ordinal DESC
+          LIMIT 100
+        ) tail
+      ),
       updated_at = now()
   WHERE worker_id = p_worker_id;
-  RETURN true;
+  RETURN FOUND;
 END;
 $append_evt$;
 REVOKE ALL ON FUNCTION public.manager_append_worker_event(text, jsonb) FROM PUBLIC, anon, authenticated;
@@ -2395,6 +2425,12 @@ DECLARE
   v_existing public.manager_commands;
   v_row public.manager_commands;
 BEGIN
+  UPDATE public.manager_commands
+  SET status = 'expired'
+  WHERE worker_id = p_worker_id
+    AND status = 'queued'
+    AND expires_at <= now();
+
   IF p_allow_coalesce THEN
     PERFORM pg_advisory_xact_lock(hashtext(p_worker_id || ':' || p_action));
 
@@ -2449,7 +2485,7 @@ DECLARE
   v_updated integer := 0;
 BEGIN
   UPDATE public.manager_commands
-  SET status = 'completed',
+  SET status = CASE WHEN COALESCE(p_result->>'ok', 'true') = 'false' THEN 'failed' ELSE 'completed' END,
       result = COALESCE(p_result, '{}'::jsonb),
       completed_at = now()
   WHERE command_id = p_command_id
@@ -3105,6 +3141,67 @@ $set_access$;
 REVOKE ALL ON FUNCTION public.manager_set_user_access(text, jsonb, text[], text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.manager_set_user_access(text, jsonb, text[], text) TO service_role;
 
+DROP FUNCTION IF EXISTS public.manager_delete_user_access(text);
+CREATE OR REPLACE FUNCTION public.manager_delete_user_access(
+  p_user_id text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $del_access$
+DECLARE
+  v_clean text := trim(COALESCE(p_user_id, ''));
+  v_lower text := lower(v_clean);
+  v_bare text := CASE WHEN left(v_lower, 4) = 'usr_' THEN substring(v_lower FROM 5) ELSE v_lower END;
+  v_user public.manager_users;
+  v_candidates text[];
+  v_deleted integer := 0;
+BEGIN
+  IF v_clean = '' THEN
+    RETURN jsonb_build_object('ok', true, 'deleted', false, 'userId', '');
+  END IF;
+
+  SELECT * INTO v_user
+  FROM public.manager_users
+  WHERE id = v_clean
+     OR lower(username) = v_lower
+     OR lower(username) = v_bare
+  FOR UPDATE
+  LIMIT 1;
+
+  v_candidates := ARRAY(
+    SELECT DISTINCT val
+    FROM unnest(ARRAY[v_clean, v_lower, v_bare, v_user.id, v_user.username, lower(COALESCE(v_user.username, ''))]) AS val
+    WHERE val IS NOT NULL AND val <> ''
+  );
+
+  DELETE FROM public.manager_assignments
+  WHERE user_id = ANY(v_candidates);
+
+  DELETE FROM public.manager_discord_links
+  WHERE manager_user_id = ANY(v_candidates)
+     OR lower(username) = ANY(v_candidates);
+
+  IF to_regclass('public.manager_access') IS NOT NULL THEN
+    EXECUTE 'DELETE FROM public.manager_access WHERE user_id = ANY($1)' USING v_candidates;
+  END IF;
+
+  DELETE FROM public.manager_users
+  WHERE id = ANY(v_candidates)
+     OR lower(username) = ANY(v_candidates);
+  GET DIAGNOSTICS v_deleted = ROW_COUNT;
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'deleted', v_deleted > 0,
+    'userId', COALESCE(NULLIF(v_user.id, ''), v_clean)
+  );
+END;
+$del_access$;
+REVOKE ALL ON FUNCTION public.manager_delete_user_access(text) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.manager_delete_user_access(text) TO service_role;
+
 CREATE OR REPLACE FUNCTION public.manager_redeem_code_with_access(
   p_code_hash text,
   p_user_id text,
@@ -3591,6 +3688,18 @@ $unlink_discord$;
 REVOKE ALL ON FUNCTION public.manager_unlink_discord_account(text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.manager_unlink_discord_account(text) TO service_role;
 
+-- Record unified migration & prior historical checkpoints idempotently
+INSERT INTO public.manager_schema_migrations (version)
+VALUES
+  ('20261107_manager_schema'),
+  ('20261108000000_durable_worker_commands'),
+  ('20261109000000_atomic_entitlement_rewards'),
+  ('20261110000000_atomic_worker_settings'),
+  ('20261111000000_worker_reset_data'),
+  ('20261111120000_command_two_phase_sync'),
+  ('20261112000000_reconcile_full_manager_schema')
+ON CONFLICT (version) DO NOTHING;
 
 COMMIT;
+
 NOTIFY pgrst, 'reload schema';

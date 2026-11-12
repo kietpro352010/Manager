@@ -194,7 +194,7 @@ class SupabaseDashboardStore {
       const now = new Date().toISOString();
       const auditCutoff = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString();
       await Promise.allSettled([
-        this.client.from(AUDIT).delete().lt('created_at', auditCutoff),
+        this.client.from(AUDIT_LOGS).delete().lt('timestamp', auditCutoff),
         this.client.from(LINK_ATTEMPTS).delete().lt('purge_at', now)
       ]);
     } catch (_) {}
@@ -435,32 +435,51 @@ class SupabaseDashboardStore {
   async removeAccess(userId) {
     this.invalidateCache();
     const clean = String(userId || '').trim();
+    if (!clean) return false;
+
+    if (typeof this.client?.rpc === 'function') {
+      const { data, error } = await this.client.rpc('manager_delete_user_access', { p_user_id: clean });
+      if (!error) {
+        const res = unwrapRpc(data);
+        return Boolean(res?.deleted ?? res === true);
+      }
+      if (!isMissingRpcError(error) && !isMissingSchemaError(error)) {
+        throw error;
+      }
+    }
+
     const lower = clean.toLowerCase();
     const bare = lower.startsWith('usr_') ? lower.slice(4) : lower;
+    let deletedAny = false;
+
+    const assignQ = this.client.from(ASSIGNMENTS).delete();
+    const candidates = [...new Set([clean, lower, bare].filter(Boolean))];
+    if (candidates.length > 1 && typeof assignQ.in === 'function') {
+      await assignQ.in('user_id', candidates);
+    } else {
+      await assignQ.eq('user_id', clean);
+    }
+
     try {
-      const q = this.client.from(USERS).delete();
-      if (typeof q.or === 'function') {
-        await q.or(`id.eq.${clean},username.eq.${lower},username.eq.${bare}`);
-      } else {
-        await q.eq('id', clean);
+      const userQ = this.client.from(USERS).delete();
+      const userRes = typeof userQ.or === 'function'
+        ? await userQ.or(`id.eq.${clean},username.eq.${lower},username.eq.${bare}`).select('username')
+        : await userQ.eq('id', clean).select('username');
+      if (userRes?.error && !isMissingSchemaError(userRes.error) && String(userRes.error.code || '') !== '42501') {
+        throw userRes.error;
       }
-    } catch (_) {}
-    try {
-      const q = this.client.from(ASSIGNMENTS).delete();
-      const candidates = [...new Set([clean, lower, bare].filter(Boolean))];
-      if (candidates.length > 1 && typeof q.in === 'function') {
-        await q.in('user_id', candidates);
-      } else {
-        await q.eq('user_id', clean);
-      }
-    } catch (_) {}
-    try {
-      const { data, error } = await this.client.from(ACCESS).delete().eq('user_id', userId).select('user_id');
-      if (error && !isMissingSchemaError(error) && String(error.code || '') !== '42501') throw error;
-      return Boolean(data?.length);
+      if (userRes?.data?.length) deletedAny = true;
     } catch (err) {
-      if (!isMissingSchemaError(err) && String(err.code || '') !== '42501') throw err;
-      return false;
+      if (!isMissingSchemaError(err) && String(err?.code || '') !== '42501') throw err;
+    }
+
+    try {
+      const { data, error } = await this.client.from(ACCESS).delete().eq('user_id', clean).select('user_id');
+      if (error && !isMissingSchemaError(error) && String(error.code || '') !== '42501') throw error;
+      return deletedAny || Boolean(data?.length);
+    } catch (err) {
+      if (!isMissingSchemaError(err) && String(err?.code || '') !== '42501') throw err;
+      return deletedAny;
     }
   }
 
@@ -1037,10 +1056,17 @@ class SupabaseDashboardStore {
   // --------------------------------------------------------------------------
   async createKey(record) {
     this.invalidateCache();
+    const row = mapTo(record, KEY_FIELDS);
+    if (!row.id && row.key_id) row.id = row.key_id;
+    if (!row.key_id && row.id) row.key_id = row.id;
     if (this.adapter && typeof this.adapter.insertKeys === 'function') {
-      return await this.adapter.insertKeys([record]);
+      return await this.adapter.insertKeys([{
+        ...(record || {}),
+        id: record?.id || row.id,
+        keyId: record?.keyId || row.key_id
+      }]);
     }
-    const { error } = await this.client.from(KEYS).insert(mapTo(record, KEY_FIELDS));
+    const { error } = await this.client.from(KEYS).insert(row);
     if (error) throw error;
   }
 
@@ -1194,17 +1220,31 @@ class SupabaseDashboardStore {
   // AUDIT LOGS
   // --------------------------------------------------------------------------
   async addAudit(entry) {
+    const auditId = String(entry.id || ('audit_' + crypto.randomUUID()));
     if (this.adapter && typeof this.adapter.insertAuditLog === 'function') {
       return await this.adapter.insertAuditLog({
-        actorUsername: entry.actorId || 'system',
+        id: auditId,
+        actor: { username: entry.actorId || 'system', role: entry.actorRole || 'system', ip: entry.actorIp || '127.0.0.1' },
         action: entry.action,
+        actionLabel: entry.actionLabel || entry.action,
+        target: typeof entry.target === 'object' ? (entry.target || {}) : { raw: String(entry.target || '') },
         details: typeof entry.details === 'object' ? JSON.stringify(entry.details) : String(entry.details || ''),
-        status: 'SUCCESS'
+        status: entry.status || 'SUCCESS',
+        timestamp: new Date().toISOString()
       });
     }
-    const { error } = await this.client.from(AUDIT).insert({
-      actor_id: entry.actorId || null, action: String(entry.action || 'unknown').slice(0, 80),
-      target: String(entry.target || '').slice(0, 160), details: entry.details || {}, created_at: new Date().toISOString()
+    const nowIso = new Date().toISOString();
+    const { error } = await this.client.from(AUDIT_LOGS).insert({
+      id: auditId,
+      log_type: 'SYSTEM',
+      category: 'SYSTEM',
+      actor_username: entry.actorId || 'system',
+      action: String(entry.action || 'unknown').slice(0, 80),
+      action_label: String(entry.action || 'unknown').slice(0, 80),
+      target: typeof entry.target === 'object' ? (entry.target || {}) : { raw: String(entry.target || '').slice(0, 160) },
+      details: typeof entry.details === 'object' ? JSON.stringify(entry.details) : String(entry.details || ''),
+      status: 'SUCCESS',
+      timestamp: nowIso
     });
     if (error && error.code !== '42P01') throw error;
   }
@@ -1212,19 +1252,38 @@ class SupabaseDashboardStore {
   async listAudit(limit = 100) {
     if (this.adapter && typeof this.adapter.fetchAuditLogs === 'function') {
       const res = await this.adapter.fetchAuditLogs({ limit });
-      if (res && Array.isArray(res.entries)) {
-        return res.entries.map((e) => ({
-          actorId: e.actor_username,
+      const rows = Array.isArray(res?.logs) ? res.logs : (Array.isArray(res?.entries) ? res.entries : null);
+      if (rows) {
+        return rows.map((e) => ({
+          id: e.id || null,
+          actorId: e.actor?.username || e.actor_username || 'system',
           action: e.action,
-          target: e.target ? JSON.stringify(e.target) : '',
+          target: typeof e.target === 'string' ? e.target : JSON.stringify(e.target || ''),
           details: e.details,
-          createdAt: e.timestamp
+          createdAt: e.timestamp || e.created_at
         }));
       }
     }
-    const { data, error } = await this.client.from(AUDIT).select('actor_id,action,target,details,created_at').order('created_at', { ascending: false }).limit(limit);
+    const { data, error } = await this.client.from(AUDIT_LOGS).select('id,actor_username,action,target,details,timestamp').order('timestamp', { ascending: false }).limit(limit);
     if (error && error.code !== '42P01') throw error;
-    return (data || []).map((row) => ({ actorId: row.actor_id, action: row.action, target: row.target, details: row.details, createdAt: row.created_at }));
+    return (data || []).map((row) => ({
+      id: row.id || null,
+      actorId: row.actor_username ?? row.actor_id,
+      action: row.action,
+      target: typeof row.target === 'string' ? row.target : JSON.stringify(row.target || ''),
+      details: row.details,
+      createdAt: row.timestamp ?? row.created_at
+    }));
+  }
+
+  async clearAuditLogs() {
+    if (this.adapter && typeof this.adapter.clearAuditLogs === 'function') {
+      const ok = await this.adapter.clearAuditLogs();
+      if (ok) return true;
+    }
+    const { error } = await this.client.from(AUDIT_LOGS).delete().neq('id', '');
+    if (error && error.code !== '42P01') throw error;
+    return true;
   }
 
   // --------------------------------------------------------------------------

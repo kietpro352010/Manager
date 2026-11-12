@@ -260,6 +260,7 @@ class Link4mService {
     await this.store.createLinkAttempt({
       attemptId,
       userId,
+      username: member.username || userId,
       tokenHash: sha256(nonce),
       rewardHours,
       status: 'pending',

@@ -268,17 +268,34 @@ class EntitlementService {
     // 5. Nếu thiếu bot so với hạn ngạch của key, đẩy vào hàng đợi cấp phát tự động
     const missingWorkers = Math.max(0, targetCount - desired.length);
     if (missingWorkers > 0) {
-      await this.store.client?.from?.('manager_pending_allocations')?.insert?.({
-        id: `alloc_${crypto.randomUUID()}`,
-        user_id: cleanUserId,
-        username: member?.username || cleanUserId,
-        required_bot_count: missingWorkers,
-        status: 'pending_retry',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      }).catch((err) => {
-        this.logger?.warn('enqueue_pending_allocation_failed', { userId: cleanUserId, error: err.message });
-      });
+      const nowIso = new Date().toISOString();
+      const allocUsername = String(member?.username || cleanUserId).trim().toLowerCase();
+      if (this.store.adapter && typeof this.store.adapter.savePendingAllocation === 'function') {
+        await this.store.adapter.savePendingAllocation({
+          id: `alloc_${crypto.randomUUID()}`,
+          username: allocUsername,
+          targetBotCount: targetCount,
+          currentAssigned: desired.length,
+          missingBotCount: missingWorkers,
+          status: 'pending_retry',
+          createdAt: nowIso
+        }).catch((err) => {
+          this.logger?.warn('enqueue_pending_allocation_failed', { userId: cleanUserId, error: err.message });
+        });
+      } else {
+        await this.store.client?.from?.('manager_pending_allocations')?.insert?.({
+          id: `alloc_${crypto.randomUUID()}`,
+          username: allocUsername,
+          target_bot_count: targetCount,
+          current_assigned: desired.length,
+          missing_bot_count: missingWorkers,
+          status: 'pending_retry',
+          created_at: nowIso,
+          updated_at: nowIso
+        }).catch((err) => {
+          this.logger?.warn('enqueue_pending_allocation_failed', { userId: cleanUserId, error: err.message });
+        });
+      }
     }
 
     this.logger?.info('key_redeemed_success', {

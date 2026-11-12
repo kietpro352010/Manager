@@ -13,8 +13,23 @@ permissions:
 
 jobs:
   test:
-    name: Node 20 Syntax & Test Suite
+    name: Node 20 Syntax, Unit & Real PostgreSQL 16 Suite
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: pg_ci_password
+          POSTGRES_DB: manager_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d manager_ci"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
 
     steps:
       - name: Checkout repository
@@ -38,10 +53,10 @@ jobs:
       - name: Run services wiring tests
         run: node tests/services-wiring.test.js
 
-      - name: Run storage SQL tests (if present)
-        run: |
-          if [ -f tests/storage-sql.test.js ]; then
-            node tests/storage-sql.test.js
-          else
-            echo "tests/storage-sql.test.js not present; skipping."
-          fi
+      - name: Run storage SQL & contract tests
+        run: node tests/storage-sql.test.js
+
+      - name: Run real PostgreSQL 16 integration & concurrency suite
+        env:
+          DATABASE_URL: postgres://postgres:pg_ci_password@127.0.0.1:5432/manager_ci
+        run: node tests/postgres-real.test.js

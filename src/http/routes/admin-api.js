@@ -275,8 +275,11 @@ function createAdminApi({
 
   router.post('/audit-logs/clear', async (req, res) => {
     try {
-      if (store.client) {
-        await store.client.from('manager_audit').delete().neq('id', 0);
+      if (typeof store.clearAuditLogs === 'function') {
+        await store.clearAuditLogs();
+      } else if (store.client) {
+        const { error } = await store.client.from('audit_logs').delete().neq('id', '');
+        if (error) throw error;
       }
       return res.json({ ok: true, message: 'Đã xóa toàn bộ nhật ký kiểm toán.' });
     } catch (error) {

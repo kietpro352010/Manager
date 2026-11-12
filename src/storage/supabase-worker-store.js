@@ -114,7 +114,12 @@ class SupabaseWorkerStore {
     } catch (_) {}
 
     // Fallback: reset settings về rỗng
-    await this.update(workerId, { settings: {}, status: 'offline', lastEvent: null });
+    await this.update(workerId, {
+      settings: {},
+      status: { state: 'offline', online: false },
+      events: [],
+      lastEvent: null
+    });
   }
 
   async remove(workerId) {

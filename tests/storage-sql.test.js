@@ -3,8 +3,11 @@
 const assert = require('node:assert');
 const crypto = require('node:crypto');
 const schemaSql = require('../src/storage/schema-sql');
+const { SUPABASE_REQUIRED_TABLES } = require('../src/storage/supabase-client');
 const SupabaseDashboardStore = require('../src/storage/supabase-dashboard-store');
 const SupabaseCommandStore = require('../src/storage/supabase-command-store');
+const SupabaseWorkerStore = require('../src/storage/supabase-worker-store');
+const { EntitlementService } = require('../src/services/entitlement-service');
 
 function extractFunctionBlock(sql, fnName) {
   const marker = `CREATE OR REPLACE FUNCTION public.${fnName}(`;
@@ -412,6 +415,11 @@ function createTableBuilder(rowsFn, handlers = {}) {
     lte: (col, val) => {
       const prevMatches = builder._extraFilter;
       builder._extraFilter = (r) => (prevMatches ? prevMatches(r) : true) && r[col] <= val;
+      return builder;
+    },
+    neq: (col, val) => {
+      const prevMatches = builder._extraFilter;
+      builder._extraFilter = (r) => (prevMatches ? prevMatches(r) : true) && r[col] !== val;
       return builder;
     },
     maybeSingle: async () => {
@@ -1331,6 +1339,274 @@ async function testCommandStoreCmdUuidEndToEndContract() {
   console.log('✅ 6. cmd_<UUID> end-to-end RPC contract across SQL signatures verified.');
 }
 
+async function testReconciledSchemaAndRuntimeContracts() {
+  console.log('7. Checking reconciled SQL parity, security hardening & Phase 6 runtime fixes...');
+  const fs = require('node:fs');
+  const path = require('node:path');
+
+  // 7a. SUPABASE_REQUIRED_TABLES completeness
+  assert.strictEqual(SUPABASE_REQUIRED_TABLES.length, 26, 'Expected 26 runtime required tables');
+  for (const requiredTbl of [
+    'manager_assignments',
+    'manager_discord_links',
+    'manager_settings',
+    'manager_workers',
+    'manager_commands',
+    'audit_logs'
+  ]) {
+    assert.ok(SUPABASE_REQUIRED_TABLES.includes(requiredTbl), `Missing ${requiredTbl} in SUPABASE_REQUIRED_TABLES`);
+  }
+
+  // 7b. Cross-file object & hardening parity across all 4 reconciled SQL sources
+  const setupSql = fs.readFileSync(path.join(__dirname, '../supabase/setup.sql'), 'utf8');
+  const resetSetupSql = fs.readFileSync(path.join(__dirname, '../supabase/reset_and_setup.sql'), 'utf8');
+  const reconcileSql = fs.readFileSync(
+    path.join(__dirname, '../supabase/migrations/20261112000000_reconcile_full_manager_schema.sql'),
+    'utf8'
+  );
+
+  const canonicalFiles = [
+    ['src/storage/schema-sql.js', schemaSql],
+    ['supabase/setup.sql', setupSql],
+    ['supabase/reset_and_setup.sql', resetSetupSql],
+    ['supabase/migrations/20261112000000_reconcile_full_manager_schema.sql', reconcileSql]
+  ];
+
+  const extractSet = (text, regex) => new Set([...text.matchAll(regex)].map((m) => m[1].toLowerCase()));
+  const expectedViews = ['manager_audit', 'backups', 'system_settings', 'bot_schedules'];
+  const expectedMigrations = [
+    '20261107_manager_schema',
+    '20261108000000_durable_worker_commands',
+    '20261109000000_atomic_entitlement_rewards',
+    '20261110000000_atomic_worker_settings',
+    '20261111000000_worker_reset_data',
+    '20261111120000_command_two_phase_sync',
+    '20261112000000_reconcile_full_manager_schema'
+  ];
+
+  let refTables = null;
+  let refFuncs = null;
+
+  for (const [label, sqlText] of canonicalFiles) {
+    assert.ok(!/^\s*DO\s+(?!\$\$|\$[a-z0-9_]*\$)(?:DECLARE|BEGIN)\b/im.test(sqlText), `${label} contains malformed DO block without $$`);
+
+    // Duplicate index check on CREATE INDEX
+    const idxMatches = [...sqlText.matchAll(/CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:public\.)?([a-z0-9_]+)/gi)];
+    const seenIdx = new Set();
+    for (const m of idxMatches) {
+      const idxName = m[1].toLowerCase();
+      assert.ok(!seenIdx.has(idxName), `${label} declares duplicate index ${idxName}`);
+      seenIdx.add(idxName);
+    }
+
+    for (const viewName of expectedViews) {
+      const viewRe = new RegExp(`CREATE\\s+(?:OR\\s+REPLACE\\s+)?VIEW\\s+public\\.${viewName}\\s+WITH\\s*\\(\\s*security_invoker\\s*=\\s*true\\s*\\)`, 'i');
+      assert.match(sqlText, viewRe, `${label} must declare view ${viewName} with security_invoker = true`);
+    }
+
+    // Check every public function definition uses SECURITY DEFINER SET search_path = public, pg_temp
+    const fnHeaders = [...sqlText.matchAll(/CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\.([a-z0-9_]+)\s*\(([\s\S]*?)AS\s+\$/gi)];
+    assert.strictEqual(fnHeaders.length, 51, `${label} expected 51 public functions, got ${fnHeaders.length}`);
+    for (const match of fnHeaders) {
+      assert.match(match[2], /\bSECURITY\s+DEFINER\b/i, `${label} ${match[1]} must be SECURITY DEFINER`);
+      assert.match(match[2], /\bSET\s+search_path\s*=\s*public,\s*pg_temp\b/i, `${label} ${match[1]} must set search_path = public, pg_temp`);
+    }
+
+    const tables = extractSet(sqlText, /CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+public\.([a-z0-9_]+)/gi);
+    const funcs = extractSet(sqlText, /CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\.([a-z0-9_]+)\s*\(/gi);
+    assert.strictEqual(tables.size, 27, `${label} expected 27 base tables, got ${tables.size}`);
+    assert.strictEqual(funcs.size, 51, `${label} expected 51 unique function names, got ${funcs.size}`);
+
+    if (!refTables) {
+      refTables = tables;
+      refFuncs = funcs;
+    } else {
+      assert.deepStrictEqual([...tables].sort(), [...refTables].sort(), `${label} table set diverges from schema-sql.js`);
+      assert.deepStrictEqual([...funcs].sort(), [...refFuncs].sort(), `${label} function set diverges from schema-sql.js`);
+    }
+  }
+
+  for (const ver of expectedMigrations) {
+    assert.ok(reconcileSql.includes(`'${ver}'`), `Convergence migration must record ${ver} in manager_schema_migrations`);
+  }
+
+  // 7c. removeAccess RPC-first & fail-closed behavior
+  let rpcCalledWith = null;
+  const rpcStore = new SupabaseDashboardStore({
+    rpc: async (fn, params) => {
+      rpcCalledWith = { fn, params };
+      return { data: { deleted: true }, error: null };
+    },
+    from: () => { throw new Error('Should not hit direct tables when manager_delete_user_access succeeds'); }
+  });
+  assert.strictEqual(await rpcStore.removeAccess('usr_test1'), true);
+  assert.deepStrictEqual(rpcCalledWith, { fn: 'manager_delete_user_access', params: { p_user_id: 'usr_test1' } });
+
+  const nonMissingErrStore = new SupabaseDashboardStore({
+    rpc: async () => ({ data: null, error: { code: '42501', message: 'permission denied' } }),
+    from: () => { throw new Error('Must not swallow 42501 error into fallback'); }
+  });
+  await assert.rejects(() => nonMissingErrStore.removeAccess('usr_test1'), { code: '42501', message: 'permission denied' });
+
+  const deletedTables = [];
+  const missingRpcFallbackStore = new SupabaseDashboardStore({
+    rpc: async () => ({ data: null, error: { code: 'PGRST202', message: 'Could not find function' } }),
+    from: (tbl) => createTableBuilder(() => [{ id: 'usr_test1', user_id: 'usr_test1', username: 'test1' }], {
+      onDelete: () => {
+        deletedTables.push(tbl);
+        return { data: [{ id: 'usr_test1', user_id: 'usr_test1', username: 'test1' }], error: null };
+      }
+    })
+  });
+  assert.strictEqual(await missingRpcFallbackStore.removeAccess('usr_test1'), true);
+  assert.ok(deletedTables.includes('manager_assignments'));
+  assert.ok(deletedTables.includes('manager_users'));
+
+  // 7d. Audit log adapter + direct table contract (audit_logs instead of manager_audit view)
+  let insertedAudit = null;
+  let clearedAudit = false;
+  const auditAdapterStore = new SupabaseDashboardStore({
+    from: () => { throw new Error('Adapter should handle audit calls when present'); },
+    adapter: {
+      insertAuditLog: async (entry) => { insertedAudit = entry; return true; },
+      fetchAuditLogs: async () => ({
+        logs: [{
+          id: 'aud_1',
+          actor: { username: 'admin1' },
+          action: 'RESET',
+          target: { workerId: '01' },
+          details: 'ok',
+          timestamp: '2026-11-12T00:00:00Z'
+        }]
+      }),
+      clearAuditLogs: async () => { clearedAudit = true; return true; }
+    }
+  });
+  await auditAdapterStore.addAudit({ actorId: 'admin1', action: 'RESET', target: { workerId: '01' } });
+  assert.match(insertedAudit.id, /^audit_/);
+  const logs = await auditAdapterStore.listAudit(10);
+  assert.strictEqual(logs.length, 1);
+  assert.strictEqual(logs[0].actorId, 'admin1');
+  assert.strictEqual(await auditAdapterStore.clearAuditLogs(), true);
+  assert.strictEqual(clearedAudit, true);
+
+  const touchedAuditTables = [];
+  const auditDirectStore = new SupabaseDashboardStore({
+    from: (tbl) => {
+      touchedAuditTables.push(tbl);
+      return createTableBuilder(() => [{
+        id: 'audit_direct_1',
+        actor_username: 'sysadmin',
+        action: 'LOGIN',
+        target: { ip: '127.0.0.1' },
+        details: 'ok',
+        timestamp: '2026-11-12T00:00:00Z'
+      }]);
+    }
+  });
+  await auditDirectStore.addAudit({ actorId: 'sysadmin', action: 'LOGIN', target: 'dashboard' });
+  const directLogs = await auditDirectStore.listAudit(10);
+  assert.strictEqual(directLogs.length, 1);
+  assert.strictEqual(await auditDirectStore.clearAuditLogs(), true);
+  assert.ok(touchedAuditTables.every((t) => t === 'audit_logs'), `Expected audit_logs only, saw ${touchedAuditTables.join(',')}`);
+
+  // 7e. EntitlementService pending allocation columns match manager_pending_allocations schema
+  let savedPendingJob = null;
+  const entStore = {
+    client: null,
+    adapter: { savePendingAllocation: async (job) => { savedPendingJob = job; return true; } },
+    getAccess: async () => ({ userId: 'usr_alice', username: 'alice', workerIds: [] }),
+    assignedUser: async () => null,
+    redeemKeyWithAccess: async () => true,
+    getKey: async () => ({ keyId: 'k_1', days: 30, botCount: 2, status: 'unused', maxUses: 1, usedCount: 0, workerIds: [] })
+  };
+  const entService = new EntitlementService({
+    store: entStore,
+    registry: { list: async () => [{ workerId: '01' }] },
+    accessControl: { memberFor: async () => ({ userId: 'usr_alice', username: 'alice', workerIds: [] }) },
+    logger: { warn: () => {}, info: () => {} },
+    userLock: { run: async (_k, fn) => await fn() }
+  });
+  await entService.redeem('usr_alice', 'KM-AAAA-BBBB-CCCC');
+  assert.ok(savedPendingJob, 'Expected pending allocation when bots < targetCount');
+  assert.strictEqual(savedPendingJob.username, 'alice');
+  assert.strictEqual(savedPendingJob.targetBotCount, 2);
+  assert.strictEqual(savedPendingJob.currentAssigned, 1);
+  assert.strictEqual(savedPendingJob.missingBotCount, 1);
+  assert.strictEqual(savedPendingJob.status, 'pending_retry');
+  assert.strictEqual(savedPendingJob.user_id, undefined);
+  assert.strictEqual(savedPendingJob.required_bot_count, undefined);
+
+  let directPendingRow = null;
+  const directEntService = new EntitlementService({
+    store: {
+      client: {
+        from: (tbl) => {
+          assert.strictEqual(tbl, 'manager_pending_allocations');
+          return {
+            insert: async (row) => {
+              directPendingRow = row;
+              return { data: [row], error: null };
+            }
+          };
+        }
+      },
+      adapter: null,
+      assignedUser: async () => null,
+      redeemKeyWithAccess: async () => true,
+      getKey: async () => ({ keyId: 'k_2', days: 30, botCount: 2, status: 'unused', maxUses: 1, usedCount: 0, workerIds: [] })
+    },
+    registry: { list: async () => [{ workerId: '01' }] },
+    accessControl: { memberFor: async () => ({ userId: 'usr_bob', username: 'bob', workerIds: [] }) },
+    logger: { warn: () => {}, info: () => {} },
+    userLock: { run: async (_k, fn) => await fn() }
+  });
+  await directEntService.redeem('usr_bob', 'KM-DDDD-EEEE-FFFF');
+  assert.ok(directPendingRow, 'Expected direct manager_pending_allocations insert when adapter is absent');
+  assert.strictEqual(directPendingRow.username, 'bob');
+  assert.strictEqual(directPendingRow.target_bot_count, 2);
+  assert.strictEqual(directPendingRow.current_assigned, 1);
+  assert.strictEqual(directPendingRow.missing_bot_count, 1);
+  assert.strictEqual(directPendingRow.status, 'pending_retry');
+  assert.strictEqual(directPendingRow.user_id, undefined);
+  assert.strictEqual(directPendingRow.required_bot_count, undefined);
+
+  // 7f. SupabaseWorkerStore.resetData fallback clears runtime columns cleanly
+  let workerResetPayload = null;
+  const workerStore = new SupabaseWorkerStore({
+    rpc: async () => ({ data: null, error: { code: 'PGRST202', message: 'missing rpc' } }),
+    from: (tbl) => ({
+      update: (payload) => {
+        if (tbl === 'manager_workers') workerResetPayload = payload;
+        return {
+          eq: () => ({
+            select: () => ({
+              maybeSingle: async () => ({
+                data: {
+                  worker_id: '01',
+                  name: 'Bot 01',
+                  settings: {},
+                  status: { state: 'offline', online: false },
+                  events: [],
+                  last_event: null
+                },
+                error: null
+              })
+            })
+          })
+        };
+      }
+    })
+  });
+  await workerStore.resetData('01');
+  assert.deepStrictEqual(workerResetPayload.settings, {});
+  assert.deepStrictEqual(workerResetPayload.status, { state: 'offline', online: false });
+  assert.deepStrictEqual(workerResetPayload.events, []);
+  assert.strictEqual(workerResetPayload.last_event, null);
+
+  console.log('✅ 7. Reconciled SQL parity, hardening & Phase 6 runtime contracts verified.');
+}
+
 (async () => {
   try {
     console.log('--- [STORAGE & SQL STRUCTURAL TESTS] ---');
@@ -1340,6 +1616,7 @@ async function testCommandStoreCmdUuidEndToEndContract() {
     await testLink4mAndSettingsParity();
     await testCommandStoreTwoPhaseSyncPersistence();
     await testCommandStoreCmdUuidEndToEndContract();
+    await testReconciledSchemaAndRuntimeContracts();
     console.log('🎉 ALL STORAGE & SQL TESTS PASSED 100%!');
   } catch (err) {
     console.error('❌ TEST FAILED:', err);

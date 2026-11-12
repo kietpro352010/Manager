@@ -23,7 +23,8 @@ const SUPABASE_REQUIRED_TABLES = Object.freeze([
   'manager_user_state', 'manager_users_write_transactions', 'manager_session_revocations',
   'manager_link4m_attempts', 'manager_outbox_queue', 'manager_pending_allocations',
   'manager_migration_entitlement_undo',
-  'manager_workers', 'manager_commands'
+  'manager_workers', 'manager_commands',
+  'manager_assignments', 'manager_discord_links', 'manager_settings'
 ]);
 
 function normalizeManagerRole(role) {
@@ -366,7 +367,7 @@ class SupabaseAdapter {
                 const defs = new Set(Object.keys(spec.definitions || {}));
                 const pathSet = new Set(normalizedPaths);
 
-                // Kiểm tra 21 bảng bắt buộc qua definitions / paths trong spec
+                // Kiểm tra 26 bảng bắt buộc qua definitions / paths trong spec
                 missingTables = SUPABASE_REQUIRED_TABLES.filter(t => !defs.has(t) && !pathSet.has('/' + t));
 
                 const requiredRpcs = [
@@ -379,7 +380,16 @@ class SupabaseAdapter {
                     '/rpc/patch_manager_registry', '/rpc/set_bot_log_clear_cutoff',
                     '/rpc/rollback_manager_link4m_attempt', '/rpc/update_manager_link4m_sync_status',
                     '/rpc/set_manager_link4m_short_url', '/rpc/claim_manager_outbox_batch', '/rpc/claim_manager_pending_allocations',
-                    '/rpc/prune_manager_historical_data'
+                    '/rpc/prune_manager_historical_data',
+                    '/rpc/manager_next_bot_number', '/rpc/manager_patch_worker_settings', '/rpc/manager_reset_worker_data',
+                    '/rpc/manager_append_worker_event', '/rpc/manager_enqueue_worker_command', '/rpc/manager_take_worker_command',
+                    '/rpc/manager_complete_worker_command', '/rpc/manager_expire_worker_command',
+                    '/rpc/manager_record_command_execution', '/rpc/manager_renew_command_sync_lease',
+                    '/rpc/manager_verify_command_sync_lease', '/rpc/manager_mark_command_sync_pending',
+                    '/rpc/manager_finalize_command_sync', '/rpc/manager_claim_pending_command_syncs',
+                    '/rpc/manager_set_user_access', '/rpc/manager_delete_user_access', '/rpc/manager_redeem_code_with_access',
+                    '/rpc/manager_claim_link4m_attempt', '/rpc/manager_complete_link4m_reward',
+                    '/rpc/manager_register_trial_user', '/rpc/manager_link_discord_account', '/rpc/manager_unlink_discord_account'
                 ];
                 missingRpcs = requiredRpcs.filter(r => !normalizedPaths.includes(r));
             } else {
