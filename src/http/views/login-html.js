@@ -303,10 +303,20 @@ html, body {
   border: 1px solid #cbd5e1 !important;
   box-shadow: 0 16px 40px rgba(15, 23, 42, 0.09), 0 1px 3px rgba(15, 23, 42, 0.05) !important;
 }
-:root[data-theme="moonlight"] .feature-item {
+:root[data-theme="moonlight"] .feature-card,
+:root[data-theme="moonlight"] .feature-item,
+:root[data-theme="moonlight"] .discord-support-link {
   background: #ffffff !important;
   border: 1px solid #cbd5e1 !important;
   box-shadow: 0 2px 4px rgba(15, 23, 42, 0.04) !important;
+}
+:root[data-theme="moonlight"] .discord-support-link {
+  color: #334155 !important;
+}
+:root[data-theme="moonlight"] .discord-support-link:hover {
+  background: #f8fafc !important;
+  border-color: #6366f1 !important;
+  color: #0f172a !important;
 }
 :root[data-theme="moonlight"] .brand-pill {
   background: #ffffff !important;
@@ -390,12 +400,14 @@ html, body {
   position: relative;
   z-index: 1;
   min-height: 100dvh;
-  max-width: 1280px;
+  max-width: 1240px;
   margin: 0 auto;
-  padding: 20px 24px 32px;
+  padding: 24px 24px 36px;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  justify-content: space-between;
+  gap: 20px;
+  box-sizing: border-box;
 }
 
 .topbar {
@@ -571,15 +583,17 @@ html, body {
 .split-grid {
   flex: 1;
   display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(360px, 440px);
-  gap: 36px;
+  grid-template-columns: minmax(0, 1.15fr) minmax(380px, 440px);
+  gap: 40px;
   align-items: center;
+  margin: auto 0;
+  width: 100%;
 }
 
 .hero-panel {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 18px;
   min-width: 0;
 }
 
@@ -628,7 +642,8 @@ html, body {
   border: 1px solid var(--border-subtle);
   background: linear-gradient(180deg, var(--diorama-sky-top) 0%, var(--diorama-sky-bot) 100%);
   overflow: hidden;
-  min-height: 228px;
+  min-height: 204px;
+  max-height: 224px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2162,7 +2177,7 @@ async function loadPublicSystemInfo() {
   resize();
 
   const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '') || (window.innerWidth <= 768);
-  const starCount = isMobile ? 32 : 76;
+  const starCount = isMobile ? 18 : 34;
   const stars = [];
   for (let i = 0; i < starCount; i++) {
     stars.push({
@@ -2188,12 +2203,21 @@ async function loadPublicSystemInfo() {
     }
   }
 
-  function frame() {
+  let lastTime = 0;
+  const frameInterval = 1000 / 45;
+
+  function frame(timestamp) {
     rafId = null;
     if (document.hidden || reducedMotionQuery.matches || !ctx) {
       stopMotion();
       return;
     }
+
+    if (timestamp && (timestamp - lastTime < frameInterval)) {
+      rafId = requestAnimationFrame(frame);
+      return;
+    }
+    lastTime = timestamp || (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
     const theme = getActivePublicTheme();
     const isLight = theme === 'moonlight';
@@ -2213,7 +2237,7 @@ async function loadPublicSystemInfo() {
         ? (i % 2 === 0 ? '56,189,248' : '186,230,253')
         : s.rgb;
       ctx.beginPath();
-      ctx.arc(s.x, s.y, s.r * s.z * 0.8, 0, Math.PI * 2);
+      ctx.arc(s.x | 0, s.y | 0, (s.r * s.z * 0.8) | 0 || 1, 0, Math.PI * 2);
       ctx.fillStyle = isLight
         ? 'rgba(79,70,229,' + (s.a * 0.20).toFixed(2) + ')'
         : 'rgba(' + starRgb + ',' + (s.a * (theme === 'violet-dusk' ? 0.5 : 0.78)).toFixed(2) + ')';

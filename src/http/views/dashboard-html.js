@@ -288,8 +288,8 @@ const HTML = String.raw`<!doctype html>
   to { opacity: 1; transform: translateY(0); }
 }
 @keyframes auroraFloat {
-  0%, 100% { transform: translate(0, 0) scale(1); }
-  50% { transform: translate(28px, -18px) scale(1.08); }
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(24px, -14px, 0) scale(1.05); }
 }
 @keyframes barShimmer {
   0% { transform: translateX(-100%); }
@@ -763,18 +763,30 @@ select option {
 }
 
 .fleet-resource-bar {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   align-items: center;
-  gap: 12px 24px;
+  gap: 14px;
   padding: 12px 18px;
   margin-bottom: 16px;
-  background: linear-gradient(90deg, rgba(11, 19, 35, 0.86) 0%, rgba(14, 24, 44, 0.82) 50%, rgba(11, 19, 35, 0.86) 100%);
-  border: 1px solid rgba(56, 189, 248, 0.18);
+  background: var(--card);
+  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  box-shadow: var(--shadow-sm);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
+}
+
+@media (max-width: 1200px) {
+  .fleet-resource-bar {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 680px) {
+  .fleet-resource-bar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .fleet-res-item {
@@ -842,9 +854,27 @@ select option {
    ========================================================================== */
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 14px;
   margin-bottom: 20px;
+}
+
+@media (max-width: 1240px) {
+  .kpi-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 480px) {
+  .kpi-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .kpi-card {
@@ -927,11 +957,11 @@ select option {
   gap: 12px;
   flex-wrap: wrap;
   margin-bottom: 14px;
-  padding: 12px 16px;
+  padding: 12px 18px;
   border-radius: var(--radius-lg);
-  background: rgba(10, 17, 32, 0.86);
-  border: 1px solid var(--border-subtle);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  background: var(--card);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
 }
@@ -3712,23 +3742,30 @@ select option {
 .app-cosmic-nebula {
   position: absolute;
   border-radius: 50%;
-  filter: blur(88px);
-  opacity: 0.24;
+  filter: blur(48px);
+  opacity: 0.22;
   will-change: transform;
+  transform: translate3d(0, 0, 0);
 }
 .app-cosmic-nebula.n1 {
   width: 52vw;
   height: 52vw;
   top: -18vw;
   left: -12vw;
-  background: radial-gradient(circle, rgba(124, 58, 237, 0.28), transparent 65%);
+  background: radial-gradient(circle at center, rgba(124, 58, 237, 0.28) 0%, rgba(124, 58, 237, 0.08) 45%, transparent 70%);
 }
 .app-cosmic-nebula.n2 {
   width: 48vw;
   height: 48vw;
   bottom: -20vw;
   right: -10vw;
-  background: radial-gradient(circle, rgba(91, 33, 182, 0.24), transparent 65%);
+  background: radial-gradient(circle at center, rgba(91, 33, 182, 0.24) 0%, rgba(91, 33, 182, 0.06) 45%, transparent 70%);
+}
+:root[data-theme="ocean-abyss"] .app-cosmic-nebula.n1 {
+  background: radial-gradient(circle at center, rgba(14, 165, 233, 0.26) 0%, rgba(14, 165, 233, 0.08) 45%, transparent 70%) !important;
+}
+:root[data-theme="ocean-abyss"] .app-cosmic-nebula.n2 {
+  background: radial-gradient(circle at center, rgba(2, 132, 199, 0.22) 0%, rgba(2, 132, 199, 0.06) 45%, transparent 70%) !important;
 }
 :root[data-theme="violet-dusk"] .app-cosmic-nebula {
   opacity: 0.12;
@@ -4877,7 +4914,10 @@ button.primary:hover:not(:disabled),
 :root[data-theme="ocean-abyss"] .kpi-card,
 :root[data-theme="ocean-abyss"] .quick-action-card,
 :root[data-theme="ocean-abyss"] .table-card,
-:root[data-theme="ocean-abyss"] .modal-card {
+:root[data-theme="ocean-abyss"] .modal-card,
+:root[data-theme="ocean-abyss"] .fleet-welcome-header,
+:root[data-theme="ocean-abyss"] .fleet-resource-bar,
+:root[data-theme="ocean-abyss"] .fleet-toolbar {
   border: 1px solid rgba(56, 189, 248, 0.22) !important;
 }
 :root[data-theme="ocean-abyss"] .stat-card:hover,
@@ -4915,10 +4955,22 @@ button.primary:hover:not(:disabled),
 :root[data-theme="moonlight"] .quick-action-card,
 :root[data-theme="moonlight"] .table-card,
 :root[data-theme="moonlight"] .modal-card,
-:root[data-theme="moonlight"] .user-detail-panel {
+:root[data-theme="moonlight"] .user-detail-panel,
+:root[data-theme="moonlight"] .fleet-welcome-header,
+:root[data-theme="moonlight"] .fleet-resource-bar,
+:root[data-theme="moonlight"] .fleet-toolbar {
   background: #ffffff !important;
   border: 1px solid #cbd5e1 !important;
   box-shadow: 0 2px 4px rgba(15, 23, 42, 0.04) !important;
+}
+:root[data-theme="moonlight"] .user-rental-dashboard-banner {
+  background: #f0f7ff !important;
+  border: 1px solid #93c5fd !important;
+  box-shadow: 0 2px 8px rgba(14, 165, 233, 0.08) !important;
+}
+:root[data-theme="moonlight"] .user-rental-dashboard-banner #userRentalBannerTitle,
+:root[data-theme="moonlight"] .user-rental-dashboard-banner b {
+  color: #0f172a !important;
 }
 :root[data-theme="moonlight"] .stat-card:hover,
 :root[data-theme="moonlight"] .kpi-card:hover,
@@ -8371,7 +8423,7 @@ try {
 
   var stars = [];
   var shootingStars = [];
-  var starCount = isMobile ? 26 : 64;
+  var starCount = isMobile ? 18 : 34;
   for (var i = 0; i < starCount; i++) {
     stars.push({
       x: Math.random() * w, y: Math.random() * h, z: Math.random() * 1.6 + 0.4,
@@ -8430,12 +8482,21 @@ try {
     kbotReducedMotionQuery.addListener(onReducedMotionChange);
   }
 
-  function render() {
+  var lastTime = 0;
+  var frameInterval = 1000 / 45;
+
+  function render(timestamp) {
     rafId = null;
     if (!shouldRunCosmicLoop()) {
       stopCosmicLoop();
       return;
     }
+
+    if (timestamp && (timestamp - lastTime < frameInterval)) {
+      rafId = requestAnimationFrame(render);
+      return;
+    }
+    lastTime = timestamp || (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
     ctx.clearRect(0, 0, w, h);
 
@@ -8453,7 +8514,7 @@ try {
         ? (i % 2 === 0 ? '56,189,248' : '186,230,253')
         : s.rgb;
       ctx.beginPath();
-      ctx.arc(s.x, s.y, s.r * s.z * 0.8, 0, Math.PI * 2);
+      ctx.arc(s.x | 0, s.y | 0, (s.r * s.z * 0.8) | 0 || 1, 0, Math.PI * 2);
       ctx.fillStyle = isLight
         ? 'rgba(79,70,229,' + (s.a * 0.16).toFixed(2) + ')'
         : 'rgba(' + starRgb + ',' + (s.a * (curTheme === 'violet-dusk' ? 0.42 : 0.65)).toFixed(2) + ')';
