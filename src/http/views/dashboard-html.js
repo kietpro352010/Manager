@@ -3777,39 +3777,27 @@ select option {
   inset: 0;
   width: 100%;
   height: 100%;
-  opacity: 0.62;
-}
-:root[data-theme="violet-dusk"] .app-cosmic-canvas {
-  opacity: 0.36;
-}
-:root[data-theme="moonlight"] .app-cosmic-canvas {
-  opacity: 0.42;
-}
-.app-cosmic-island-horizon {
-  position: absolute;
-  right: 3%;
-  bottom: 2%;
-  width: min(440px, 42vw);
-  opacity: 0.16;
+  opacity: 0.95;
   pointer-events: none;
 }
-:root[data-theme="violet-dusk"] .app-cosmic-island-horizon {
-  opacity: 0.11;
+:root[data-theme="violet-dusk"] .app-cosmic-canvas {
+  opacity: 0.95;
 }
-:root[data-theme="moonlight"] .app-cosmic-island-horizon {
-  opacity: 0.14;
+:root[data-theme="moonlight"] .app-cosmic-canvas {
+  opacity: 0.88;
 }
 .app-cosmic-scrim {
   position: absolute;
   inset: 0;
-  background: radial-gradient(circle at 50% 45%, transparent 0%, rgba(6, 4, 15, 0.46) 100%);
+  background: radial-gradient(circle at 50% 45%, transparent 0%, rgba(6, 4, 15, 0.38) 100%);
+  pointer-events: none;
 }
 :root[data-theme="moonlight"] .app-cosmic-scrim {
-  background: radial-gradient(circle at 50% 35%, rgba(255, 255, 255, 0.18) 0%, rgba(235, 230, 248, 0.42) 100%);
+  background: radial-gradient(circle at 50% 35%, rgba(255, 255, 255, 0.12) 0%, rgba(235, 230, 248, 0.32) 100%);
+  pointer-events: none;
 }
 body.cosmic-mode-login .app-cosmic-nebula { opacity: 0.42; }
-body.cosmic-mode-login .app-cosmic-canvas { opacity: 0.85; }
-body.cosmic-mode-login .app-cosmic-island-horizon { opacity: 0.34; }
+body.cosmic-mode-login .app-cosmic-canvas { opacity: 0.95; }
 
 /* ==========================================================================
    LEGACY WEBKIT SCROLLBAR FALLBACK
@@ -5178,15 +5166,6 @@ button.primary:hover:not(:disabled),
   }
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .app-cosmic-island-horizon {
-    animation: kbotAppIslandFloat 14s ease-in-out infinite;
-  }
-}
-@keyframes kbotAppIslandFloat {
-  0%, 100% { transform: translate3d(0, 0, 0); }
-  50% { transform: translate3d(0, -8px, 0); }
-}
 </style>
 </head>
 <body>
@@ -5195,13 +5174,6 @@ button.primary:hover:not(:disabled),
   <div class="app-cosmic-nebula n1"></div>
   <div class="app-cosmic-nebula n2"></div>
   <canvas id="appStarfieldCanvas" class="app-cosmic-canvas"></canvas>
-  <svg class="app-cosmic-island-horizon" viewBox="0 0 360 180" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <polygon points="84,112 276,112 246,144 196,166 172,172 138,158 106,138" fill="#2e2352"/>
-    <rect x="74" y="100" width="212" height="14" rx="2" fill="#46357a"/>
-    <rect x="74" y="95" width="212" height="7" rx="2" fill="#6d4fc2"/>
-    <rect x="148" y="36" width="64" height="59" rx="3" fill="#170f2e" stroke="#4c3582" stroke-width="2"/>
-    <rect x="159" y="47" width="42" height="48" rx="2" fill="#7c3aed" opacity="0.72"/>
-  </svg>
   <div class="app-cosmic-scrim"></div>
 </div>
 <div id="loginGate" class="login-gate hidden">
@@ -8413,15 +8385,20 @@ try {
 
   var stars = [];
   var shootingStars = [];
-  var starCount = isMobile ? 18 : 34;
+  var starCount = isMobile ? 22 : 42;
   for (var i = 0; i < starCount; i++) {
     stars.push({
-      x: Math.random() * w, y: Math.random() * h, z: Math.random() * 1.6 + 0.4,
-      r: Math.random() * 1.4 + 0.6, a: Math.random() * 0.45 + 0.2,
-      da: (Math.random() * 0.009 + 0.003) * (Math.random() < 0.5 ? 1 : -1),
-      rgb: Math.random() < 0.55 ? '237,233,254' : '196,181,253',
+      x: Math.random() * w,
+      y: Math.random() * h,
+      z: Math.random() * 1.8 + 0.4,
+      r: Math.random() * 1.8 + 0.6,
+      a: Math.random() * 0.5 + 0.3,
+      da: (Math.random() * 0.008 + 0.003) * (Math.random() < 0.5 ? 1 : -1),
+      rgb: Math.random() < 0.6 ? '237,233,254' : '196,181,253',
       seed: Math.random() * 100,
-      phase: Math.random() * Math.PI * 2
+      phase: Math.random() * Math.PI * 2,
+      trail: [],
+      isAnchor: i < 7
     });
   }
 
@@ -8495,116 +8472,299 @@ try {
     var curTheme = getSavedDashboardTheme();
 
     if (curTheme === 'ocean-abyss') {
-      // THEME 2: Ocean Abyss - Bioluminescent bubbles rising with gentle sine sway
+      // THEME 2: Ocean Abyss - Volumetric Underwater Caustic Sunbeams & Bioluminescent Glass Bubbles
+      var tOcean = (timestamp || Date.now()) * 0.0006;
+      var rayAlpha1 = 0.045 + Math.sin(tOcean * 1.1) * 0.02;
+      var rayAlpha2 = 0.035 + Math.cos(tOcean * 0.85) * 0.015;
+
+      var gRay1 = ctx.createLinearGradient(w * 0.05, 0, w * 0.45, h * 0.9);
+      gRay1.addColorStop(0, 'rgba(56, 189, 248, ' + rayAlpha1.toFixed(3) + ')');
+      gRay1.addColorStop(0.4, 'rgba(14, 165, 233, ' + (rayAlpha1 * 0.45).toFixed(3) + ')');
+      gRay1.addColorStop(1, 'rgba(4, 13, 26, 0)');
+      ctx.fillStyle = gRay1;
+      ctx.beginPath();
+      ctx.moveTo(w * 0.05, 0);
+      ctx.lineTo(w * 0.38, 0);
+      ctx.lineTo(w * 0.68, h);
+      ctx.lineTo(w * 0.22, h);
+      ctx.closePath();
+      ctx.fill();
+
+      var gRay2 = ctx.createLinearGradient(w * 0.38, 0, w * 0.78, h * 0.9);
+      gRay2.addColorStop(0, 'rgba(56, 189, 248, ' + rayAlpha2.toFixed(3) + ')');
+      gRay2.addColorStop(0.5, 'rgba(2, 132, 199, ' + (rayAlpha2 * 0.4).toFixed(3) + ')');
+      gRay2.addColorStop(1, 'rgba(4, 13, 26, 0)');
+      ctx.fillStyle = gRay2;
+      ctx.beginPath();
+      ctx.moveTo(w * 0.35, 0);
+      ctx.lineTo(w * 0.62, 0);
+      ctx.lineTo(w * 0.96, h);
+      ctx.lineTo(w * 0.58, h);
+      ctx.closePath();
+      ctx.fill();
+
       for (var i = 0; i < stars.length; i++) {
         var s = stars[i];
-        s.y -= (0.35 + s.z * 0.25);
-        s.x += Math.sin(s.seed + s.y * 0.012) * 0.4;
+        s.y -= (0.42 + s.z * 0.24);
+        s.x += Math.sin(s.seed + s.y * 0.012) * 0.52;
         s.a += s.da * 0.8;
-        if (s.a > 0.85 || s.a < 0.15) s.da = -s.da;
-        if (s.y < -20) {
-          s.y = h + 15;
+        if (s.a > 0.9 || s.a < 0.2) s.da = -s.da;
+
+        if (s.y < -25) {
+          s.y = h + 20;
           s.x = Math.random() * w;
           s.seed = Math.random() * 100;
         }
         if (s.x < -20) s.x = w + 10;
         else if (s.x > w + 20) s.x = -10;
 
-        var bubbleRadius = Math.max(1.2, s.r * s.z * 1.1);
-        ctx.beginPath();
-        ctx.arc(s.x | 0, s.y | 0, bubbleRadius, 0, Math.PI * 2);
-        if (i % 3 === 0) {
-          ctx.strokeStyle = 'rgba(56, 189, 248, ' + (s.a * 0.70).toFixed(2) + ')';
-          ctx.lineWidth = 1.2;
-          ctx.fillStyle = 'rgba(14, 165, 233, ' + (s.a * 0.18).toFixed(2) + ')';
+        var bRad = Math.max(1.8, s.r * s.z * 1.35);
+
+        if (i % 2 === 0) {
+          ctx.beginPath();
+          ctx.arc(s.x | 0, s.y | 0, bRad, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(56, 189, 248, ' + (s.a * 0.85).toFixed(2) + ')';
+          ctx.lineWidth = 1.3;
+          ctx.fillStyle = 'rgba(14, 165, 233, ' + (s.a * 0.16).toFixed(2) + ')';
           ctx.fill();
           ctx.stroke();
+
+          ctx.beginPath();
+          ctx.arc((s.x - bRad * 0.34) | 0, (s.y - bRad * 0.34) | 0, Math.max(0.6, bRad * 0.24), 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(255, 255, 255, ' + (s.a * 0.9).toFixed(2) + ')';
+          ctx.fill();
         } else {
-          ctx.fillStyle = 'rgba(186, 230, 253, ' + (s.a * 0.60).toFixed(2) + ')';
+          ctx.beginPath();
+          ctx.arc(s.x | 0, s.y | 0, Math.max(1, bRad * 0.65), 0, Math.PI * 2);
+          ctx.fillStyle = (i % 4 === 1)
+            ? 'rgba(56, 189, 248, ' + (s.a * 0.8).toFixed(2) + ')'
+            : 'rgba(52, 211, 153, ' + (s.a * 0.75).toFixed(2) + ')';
+          ctx.fill();
+
+          ctx.beginPath();
+          ctx.arc(s.x | 0, s.y | 0, bRad * 1.8, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(14, 165, 233, ' + (s.a * 0.15).toFixed(2) + ')';
           ctx.fill();
         }
       }
     } else if (curTheme === 'violet-dusk') {
-      // THEME 3: Violet Dusk - Floating mystic fireflies / embers meandering in twilight
+      // THEME 3: Violet Dusk - Twilight Horizon Glow & Living Fireflies with Trailing Stardust
+      var tDusk = (timestamp || Date.now()) * 0.0005;
+      var duskWaveY = h * 0.8 + Math.sin(tDusk) * (h * 0.05);
+      var gDusk = ctx.createRadialGradient(w * 0.5, duskWaveY, 20, w * 0.5, duskWaveY, w * 0.65);
+      gDusk.addColorStop(0, 'rgba(126, 91, 239, 0.14)');
+      gDusk.addColorStop(0.45, 'rgba(245, 158, 11, 0.06)');
+      gDusk.addColorStop(1, 'rgba(18, 17, 24, 0)');
+      ctx.fillStyle = gDusk;
+      ctx.fillRect(0, 0, w, h);
+
       for (var i = 0; i < stars.length; i++) {
         var s = stars[i];
-        s.phase += 0.015;
-        s.x += Math.cos(s.seed + s.phase) * 0.45;
-        s.y += Math.sin(s.seed * 1.3 + s.phase * 0.8) * 0.35 - 0.08;
-        s.a += s.da * 0.6;
-        if (s.a > 0.85 || s.a < 0.16) s.da = -s.da;
-        if (s.y < -20) s.y = h + 15;
-        if (s.y > h + 20) s.y = -10;
-        if (s.x < -20) s.x = w + 15;
-        if (s.x > w + 20) s.x = -10;
+        s.phase += 0.016 + (s.z * 0.004);
+        s.x += Math.cos(s.seed + s.phase) * (0.42 + s.z * 0.18);
+        s.y += Math.sin(s.seed * 1.4 + s.phase * 0.8) * 0.38 - 0.07;
+        s.a += s.da * 0.7;
+        if (s.a > 0.95 || s.a < 0.2) s.da = -s.da;
 
-        var emberRadius = Math.max(1.2, s.r * s.z * 0.95);
+        if (s.y < -20) s.y = h + 15;
+        if (s.y > h + 20) s.y = -15;
+        if (s.x < -20) s.x = w + 15;
+        if (s.x > w + 20) s.x = -15;
+
+        if (!s.trail) s.trail = [];
+        if (Math.random() < 0.22) {
+          s.trail.push({ x: s.x, y: s.y, a: s.a * 0.4 });
+          if (s.trail.length > 3) s.trail.shift();
+        }
+
         var isWarmAmber = (i % 2 === 0);
-        var emberColor = isWarmAmber ? '251, 191, 36' : '216, 180, 254';
+        var coreRgb = isWarmAmber ? '251, 191, 36' : '232, 121, 249';
+        var haloRgb = isWarmAmber ? '245, 158, 11' : '168, 85, 247';
+        var eRad = Math.max(1.4, s.r * s.z * 1.05);
+
+        for (var k = 0; k < s.trail.length; k++) {
+          var pt = s.trail[k];
+          pt.a -= 0.012;
+          if (pt.a > 0.02) {
+            ctx.beginPath();
+            ctx.arc(pt.x | 0, pt.y | 0, eRad * 0.55, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(' + coreRgb + ', ' + pt.a.toFixed(2) + ')';
+            ctx.fill();
+          }
+        }
 
         ctx.beginPath();
-        ctx.arc(s.x | 0, s.y | 0, emberRadius * 2.2, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(' + emberColor + ', ' + (s.a * 0.16).toFixed(2) + ')';
+        ctx.arc(s.x | 0, s.y | 0, eRad * 3.2, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + haloRgb + ', ' + (s.a * 0.16).toFixed(2) + ')';
         ctx.fill();
 
         ctx.beginPath();
-        ctx.arc(s.x | 0, s.y | 0, emberRadius, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(' + emberColor + ', ' + (s.a * 0.75).toFixed(2) + ')';
+        ctx.arc(s.x | 0, s.y | 0, eRad * 1.6, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + haloRgb + ', ' + (s.a * 0.38).toFixed(2) + ')';
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(s.x | 0, s.y | 0, eRad, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + coreRgb + ', ' + (s.a * 0.95).toFixed(2) + ')';
         ctx.fill();
       }
     } else if (curTheme === 'moonlight') {
-      // THEME 4: Moonlight - Gentle daylight micro-motes floating peacefully
+      // THEME 4: Moonlight - Harmonic Geometric Orbit Rings & Prismatic Daylight Motes
+      var tMoon = (timestamp || Date.now()) * 0.0004;
+      var ring1R = (Math.min(w, h) * 0.42) + Math.sin(tMoon) * 18;
+      var ring2R = (Math.min(w, h) * 0.65) + Math.cos(tMoon * 0.8) * 24;
+
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(w * 0.5, h * 0.45, ring1R, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(99, 102, 241, 0.055)';
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(w * 0.5, h * 0.45, ring2R, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(79, 70, 229, 0.038)';
+      ctx.stroke();
+
       for (var i = 0; i < stars.length; i++) {
         var s = stars[i];
-        s.y -= 0.06 * s.z;
-        s.x += Math.sin(s.seed + s.y * 0.005) * 0.12;
-        s.a += s.da * 0.4;
-        if (s.a > 0.55 || s.a < 0.1) s.da = -s.da;
-        if (s.y < -10) { s.y = h + 10; s.x = Math.random() * w; }
+        s.y -= 0.08 * s.z;
+        s.x += Math.sin(s.seed + s.y * 0.006) * 0.16;
+        s.a += s.da * 0.5;
+        if (s.a > 0.8 || s.a < 0.15) s.da = -s.da;
+        if (s.y < -12) { s.y = h + 10; s.x = Math.random() * w; }
         if (s.x < -10) s.x = w + 5;
         if (s.x > w + 10) s.x = -5;
 
+        var mRad = Math.max(1, s.r * 0.85);
+
         ctx.beginPath();
-        ctx.arc(s.x | 0, s.y | 0, Math.max(0.8, s.r * 0.7), 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(99, 102, 241, ' + (s.a * 0.20).toFixed(2) + ')';
+        ctx.arc(s.x | 0, s.y | 0, mRad, 0, Math.PI * 2);
+        ctx.fillStyle = (i % 3 === 0)
+          ? 'rgba(79, 70, 229, ' + (s.a * 0.35).toFixed(2) + ')'
+          : 'rgba(14, 165, 233, ' + (s.a * 0.28).toFixed(2) + ')';
         ctx.fill();
+
+        if (s.isAnchor) {
+          ctx.beginPath();
+          ctx.arc(s.x | 0, s.y | 0, mRad * 2.4, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(99, 102, 241, ' + (s.a * 0.08).toFixed(2) + ')';
+          ctx.fill();
+        }
       }
     } else {
-      // THEME 1: Deep Galaxy - Classic cosmic starfield + shooting star meteor streaks
+      // THEME 1: Deep Galaxy - Celestial Nebula Cloud Waves, Constellation Web & Star Comets
+      var tSec = (timestamp || Date.now()) * 0.0006;
+      var neb1X = w * 0.25 + Math.sin(tSec * 0.7) * (w * 0.08);
+      var neb1Y = h * 0.3 + Math.cos(tSec * 0.5) * (h * 0.08);
+      var gNeb1 = ctx.createRadialGradient(neb1X, neb1Y, 10, neb1X, neb1Y, w * 0.45);
+      gNeb1.addColorStop(0, 'rgba(124, 58, 237, 0.12)');
+      gNeb1.addColorStop(0.5, 'rgba(79, 70, 229, 0.05)');
+      gNeb1.addColorStop(1, 'rgba(8, 5, 17, 0)');
+      ctx.fillStyle = gNeb1;
+      ctx.fillRect(0, 0, w, h);
+
+      var neb2X = w * 0.75 + Math.cos(tSec * 0.6) * (w * 0.07);
+      var neb2Y = h * 0.65 + Math.sin(tSec * 0.8) * (h * 0.07);
+      var gNeb2 = ctx.createRadialGradient(neb2X, neb2Y, 10, neb2X, neb2Y, w * 0.4);
+      gNeb2.addColorStop(0, 'rgba(56, 189, 248, 0.08)');
+      gNeb2.addColorStop(0.5, 'rgba(139, 92, 246, 0.04)');
+      gNeb2.addColorStop(1, 'rgba(8, 5, 17, 0)');
+      ctx.fillStyle = gNeb2;
+      ctx.fillRect(0, 0, w, h);
+
+      var maxDist = isMobile ? 65 : 95;
+      var maxDistSq = maxDist * maxDist;
+      ctx.lineWidth = 0.8;
+      for (var i = 0; i < stars.length; i++) {
+        var s1 = stars[i];
+        for (var j = i + 1; j < stars.length; j++) {
+          var s2 = stars[j];
+          var dx = s1.x - s2.x;
+          var dy = s1.y - s2.y;
+          var distSq = dx * dx + dy * dy;
+          if (distSq < maxDistSq) {
+            var dist = Math.sqrt(distSq);
+            var lineAlpha = (1 - dist / maxDist) * 0.18 * Math.min(s1.a, s2.a);
+            ctx.strokeStyle = 'rgba(196, 181, 253, ' + lineAlpha.toFixed(3) + ')';
+            ctx.beginPath();
+            ctx.moveTo(s1.x | 0, s1.y | 0);
+            ctx.lineTo(s2.x | 0, s2.y | 0);
+            ctx.stroke();
+          }
+        }
+      }
+
       for (var i = 0; i < stars.length; i++) {
         var s = stars[i];
         s.y -= 0.07 * s.z;
         s.a += s.da;
-        if (s.a > 0.85 || s.a < 0.14) s.da = -s.da;
-        if (s.y < -10) { s.y = h + 10; s.x = Math.random() * w; }
+        if (s.a > 0.95 || s.a < 0.2) s.da = -s.da;
+        if (s.y < -15) {
+          s.y = h + 15;
+          s.x = Math.random() * w;
+        }
 
+        var r = Math.max(1, s.r * s.z * 0.75);
         ctx.beginPath();
-        ctx.arc(s.x | 0, s.y | 0, (s.r * s.z * 0.8) | 0 || 1, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(' + s.rgb + ',' + (s.a * 0.65).toFixed(2) + ')';
+        ctx.arc(s.x | 0, s.y | 0, r, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + s.rgb + ',' + s.a.toFixed(2) + ')';
         ctx.fill();
+
+        if (s.isAnchor && !isMobile) {
+          var spike = 5 + s.z * 2.5;
+          ctx.strokeStyle = 'rgba(237, 233, 254, ' + (s.a * 0.45).toFixed(2) + ')';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo((s.x - spike) | 0, s.y | 0);
+          ctx.lineTo((s.x + spike) | 0, s.y | 0);
+          ctx.moveTo(s.x | 0, (s.y - spike) | 0);
+          ctx.lineTo(s.x | 0, (s.y + spike) | 0);
+          ctx.stroke();
+
+          ctx.beginPath();
+          ctx.arc(s.x | 0, s.y | 0, r * 2.6, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(167, 139, 250, ' + (s.a * 0.15).toFixed(2) + ')';
+          ctx.fill();
+        }
       }
 
       if (!isMobile) {
-        if (shootingStars.length < 1 && Math.random() < 0.004) {
+        if (shootingStars.length < 1 && Math.random() < 0.007) {
           shootingStars.push({
-            x: Math.random() * w * 0.75 + w * 0.12,
+            x: Math.random() * w * 0.7 + w * 0.15,
             y: Math.random() * h * 0.35,
-            len: Math.random() * 90 + 55,
-            speed: Math.random() * 5 + 5,
-            a: 0.75
+            len: Math.random() * 120 + 80,
+            speed: Math.random() * 7 + 7,
+            a: 0.95
           });
         }
         for (var j = shootingStars.length - 1; j >= 0; j--) {
           var st = shootingStars[j];
-          st.x -= st.speed; st.y += st.speed * 0.52; st.a -= 0.022;
-          if (st.a <= 0) { shootingStars.splice(j, 1); continue; }
+          st.x -= st.speed;
+          st.y += st.speed * 0.52;
+          st.a -= 0.02;
+          if (st.a <= 0) {
+            shootingStars.splice(j, 1);
+            continue;
+          }
           var tailX = st.x + st.len;
           var tailY = st.y - st.len * 0.52;
-          var gGlow = ctx.createLinearGradient(st.x, st.y, tailX, tailY);
-          gGlow.addColorStop(0, 'rgba(196,181,253,' + st.a.toFixed(2) + ')');
-          gGlow.addColorStop(1, 'rgba(196,181,253,0)');
-          ctx.strokeStyle = gGlow; ctx.lineWidth = 1.8; ctx.beginPath();
-          ctx.moveTo(st.x, st.y); ctx.lineTo(tailX, tailY); ctx.stroke();
+          var grad = ctx.createLinearGradient(st.x, st.y, tailX, tailY);
+          grad.addColorStop(0, 'rgba(255, 255, 255, ' + st.a.toFixed(2) + ')');
+          grad.addColorStop(0.25, 'rgba(196, 181, 253, ' + (st.a * 0.85).toFixed(2) + ')');
+          grad.addColorStop(0.6, 'rgba(56, 189, 248, ' + (st.a * 0.4).toFixed(2) + ')');
+          grad.addColorStop(1, 'rgba(124, 58, 237, 0)');
+          ctx.strokeStyle = grad;
+          ctx.lineWidth = 2.2;
+          ctx.beginPath();
+          ctx.moveTo(st.x, st.y);
+          ctx.lineTo(tailX, tailY);
+          ctx.stroke();
+
+          ctx.beginPath();
+          ctx.arc(st.x, st.y, 2.5, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(255, 255, 255, ' + st.a.toFixed(2) + ')';
+          ctx.fill();
         }
       }
     }
