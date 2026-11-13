@@ -19,6 +19,11 @@ const HTML = String.raw`<!doctype html>
       'deep-galaxy': 'deep-galaxy',
       'galaxy': 'deep-galaxy',
       'vivid': 'deep-galaxy',
+      'ocean-abyss': 'ocean-abyss',
+      'ocean': 'ocean-abyss',
+      'blue': 'ocean-abyss',
+      'deep-ocean': 'ocean-abyss',
+      'oceanic': 'ocean-abyss',
       'violet-dusk': 'violet-dusk',
       'sunset': 'violet-dusk',
       'subtle': 'violet-dusk',
@@ -60,9 +65,9 @@ const HTML = String.raw`<!doctype html>
   --sidebar-bg: rgba(13, 9, 26, 0.96);
 
   /* Hairline Borders */
-  --border: rgba(167, 139, 250, 0.18);
-  --border-subtle: rgba(167, 139, 250, 0.14);
-  --border-strong: rgba(167, 139, 250, 0.34);
+  --border: rgba(167, 139, 250, 0.22);
+  --border-subtle: rgba(167, 139, 250, 0.16);
+  --border-strong: rgba(167, 139, 250, 0.42);
   --border-glow: rgba(139, 92, 246, 0.45);
   --border-focus: #8b5cf6;
 
@@ -112,6 +117,62 @@ const HTML = String.raw`<!doctype html>
   scrollbar-width: thin;
 }
 
+:root[data-theme="ocean-abyss"] {
+  color-scheme: dark;
+  --bg: #040d1a;
+  --bg-base: #040d1a;
+  --bg-surface: rgba(8, 23, 44, 0.92);
+  --bg-elevated: rgba(12, 32, 60, 0.96);
+  --bg-input: #061426;
+  --bg-gradient:
+    radial-gradient(ellipse at 18% 10%, rgba(14, 165, 233, 0.18) 0%, transparent 55%),
+    radial-gradient(ellipse at 85% 90%, rgba(2, 132, 199, 0.15) 0%, transparent 60%),
+    linear-gradient(180deg, #040d1a 0%, #02070e 100%);
+
+  --card: rgba(10, 26, 48, 0.90);
+  --card-hover: rgba(14, 34, 62, 0.95);
+  --card2: #07172b;
+  --sidebar-bg: #051020;
+
+  --border: rgba(56, 189, 248, 0.22);
+  --border-subtle: rgba(56, 189, 248, 0.15);
+  --border-strong: rgba(56, 189, 248, 0.42);
+  --border-glow: rgba(14, 165, 233, 0.50);
+  --border-focus: #38bdf8;
+
+  --text: #f0f9ff;
+  --text-primary: #f0f9ff;
+  --text-secondary: #bae6fd;
+  --text-muted: #7dd3fc;
+  --text-dim: #38bdf8;
+  --muted: #7dd3fc;
+
+  --cyan: #38bdf8;
+  --cyan-soft: rgba(56, 189, 248, 0.16);
+  --indigo: #0284c7;
+  --discord: #5865F2;
+  --green: #10b981;
+  --green-glow: rgba(16, 185, 129, 0.25);
+  --red: #ef4444;
+  --red-glow: rgba(239, 68, 68, 0.25);
+  --yellow: #f59e0b;
+  --yellow-glow: rgba(245, 158, 11, 0.25);
+  --blue: #0ea5e9;
+  --blue-glow: rgba(14, 165, 233, 0.35);
+  --accent: #0ea5e9;
+  --accent-hover: #38bdf8;
+  --accent-soft: rgba(14, 165, 233, 0.18);
+  --accent-text: #7dd3fc;
+  --gold: #f59e0b;
+  --purple: #38bdf8;
+
+  --shadow-sm: 0 2px 8px rgba(2, 8, 20, 0.40);
+  --shadow-md: 0 10px 28px rgba(2, 8, 20, 0.52);
+  --shadow-lg: 0 22px 54px rgba(2, 8, 20, 0.72);
+  --scrollbar-thumb: rgba(56, 189, 248, 0.30);
+  --scrollbar-track: #051020;
+}
+
 :root[data-theme="violet-dusk"] {
   color-scheme: dark;
   --bg: #121118;
@@ -128,9 +189,9 @@ const HTML = String.raw`<!doctype html>
   --card2: #15131d;
   --sidebar-bg: #16141f;
 
-  --border: rgba(176, 168, 206, 0.16);
-  --border-subtle: rgba(176, 168, 206, 0.12);
-  --border-strong: rgba(176, 168, 206, 0.28);
+  --border: rgba(176, 168, 206, 0.20);
+  --border-subtle: rgba(176, 168, 206, 0.14);
+  --border-strong: rgba(176, 168, 206, 0.36);
   --border-glow: rgba(126, 91, 239, 0.38);
   --border-focus: #7e5bef;
 
@@ -161,57 +222,58 @@ const HTML = String.raw`<!doctype html>
 
 :root[data-theme="moonlight"] {
   color-scheme: light;
-  --bg: #f3f1fa;
-  --bg-base: #f3f1fa;
-  --bg-surface: rgba(255, 255, 255, 0.96);
+  --bg: #edf1f7;
+  --bg-base: #edf1f7;
+  --bg-surface: #ffffff;
   --bg-elevated: #ffffff;
-  --bg-input: #faf9fe;
+  --bg-input: #ffffff;
   --bg-gradient:
-    radial-gradient(ellipse at 18% 10%, rgba(124, 58, 237, 0.08) 0%, transparent 50%),
-    radial-gradient(ellipse at 85% 90%, rgba(139, 92, 246, 0.06) 0%, transparent 55%),
-    linear-gradient(180deg, #f5f3fc 0%, #ede9f7 100%);
+    radial-gradient(ellipse at 18% 10%, rgba(99, 102, 241, 0.08) 0%, transparent 50%),
+    radial-gradient(ellipse at 85% 90%, rgba(14, 165, 233, 0.06) 0%, transparent 55%),
+    linear-gradient(180deg, #f1f5f9 0%, #edf1f7 100%);
 
   --card: #ffffff;
-  --card-hover: #faf8ff;
-  --card2: #f4f1fb;
-  --sidebar-bg: #ffffff;
+  --card-hover: #f8fafc;
+  --card2: #f1f5f9;
+  --sidebar-bg: #f8fafc;
 
-  --border: rgba(91, 33, 182, 0.15);
-  --border-subtle: rgba(91, 33, 182, 0.11);
-  --border-strong: rgba(91, 33, 182, 0.28);
-  --border-glow: rgba(109, 40, 217, 0.36);
-  --border-focus: #6d28d9;
+  --border: #cbd5e1;
+  --border-subtle: #e2e8f0;
+  --border-strong: #94a3b8;
+  --border-glow: rgba(99, 102, 241, 0.28);
+  --border-focus: #6366f1;
 
-  --text: #171326;
-  --text-primary: #171326;
-  --text-secondary: #3e3759;
-  --text-muted: #5c537a;
-  --text-dim: #6e658c;
-  --muted: #5c537a;
+  --text: #0f172a;
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #64748b;
+  --text-dim: #94a3b8;
+  --muted: #64748b;
 
-  --cyan: #6d28d9;
-  --cyan-soft: rgba(109, 40, 217, 0.10);
-  --indigo: #5b21b6;
-  --green: #15803d;
-  --green-glow: rgba(21, 128, 61, 0.18);
-  --red: #b91c1c;
-  --red-glow: rgba(185, 28, 28, 0.18);
-  --yellow: #b45309;
-  --yellow-glow: rgba(180, 83, 9, 0.18);
-  --blue: #6d28d9;
-  --blue-glow: rgba(109, 40, 217, 0.18);
-  --accent: #6d28d9;
-  --accent-hover: #5b21b6;
-  --accent-soft: rgba(109, 40, 217, 0.10);
-  --accent-text: #5b21b6;
-  --gold: #b45309;
-  --purple: #6d28d9;
+  --cyan: #6366f1;
+  --cyan-soft: rgba(99, 102, 241, 0.12);
+  --indigo: #4f46e5;
+  --discord: #5865F2;
+  --green: #16a34a;
+  --green-glow: rgba(22, 163, 74, 0.20);
+  --red: #dc2626;
+  --red-glow: rgba(220, 38, 38, 0.20);
+  --yellow: #d97706;
+  --yellow-glow: rgba(217, 119, 6, 0.20);
+  --blue: #4f46e5;
+  --blue-glow: rgba(79, 70, 229, 0.20);
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-soft: rgba(79, 70, 229, 0.10);
+  --accent-text: #4f46e5;
+  --gold: #d97706;
+  --purple: #6366f1;
 
-  --shadow-sm: 0 1px 4px rgba(36, 20, 74, 0.06);
-  --shadow-md: 0 8px 22px rgba(36, 20, 74, 0.08);
-  --shadow-lg: 0 18px 42px rgba(36, 20, 74, 0.14);
-  --scrollbar-thumb: rgba(91, 33, 182, 0.25);
-  --scrollbar-track: #ebe6f7;
+  --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.08);
+  --shadow-md: 0 4px 6px -1px rgba(15, 23, 42, 0.08), 0 2px 4px -2px rgba(15, 23, 42, 0.05);
+  --shadow-lg: 0 10px 15px -3px rgba(15, 23, 42, 0.10), 0 4px 6px -4px rgba(15, 23, 42, 0.04);
+  --scrollbar-thumb: #94a3b8;
+  --scrollbar-track: #e2e8f0;
 }
 
 /* ==========================================================================
@@ -4802,16 +4864,91 @@ button.primary:hover:not(:disabled),
   -webkit-text-fill-color: transparent !important;
 }
 
-/* Moonlight Light-Theme Contrast Safeguards */
+/* Ocean Abyss Theme Refinements */
+:root[data-theme="ocean-abyss"] .sidebar {
+  border-right: 1px solid rgba(56, 189, 248, 0.20) !important;
+}
+:root[data-theme="ocean-abyss"] .global-header {
+  border-bottom: 1px solid rgba(56, 189, 248, 0.20) !important;
+}
+:root[data-theme="ocean-abyss"] .panel,
+:root[data-theme="ocean-abyss"] .card,
+:root[data-theme="ocean-abyss"] .stat-card,
+:root[data-theme="ocean-abyss"] .kpi-card,
+:root[data-theme="ocean-abyss"] .quick-action-card,
+:root[data-theme="ocean-abyss"] .table-card,
+:root[data-theme="ocean-abyss"] .modal-card {
+  border: 1px solid rgba(56, 189, 248, 0.22) !important;
+}
+:root[data-theme="ocean-abyss"] .stat-card:hover,
+:root[data-theme="ocean-abyss"] .kpi-card:hover,
+:root[data-theme="ocean-abyss"] .quick-action-card:hover {
+  border-color: rgba(56, 189, 248, 0.45) !important;
+  box-shadow: 0 4px 16px rgba(14, 165, 233, 0.22) !important;
+}
+:root[data-theme="ocean-abyss"] .user-table th {
+  background: #081a30 !important;
+  color: #bae6fd !important;
+  border-bottom: 2px solid rgba(56, 189, 248, 0.30) !important;
+}
+:root[data-theme="ocean-abyss"] .user-table td {
+  border-bottom: 1px solid rgba(56, 189, 248, 0.12) !important;
+}
+:root[data-theme="ocean-abyss"] .user-table tr:hover td {
+  background: rgba(14, 165, 233, 0.08) !important;
+}
+
+/* Moonlight Light-Theme Contrast & Region Separation Safeguards */
+:root[data-theme="moonlight"] .sidebar {
+  background: #f8fafc !important;
+  border-right: 1px solid #cbd5e1 !important;
+}
 :root[data-theme="moonlight"] .global-header {
-  background: rgba(255, 255, 255, 0.94) !important;
+  background: #ffffff !important;
+  border-bottom: 1px solid #cbd5e1 !important;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05) !important;
+}
+:root[data-theme="moonlight"] .panel,
+:root[data-theme="moonlight"] .card,
+:root[data-theme="moonlight"] .stat-card,
+:root[data-theme="moonlight"] .kpi-card,
+:root[data-theme="moonlight"] .quick-action-card,
+:root[data-theme="moonlight"] .table-card,
+:root[data-theme="moonlight"] .modal-card,
+:root[data-theme="moonlight"] .user-detail-panel {
+  background: #ffffff !important;
+  border: 1px solid #cbd5e1 !important;
+  box-shadow: 0 2px 4px rgba(15, 23, 42, 0.04) !important;
+}
+:root[data-theme="moonlight"] .stat-card:hover,
+:root[data-theme="moonlight"] .kpi-card:hover,
+:root[data-theme="moonlight"] .quick-action-card:hover {
+  border-color: #94a3b8 !important;
+  box-shadow: 0 4px 10px rgba(15, 23, 42, 0.08) !important;
 }
 :root[data-theme="moonlight"] input:not([type="checkbox"]):not([type="radio"]),
 :root[data-theme="moonlight"] select,
 :root[data-theme="moonlight"] textarea {
-  background: var(--bg-input) !important;
-  color: var(--text) !important;
-  border-color: var(--border-strong) !important;
+  background: #ffffff !important;
+  color: #0f172a !important;
+  border: 1px solid #cbd5e1 !important;
+}
+:root[data-theme="moonlight"] input:focus,
+:root[data-theme="moonlight"] select:focus,
+:root[data-theme="moonlight"] textarea:focus {
+  border-color: #6366f1 !important;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15) !important;
+}
+:root[data-theme="moonlight"] .sidebar-theme-btn {
+  background: #ffffff !important;
+  border: 1px solid #cbd5e1 !important;
+  color: #334155 !important;
+}
+:root[data-theme="moonlight"] .sidebar-theme-btn.active {
+  background: #f1f5f9 !important;
+  border-color: #6366f1 !important;
+  color: #0f172a !important;
+  font-weight: 600 !important;
 }
 :root[data-theme="moonlight"] .info-item,
 :root[data-theme="moonlight"] .note,
@@ -4829,26 +4966,34 @@ button.primary:hover:not(:disabled),
 :root[data-theme="moonlight"] .user-profile-dropdown,
 :root[data-theme="moonlight"] .announcement-card,
 :root[data-theme="moonlight"] .user-announcement-card {
-  background: var(--card2) !important;
-  color: var(--text) !important;
-  border-color: var(--border) !important;
+  background: #f8fafc !important;
+  color: #0f172a !important;
+  border: 1px solid #cbd5e1 !important;
 }
 :root[data-theme="moonlight"] .user-table th {
-  background: #ede9f8 !important;
-  color: #2e244d !important;
+  background: #f1f5f9 !important;
+  color: #0f172a !important;
+  border-bottom: 2px solid #cbd5e1 !important;
+  font-weight: 600 !important;
 }
-:root[data-theme="moonlight"] .user-table td,
+:root[data-theme="moonlight"] .user-table td {
+  border-bottom: 1px solid #e2e8f0 !important;
+  color: #0f172a !important;
+}
+:root[data-theme="moonlight"] .user-table tr:hover td {
+  background: #f8fafc !important;
+}
 :root[data-theme="moonlight"] .bot-card-name,
 :root[data-theme="moonlight"] .kpi-value,
 :root[data-theme="moonlight"] .panel h3,
 :root[data-theme="moonlight"] .modal-card h3,
 :root[data-theme="moonlight"] .full-page-title,
 :root[data-theme="moonlight"] .fleet-welcome-title {
-  color: var(--text) !important;
+  color: #0f172a !important;
 }
 :root[data-theme="moonlight"] [style*="color:#fff"],
 :root[data-theme="moonlight"] [style*="color: #fff"] {
-  color: var(--text) !important;
+  color: #0f172a !important;
 }
 :root[data-theme="moonlight"] button.primary,
 :root[data-theme="moonlight"] button.primary *,
@@ -4865,17 +5010,23 @@ button.primary:hover:not(:disabled),
 :root[data-theme="moonlight"] button.small:not(.primary):not(.danger),
 :root[data-theme="moonlight"] button.secondary,
 :root[data-theme="moonlight"] button:not(.primary):not(.danger):not(.danger-btn):not(.tab-btn):not(.sidebar-nav-btn):not(.theme-chip-btn):not(.bot-owner-pill):not(.bot-tag-chip):not(.bot-mini-btn):not(.sidebar-collapse-btn):not(.tag-filter-chip):not(.profile-menu-item):not(.user-profile-trigger) {
-  background: #f0ecf9 !important;
-  color: #2b2247 !important;
-  border-color: var(--border-strong) !important;
+  background: #f1f5f9 !important;
+  color: #1e293b !important;
+  border: 1px solid #cbd5e1 !important;
 }
 :root[data-theme="moonlight"] .filter-tabs {
-  background: #f2eefb !important;
-  border-color: var(--border-strong) !important;
+  background: #e2e8f0 !important;
+  border: 1px solid #cbd5e1 !important;
 }
 :root[data-theme="moonlight"] .tab-btn {
   background: transparent !important;
-  color: #5b5276 !important;
+  color: #475569 !important;
+}
+:root[data-theme="moonlight"] .tab-btn.active {
+  background: #ffffff !important;
+  color: #0f172a !important;
+  border: 1px solid #cbd5e1 !important;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08) !important;
 }
 :root[data-theme="moonlight"] .tab-btn.active {
   background: rgba(124, 58, 237, 0.14) !important;
@@ -5341,11 +5492,15 @@ button.primary:hover:not(:disabled),
 
     <div class="sidebar-footer">
       <div class="sidebar-theme-box">
-        <div class="sidebar-section-label" style="padding-left:2px;">Giao Diện (3 Themes)</div>
+        <div class="sidebar-section-label" style="padding-left:2px;">Giao Diện (4 Themes)</div>
         <div class="sidebar-theme-grid" role="group" aria-label="Chọn giao diện">
           <button type="button" class="sidebar-theme-btn active" data-theme-choice="deep-galaxy" onclick="applyDashboardCosmicMode('deep-galaxy')">
             <span>Deep Galaxy</span>
             <span class="theme-swatch-dot" style="background:#8b5cf6;"></span>
+          </button>
+          <button type="button" class="sidebar-theme-btn" data-theme-choice="ocean-abyss" onclick="applyDashboardCosmicMode('ocean-abyss')">
+            <span>Ocean Abyss</span>
+            <span class="theme-swatch-dot" style="background:#0ea5e9;"></span>
           </button>
           <button type="button" class="sidebar-theme-btn" data-theme-choice="violet-dusk" onclick="applyDashboardCosmicMode('violet-dusk')">
             <span>Violet Dusk</span>
@@ -5353,7 +5508,7 @@ button.primary:hover:not(:disabled),
           </button>
           <button type="button" class="sidebar-theme-btn" data-theme-choice="moonlight" onclick="applyDashboardCosmicMode('moonlight')">
             <span>Moonlight</span>
-            <span class="theme-swatch-dot" style="background:#f3f1fa;"></span>
+            <span class="theme-swatch-dot" style="background:#edf1f7;border:1px solid #94a3b8;"></span>
           </button>
         </div>
       </div>
@@ -5391,7 +5546,7 @@ button.primary:hover:not(:disabled),
       </nav>
     </div>
     <div class="global-header-right">
-      <button type="button" id="cosmicModeToggleBtn" class="cosmic-toggle-pill" onclick="cycleDashboardCosmicMode()" title="Chuyển nhanh 3 giao diện: Deep Galaxy / Violet Dusk / Moonlight">🌌 Deep Galaxy</button>
+      <button type="button" id="cosmicModeToggleBtn" class="cosmic-toggle-pill" onclick="cycleDashboardCosmicMode()" title="Chuyển nhanh 4 giao diện: Deep Galaxy / Ocean Abyss / Violet Dusk / Moonlight">🌌 Deep Galaxy</button>
       <span id="globalUserRoleBadge" class="vip-pill" style="background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.3);">🔒 CHƯA ĐĂNG NHẬP</span>
       <span class="ram-pill">📊 <strong id="globalManagerRam">-- MB</strong></span>
 
@@ -5423,11 +5578,12 @@ button.primary:hover:not(:disabled),
           <div class="profile-dropdown-divider"></div>
 
           <div class="profile-dropdown-menu">
-            <div class="profile-menu-section-title">GIAO DIỆN HIỂN THỊ</div>
-            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;padding:4px 8px 8px;">
-              <button type="button" class="small" data-theme-choice="deep-galaxy" onclick="applyDashboardCosmicMode('deep-galaxy')">Deep Galaxy</button>
-              <button type="button" class="small" data-theme-choice="violet-dusk" onclick="applyDashboardCosmicMode('violet-dusk')">Violet Dusk</button>
-              <button type="button" class="small" data-theme-choice="moonlight" onclick="applyDashboardCosmicMode('moonlight')">Moonlight</button>
+            <div class="profile-menu-section-title">GIAO DIỆN HIỂN THỊ (4 THEMES)</div>
+            <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:6px;padding:4px 8px 8px;">
+              <button type="button" class="small" data-theme-choice="deep-galaxy" onclick="applyDashboardCosmicMode('deep-galaxy')">🌌 Deep Galaxy</button>
+              <button type="button" class="small" data-theme-choice="ocean-abyss" onclick="applyDashboardCosmicMode('ocean-abyss')">🌊 Ocean Abyss</button>
+              <button type="button" class="small" data-theme-choice="violet-dusk" onclick="applyDashboardCosmicMode('violet-dusk')">🌙 Violet Dusk</button>
+              <button type="button" class="small" data-theme-choice="moonlight" onclick="applyDashboardCosmicMode('moonlight')">☀️ Moonlight</button>
             </div>
             <div class="profile-dropdown-divider"></div>
             <div class="profile-menu-section-title">CHUYỂN TRANG NHANH</div>
@@ -8039,6 +8195,11 @@ function normalizeDashboardTheme(mode) {
     'deep-galaxy': 'deep-galaxy',
     'galaxy': 'deep-galaxy',
     'vivid': 'deep-galaxy',
+    'ocean-abyss': 'ocean-abyss',
+    'ocean': 'ocean-abyss',
+    'blue': 'ocean-abyss',
+    'deep-ocean': 'ocean-abyss',
+    'oceanic': 'ocean-abyss',
     'violet-dusk': 'violet-dusk',
     'sunset': 'violet-dusk',
     'subtle': 'violet-dusk',
@@ -8086,7 +8247,7 @@ function applyDashboardCosmicMode(mode) {
 
   document.body.classList.remove(
     'theme-galaxy', 'theme-sunset', 'theme-morning', 'theme-off',
-    'theme-deep-galaxy', 'theme-violet-dusk', 'theme-moonlight',
+    'theme-deep-galaxy', 'theme-ocean-abyss', 'theme-violet-dusk', 'theme-moonlight',
     'cosmic-mode-vivid', 'cosmic-mode-subtle', 'cosmic-mode-off'
   );
   document.body.classList.add('theme-' + theme);
@@ -8102,13 +8263,16 @@ function applyDashboardCosmicMode(mode) {
   if (btn) {
     if (theme === 'deep-galaxy') {
       btn.textContent = '🌌 Deep Galaxy';
-      btn.title = 'Theme: Deep Galaxy (Mặc định) — Bấm để chuyển sang Violet Dusk';
+      btn.title = 'Theme: Deep Galaxy (Mặc định) — Bấm để chuyển sang Ocean Abyss';
+    } else if (theme === 'ocean-abyss') {
+      btn.textContent = '🌊 Ocean Abyss';
+      btn.title = 'Theme: Ocean Abyss (Xanh Biển) — Bấm để chuyển sang Violet Dusk';
     } else if (theme === 'violet-dusk') {
       btn.textContent = '🌙 Violet Dusk';
       btn.title = 'Theme: Violet Dusk — Bấm để chuyển sang Moonlight';
     } else {
       btn.textContent = '☀️ Moonlight';
-      btn.title = 'Theme: Moonlight (Sáng) — Bấm để chuyển sang Deep Galaxy';
+      btn.title = 'Theme: Moonlight (Sáng Rõ Viền) — Bấm để chuyển sang Deep Galaxy';
     }
   }
 
@@ -8131,15 +8295,16 @@ function applyDashboardCosmicMode(mode) {
 
 function cycleDashboardCosmicMode() {
   var current = getSavedDashboardTheme();
-  var themeOrder = ['deep-galaxy', 'violet-dusk', 'moonlight'];
+  var themeOrder = ['deep-galaxy', 'ocean-abyss', 'violet-dusk', 'moonlight'];
   var idx = themeOrder.indexOf(current);
-  var next = idx >= 0 ? themeOrder[(idx + 1) % themeOrder.length] : 'violet-dusk';
+  var next = idx >= 0 ? themeOrder[(idx + 1) % themeOrder.length] : 'ocean-abyss';
   applyDashboardCosmicMode(next);
   if (typeof showToast === 'function') {
     var toastMap = {
       'deep-galaxy': '🌌 Đã chuyển sang Deep Galaxy (Tím Vũ Trụ)',
+      'ocean-abyss': '🌊 Đã chuyển sang Ocean Abyss (Xanh Biển Sâu)',
       'violet-dusk': '🌙 Đã chuyển sang Violet Dusk (Tím Trầm Dịu Mắt)',
-      'moonlight': '☀️ Đã chuyển sang Moonlight (Giao Diện Sáng)'
+      'moonlight': '☀️ Đã chuyển sang Moonlight (Giao Diện Sáng Rõ Viền)'
     };
     showToast(toastMap[next] || 'Đã chuyển đổi giao diện', 'info');
   }
@@ -8284,11 +8449,14 @@ try {
       s.a += s.da * speedScale;
       if (s.a > 0.85 || s.a < 0.14) s.da = -s.da;
       if (s.y < -10) { s.y = h + 10; s.x = Math.random() * w; }
+      var starRgb = curTheme === 'ocean-abyss'
+        ? (i % 2 === 0 ? '56,189,248' : '186,230,253')
+        : s.rgb;
       ctx.beginPath();
       ctx.arc(s.x, s.y, s.r * s.z * 0.8, 0, Math.PI * 2);
       ctx.fillStyle = isLight
-        ? 'rgba(109,40,217,' + (s.a * 0.18).toFixed(2) + ')'
-        : 'rgba(' + s.rgb + ',' + (s.a * (curTheme === 'violet-dusk' ? 0.42 : 0.65)).toFixed(2) + ')';
+        ? 'rgba(79,70,229,' + (s.a * 0.16).toFixed(2) + ')'
+        : 'rgba(' + starRgb + ',' + (s.a * (curTheme === 'violet-dusk' ? 0.42 : 0.65)).toFixed(2) + ')';
       ctx.fill();
     }
 

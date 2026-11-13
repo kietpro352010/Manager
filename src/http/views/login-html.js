@@ -18,6 +18,11 @@ const PUBLIC_LOGIN_HTML = `<!doctype html>
       'deep-galaxy': 'deep-galaxy',
       'galaxy': 'deep-galaxy',
       'vivid': 'deep-galaxy',
+      'ocean-abyss': 'ocean-abyss',
+      'ocean': 'ocean-abyss',
+      'blue': 'ocean-abyss',
+      'deep-ocean': 'ocean-abyss',
+      'oceanic': 'ocean-abyss',
       'violet-dusk': 'violet-dusk',
       'sunset': 'violet-dusk',
       'subtle': 'violet-dusk',
@@ -45,8 +50,8 @@ const PUBLIC_LOGIN_HTML = `<!doctype html>
   --surface-panel: rgba(24, 18, 46, 0.86);
   --surface-soft: rgba(34, 26, 62, 0.72);
   --surface-input: rgba(10, 7, 20, 0.92);
-  --border-subtle: rgba(167, 139, 250, 0.18);
-  --border-strong: rgba(167, 139, 250, 0.36);
+  --border-subtle: rgba(167, 139, 250, 0.22);
+  --border-strong: rgba(167, 139, 250, 0.42);
   --text-primary: #f5f3ff;
   --text-secondary: #cbc4e6;
   --text-muted: #9b92bf;
@@ -73,38 +78,77 @@ const PUBLIC_LOGIN_HTML = `<!doctype html>
   --cloud-color: rgba(196, 181, 253, 0.12);
 }
 
+:root[data-theme="ocean-abyss"] {
+  color-scheme: dark;
+  --bg-base: #040d1a;
+  --bg-elevated: #08172c;
+  --bg-glow-1: rgba(14, 165, 233, 0.22);
+  --bg-glow-2: rgba(2, 132, 199, 0.18);
+  --bg-glow-3: rgba(56, 189, 248, 0.12);
+  --surface-card: rgba(8, 23, 44, 0.92);
+  --surface-panel: rgba(10, 28, 54, 0.88);
+  --surface-soft: rgba(14, 38, 70, 0.75);
+  --surface-input: rgba(5, 15, 30, 0.94);
+  --border-subtle: rgba(56, 189, 248, 0.22);
+  --border-strong: rgba(56, 189, 248, 0.44);
+  --text-primary: #f0f9ff;
+  --text-secondary: #bae6fd;
+  --text-muted: #7dd3fc;
+  --accent: #0ea5e9;
+  --accent-hover: #38bdf8;
+  --accent-active: #0284c7;
+  --accent-soft: rgba(14, 165, 233, 0.18);
+  --accent-text: #7dd3fc;
+  --accent-on: #ffffff;
+  --success: #10b981;
+  --success-soft: rgba(16, 185, 129, 0.16);
+  --success-text: #6ee7b7;
+  --danger: #ef4444;
+  --danger-soft: rgba(239, 68, 68, 0.16);
+  --danger-text: #fca5a5;
+  --warning: #f59e0b;
+  --warning-soft: rgba(245, 158, 11, 0.16);
+  --warning-text: #fcd34d;
+  --neutral-soft: rgba(148, 163, 184, 0.16);
+  --neutral-text: #cbd5e1;
+  --shadow-card: 0 24px 60px rgba(2, 8, 20, 0.70);
+  --diorama-sky-top: #030a14;
+  --diorama-sky-bot: #0a2544;
+  --cloud-color: rgba(125, 211, 252, 0.14);
+}
+
 :root[data-theme="violet-dusk"] {
   color-scheme: dark;
   --bg-base: #121118;
   --bg-elevated: #191722;
-  --bg-glow-1: rgba(126, 91, 239, 0.12);
-  --bg-glow-2: rgba(94, 72, 178, 0.09);
-  --bg-glow-3: rgba(148, 163, 184, 0.04);
+  --bg-glow-1: rgba(126, 91, 239, 0.14);
+  --bg-glow-2: rgba(94, 72, 178, 0.10);
+  --bg-glow-3: rgba(148, 163, 184, 0.05);
   --surface-card: #1d1b27;
   --surface-panel: #191722;
   --surface-soft: #242131;
   --surface-input: #13111a;
-  --border-subtle: rgba(176, 168, 206, 0.16);
-  --border-strong: rgba(176, 168, 206, 0.30);
+  --border-subtle: rgba(176, 168, 206, 0.20);
+  --border-strong: rgba(176, 168, 206, 0.36);
   --text-primary: #f2f0fa;
   --text-secondary: #c5bfd8;
   --text-muted: #9891b0;
   --accent: #7e5bef;
   --accent-hover: #6f4ce2;
   --accent-active: #5f3dc4;
-  --accent-soft: rgba(126, 91, 239, 0.14);
+  --accent-soft: rgba(126, 91, 239, 0.16);
   --accent-text: #c4b5fd;
   --accent-on: #ffffff;
   --success: #22c55e;
-  --success-soft: rgba(34, 197, 94, 0.13);
+  --success-soft: rgba(34, 197, 94, 0.14);
   --success-text: #86efac;
   --danger: #ef4444;
-  --danger-soft: rgba(239, 68, 68, 0.13);
+  --danger-soft: rgba(239, 68, 68, 0.14);
   --danger-text: #fca5a5;
   --warning: #f59e0b;
-  --warning-soft: rgba(245, 158, 11, 0.13);
+  --warning-soft: rgba(245, 158, 11, 0.14);
   --warning-text: #fcd34d;
-  --neutral-soft: rgba(148, 163, 184, 0.13);
+  --neutral-soft: rgba(148, 163, 184, 0.14);
   --neutral-text: #cbd5e1;
   --shadow-card: 0 20px 48px rgba(5, 4, 10, 0.50);
   --diorama-sky-top: #14121d;
@@ -114,41 +158,41 @@ const PUBLIC_LOGIN_HTML = `<!doctype html>
 
 :root[data-theme="moonlight"] {
   color-scheme: light;
-  --bg-base: #f3f1fa;
+  --bg-base: #edf1f7;
   --bg-elevated: #ffffff;
-  --bg-glow-1: rgba(124, 58, 237, 0.10);
-  --bg-glow-2: rgba(139, 92, 246, 0.07);
-  --bg-glow-3: rgba(14, 165, 233, 0.05);
-  --surface-card: rgba(255, 255, 255, 0.95);
-  --surface-panel: rgba(255, 255, 255, 0.88);
-  --surface-soft: #ebe6f7;
-  --surface-input: #faf9fe;
-  --border-subtle: rgba(91, 33, 182, 0.15);
-  --border-strong: rgba(91, 33, 182, 0.32);
-  --text-primary: #171326;
-  --text-secondary: #3e3759;
-  --text-muted: #5c537a;
-  --accent: #6d28d9;
-  --accent-hover: #5b21b6;
-  --accent-active: #4c1d95;
-  --accent-soft: rgba(109, 40, 217, 0.10);
-  --accent-text: #5b21b6;
+  --bg-glow-1: rgba(99, 102, 241, 0.08);
+  --bg-glow-2: rgba(14, 165, 233, 0.06);
+  --bg-glow-3: rgba(148, 163, 184, 0.05);
+  --surface-card: #ffffff;
+  --surface-panel: #ffffff;
+  --surface-soft: #f1f5f9;
+  --surface-input: #ffffff;
+  --border-subtle: #cbd5e1;
+  --border-strong: #94a3b8;
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #64748b;
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-active: #3730a3;
+  --accent-soft: rgba(79, 70, 229, 0.10);
+  --accent-text: #4f46e5;
   --accent-on: #ffffff;
-  --success: #15803d;
-  --success-soft: rgba(21, 128, 61, 0.11);
-  --success-text: #166534;
-  --danger: #b91c1c;
-  --danger-soft: rgba(185, 28, 28, 0.10);
-  --danger-text: #991b1b;
-  --warning: #b45309;
-  --warning-soft: rgba(180, 83, 9, 0.11);
-  --warning-text: #92400e;
+  --success: #16a34a;
+  --success-soft: rgba(22, 163, 74, 0.12);
+  --success-text: #15803d;
+  --danger: #dc2626;
+  --danger-soft: rgba(220, 38, 38, 0.12);
+  --danger-text: #b91c1c;
+  --warning: #d97706;
+  --warning-soft: rgba(217, 119, 6, 0.12);
+  --warning-text: #b45309;
   --neutral-soft: rgba(100, 116, 139, 0.12);
   --neutral-text: #334155;
-  --shadow-card: 0 22px 52px rgba(45, 25, 92, 0.12);
-  --diorama-sky-top: #e8e2fa;
-  --diorama-sky-bot: #d8cef5;
-  --cloud-color: rgba(255, 255, 255, 0.65);
+  --shadow-card: 0 16px 40px rgba(15, 23, 42, 0.09), 0 1px 3px rgba(15, 23, 42, 0.06);
+  --diorama-sky-top: #e2e8f0;
+  --diorama-sky-bot: #cbd5e1;
+  --cloud-color: rgba(255, 255, 255, 0.85);
 }
 
 *, *::before, *::after {
@@ -215,6 +259,10 @@ html, body {
 :root[data-theme="violet-dusk"] .scene-video {
   opacity: 0.08;
 }
+:root[data-theme="ocean-abyss"] .scene-video {
+  opacity: 0.22;
+  filter: saturate(1.1) hue-rotate(180deg);
+}
 
 .scene-nebula {
   position: absolute;
@@ -226,12 +274,78 @@ html, body {
   will-change: transform, opacity;
 }
 
+:root[data-theme="ocean-abyss"] .scene-nebula {
+  background:
+    radial-gradient(circle at 26% 34%, rgba(14, 165, 233, 0.22), transparent 45%),
+    radial-gradient(circle at 74% 66%, rgba(2, 132, 199, 0.18), transparent 50%);
+  opacity: 0.88;
+}
+
 :root[data-theme="moonlight"] .scene-nebula {
-  opacity: 0.35;
+  opacity: 0.20;
 }
 
 :root[data-theme="violet-dusk"] .scene-nebula {
   opacity: 0.45;
+}
+
+/* Ocean Abyss Portal Styling */
+:root[data-theme="ocean-abyss"] .portal-aura-glow {
+  fill: url(#portalGlowOcean);
+}
+:root[data-theme="ocean-abyss"] .portal-core-pulse {
+  fill: url(#portalCoreOcean);
+}
+
+/* Moonlight Light-Theme Contrast & Border Enhancements */
+:root[data-theme="moonlight"] .auth-card {
+  background: #ffffff !important;
+  border: 1px solid #cbd5e1 !important;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.09), 0 1px 3px rgba(15, 23, 42, 0.05) !important;
+}
+:root[data-theme="moonlight"] .feature-item {
+  background: #ffffff !important;
+  border: 1px solid #cbd5e1 !important;
+  box-shadow: 0 2px 4px rgba(15, 23, 42, 0.04) !important;
+}
+:root[data-theme="moonlight"] .brand-pill {
+  background: #ffffff !important;
+  border: 1px solid #cbd5e1 !important;
+  color: #334155 !important;
+}
+:root[data-theme="moonlight"] .server-pulse-tag {
+  background: #ffffff !important;
+  border: 1px solid #cbd5e1 !important;
+}
+:root[data-theme="moonlight"] .auth-field input {
+  background: #ffffff !important;
+  border: 1px solid #cbd5e1 !important;
+  color: #0f172a !important;
+}
+:root[data-theme="moonlight"] .auth-field input:focus {
+  border-color: #6366f1 !important;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15) !important;
+}
+:root[data-theme="moonlight"] .theme-switcher {
+  background: #e2e8f0 !important;
+  border: 1px solid #cbd5e1 !important;
+}
+:root[data-theme="moonlight"] .theme-pill-btn {
+  color: #475569 !important;
+}
+:root[data-theme="moonlight"] .theme-pill-btn.active {
+  background: #ffffff !important;
+  color: #0f172a !important;
+  border: 1px solid #cbd5e1 !important;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08) !important;
+}
+:root[data-theme="moonlight"] .auth-tab-btn {
+  color: #64748b !important;
+}
+:root[data-theme="moonlight"] .auth-tab-btn.active {
+  background: #ffffff !important;
+  color: #0f172a !important;
+  border: 1px solid #cbd5e1 !important;
 }
 
 .scene-canvas {
@@ -1128,6 +1242,7 @@ html, body {
 
       <div class="theme-switcher" role="group" aria-label="Chọn giao diện hiển thị">
         <button type="button" class="theme-pill-btn active" data-theme-choice="deep-galaxy" aria-pressed="true">Deep Galaxy</button>
+        <button type="button" class="theme-pill-btn" data-theme-choice="ocean-abyss" aria-pressed="false">Ocean Abyss</button>
         <button type="button" class="theme-pill-btn" data-theme-choice="violet-dusk" aria-pressed="false">Violet Dusk</button>
         <button type="button" class="theme-pill-btn" data-theme-choice="moonlight" aria-pressed="false">Moonlight</button>
       </div>
@@ -1160,10 +1275,20 @@ html, body {
               <stop offset="48%" stop-color="#7c3aed" stop-opacity="0.65"/>
               <stop offset="100%" stop-color="#4c1d95" stop-opacity="0"/>
             </radialGradient>
+            <radialGradient id="portalGlowOcean" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.95"/>
+              <stop offset="48%" stop-color="#0ea5e9" stop-opacity="0.65"/>
+              <stop offset="100%" stop-color="#0284c7" stop-opacity="0"/>
+            </radialGradient>
             <linearGradient id="portalCore" x1="0" y1="0" x2="1" y2="1">
               <stop offset="0%" stop-color="#ddd6fe"/>
               <stop offset="45%" stop-color="#8b5cf6"/>
               <stop offset="100%" stop-color="#4c1d95"/>
+            </linearGradient>
+            <linearGradient id="portalCoreOcean" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#e0f2fe"/>
+              <stop offset="45%" stop-color="#38bdf8"/>
+              <stop offset="100%" stop-color="#0369a1"/>
             </linearGradient>
             <linearGradient id="stoneShade" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stop-color="#473c66"/>
@@ -1182,7 +1307,7 @@ html, body {
           </g>
 
           <!-- Ambient portal aura -->
-          <circle cx="320" cy="104" r="96" fill="url(#portalGlow)"/>
+          <circle class="portal-aura-glow" cx="320" cy="104" r="96" fill="url(#portalGlow)"/>
 
           <!-- Main Floating Minecraft Island & Ancient Portal -->
           <g class="island-float-group">
@@ -1530,6 +1655,11 @@ const THEME_MAP = {
   'deep-galaxy': 'deep-galaxy',
   'galaxy': 'deep-galaxy',
   'vivid': 'deep-galaxy',
+  'ocean-abyss': 'ocean-abyss',
+  'ocean': 'ocean-abyss',
+  'blue': 'ocean-abyss',
+  'deep-ocean': 'ocean-abyss',
+  'oceanic': 'ocean-abyss',
   'violet-dusk': 'violet-dusk',
   'sunset': 'violet-dusk',
   'subtle': 'violet-dusk',
@@ -2079,15 +2209,18 @@ async function loadPublicSystemInfo() {
         s.y = h + 10;
         s.x = Math.random() * w;
       }
+      var starRgb = theme === 'ocean-abyss'
+        ? (i % 2 === 0 ? '56,189,248' : '186,230,253')
+        : s.rgb;
       ctx.beginPath();
       ctx.arc(s.x, s.y, s.r * s.z * 0.8, 0, Math.PI * 2);
       ctx.fillStyle = isLight
-        ? 'rgba(109,40,217,' + (s.a * 0.24).toFixed(2) + ')'
-        : 'rgba(' + s.rgb + ',' + (s.a * (theme === 'violet-dusk' ? 0.5 : 0.78)).toFixed(2) + ')';
+        ? 'rgba(79,70,229,' + (s.a * 0.20).toFixed(2) + ')'
+        : 'rgba(' + starRgb + ',' + (s.a * (theme === 'violet-dusk' ? 0.5 : 0.78)).toFixed(2) + ')';
       ctx.fill();
     }
 
-    if (!isMobile && !isLight && theme === 'deep-galaxy') {
+    if (!isMobile && !isLight && (theme === 'deep-galaxy' || theme === 'ocean-abyss')) {
       if (shootingStars.length < 1 && Math.random() < 0.005) {
         shootingStars.push({
           x: Math.random() * w * 0.7 + w * 0.15,
