@@ -854,7 +854,7 @@ select option {
    ========================================================================== */
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 14px;
   margin-bottom: 20px;
 }
@@ -906,7 +906,6 @@ select option {
 }
 
 .kpi-card.kpi-total::after { background: linear-gradient(90deg, #38bdf8, #818cf8); opacity: 1; }
-.kpi-card.kpi-health::after { background: linear-gradient(90deg, #10b981, #34d399); opacity: 1; }
 .kpi-card.kpi-afk::after { background: linear-gradient(90deg, #10b981, #059669); opacity: 1; }
 .kpi-card.kpi-online::after { background: linear-gradient(90deg, #f59e0b, #fbbf24); opacity: 1; }
 .kpi-card.kpi-offline::after { background: linear-gradient(90deg, #ef4444, #f87171); opacity: 1; }
@@ -4812,7 +4811,6 @@ body.sidebar-collapsed .sidebar-nav-btn[data-tooltip]:hover::after {
   height: 3px !important;
 }
 .kpi-card.kpi-total::after { background: var(--accent) !important; }
-.kpi-card.kpi-health::after,
 .kpi-card.kpi-afk::after { background: var(--green) !important; }
 .kpi-card.kpi-online::after { background: var(--yellow) !important; }
 .kpi-card.kpi-offline::after { background: var(--red) !important; }
@@ -5791,14 +5789,6 @@ button.primary:hover:not(:disabled),
         </div>
         <div id="kpiTotal" class="kpi-value">0</div>
         <div class="kpi-sub">Sức chứa hạm đội đám mây</div>
-      </div>
-      <div class="kpi-card kpi-health">
-        <div class="kpi-header">
-          <span class="kpi-title">Sức Khỏe Hạm Đội</span>
-          <span class="kpi-icon">❤️‍🔥</span>
-        </div>
-        <div id="kpiFleetHealth" class="kpi-value" style="color:var(--green)">100%</div>
-        <div class="kpi-sub" id="kpiFleetHealthSub">Hệ thống tối ưu</div>
       </div>
       <div class="kpi-card kpi-afk">
         <div class="kpi-header">
@@ -10726,17 +10716,6 @@ function updateKpis() {
   const fEl = document.getElementById('kpiOffline'); if(fEl) fEl.textContent = String(offline);
   const uEl = document.getElementById('kpiUnreachable'); if(uEl) uEl.textContent = String(unreachable);
 
-  // Cập nhật Chỉ số Sức khỏe Hạm đội (Fleet Health Score)
-  const healthPercent = total > 0 ? Math.round(((afk * 1.0 + online * 0.7) / total) * 100) : 100;
-  const hEl = document.getElementById('kpiFleetHealth');
-  const hSubEl = document.getElementById('kpiFleetHealthSub');
-  if (hEl) {
-    hEl.textContent = healthPercent + '%';
-    hEl.style.color = healthPercent >= 90 ? 'var(--green)' : (healthPercent >= 60 ? 'var(--yellow)' : 'var(--red)');
-  }
-  if (hSubEl) {
-    hSubEl.textContent = healthPercent >= 90 ? 'Hệ thống tối ưu' : (healthPercent >= 60 ? 'Cần chú ý kết nối' : 'Cảnh báo gián đoạn!');
-  }
   updateTagPills();
 
   // Cập nhật Fleet Resource Bar (Eco & RAM Fleet & Host Hardware Aggregation)
