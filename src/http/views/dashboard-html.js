@@ -8429,7 +8429,9 @@ try {
       x: Math.random() * w, y: Math.random() * h, z: Math.random() * 1.6 + 0.4,
       r: Math.random() * 1.4 + 0.6, a: Math.random() * 0.45 + 0.2,
       da: (Math.random() * 0.009 + 0.003) * (Math.random() < 0.5 ? 1 : -1),
-      rgb: Math.random() < 0.55 ? '237,233,254' : '196,181,253'
+      rgb: Math.random() < 0.55 ? '237,233,254' : '196,181,253',
+      seed: Math.random() * 100,
+      phase: Math.random() * Math.PI * 2
     });
   }
 
@@ -8501,47 +8503,119 @@ try {
     ctx.clearRect(0, 0, w, h);
 
     var curTheme = getSavedDashboardTheme();
-    var isLight = curTheme === 'moonlight';
-    var speedScale = curTheme === 'violet-dusk' ? 0.45 : 0.85;
 
-    for (var i = 0; i < stars.length; i++) {
-      var s = stars[i];
-      s.y -= 0.07 * s.z * speedScale;
-      s.a += s.da * speedScale;
-      if (s.a > 0.85 || s.a < 0.14) s.da = -s.da;
-      if (s.y < -10) { s.y = h + 10; s.x = Math.random() * w; }
-      var starRgb = curTheme === 'ocean-abyss'
-        ? (i % 2 === 0 ? '56,189,248' : '186,230,253')
-        : s.rgb;
-      ctx.beginPath();
-      ctx.arc(s.x | 0, s.y | 0, (s.r * s.z * 0.8) | 0 || 1, 0, Math.PI * 2);
-      ctx.fillStyle = isLight
-        ? 'rgba(79,70,229,' + (s.a * 0.16).toFixed(2) + ')'
-        : 'rgba(' + starRgb + ',' + (s.a * (curTheme === 'violet-dusk' ? 0.42 : 0.65)).toFixed(2) + ')';
-      ctx.fill();
-    }
+    if (curTheme === 'ocean-abyss') {
+      // THEME 2: Ocean Abyss - Bioluminescent bubbles rising with gentle sine sway
+      for (var i = 0; i < stars.length; i++) {
+        var s = stars[i];
+        s.y -= (0.35 + s.z * 0.25);
+        s.x += Math.sin(s.seed + s.y * 0.012) * 0.4;
+        s.a += s.da * 0.8;
+        if (s.a > 0.85 || s.a < 0.15) s.da = -s.da;
+        if (s.y < -20) {
+          s.y = h + 15;
+          s.x = Math.random() * w;
+          s.seed = Math.random() * 100;
+        }
+        if (s.x < -20) s.x = w + 10;
+        else if (s.x > w + 20) s.x = -10;
 
-    if (!isMobile && curTheme === 'deep-galaxy') {
-      if (shootingStars.length < 1 && Math.random() < 0.004) {
-        shootingStars.push({
-          x: Math.random() * w * 0.75 + w * 0.12,
-          y: Math.random() * h * 0.35,
-          len: Math.random() * 90 + 55,
-          speed: Math.random() * 5 + 5,
-          a: 0.75
-        });
+        var bubbleRadius = Math.max(1.2, s.r * s.z * 1.1);
+        ctx.beginPath();
+        ctx.arc(s.x | 0, s.y | 0, bubbleRadius, 0, Math.PI * 2);
+        if (i % 3 === 0) {
+          ctx.strokeStyle = 'rgba(56, 189, 248, ' + (s.a * 0.70).toFixed(2) + ')';
+          ctx.lineWidth = 1.2;
+          ctx.fillStyle = 'rgba(14, 165, 233, ' + (s.a * 0.18).toFixed(2) + ')';
+          ctx.fill();
+          ctx.stroke();
+        } else {
+          ctx.fillStyle = 'rgba(186, 230, 253, ' + (s.a * 0.60).toFixed(2) + ')';
+          ctx.fill();
+        }
       }
-      for (var j = shootingStars.length - 1; j >= 0; j--) {
-        var st = shootingStars[j];
-        st.x -= st.speed; st.y += st.speed * 0.52; st.a -= 0.022;
-        if (st.a <= 0) { shootingStars.splice(j, 1); continue; }
-        var tailX = st.x + st.len;
-        var tailY = st.y - st.len * 0.52;
-        var gGlow = ctx.createLinearGradient(st.x, st.y, tailX, tailY);
-        gGlow.addColorStop(0, 'rgba(196,181,253,' + st.a.toFixed(2) + ')');
-        gGlow.addColorStop(1, 'rgba(196,181,253,0)');
-        ctx.strokeStyle = gGlow; ctx.lineWidth = 1.8; ctx.beginPath();
-        ctx.moveTo(st.x, st.y); ctx.lineTo(tailX, tailY); ctx.stroke();
+    } else if (curTheme === 'violet-dusk') {
+      // THEME 3: Violet Dusk - Floating mystic fireflies / embers meandering in twilight
+      for (var i = 0; i < stars.length; i++) {
+        var s = stars[i];
+        s.phase += 0.015;
+        s.x += Math.cos(s.seed + s.phase) * 0.45;
+        s.y += Math.sin(s.seed * 1.3 + s.phase * 0.8) * 0.35 - 0.08;
+        s.a += s.da * 0.6;
+        if (s.a > 0.85 || s.a < 0.16) s.da = -s.da;
+        if (s.y < -20) s.y = h + 15;
+        if (s.y > h + 20) s.y = -10;
+        if (s.x < -20) s.x = w + 15;
+        if (s.x > w + 20) s.x = -10;
+
+        var emberRadius = Math.max(1.2, s.r * s.z * 0.95);
+        var isWarmAmber = (i % 2 === 0);
+        var emberColor = isWarmAmber ? '251, 191, 36' : '216, 180, 254';
+
+        ctx.beginPath();
+        ctx.arc(s.x | 0, s.y | 0, emberRadius * 2.2, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + emberColor + ', ' + (s.a * 0.16).toFixed(2) + ')';
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(s.x | 0, s.y | 0, emberRadius, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + emberColor + ', ' + (s.a * 0.75).toFixed(2) + ')';
+        ctx.fill();
+      }
+    } else if (curTheme === 'moonlight') {
+      // THEME 4: Moonlight - Gentle daylight micro-motes floating peacefully
+      for (var i = 0; i < stars.length; i++) {
+        var s = stars[i];
+        s.y -= 0.06 * s.z;
+        s.x += Math.sin(s.seed + s.y * 0.005) * 0.12;
+        s.a += s.da * 0.4;
+        if (s.a > 0.55 || s.a < 0.1) s.da = -s.da;
+        if (s.y < -10) { s.y = h + 10; s.x = Math.random() * w; }
+        if (s.x < -10) s.x = w + 5;
+        if (s.x > w + 10) s.x = -5;
+
+        ctx.beginPath();
+        ctx.arc(s.x | 0, s.y | 0, Math.max(0.8, s.r * 0.7), 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(99, 102, 241, ' + (s.a * 0.20).toFixed(2) + ')';
+        ctx.fill();
+      }
+    } else {
+      // THEME 1: Deep Galaxy - Classic cosmic starfield + shooting star meteor streaks
+      for (var i = 0; i < stars.length; i++) {
+        var s = stars[i];
+        s.y -= 0.07 * s.z;
+        s.a += s.da;
+        if (s.a > 0.85 || s.a < 0.14) s.da = -s.da;
+        if (s.y < -10) { s.y = h + 10; s.x = Math.random() * w; }
+
+        ctx.beginPath();
+        ctx.arc(s.x | 0, s.y | 0, (s.r * s.z * 0.8) | 0 || 1, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + s.rgb + ',' + (s.a * 0.65).toFixed(2) + ')';
+        ctx.fill();
+      }
+
+      if (!isMobile) {
+        if (shootingStars.length < 1 && Math.random() < 0.004) {
+          shootingStars.push({
+            x: Math.random() * w * 0.75 + w * 0.12,
+            y: Math.random() * h * 0.35,
+            len: Math.random() * 90 + 55,
+            speed: Math.random() * 5 + 5,
+            a: 0.75
+          });
+        }
+        for (var j = shootingStars.length - 1; j >= 0; j--) {
+          var st = shootingStars[j];
+          st.x -= st.speed; st.y += st.speed * 0.52; st.a -= 0.022;
+          if (st.a <= 0) { shootingStars.splice(j, 1); continue; }
+          var tailX = st.x + st.len;
+          var tailY = st.y - st.len * 0.52;
+          var gGlow = ctx.createLinearGradient(st.x, st.y, tailX, tailY);
+          gGlow.addColorStop(0, 'rgba(196,181,253,' + st.a.toFixed(2) + ')');
+          gGlow.addColorStop(1, 'rgba(196,181,253,0)');
+          ctx.strokeStyle = gGlow; ctx.lineWidth = 1.8; ctx.beginPath();
+          ctx.moveTo(st.x, st.y); ctx.lineTo(tailX, tailY); ctx.stroke();
+        }
       }
     }
 

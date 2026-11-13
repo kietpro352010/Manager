@@ -634,55 +634,6 @@ html, body {
 }
 
 /* =========================================================
-   MINECRAFT FLOATING ISLAND & PORTAL DIORAMA
-   ========================================================= */
-.hero-diorama {
-  position: relative;
-  border-radius: 18px;
-  border: 1px solid var(--border-subtle);
-  background: linear-gradient(180deg, var(--diorama-sky-top) 0%, var(--diorama-sky-bot) 100%);
-  overflow: hidden;
-  min-height: 204px;
-  max-height: 224px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: var(--shadow-card);
-}
-
-.hero-diorama-svg {
-  width: 100%;
-  height: auto;
-  max-height: 256px;
-  display: block;
-}
-
-.diorama-caption {
-  position: absolute;
-  left: 14px;
-  bottom: 12px;
-  right: 14px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  pointer-events: none;
-}
-
-.diorama-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 10px;
-  border-radius: 8px;
-  background: var(--surface-card);
-  border: 1px solid var(--border-subtle);
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--text-secondary);
-}
-
-/* =========================================================
    FEATURE CARDS (AUTHENTIC REPO CAPABILITIES)
    ========================================================= */
 .feature-grid {
@@ -699,6 +650,13 @@ html, body {
   border-radius: 14px;
   background: var(--surface-panel);
   border: 1px solid var(--border-subtle);
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.feature-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--border-strong);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.16);
 }
 
 .feature-icon {
@@ -1250,11 +1208,6 @@ html, body {
     </div>
 
     <div class="topbar-controls">
-      <div id="serverStatusPill" class="server-pulse-tag is-checking" role="status" aria-live="polite">
-        <span class="status-dot" aria-hidden="true"></span>
-        <span id="serverStatusText">Đang kiểm tra trạng thái...</span>
-      </div>
-
       <div class="theme-switcher" role="group" aria-label="Chọn giao diện hiển thị">
         <button type="button" class="theme-pill-btn active" data-theme-choice="deep-galaxy" aria-pressed="true">Deep Galaxy</button>
         <button type="button" class="theme-pill-btn" data-theme-choice="ocean-abyss" aria-pressed="false">Ocean Abyss</button>
@@ -1268,111 +1221,69 @@ html, body {
     <div class="hero-panel">
       <div class="hero-kicker">
         <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-          <rect x="4" y="4" width="16" height="16" rx="3"/>
-          <path d="M9 9h6v6H9z"/>
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
         </svg>
-        <span>KIẾN TRÚC WORKER PHÂN TÁN • PURE RENDER NATIVE</span>
+        <span>HỆ THỐNG ĐIỀU PHỐI BOT CHUYÊN NGHIỆP • KINGMC CLUSTER</span>
       </div>
 
       <h1 class="hero-heading">
-        Điều Khiển Hạm Đội <span class="hero-heading-accent">Minecraft Bot</span> Mọi Lúc
+        KBOT MANAGER <span class="hero-heading-accent">KINGMC</span>
       </h1>
 
       <p class="hero-lead">
-        Giám sát trạng thái trực tiếp, thao tác Remote GUI trong game, quản lý 36 ô hòm đồ, lên lịch tự động và phân quyền thuê bot an toàn trên một bảng điều khiển duy nhất.
+        Nền tảng quản lý và vận hành bot tự động KingMC tối tân. Bảo mật tuyệt đối, hoạt động 24/7 ổn định, tiện lợi và dễ dàng quản lý mọi lúc mọi nơi.
       </p>
-
-      <div class="hero-diorama" aria-hidden="true">
-        <svg class="hero-diorama-svg" viewBox="0 0 640 240" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <defs>
-            <radialGradient id="portalGlow" cx="50%" cy="50%" r="50%">
-              <stop offset="0%" stop-color="#c084fc" stop-opacity="0.95"/>
-              <stop offset="48%" stop-color="#7c3aed" stop-opacity="0.65"/>
-              <stop offset="100%" stop-color="#4c1d95" stop-opacity="0"/>
-            </radialGradient>
-            <radialGradient id="portalGlowOcean" cx="50%" cy="50%" r="50%">
-              <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.95"/>
-              <stop offset="48%" stop-color="#0ea5e9" stop-opacity="0.65"/>
-              <stop offset="100%" stop-color="#0284c7" stop-opacity="0"/>
-            </radialGradient>
-            <linearGradient id="portalCore" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0%" stop-color="#ddd6fe"/>
-              <stop offset="45%" stop-color="#8b5cf6"/>
-              <stop offset="100%" stop-color="#4c1d95"/>
-            </linearGradient>
-            <linearGradient id="portalCoreOcean" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0%" stop-color="#e0f2fe"/>
-              <stop offset="45%" stop-color="#38bdf8"/>
-              <stop offset="100%" stop-color="#0369a1"/>
-            </linearGradient>
-            <linearGradient id="stoneShade" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="#473c66"/>
-              <stop offset="100%" stop-color="#1e1733"/>
-            </linearGradient>
-          </defs>
-
-          <!-- Distant floating voxel shards -->
-          <g opacity="0.55">
-            <rect x="86" y="54" width="18" height="18" rx="3" fill="#4c1d95"/>
-            <rect x="86" y="54" width="18" height="6" rx="2" fill="#8b5cf6"/>
-            <rect x="536" y="64" width="22" height="22" rx="3" fill="#3b1d6a"/>
-            <rect x="536" y="64" width="22" height="7" rx="2" fill="#a78bfa"/>
-            <rect x="498" y="138" width="14" height="14" rx="2" fill="#433878"/>
-            <rect x="130" y="148" width="14" height="14" rx="2" fill="#3f3369"/>
-          </g>
-
-          <!-- Ambient portal aura -->
-          <circle class="portal-aura-glow" cx="320" cy="104" r="96" fill="url(#portalGlow)"/>
-
-          <!-- Main Floating Minecraft Island & Ancient Portal -->
-          <g class="island-float-group">
-            <!-- Island underside voxel spire -->
-            <polygon points="184,152 456,152 418,186 358,214 320,224 276,210 218,184" fill="url(#stoneShade)"/>
-            <rect x="220" y="152" width="44" height="28" fill="#332852"/>
-            <rect x="378" y="152" width="40" height="24" fill="#2c2247"/>
-            <rect x="288" y="162" width="64" height="40" fill="#271e40"/>
-            <!-- Grass / Moss voxel surface -->
-            <rect x="172" y="138" width="296" height="16" rx="3" fill="#2b2149"/>
-            <rect x="172" y="132" width="296" height="9" rx="2" fill="#5b4694"/>
-            <rect x="190" y="132" width="48" height="9" fill="#7c3aed" opacity="0.55"/>
-            <rect x="392" y="132" width="54" height="9" fill="#6d28d9" opacity="0.6"/>
-
-            <!-- Left Voxel Tree -->
-            <rect x="210" y="102" width="10" height="30" fill="#4b352a"/>
-            <rect x="195" y="80" width="40" height="24" rx="2" fill="#312357"/>
-            <rect x="203" y="68" width="24" height="16" rx="2" fill="#4c3582"/>
-
-            <!-- Right Voxel Crystals -->
-            <polygon points="418,132 428,104 438,132" fill="#8b5cf6"/>
-            <polygon points="434,132 442,114 450,132" fill="#a78bfa"/>
-
-            <!-- Ancient Obsidian Portal Frame -->
-            <rect x="278" y="54" width="84" height="78" rx="4" fill="#120b24" stroke="#3b2667" stroke-width="2"/>
-            <!-- Portal Vortex -->
-            <rect class="portal-core-pulse" x="292" y="68" width="56" height="64" rx="2" fill="url(#portalCore)"/>
-            <!-- Portal Voxel Steps -->
-            <rect x="268" y="128" width="104" height="8" rx="2" fill="#241744"/>
-            <rect x="278" y="122" width="84" height="6" rx="1" fill="#312059"/>
-          </g>
-        </svg>
-
-        <div class="diorama-caption">
-          <span class="diorama-badge">Cổng Điều Phối Remote GUI</span>
-          <span class="diorama-badge">Tự Động Khôi Phục Kết Nối</span>
-        </div>
-      </div>
 
       <div class="feature-grid">
         <article class="feature-card">
           <div class="feature-icon" aria-hidden="true">
             <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="3" y="4" width="18" height="14" rx="2"/>
-              <path d="M8 20h8M12 18v2"/>
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              <path d="M9 12l2 2 4-4"/>
+            </svg>
+          </div>
+          <div>
+            <h2 class="feature-title">Bảo Mật &amp; An Toàn Tuyệt Đối</h2>
+            <p class="feature-desc">Mã hóa chuẩn AES-256-GCM, bảo vệ phiên đăng nhập CSRF, Rate Limiting và cô lập dữ liệu 100%.</p>
+          </div>
+        </article>
+
+        <article class="feature-card">
+          <div class="feature-icon" aria-hidden="true">
+            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+            </svg>
+          </div>
+          <div>
+            <h2 class="feature-title">Hoạt Động Online 24/7</h2>
+            <p class="feature-desc">Hạ tầng Cluster tự động khôi phục kết nối, bot duy trì cắm chuột bền bỉ, Uptime đạt 99.9%.</p>
+          </div>
+        </article>
+
+        <article class="feature-card">
+          <div class="feature-icon" aria-hidden="true">
+            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="2" y="3" width="20" height="14" rx="2"/>
+              <line x1="8" y1="21" x2="16" y2="21"/>
+              <line x1="12" y1="17" x2="12" y2="21"/>
+            </svg>
+          </div>
+          <div>
+            <h2 class="feature-title">Tiện Lợi Mọi Lúc Mọi Nơi</h2>
+            <p class="feature-desc">Giao diện web trực quan thời gian thực, điều khiển toàn diện trên cả điện thoại, máy tính bảng và PC.</p>
+          </div>
+        </article>
+
+        <article class="feature-card">
+          <div class="feature-icon" aria-hidden="true">
+            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="18" height="18" rx="2"/>
+              <path d="M3 9h18M9 21V9"/>
             </svg>
           </div>
           <div>
             <h2 class="feature-title">Remote GUI &amp; Hòm Đồ</h2>
-            <p class="feature-desc">Click trực tiếp slot rương /menu ingame, kéo thả 36 ô đồ và lắp Totem tay phụ tức thì.</p>
+            <p class="feature-desc">Click trực tiếp slot rương /menu ingame, kéo thả 36 ô đồ và trang bị Totem tay phụ tức thì.</p>
           </div>
         </article>
 
@@ -1384,33 +1295,21 @@ html, body {
             </svg>
           </div>
           <div>
-            <h2 class="feature-title">Hẹn Giờ &amp; Auto Chat</h2>
-            <p class="feature-desc">Thiết lập lịch bật/tắt theo khung giờ hoặc chu kỳ lặp cùng chuỗi Spawn Commands.</p>
+            <h2 class="feature-title">Lên Lịch &amp; Auto Chat</h2>
+            <p class="feature-desc">Thiết lập lịch bật/tắt theo khung giờ linh hoạt, chuỗi lệnh Spawn Commands và vòng lặp tự động.</p>
           </div>
         </article>
 
         <article class="feature-card">
           <div class="feature-icon" aria-hidden="true">
             <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 2l7 4v6c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-4z"/>
+              <path d="M23 4v6h-6M1 20v-6h6"/>
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
             </svg>
           </div>
           <div>
-            <h2 class="feature-title">Phân Quyền &amp; Phiên An Toàn</h2>
-            <p class="feature-desc">Cô lập chặt chẽ dữ liệu theo tài khoản thuê, hỗ trợ Proxy riêng SOCKS5/HTTP và Audit Log.</p>
-          </div>
-        </article>
-
-        <article class="feature-card">
-          <div class="feature-icon" aria-hidden="true">
-            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M4 17l6-6 4 4 6-6"/>
-              <path d="M16 9h4v4"/>
-            </svg>
-          </div>
-          <div>
-            <h2 class="feature-title">Giám Sát &amp; Đồng Bộ Cloud</h2>
-            <p class="feature-desc">Theo dõi Ping, RAM, Chat/Event Log thời gian thực và sao lưu cấu hình lên Supabase.</p>
+            <h2 class="feature-title">Tự Động Khôi Phục Kết Nối</h2>
+            <p class="feature-desc">Watchdog thông minh tự phát hiện sự cố, reconnect và duy trì phiên bot bền bỉ không ngắt quãng.</p>
           </div>
         </article>
       </div>
@@ -1488,16 +1387,6 @@ html, body {
               </button>
             </div>
             <p id="publicPasswordErr" class="field-error" hidden></p>
-          </div>
-
-          <div class="field-group">
-            <label class="field-label" for="publicLicenseKey">
-              <span>Mã Key kích hoạt / Gia hạn</span>
-              <span class="field-hint-inline">Tùy chọn</span>
-            </label>
-            <div class="input-wrap">
-              <input id="publicLicenseKey" class="field-input key-input" type="text" autocomplete="off" placeholder="Nhập License Key nếu cần nạp thêm gói...">
-            </div>
           </div>
 
           <div class="remember-row">
@@ -1591,10 +1480,10 @@ html, body {
             <div class="field-group">
               <label class="field-label" for="regLicenseKey">
                 <span>Mã License Key</span>
-                <span id="regLicenseKeyHint" class="field-hint-inline">(Để trống nếu dùng thử)</span>
+                <span id="regLicenseKeyHint" class="field-hint-inline">(Có thể bỏ trống)</span>
               </label>
               <div class="input-wrap">
-                <input id="regLicenseKey" class="field-input key-input" type="text" autocomplete="off" placeholder="Để trống để nhận 1 ngày dùng thử miễn phí...">
+                <input id="regLicenseKey" class="field-input key-input" type="text" autocomplete="off" placeholder="Có thể bỏ trống nếu chưa có mã Key...">
               </div>
             </div>
 
@@ -1904,7 +1793,8 @@ async function handlePublicLoginSubmit(e) {
 
   const u = document.getElementById('publicUsername').value.trim();
   const p = document.getElementById('publicPassword').value;
-  const k = document.getElementById('publicLicenseKey').value.trim();
+  const keyEl = document.getElementById('publicLicenseKey');
+  const k = keyEl ? keyEl.value.trim() : '';
   const rememberEl = document.getElementById('publicRememberMe');
   const remember = rememberEl ? rememberEl.checked : true;
   const btn = document.getElementById('publicSubmitBtn');
@@ -2002,8 +1892,8 @@ function renderTrialCallout(trialGiftEnabled, rawTrialDays) {
 
   if (trialGiftEnabled === false) {
     badge.hidden = true;
-    if (keyHint) keyHint.textContent = '(Tùy chọn - Nhập nếu có mã Key)';
-    if (keyInput) keyInput.placeholder = 'Nhập mã Key (Tùy chọn, để trống nếu chưa có)...';
+    if (keyHint) keyHint.textContent = '(Có thể bỏ trống)';
+    if (keyInput) keyInput.placeholder = 'Có thể bỏ trống nếu chưa có mã Key...';
     return;
   }
 
@@ -2024,8 +1914,8 @@ function renderTrialCallout(trialGiftEnabled, rawTrialDays) {
       document.createTextNode(' sau khi tạo tài khoản thành công!')
     );
   }
-  if (keyHint) keyHint.textContent = '(Để trống nếu dùng thử)';
-  if (keyInput) keyInput.placeholder = 'Để trống để nhận ' + days + ' ngày dùng thử miễn phí...';
+  if (keyHint) keyHint.textContent = '(Có thể bỏ trống)';
+  if (keyInput) keyInput.placeholder = 'Có thể bỏ trống nếu chưa có mã Key...';
 }
 
 function parseBoundedInt(value, maxVal) {
@@ -2184,10 +2074,12 @@ async function loadPublicSystemInfo() {
       x: Math.random() * w,
       y: Math.random() * h,
       z: Math.random() * 1.6 + 0.4,
-      r: Math.random() * 1.4 + 0.5,
+      r: Math.random() * 1.4 + 0.6,
       a: Math.random() * 0.5 + 0.25,
       da: (Math.random() * 0.009 + 0.003) * (Math.random() < 0.5 ? 1 : -1),
-      rgb: Math.random() < 0.55 ? '237,233,254' : '196,181,253'
+      rgb: Math.random() < 0.55 ? '237,233,254' : '196,181,253',
+      seed: Math.random() * 100,
+      phase: Math.random() * Math.PI * 2
     });
   }
   const shootingStars = [];
@@ -2220,60 +2112,131 @@ async function loadPublicSystemInfo() {
     lastTime = timestamp || (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
     const theme = getActivePublicTheme();
-    const isLight = theme === 'moonlight';
-    const speedScale = theme === 'violet-dusk' ? 0.55 : 1.0;
-
     ctx.clearRect(0, 0, w, h);
-    for (let i = 0; i < stars.length; i++) {
-      const s = stars[i];
-      s.y -= 0.08 * s.z * speedScale;
-      s.a += s.da * speedScale;
-      if (s.a > 0.9 || s.a < 0.16) s.da = -s.da;
-      if (s.y < -10) {
-        s.y = h + 10;
-        s.x = Math.random() * w;
-      }
-      var starRgb = theme === 'ocean-abyss'
-        ? (i % 2 === 0 ? '56,189,248' : '186,230,253')
-        : s.rgb;
-      ctx.beginPath();
-      ctx.arc(s.x | 0, s.y | 0, (s.r * s.z * 0.8) | 0 || 1, 0, Math.PI * 2);
-      ctx.fillStyle = isLight
-        ? 'rgba(79,70,229,' + (s.a * 0.20).toFixed(2) + ')'
-        : 'rgba(' + starRgb + ',' + (s.a * (theme === 'violet-dusk' ? 0.5 : 0.78)).toFixed(2) + ')';
-      ctx.fill();
-    }
 
-    if (!isMobile && !isLight && (theme === 'deep-galaxy' || theme === 'ocean-abyss')) {
-      if (shootingStars.length < 1 && Math.random() < 0.005) {
-        shootingStars.push({
-          x: Math.random() * w * 0.7 + w * 0.15,
-          y: Math.random() * h * 0.35,
-          len: Math.random() * 100 + 60,
-          speed: Math.random() * 6 + 6,
-          a: 0.85
-        });
-      }
-      for (let j = shootingStars.length - 1; j >= 0; j--) {
-        const st = shootingStars[j];
-        st.x -= st.speed;
-        st.y += st.speed * 0.52;
-        st.a -= 0.022;
-        if (st.a <= 0) {
-          shootingStars.splice(j, 1);
-          continue;
+    if (theme === 'ocean-abyss') {
+      // THEME 2: Ocean Abyss - Bioluminescent bubbles rising with gentle sine-wave swaying
+      for (let i = 0; i < stars.length; i++) {
+        const s = stars[i];
+        s.y -= (0.35 + s.z * 0.25);
+        s.x += Math.sin(s.seed + s.y * 0.012) * 0.4;
+        s.a += s.da * 0.8;
+        if (s.a > 0.85 || s.a < 0.15) s.da = -s.da;
+        if (s.y < -20) {
+          s.y = h + 15;
+          s.x = Math.random() * w;
+          s.seed = Math.random() * 100;
         }
-        const tx = st.x + st.len;
-        const ty = st.y - st.len * 0.52;
-        const grad = ctx.createLinearGradient(st.x, st.y, tx, ty);
-        grad.addColorStop(0, 'rgba(196,181,253,' + st.a.toFixed(2) + ')');
-        grad.addColorStop(1, 'rgba(196,181,253,0)');
-        ctx.strokeStyle = grad;
-        ctx.lineWidth = 2;
+        if (s.x < -20) s.x = w + 10;
+        else if (s.x > w + 20) s.x = -10;
+
+        const bubbleRadius = Math.max(1.2, s.r * s.z * 1.1);
         ctx.beginPath();
-        ctx.moveTo(st.x, st.y);
-        ctx.lineTo(tx, ty);
-        ctx.stroke();
+        ctx.arc(s.x | 0, s.y | 0, bubbleRadius, 0, Math.PI * 2);
+        if (i % 3 === 0) {
+          ctx.strokeStyle = 'rgba(56, 189, 248, ' + (s.a * 0.75).toFixed(2) + ')';
+          ctx.lineWidth = 1.2;
+          ctx.fillStyle = 'rgba(14, 165, 233, ' + (s.a * 0.20).toFixed(2) + ')';
+          ctx.fill();
+          ctx.stroke();
+        } else {
+          ctx.fillStyle = 'rgba(186, 230, 253, ' + (s.a * 0.65).toFixed(2) + ')';
+          ctx.fill();
+        }
+      }
+    } else if (theme === 'violet-dusk') {
+      // THEME 3: Violet Dusk - Floating mystic fireflies / embers meandering in twilight
+      for (let i = 0; i < stars.length; i++) {
+        const s = stars[i];
+        s.phase += 0.015;
+        s.x += Math.cos(s.seed + s.phase) * 0.45;
+        s.y += Math.sin(s.seed * 1.3 + s.phase * 0.8) * 0.35 - 0.08;
+        s.a += s.da * 0.6;
+        if (s.a > 0.9 || s.a < 0.18) s.da = -s.da;
+        if (s.y < -20) s.y = h + 15;
+        if (s.y > h + 20) s.y = -10;
+        if (s.x < -20) s.x = w + 15;
+        if (s.x > w + 20) s.x = -10;
+
+        const emberRadius = Math.max(1.2, s.r * s.z * 0.95);
+        const isWarmAmber = (i % 2 === 0);
+        const emberColor = isWarmAmber ? '251, 191, 36' : '216, 180, 254';
+
+        ctx.beginPath();
+        ctx.arc(s.x | 0, s.y | 0, emberRadius * 2.2, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + emberColor + ', ' + (s.a * 0.18).toFixed(2) + ')';
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(s.x | 0, s.y | 0, emberRadius, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + emberColor + ', ' + (s.a * 0.8).toFixed(2) + ')';
+        ctx.fill();
+      }
+    } else if (theme === 'moonlight') {
+      // THEME 4: Moonlight - Gentle, ultra-light daylight micro-motes floating peacefully
+      for (let i = 0; i < stars.length; i++) {
+        const s = stars[i];
+        s.y -= 0.06 * s.z;
+        s.x += Math.sin(s.seed + s.y * 0.005) * 0.12;
+        s.a += s.da * 0.4;
+        if (s.a > 0.6 || s.a < 0.1) s.da = -s.da;
+        if (s.y < -10) { s.y = h + 10; s.x = Math.random() * w; }
+        if (s.x < -10) s.x = w + 5;
+        if (s.x > w + 10) s.x = -5;
+
+        ctx.beginPath();
+        ctx.arc(s.x | 0, s.y | 0, Math.max(0.8, s.r * 0.7), 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(99, 102, 241, ' + (s.a * 0.22).toFixed(2) + ')';
+        ctx.fill();
+      }
+    } else {
+      // THEME 1: Deep Galaxy - Classic cosmic starfield + shooting star meteor streaks
+      for (let i = 0; i < stars.length; i++) {
+        const s = stars[i];
+        s.y -= 0.08 * s.z;
+        s.a += s.da;
+        if (s.a > 0.9 || s.a < 0.16) s.da = -s.da;
+        if (s.y < -10) {
+          s.y = h + 10;
+          s.x = Math.random() * w;
+        }
+        ctx.beginPath();
+        ctx.arc(s.x | 0, s.y | 0, (s.r * s.z * 0.8) | 0 || 1, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + s.rgb + ',' + (s.a * 0.78).toFixed(2) + ')';
+        ctx.fill();
+      }
+
+      if (!isMobile) {
+        if (shootingStars.length < 1 && Math.random() < 0.005) {
+          shootingStars.push({
+            x: Math.random() * w * 0.7 + w * 0.15,
+            y: Math.random() * h * 0.35,
+            len: Math.random() * 100 + 60,
+            speed: Math.random() * 6 + 6,
+            a: 0.85
+          });
+        }
+        for (let j = shootingStars.length - 1; j >= 0; j--) {
+          const st = shootingStars[j];
+          st.x -= st.speed;
+          st.y += st.speed * 0.52;
+          st.a -= 0.022;
+          if (st.a <= 0) {
+            shootingStars.splice(j, 1);
+            continue;
+          }
+          const tx = st.x + st.len;
+          const ty = st.y - st.len * 0.52;
+          const grad = ctx.createLinearGradient(st.x, st.y, tx, ty);
+          grad.addColorStop(0, 'rgba(196,181,253,' + st.a.toFixed(2) + ')');
+          grad.addColorStop(1, 'rgba(196,181,253,0)');
+          ctx.strokeStyle = grad;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(st.x, st.y);
+          ctx.lineTo(tx, ty);
+          ctx.stroke();
+        }
       }
     }
 
