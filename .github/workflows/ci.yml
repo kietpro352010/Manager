@@ -47,14 +47,8 @@ jobs:
       - name: Syntax check (src/**/*.js & tests/*.js)
         run: find src tests -type f -name '*.js' -print0 | xargs -0 -n 1 node --check
 
-      - name: Run integration tests
-        run: node tests/integration.test.js
-
-      - name: Run services wiring tests
-        run: node tests/services-wiring.test.js
-
-      - name: Run storage SQL & contract tests
-        run: node tests/storage-sql.test.js
+      - name: Run full manager test suite
+        run: npm test
 
       - name: Run real PostgreSQL 16 integration & concurrency suite
         env:

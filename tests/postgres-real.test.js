@@ -662,8 +662,18 @@ async function runSuiteAFreshInstalls(harness) {
   for (const [label, scripts] of cases) {
     const db = await harness.createDatabase(`suite_a_${label.replace(/[^a-z0-9]/gi, '_')}`);
     try {
-      for (const sqlText of scripts) {
-        await db.pool.query(sqlText);
+      if (label === 'reset_and_setup.sql') {
+        // Verify disaster recovery guard raises exception without kingmc.allow_reset = 'true'
+        await assert.rejects(
+          () => db.pool.query(scripts[0]),
+          /DISASTER RECOVERY GUARD: reset_and_setup\.sql will drop all manager and bot tables/
+        );
+        // Execute with kingmc.allow_reset = 'true' to install schema
+        await db.pool.query("SET kingmc.allow_reset = 'true';\n" + scripts[0]);
+      } else {
+        for (const sqlText of scripts) {
+          await db.pool.query(sqlText);
+        }
       }
       const catalog = await inspectPublicCatalog(db.pool);
       const canonicalTables = assertCanonicalCatalog(catalog, label, {
@@ -684,7 +694,11 @@ async function runSuiteAFreshInstalls(harness) {
       }
 
       // Idempotent re-execution check
-      await db.pool.query(scripts[scripts.length - 1]);
+      if (label === 'reset_and_setup.sql') {
+        await db.pool.query("SET kingmc.allow_reset = 'true';\n" + scripts[scripts.length - 1]);
+      } else {
+        await db.pool.query(scripts[scripts.length - 1]);
+      }
       if (label === 'schema-sql.js') {
         await db.pool.query(schemaSql);
       }
