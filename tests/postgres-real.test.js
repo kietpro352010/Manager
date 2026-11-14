@@ -95,6 +95,7 @@ async function grantPublicSchema(client) {
 async function startPostgresHarness() {
   if (process.env.DATABASE_URL) {
     const adminPool = new Pool({ connectionString: process.env.DATABASE_URL });
+    adminPool.on('error', () => {});
     const probe = await adminPool.connect();
     try {
       await ensureSupabaseRoles(probe);
@@ -110,6 +111,7 @@ async function startPostgresHarness() {
         const dbUrl = new URL(baseUrl.toString());
         dbUrl.pathname = `/${dbName}`;
         const pool = new Pool({ connectionString: dbUrl.toString(), max: 12 });
+        pool.on('error', () => {});
         await grantPublicSchema(pool);
         return {
           dbName,
@@ -156,6 +158,7 @@ async function startPostgresHarness() {
     database: 'postgres',
     max: 6
   });
+  adminPool.on('error', () => {});
   await ensureSupabaseRoles(adminPool);
 
   return {
@@ -171,6 +174,7 @@ async function startPostgresHarness() {
         database: dbName,
         max: 12
       });
+      pool.on('error', () => {});
       await grantPublicSchema(pool);
       return {
         dbName,
