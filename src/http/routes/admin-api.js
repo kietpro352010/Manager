@@ -35,7 +35,10 @@ function createAdminApi({
   // Middleware: Require Admin Role
   function requireAdmin(req, res, next) {
     const session = req.managerAuthSession;
-    if (!session || session.role !== 'admin') {
+    if (!session) {
+      return res.status(401).json({ ok: false, error: 'Chưa đăng nhập hệ thống.' });
+    }
+    if (session.role !== 'admin') {
       return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên (ADMIN) mới có quyền truy cập.' });
     }
     return next();
