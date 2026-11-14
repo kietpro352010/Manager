@@ -4,6 +4,11 @@ const { SlashCommandBuilder } = require('discord.js');
 const { renderAdminStatus, renderAdminBots, embed } = require('../panels/renderer');
 const { resolveLinkedUser } = require('../handlers/panel-handler');
 
+function checkUserAdmin(interaction, services, user) {
+  const { isUserAdmin } = require('../handlers/interaction-handler');
+  return isUserAdmin(interaction, services, user);
+}
+
 const definition = new SlashCommandBuilder()
   .setName('admin')
   .setDescription('Bảng điều khiển và quản trị hệ thống Enterprise (Dành riêng cho Admin)')
@@ -24,15 +29,26 @@ const definition = new SlashCommandBuilder()
   );
 
 async function execute(interaction, services) {
-  const user = await resolveLinkedUser(interaction, services);
-  const isSuperAdmin = user?.role === 'admin' ||
-    (services.config?.adminUserId && services.config.adminUserId === interaction.user.id) ||
-    interaction.guild?.ownerId === interaction.user.id;
+  const user = (services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function')
+    ? await resolveLinkedUser(interaction, services)
+    : null;
+  const isAdmin = checkUserAdmin(interaction, services, user);
+
+  if (!isAdmin) {
+    return {
+      embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Lệnh này chỉ dành cho Quản trị viên hệ thống (Admin).', 0xef4444)]
+    };
+  }
 
   const subcommand = interaction.options.getSubcommand();
 
   // 1. SETUP
   if (subcommand === 'setup') {
+    const isSuperAdmin = user?.role === 'admin' ||
+      (services?.config?.adminUserId && services.config.adminUserId === interaction.user?.id) ||
+      (services?.accessControl?.adminUserId && services.accessControl.adminUserId === interaction.user?.id) ||
+      interaction.guild?.ownerId === interaction.user?.id;
+
     if (!isSuperAdmin) {
       return {
         embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Chỉ Chủ sở hữu server hoặc SuperAdmin mới có quyền chạy setup.', 0xef4444)]
@@ -74,31 +90,36 @@ async function execute(interaction, services) {
     };
   }
 
-  // Ensure role is admin for remaining subcommands
-  if (!isSuperAdmin) {
-    return {
-      embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Lệnh này chỉ dành cho Quản trị viên hệ thống (Admin).', 0xef4444)]
-    };
-  }
-
-  // 2. STATUS & HEALTH
-  if (subcommand === 'status' || subcommand === 'health') {
-    const allWorkers = await services.registry.list();
+  // 2. STATUS
+  if (subcommand === 'status') {
+    const allWorkers = services.registry?.list ? await services.registry.list() : [];
     const onlineWorkers = allWorkers.filter((w) => w.status?.online).length;
     const stats = { totalWorkers: allWorkers.length, onlineWorkers };
 
     let dbOk = true;
     let dbLatencyMs = 0;
-    if (services.store?.adapter && typeof services.store.adapter.testConnection === 'function') {
+    const store = services.store || services.supabaseClient;
+    if (store?.adapter && typeof store.adapter.testConnection === 'function') {
       const start = Date.now();
       try {
-        const testRes = await services.store.adapter.testConnection();
-        dbOk = Boolean(testRes?.ok);
+        const testRes = await store.adapter.testConnection();
+        dbOk = Boolean(testRes?.ok !== false);
+        dbLatencyMs = Date.now() - start;
+      } catch (_) {
+        dbOk = false;
+      }
+    } else if (typeof store?.testConnection === 'function') {
+      const start = Date.now();
+      try {
+        const testRes = await store.testConnection();
+        dbOk = Boolean(testRes?.ok !== false);
         dbLatencyMs = Date.now() - start;
       } catch (_) {
         dbOk = false;
       }
     }
+
+    const discordReady = Boolean((services.discordClient || services.client)?.isReady?.());
 
     const systemInfo = {
       uptime: process.uptime(),
@@ -108,16 +129,91 @@ async function execute(interaction, services) {
       },
       checks: {
         database: { ok: dbOk, latencyMs: dbLatencyMs },
-        discord: { ok: services.client ? services.client.isReady() : true }
+        discord: { ok: discordReady }
       }
     };
 
     return renderAdminStatus({ stats, systemInfo });
   }
 
-  // 3. BOTS
+  // 3. HEALTH (Deep Probe)
+  if (subcommand === 'health') {
+    const allWorkers = services.registry?.list ? await services.registry.list() : [];
+    let reachableWorkers = 0;
+    for (const w of allWorkers) {
+      const isReachable = Boolean(
+        w.reachable ||
+        w.status?.online ||
+        (w.lastHeartbeat && Date.now() - new Date(w.lastHeartbeat).getTime() <= 120000)
+      );
+      if (isReachable) reachableWorkers++;
+    }
+    const totalWorkers = allWorkers.length;
+
+    let dbOk = false;
+    let dbLatencyMs = -1;
+    const store = services.store || services.supabaseClient;
+    if (store?.adapter && typeof store.adapter.testConnection === 'function') {
+      const start = Date.now();
+      try {
+        const testRes = await store.adapter.testConnection();
+        dbOk = Boolean(testRes?.ok !== false);
+        dbLatencyMs = Date.now() - start;
+      } catch (_) {
+        dbOk = false;
+        dbLatencyMs = Date.now() - start;
+      }
+    } else if (typeof store?.testConnection === 'function') {
+      const start = Date.now();
+      try {
+        const testRes = await store.testConnection();
+        dbOk = Boolean(testRes?.ok !== false);
+        dbLatencyMs = Date.now() - start;
+      } catch (_) {
+        dbOk = false;
+        dbLatencyMs = Date.now() - start;
+      }
+    } else {
+      dbOk = Boolean(store);
+      dbLatencyMs = 0;
+    }
+
+    const broker = services.commandBroker || services.broker;
+    const pendingQueueCount = (broker?.pendingResults?.size ?? (broker?.queue?.length ?? 0));
+
+    const discordClient = services.discordClient || services.client;
+    const discordReady = Boolean(discordClient?.isReady?.());
+    const discordPing = typeof discordClient?.ws?.ping === 'number' ? discordClient.ws.ping : -1;
+
+    const isSystemHealthy = dbOk && discordReady;
+    const healthColor = isSystemHealthy ? 0x22c55e : (dbOk || discordReady ? 0xf59e0b : 0xef4444);
+
+    const desc =
+      `### 🏥 KẾT QUẢ KIỂM TRA SỨC KHỎE HỆ THỐNG (DEEP PROBE)\n\n` +
+      `• **Cơ sở dữ liệu (Database):** ${dbOk ? '🟢 Khỏe mạnh' : '🔴 Lỗi kết nối'} (\`${dbLatencyMs >= 0 ? `${dbLatencyMs} ms` : 'N/A'}\`)\n` +
+      `• **CommandBroker Queue:** \`${pendingQueueCount}\` lệnh đang chờ xử lý\n` +
+      `• **Discord Gateway:** ${discordReady ? '🟢 Đã kết nối' : '🔴 Chưa sẵn sàng'} (Ping: \`${discordPing >= 0 ? `${discordPing} ms` : 'N/A'}\`)\n` +
+      `• **Worker Fleet Reachability:** **${reachableWorkers}/${totalWorkers}** workers hoạt động (${totalWorkers > 0 ? Math.round((reachableWorkers / totalWorkers) * 100) : 100}%)\n` +
+      `• **Node.js Uptime:** \`${Math.round(process.uptime())}s\` | Heap: \`${Math.round(process.memoryUsage().heapUsed / (1024 * 1024))} MB\``;
+
+    const healthEmbed = embed('🏥 KIỂM TRA SỨC KHỎE HỆ THỐNG — HEALTH PROBE', desc, healthColor);
+    return {
+      embeds: [healthEmbed],
+      probe: {
+        dbOk,
+        dbLatencyMs,
+        pendingQueueCount,
+        discordReady,
+        discordPing,
+        reachableWorkers,
+        totalWorkers
+      }
+    };
+  }
+
+  // 4. BOTS
   if (subcommand === 'bots') {
-    const allWorkers = await services.registry.list();
+    const allWorkers = services.registry?.list ? await services.registry.list() : [];
     return renderAdminBots({ workers: allWorkers, page: 0 });
   }
 }

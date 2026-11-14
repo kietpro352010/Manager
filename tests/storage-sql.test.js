@@ -151,6 +151,11 @@ async function testSqlSchemaStructure() {
   assert.match(completeFn, /completed_at = v_now/);
   assert.match(completeFn, /verified_at = COALESCE\(verified_at,\s*v_now\)/);
   assert.match(completeFn, /updated_at = v_now/);
+  assert.match(
+    completeFn,
+    /\(\s*user_id\s+IS\s+NULL\s+OR\s+user_id\s*=\s*''\s+OR\s+user_id\s*=\s*p_user_id\s*\)/i,
+    'manager_complete_link4m_reward must enforce (user_id IS NULL OR user_id = \'\' OR user_id = p_user_id)'
+  );
   assert.match(completeFn, /WHERE id = p_user_id[\s\S]*lower\(username\) = v_clean_user/i, 'Must resolve manager_users by id OR username');
   assert.match(completeFn, /assigned_bot_ids\s*=/);
   assert.match(completeFn, /INSERT INTO public\.manager_assignments/);
@@ -241,6 +246,11 @@ async function testSqlSchemaStructure() {
   assert.match(resetSetupSql, /n\.nspname = 'public'/);
   assert.match(resetSetupSql, /p\.prokind = 'f'/);
   assert.match(resetSetupSql, /NOT EXISTS\s*\(\s*SELECT 1 FROM pg_depend/i);
+  assert.match(
+    resetSetupSql,
+    /current_setting\('kingmc\.allow_reset',\s*true\)\s+IS\s+DISTINCT\s+FROM\s+'true'/i,
+    'reset_and_setup.sql must enforce disaster recovery guard checking kingmc.allow_reset'
+  );
   assert.match(resetSetupSql, /'manager_access'/);
   assert.match(resetSetupSql, /'manager_worker_assignments'/);
   assert.match(resetSetupSql, /'manager_audit'/);
@@ -1659,6 +1669,19 @@ async function testReconciledSchemaAndRuntimeContracts() {
   assert.deepStrictEqual(workerResetPayload.status, { state: 'offline', online: false });
   assert.deepStrictEqual(workerResetPayload.events, []);
   assert.strictEqual(workerResetPayload.last_event, null);
+
+  // 7g. SupabaseWorkerStore.resetData throws when RPC returns false (0 rows updated)
+  const resetFn = extractFunctionBlock(schemaSql, 'manager_reset_worker_data');
+  assert.match(resetFn, /GET\s+DIAGNOSTICS\s+v_row_count\s*=\s*ROW_COUNT;/i);
+  assert.match(resetFn, /RETURN\s+v_row_count\s*>\s*0;/i);
+
+  const falseRpcWorkerStore = new SupabaseWorkerStore({
+    rpc: async () => ({ data: false, error: null })
+  });
+  await assert.rejects(
+    () => falseRpcWorkerStore.resetData('99'),
+    /Worker 99 could not be reset or does not exist/
+  );
 
   console.log('✅ 7. Reconciled SQL parity, hardening & Phase 6 runtime contracts verified.');
 }

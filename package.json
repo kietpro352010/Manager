@@ -6,7 +6,7 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node tests/integration.test.js && node tests/services-wiring.test.js && node tests/storage-sql.test.js",
+    "test": "node tests/integration.test.js && node tests/services-wiring.test.js && node tests/storage-sql.test.js && node tests/auth-regression.test.js && node tests/worker-registry-audit.test.js && node tests/command-execution-audit.test.js && node tests/gate4-database-schema.test.js && node tests/gate5-ui-worker.test.js",
     "commands:register": "node scripts/register-commands.js"
   },
   "engines": {

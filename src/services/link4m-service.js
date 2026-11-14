@@ -220,19 +220,6 @@ class Link4mService {
     }
 
     const now = new Date();
-    const active = await this.store.findActiveLinkAttempt(userId, now);
-    if (active?.providerUrl) {
-      return {
-        attemptId: active.attemptId,
-        providerUrl: active.providerUrl,
-        expiresAt: active.expiresAt,
-        rewardHours: active.rewardHours,
-        reused: true
-      };
-    }
-    if (active) await this.store.expireLinkAttempt(active.attemptId);
-    await this.store.expireLinkAttempts(userId, now);
-
     const todayStart = vietnamDayStart(now);
     const usedToday = await this.store.countLinkRewards(userId, todayStart);
     const dailyLimit = Number(this.config.dailyLimit || 2);
@@ -245,6 +232,19 @@ class Link4mService {
       const minutes = Math.ceil((COOLDOWN_MS - (now.getTime() - new Date(last.rewardedAt).getTime())) / 60000);
       throw new Error(`Thời gian chờ giữa 2 lần nhận thưởng là 2 tiếng. Vui lòng thử lại sau ${minutes} phút.`);
     }
+
+    const active = await this.store.findActiveLinkAttempt(userId, now);
+    if (active?.providerUrl) {
+      return {
+        attemptId: active.attemptId,
+        providerUrl: active.providerUrl,
+        expiresAt: active.expiresAt,
+        rewardHours: active.rewardHours,
+        reused: true
+      };
+    }
+    if (active) await this.store.expireLinkAttempt(active.attemptId);
+    await this.store.expireLinkAttempts(userId, now);
 
     const attemptId = `l4m_${crypto.randomBytes(12).toString('hex')}`;
     const nonce = crypto.randomBytes(24).toString('base64url');

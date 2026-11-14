@@ -1,7 +1,47 @@
 'use strict';
 
+function isUserAdmin(interaction, services, user) {
+  const userId = interaction?.user?.id;
+  if (!userId) return false;
+
+  // 1. Configured Admin User ID
+  if (services?.config?.adminUserId && services.config.adminUserId === userId) return true;
+  if (services?.accessControl?.adminUserId && services.accessControl.adminUserId === userId) return true;
+
+  // 2. Server Owner
+  const ownerId = interaction?.guild?.ownerId;
+  if (ownerId && ownerId === userId) return true;
+
+  // 3. Discord Administrator Permission
+  try {
+    if (interaction?.memberPermissions?.has?.('Administrator') || interaction?.memberPermissions?.has?.(8n)) {
+      return true;
+    }
+  } catch (_) {}
+  try {
+    if (typeof interaction?.member?.permissions?.has === 'function') {
+      if (interaction.member.permissions.has('Administrator') || interaction.member.permissions.has(8n)) {
+        return true;
+      }
+    } else if (interaction?.member?.permissions && (BigInt(interaction.member.permissions) & 8n)) {
+      return true;
+    }
+  } catch (_) {}
+
+  // 4. Configured Manager Admin Role
+  const role = services?.accessControl?.roleFor?.(interaction?.member, interaction);
+  if (role === 'admin') return true;
+
+  // 5. Linked Database User Role
+  if (user?.role === 'admin') return true;
+
+  return false;
+}
+
+exports.isUserAdmin = isUserAdmin;
+
 const { loadCommands } = require('../command-registry');
-const { handlePanelInteraction } = require('./panel-handler');
+const { handlePanelInteraction, resolveLinkedUser } = require('./panel-handler');
 
 const commands = loadCommands();
 const commandMap = new Map(commands.map((command) => [command.data.name, command]));
@@ -65,41 +105,6 @@ async function rejectOutsideGuild(interaction, logger, allowedGuildId) {
   return true;
 }
 
-function isUserAdmin(interaction, services) {
-  const userId = interaction.user?.id;
-  if (!userId) return false;
-
-  // 1. Configured Admin User ID
-  if (services.config.adminUserId && services.config.adminUserId === userId) return true;
-  if (services.accessControl?.adminUserId && services.accessControl.adminUserId === userId) return true;
-
-  // 2. Server Owner
-  const ownerId = interaction.guild?.ownerId;
-  if (ownerId && ownerId === userId) return true;
-
-  // 3. Discord Administrator Permission
-  try {
-    if (interaction.memberPermissions?.has('Administrator') || interaction.memberPermissions?.has(8n)) {
-      return true;
-    }
-  } catch (_) {}
-  try {
-    if (typeof interaction.member?.permissions?.has === 'function') {
-      if (interaction.member.permissions.has('Administrator') || interaction.member.permissions.has(8n)) {
-        return true;
-      }
-    } else if (interaction.member?.permissions && (BigInt(interaction.member.permissions) & 8n)) {
-      return true;
-    }
-  } catch (_) {}
-
-  // 4. Configured Manager Admin Role
-  const role = services.accessControl?.roleFor?.(interaction.member, interaction);
-  if (role === 'admin') return true;
-
-  return false;
-}
-
 function attachInteractionHandler(client, { config, services, logger }) {
   client.on('interactionCreate', async (interaction) => {
     try {
@@ -123,7 +128,10 @@ function attachInteractionHandler(client, { config, services, logger }) {
 
         // Admin command authorization check
         if (interaction.commandName === 'admin') {
-          const allowed = isUserAdmin(interaction, services);
+          const user = (services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function')
+            ? await resolveLinkedUser(interaction, services)
+            : null;
+          const allowed = isUserAdmin(interaction, services, user);
           if (!allowed) {
             return safeEditReply(interaction, {
               content: '⛔ Bạn không có quyền truy cập lệnh Quản trị viên (Admin).',
@@ -172,6 +180,7 @@ function attachInteractionHandler(client, { config, services, logger }) {
 
 module.exports = {
   attachInteractionHandler,
+  isUserAdmin,
   requiredRole: () => 'user',
   roleAllows: () => true
 };

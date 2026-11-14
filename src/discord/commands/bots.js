@@ -22,6 +22,23 @@ async function execute(interaction, services) {
     };
   }
 
+  if (user.role !== 'admin') {
+    const isEntitled = services?.accessControl?.isEntitled
+      ? services.accessControl.isEntitled(user)
+      : (String(user.status || 'active').toLowerCase() !== 'disabled' && (user.isPermanent === true || (user.expiresAt && new Date(user.expiresAt).getTime() > Date.now())));
+
+    if (!isEntitled) {
+      const isLocked = String(user.status || 'active').toLowerCase() === 'disabled';
+      const title = isLocked ? '⛔ TÀI KHOẢN BỊ KHÓA' : '⛔ TÀI KHOẢN HẾT HẠN HOẶC BỊ KHÓA';
+      const desc = isLocked
+        ? 'Tài khoản của bạn đã bị vô hiệu hóa bởi Quản trị viên.'
+        : 'Tài khoản của bạn đã hết hạn thuê bot hoặc bị vô hiệu hóa. Vui lòng gia hạn trên Web Manager để tiếp tục sử dụng bot.';
+      return {
+        embeds: [embed(title, desc, 0xef4444)]
+      };
+    }
+  }
+
   const userBots = await getUserBots(user, services);
   return renderBotsList({ user, workers: userBots, page: 0 });
 }

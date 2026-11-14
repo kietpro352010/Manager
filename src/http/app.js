@@ -36,6 +36,7 @@ function createApp({
 }) {
   const app = express();
   app.disable('x-powered-by');
+  app.set('trust proxy', 1);
 
   // Shared active sessions map in memory (TTL synced with DB)
   const activeSessions = new Map();
@@ -44,8 +45,22 @@ function createApp({
   function isBotSecretRequest(req) {
     const incoming = String(req?.headers?.['x-bot-secret'] || req?.headers?.['x-worker-secret'] || '').trim();
     if (!incoming) return false;
+
+    const path = String(req?.originalUrl || req?.path || '');
+    const isWorkerRoute = path.startsWith('/api/worker') ||
+                          path.startsWith('/api/v1/workers') ||
+                          path.startsWith('/api/auth/verify-bot-access');
+
     const globalSecret = String(config.botSecretKey || '').trim();
-    if (globalSecret && timingSafeStringEquals(incoming, globalSecret)) return true;
+    if (globalSecret && timingSafeStringEquals(incoming, globalSecret)) {
+      if (!isWorkerRoute) {
+        logger?.warn?.('GLOBAL_BOT_SECRET_BLOCKED', { path, ip: req.ip });
+        return false;
+      }
+      logger?.warn?.('GLOBAL_BOT_SECRET_USED', { path, ip: req.ip });
+      return true;
+    }
+
     const botId = String(req?.headers?.['x-manager-bot-id'] || req?.body?.workerId || req?.body?.botId || req?.query?.botId || req?.params?.workerId || '').trim();
     if (botId && typeof registry.verifyBotSecretSync === 'function') {
       return registry.verifyBotSecretSync(botId, incoming);
@@ -122,10 +137,16 @@ function createApp({
           req.path === '/api/auth/logout' ||
           req.path === '/api/auth/verify-bot-access' ||
           req.path === '/api/rewards/link4m/return' ||
-          req.path === '/api/rewards/link4m/verify' ||
-          req.path.startsWith('/api/worker/') ||
-          req.path.startsWith('/api/v1/workers/')) {
+          req.path === '/api/rewards/link4m/verify') {
         return next();
+      }
+
+      if (req.path.startsWith('/api/worker/') || req.path.startsWith('/api/v1/workers/')) {
+        const authHeader = String(req.headers['authorization'] || '');
+        const hasBearer = authHeader.startsWith('Bearer ') && authHeader.slice(7).trim().length > 0;
+        if (isBotSecretRequest(req) || hasBearer) {
+          return next();
+        }
       }
 
       const cookies = parseCookies(req);
@@ -432,11 +453,7 @@ function createApp({
     config,
     logger
   });
-  app.use('/api/manager', userRouter);
-  app.use('/api/rewards/link4m', userRouter); // Route alias for Link4m
-  app.use('/api/public', userRouter); // Route alias for public stats
-  app.use('/api/user', userRouter); // Route alias for user discord & settings
-  app.use('/api', userRouter); // Route alias for generic API calls
+  app.use('/api/user', userRouter);
 
   const adminRouter = createAdminApi({
     store,

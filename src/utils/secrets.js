@@ -175,10 +175,12 @@ function decryptUserPassword(value, key = null, previousKey = null) {
 // ----------------------------------------------------------------------------
 // 3. Password Hashing & Timing-Safe Verification (Scrypt)
 // ----------------------------------------------------------------------------
-function hashPassword(password) {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const derived = crypto.scryptSync(String(password), salt, 64, { N: 16384, r: 8, p: 1 });
-  return `scrypt$N=16384,r=8,p=1$${salt}$${derived.toString('hex')}`;
+function hashPassword(password, salt = null) {
+  const actualSalt = salt && typeof salt === 'string' && salt.length >= 8
+    ? salt
+    : crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(String(password), actualSalt, 64, { N: 16384, r: 8, p: 1 });
+  return `scrypt$N=16384,r=8,p=1$${actualSalt}$${derived.toString('hex')}`;
 }
 
 function verifyPassword(password, storedValue) {

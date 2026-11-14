@@ -4,12 +4,17 @@ const SNOWFLAKE = /^\d{17,20}$/;
 const ROLES = new Set(['user', 'admin']);
 
 class AccessControl {
-  constructor({ store, adminRoleId, userRoleId, adminUserId }) {
+  constructor({ store, adminRoleId, userRoleId, adminUserId, registry } = {}) {
     this.store = store;
+    this.registry = registry || null;
     this.adminRoleId = '';
     this.userRoleId = '';
     this.adminUserId = String(adminUserId || '').trim();
     if (adminRoleId || userRoleId) this.setRoleIds(adminRoleId, userRoleId);
+  }
+
+  setRegistry(registry) {
+    this.registry = registry || null;
   }
 
   setAdminUserId(adminUserId) {
@@ -84,8 +89,9 @@ class AccessControl {
     const status = String(member.status || 'active').toLowerCase();
     if (status !== 'active') return false;
     if (member.isPermanent === true) return true;
-    if (!member.expiresAt) return true; // Null expiresAt with active status is treated as lifetime or unexpired
-    const expiryTime = Date.parse(member.expiresAt);
+    const rawExpiresAt = member.expiresAt || member.expiresAtRental || null;
+    if (!rawExpiresAt) return false;
+    const expiryTime = new Date(rawExpiresAt).getTime();
     return Number.isFinite(expiryTime) && expiryTime > Date.now();
   }
 
@@ -115,6 +121,28 @@ class AccessControl {
     if (role !== 'user') throw new Error('Admin and user roles are managed by Discord server roles.');
     const workerIds = [...new Set((options.workerIds || []).map((id) => String(id).trim().toLowerCase()).filter(Boolean))];
     if (workerIds.some((id) => !/^[a-z0-9][a-z0-9_-]{1,39}$/.test(id))) throw new Error('One or more worker IDs are invalid.');
+
+    const registry = options.registry || this.registry || this.store?.registry;
+    if (registry && workerIds.length > 0) {
+      let knownIds = null;
+      if (typeof registry.list === 'function') {
+        const workers = await registry.list();
+        knownIds = new Set((workers || []).map((w) => String(w.workerId || w.id).trim().toLowerCase()));
+      }
+      for (const id of workerIds) {
+        if (knownIds) {
+          if (!knownIds.has(id)) {
+            throw new Error(`Target worker "${id}" does not exist in WorkerRegistry.`);
+          }
+        } else if (typeof registry.find === 'function') {
+          const w = await registry.find(id);
+          if (!w) throw new Error(`Target worker "${id}" does not exist in WorkerRegistry.`);
+        } else if (typeof registry.get === 'function') {
+          const w = await registry.get(id);
+          if (!w) throw new Error(`Target worker "${id}" does not exist in WorkerRegistry.`);
+        }
+      }
+    }
 
     const isPermanent = options.isPermanent !== undefined ? Boolean(options.isPermanent) : true;
     const expiresAt = isPermanent ? null : (options.expiresAt || null);

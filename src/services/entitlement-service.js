@@ -170,7 +170,12 @@ class EntitlementService {
   async redeem(userId, rawCode, discordRole = 'user') {
     const run = () => this.redeemLocked(userId, rawCode, discordRole);
     if (!this.userLock) return run();
-    return this.userLock.run('global:bot_allocation', () => this.userLock.run(userId, run));
+    const codeHash = hashCode(rawCode);
+    return this.userLock.run(`key:${codeHash}`, () =>
+      this.userLock.run('global:bot_allocation', () =>
+        this.userLock.run(userId, run)
+      )
+    );
   }
 
   async redeemLocked(userId, rawCode, discordRole) {
@@ -230,6 +235,7 @@ class EntitlementService {
 
     // Gán các bot cố định trong key
     for (const workerId of fixedIds) {
+      if (desired.length >= targetCount) break;
       if (desired.includes(workerId)) continue;
       if (!registeredIds.has(workerId)) continue;
       const assigned = await this.store.assignedUser(workerId);
@@ -267,34 +273,100 @@ class EntitlementService {
 
     // 5. Nếu thiếu bot so với hạn ngạch của key, đẩy vào hàng đợi cấp phát tự động
     const missingWorkers = Math.max(0, targetCount - desired.length);
+    let compensationState = null;
     if (missingWorkers > 0) {
       const nowIso = new Date().toISOString();
       const allocUsername = String(member?.username || cleanUserId).trim().toLowerCase();
+      const allocId = `alloc_${crypto.randomUUID()}`;
+      let allocationSaved = false;
+      let allocError = null;
+
       if (this.store.adapter && typeof this.store.adapter.savePendingAllocation === 'function') {
-        await this.store.adapter.savePendingAllocation({
-          id: `alloc_${crypto.randomUUID()}`,
+        try {
+          const res = await this.store.adapter.savePendingAllocation({
+            id: allocId,
+            username: allocUsername,
+            targetBotCount: targetCount,
+            currentAssigned: desired.length,
+            missingBotCount: missingWorkers,
+            status: 'pending_retry',
+            createdAt: nowIso
+          });
+          if (res !== false) {
+            allocationSaved = true;
+          } else {
+            allocError = new Error('savePendingAllocation returned false');
+          }
+        } catch (err) {
+          allocError = err;
+        }
+      } else if (this.store.client?.from) {
+        try {
+          const res = await this.store.client.from('manager_pending_allocations').insert({
+            id: allocId,
+            username: allocUsername,
+            target_bot_count: targetCount,
+            current_assigned: desired.length,
+            missing_bot_count: missingWorkers,
+            status: 'pending_retry',
+            created_at: nowIso,
+            updated_at: nowIso
+          });
+          if (res?.error) {
+            allocError = res.error;
+          } else {
+            allocationSaved = true;
+          }
+        } catch (err) {
+          allocError = err;
+        }
+      }
+
+      if (!allocationSaved) {
+        this.logger?.warn('enqueue_pending_allocation_failed_attempting_compensation', {
+          userId: cleanUserId,
+          error: allocError?.message || 'unknown'
+        });
+
+        const compensationRecord = {
+          id: allocId,
+          type: 'pending_allocation_compensation',
+          userId: cleanUserId,
           username: allocUsername,
           targetBotCount: targetCount,
           currentAssigned: desired.length,
           missingBotCount: missingWorkers,
           status: 'pending_retry',
+          error: allocError?.message || 'Allocation save failed',
           createdAt: nowIso
-        }).catch((err) => {
-          this.logger?.warn('enqueue_pending_allocation_failed', { userId: cleanUserId, error: err.message });
-        });
-      } else {
-        await this.store.client?.from?.('manager_pending_allocations')?.insert?.({
-          id: `alloc_${crypto.randomUUID()}`,
-          username: allocUsername,
-          target_bot_count: targetCount,
-          current_assigned: desired.length,
-          missing_bot_count: missingWorkers,
-          status: 'pending_retry',
-          created_at: nowIso,
-          updated_at: nowIso
-        }).catch((err) => {
-          this.logger?.warn('enqueue_pending_allocation_failed', { userId: cleanUserId, error: err.message });
-        });
+        };
+
+        if (typeof this.store.enqueueOutbox === 'function') {
+          try {
+            await this.store.enqueueOutbox({
+              id: `outbox_${allocId}`,
+              taskType: 'pending_allocation_compensation',
+              type: 'pending_allocation_compensation',
+              payload: compensationRecord,
+              status: 'pending',
+              nextRetryAt: nowIso
+            });
+          } catch (outboxErr) {
+            this.logger?.error?.('compensation_outbox_failed', { userId: cleanUserId, error: outboxErr.message });
+          }
+        }
+
+        if (typeof this.store.saveCompensationRecord === 'function') {
+          try {
+            await this.store.saveCompensationRecord(compensationRecord);
+          } catch (_) {}
+        }
+
+        if (!this.pendingCompensations) {
+          this.pendingCompensations = new Map();
+        }
+        this.pendingCompensations.set(allocId, compensationRecord);
+        compensationState = compensationRecord;
       }
     }
 
@@ -316,8 +388,17 @@ class EntitlementService {
       assignedCount: desired.length,
       targetCount,
       missingWorkers,
-      planName: key.planName
+      planName: key.planName,
+      compensationState: compensationState || null
     };
+  }
+
+  getPendingCompensations() {
+    return Array.from(this.pendingCompensations?.values() || []);
+  }
+
+  clearPendingCompensations() {
+    this.pendingCompensations?.clear();
   }
 
   async checkExpiredUsersAndGracefulStop({ broker, fleetOperations } = {}) {

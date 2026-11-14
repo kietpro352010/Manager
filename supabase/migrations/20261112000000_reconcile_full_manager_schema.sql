@@ -2845,6 +2845,8 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $reset_data$
+DECLARE
+  v_row_count integer := 0;
 BEGIN
   UPDATE public.manager_workers
   SET settings = '{}'::jsonb,
@@ -2853,7 +2855,8 @@ BEGIN
       last_event = NULL,
       updated_at = now()
   WHERE worker_id = p_worker_id;
-  RETURN true;
+  GET DIAGNOSTICS v_row_count = ROW_COUNT;
+  RETURN v_row_count > 0;
 END;
 $reset_data$;
 REVOKE ALL ON FUNCTION public.manager_reset_worker_data(text) FROM PUBLIC, anon, authenticated;
@@ -3959,6 +3962,7 @@ BEGIN
       updated_at = v_now
   WHERE attempt_id = p_attempt_id
     AND status = 'processing'
+    AND (user_id IS NULL OR user_id = '' OR user_id = p_user_id)
   RETURNING * INTO v_attempt;
 
   IF NOT FOUND THEN

@@ -34,6 +34,81 @@ const ACTIONS = new Set([
 
 const BOT_SUMMARY_CACHE_MS = 2000;
 const MAX_LOGS_PER_BOT = 100;
+const SECRET_CACHE_TTL_MS = 60000; // 60s TTL for worker secretCache (WORKER-02)
+const ROTATION_GRACE_PERIOD_MS = 5 * 60 * 1000; // 5m grace period for rotated secrets (WKR-02)
+
+const VALID_WORKER_STATES = new Set([
+  'online', 'offline', 'error', 'maintenance', 'stopped',
+  'connecting', 'authenticating', 'entering', 'kicked', 'afk',
+  'waking', 'registered', 'idle', 'running', 'banned',
+  'ip_limited', 'disconnected', 'unknown'
+]);
+
+// Canonical Worker Status Validator (WORKER-08)
+function validateWorkerStatus(rawStatus, source = 'worker') {
+  const status = rawStatus && typeof rawStatus === 'object' && !Array.isArray(rawStatus) ? rawStatus : {};
+
+  const asNumber = (value, min = 0, max = Number.MAX_SAFE_INTEGER) => {
+    if (value === null || value === undefined || value === '') return null;
+    const num = Number(value);
+    return Number.isFinite(num) ? Math.max(min, Math.min(max, num)) : null;
+  };
+
+  const asInteger = (value, min = 0, max = Number.MAX_SAFE_INTEGER) => {
+    const num = asNumber(value, min, max);
+    return num !== null ? Math.round(num) : null;
+  };
+
+  const rawState = String(status.state || '').trim().toLowerCase();
+  const state = VALID_WORKER_STATES.has(rawState) ? rawState : 'unknown';
+
+  let position = null;
+  if (status.position && typeof status.position === 'object' && !Array.isArray(status.position)) {
+    const x = asNumber(status.position.x, -30000000, 30000000);
+    const y = asNumber(status.position.y, -2048, 2048);
+    const z = asNumber(status.position.z, -30000000, 30000000);
+    if (x !== null && y !== null && z !== null) {
+      position = { x, y, z };
+    }
+  }
+
+  return {
+    state,
+    online: Boolean(status.online ?? status.connected),
+    username: String(status.username || '').slice(0, 64),
+    uptimeSeconds: asInteger(status.uptimeSeconds, 0),
+    pingMs: asNumber(status.pingMs, 0, 600000),
+    managerLatencyMs: asNumber(status.managerLatencyMs, 0, 600000),
+    transport: String(status.transport || '').slice(0, 24),
+    reconnectAttempts: asInteger(status.reconnectAttempts, 0, 1000) || 0,
+    reconnectCount: asInteger(status.reconnectCount, 0, 10000) || 0,
+    afkMode: 'still',
+    proxyEnabled: Boolean(status.proxyEnabled),
+    lastError: String(status.lastError || '').slice(0, 240),
+    lastKickReason: String(status.lastKickReason || '').slice(0, 240),
+    restriction: String(status.restriction || '').slice(0, 40) || null,
+    maintenanceWindow: Boolean(status.maintenanceWindow),
+    maintenanceTimeZone: String(status.maintenanceTimeZone || '').slice(0, 40),
+    maintenanceStart: String(status.maintenanceStart || '').slice(0, 5),
+    maintenanceEnd: String(status.maintenanceEnd || '').slice(0, 5),
+    tps: typeof status.tps === 'number' && Number.isFinite(status.tps) ? Math.max(0, Math.min(20, status.tps)) : null,
+    cpuPercent: asNumber(status.cpuPercent, 0, 100),
+    rssMb: asNumber(status.rssMb, 0, 65536),
+    heapUsedMb: asNumber(status.heapUsedMb, 0, 65536),
+    health: asNumber(status.health, 0, 20),
+    food: asNumber(status.food, 0, 20),
+    totemCount: asInteger(status.totemCount, 0, 1000),
+    goldenAppleCount: asInteger(status.goldenAppleCount, 0, 1000),
+    position,
+    dimension: String(status.dimension || '').slice(0, 40),
+    lastStateAt: status.lastStateAt && !Number.isNaN(new Date(status.lastStateAt).getTime())
+      ? new Date(status.lastStateAt)
+      : null,
+    manuallyStopped: status.manuallyStopped !== undefined ? Boolean(status.manuallyStopped) : undefined,
+    updatedAt: new Date(),
+    source
+  };
+}
 
 class WorkerRegistry {
   constructor({ store, accessStore, encryptionKey, renderApi, adminNotifier }) {
@@ -62,6 +137,11 @@ class WorkerRegistry {
     for (const [botId, logs] of this.botLogsCache.entries()) {
       if (Array.isArray(logs) && logs.length > MAX_LOGS_PER_BOT) {
         this.botLogsCache.set(botId, logs.slice(-MAX_LOGS_PER_BOT));
+      }
+    }
+    for (const [botId, entry] of this.secretCache.entries()) {
+      if (entry?.cachedAt && now - entry.cachedAt > SECRET_CACHE_TTL_MS) {
+        this.secretCache.delete(botId);
       }
     }
   }
@@ -167,11 +247,16 @@ class WorkerRegistry {
     const id = String(workerId || '').trim().toLowerCase();
     const cached = this.secretCache.get(id);
     if (cached) {
-      if (typeof cached === 'object') {
-        if (cached.enabled === false) return null;
-        return cached.secret;
+      const isExpired = cached.cachedAt && (Date.now() - cached.cachedAt > SECRET_CACHE_TTL_MS);
+      if (isExpired) {
+        this.secretCache.delete(id);
+      } else {
+        if (typeof cached === 'object') {
+          if (cached.enabled === false) return null;
+          return cached.secret;
+        }
+        return cached;
       }
-      return cached;
     }
     const record = await this.find(id);
     if (!record || record.enabled === false) {
@@ -179,17 +264,45 @@ class WorkerRegistry {
       return null;
     }
     const secret = safeDecryptText(record.secretCiphertext, this.encryptionKey);
-    if (secret) this.secretCache.set(id, { secret, enabled: Boolean(record.enabled) });
+    if (secret) {
+      this.secretCache.set(id, {
+        secret,
+        enabled: Boolean(record.enabled),
+        cachedAt: Date.now()
+      });
+    }
     return secret || null;
   }
 
   async rotateSecret(workerId) {
     const record = await this.find(workerId);
-    if (!record) throw new Error(`Worker ${workerId} is not registered.`);
+    if (!record || !record.enabled) {
+      throw new Error(`Worker ${workerId} is not registered or is disabled.`);
+    }
+    const oldSecret = safeDecryptText(record.secretCiphertext, this.encryptionKey);
     const secret = generateWorkerSecret();
     await this.store.update(record.workerId, { secretCiphertext: encryptSecret(secret, this.encryptionKey) });
-    this.secretCache.set(record.workerId, { secret, enabled: Boolean(record.enabled) });
+    this.secretCache.set(record.workerId, {
+      secret,
+      previousSecret: oldSecret || null,
+      graceUntil: Date.now() + ROTATION_GRACE_PERIOD_MS,
+      enabled: Boolean(record.enabled),
+      cachedAt: Date.now()
+    });
     return secret;
+  }
+
+  invalidateWorkerSecret(workerId) {
+    if (!workerId) {
+      this.secretCache.clear();
+      return true;
+    }
+    const id = String(workerId).trim().toLowerCase();
+    return this.secretCache.delete(id);
+  }
+
+  invalidate(workerId) {
+    return this.invalidateWorkerSecret(workerId);
   }
 
   async resetData(workerId) {
@@ -203,11 +316,43 @@ class WorkerRegistry {
   }
 
   async authenticate(workerId, presentedSecret) {
-    const expected = await this.credential(workerId).catch(() => null);
-    if (!expected || typeof presentedSecret !== 'string') return false;
+    if (!workerId || typeof presentedSecret !== 'string') return false;
+    const id = String(workerId).trim().toLowerCase();
+    const cached = this.secretCache.get(id);
+    const now = Date.now();
+    if (cached && typeof cached === 'object') {
+      if (cached.enabled === false) return false;
+      const isExpired = cached.cachedAt && (now - cached.cachedAt > SECRET_CACHE_TTL_MS);
+      if (!isExpired && cached.secret) {
+        const left = Buffer.from(cached.secret, 'utf8');
+        const right = Buffer.from(presentedSecret, 'utf8');
+        if (left.length === right.length && crypto.timingSafeEqual(left, right)) {
+          return true;
+        }
+      }
+      if (cached.previousSecret && cached.graceUntil && now < cached.graceUntil) {
+        const prevLeft = Buffer.from(cached.previousSecret, 'utf8');
+        const right = Buffer.from(presentedSecret, 'utf8');
+        if (prevLeft.length === right.length && crypto.timingSafeEqual(prevLeft, right)) {
+          return true;
+        }
+      }
+    }
+    const expected = await this.credential(id).catch(() => null);
+    if (!expected) return false;
     const left = Buffer.from(expected, 'utf8');
     const right = Buffer.from(presentedSecret, 'utf8');
-    return left.length === right.length && crypto.timingSafeEqual(left, right);
+    if (left.length === right.length && crypto.timingSafeEqual(left, right)) {
+      return true;
+    }
+    const freshCached = this.secretCache.get(id);
+    if (freshCached?.previousSecret && freshCached?.graceUntil && now < freshCached.graceUntil) {
+      const prevLeft = Buffer.from(freshCached.previousSecret, 'utf8');
+      if (prevLeft.length === right.length && crypto.timingSafeEqual(prevLeft, right)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   verifyBotSecretSync(workerId, secret) {
@@ -215,16 +360,35 @@ class WorkerRegistry {
     const id = String(workerId).trim().toLowerCase();
     const cached = this.secretCache.get(id);
     if (!cached) return false;
+    const now = Date.now();
+    const isExpired = cached.cachedAt && (now - cached.cachedAt > SECRET_CACHE_TTL_MS);
+    if (isExpired) {
+      this.secretCache.delete(id);
+      return false;
+    }
     const expected = typeof cached === 'object' ? cached.secret : cached;
     if (typeof cached === 'object' && cached.enabled === false) return false;
     if (!expected) return false;
     const left = Buffer.from(expected, 'utf8');
     const right = Buffer.from(secret, 'utf8');
-    return left.length === right.length && crypto.timingSafeEqual(left, right);
+    if (left.length === right.length && crypto.timingSafeEqual(left, right)) {
+      return true;
+    }
+    if (cached.previousSecret && cached.graceUntil && now < cached.graceUntil) {
+      const prevLeft = Buffer.from(cached.previousSecret, 'utf8');
+      if (prevLeft.length === right.length && crypto.timingSafeEqual(prevLeft, right)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   async isBotSecretRequestForBot(presentedSecret, expectedBotId) {
     return this.authenticate(expectedBotId, presentedSecret);
+  }
+
+  async verifyBotSecret(workerId, secret) {
+    return Boolean(await this.isBotSecretRequestForBot(secret, workerId));
   }
 
   async updateStatus(workerId, status, source) {
@@ -246,56 +410,28 @@ class WorkerRegistry {
         return this.publicView(existing);
       }
 
-      const asNumber = (value, max = Number.MAX_SAFE_INTEGER) =>
-        value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
-          ? Math.max(0, Math.min(max, Number(value)))
-          : null;
+      const safeStatus = validateWorkerStatus(status, source);
 
-      const safeStatus = {
-        state: String(status?.state || 'unknown').slice(0, 40),
-        online: Boolean(status?.online ?? status?.connected),
-        username: String(status?.username || '').slice(0, 64),
-        uptimeSeconds: Number.isFinite(Number(status?.uptimeSeconds)) ? Math.max(0, Number(status.uptimeSeconds)) : null,
-        pingMs: asNumber(status?.pingMs, 600000),
-        managerLatencyMs: asNumber(status?.managerLatencyMs, 600000),
-        transport: String(status?.transport || '').slice(0, 24),
-        reconnectAttempts: Number.isFinite(Number(status?.reconnectAttempts)) ? Math.max(0, Number(status.reconnectAttempts)) : 0,
-        reconnectCount: Number.isFinite(Number(status?.reconnectCount)) ? Math.max(0, Number(status.reconnectCount)) : 0,
-        afkMode: 'still',
-        proxyEnabled: Boolean(status?.proxyEnabled),
-        lastError: String(status?.lastError || '').slice(0, 240),
-        lastKickReason: String(status?.lastKickReason || '').slice(0, 240),
-        restriction: String(status?.restriction || '').slice(0, 40) || null,
-        maintenanceWindow: Boolean(status?.maintenanceWindow),
-        maintenanceTimeZone: String(status?.maintenanceTimeZone || '').slice(0, 40),
-        maintenanceStart: String(status?.maintenanceStart || '').slice(0, 5),
-        maintenanceEnd: String(status?.maintenanceEnd || '').slice(0, 5),
-        tps: typeof status?.tps === 'number' && Number.isFinite(status.tps) ? Math.max(0, Math.min(20, status.tps)) : null,
-        cpuPercent: asNumber(status?.cpuPercent, 100),
-        rssMb: asNumber(status?.rssMb, 65536),
-        heapUsedMb: asNumber(status?.heapUsedMb, 65536),
-        health: asNumber(status?.health, 20),
-        food: asNumber(status?.food, 20),
-        totemCount: asNumber(status?.totemCount, 1000),
-        goldenAppleCount: asNumber(status?.goldenAppleCount, 1000),
-        position: status?.position && ['x', 'y', 'z'].every((axis) => Number.isFinite(Number(status.position[axis])))
-          ? { x: Number(status.position.x), y: Number(status.position.y), z: Number(status.position.z) }
-          : null,
-        dimension: String(status?.dimension || '').slice(0, 40),
-        lastStateAt: status?.lastStateAt ? new Date(status.lastStateAt) : null,
-        updatedAt: new Date(),
-        source
-      };
+      // Preserve manuallyStopped flag across status reports if not explicitly provided
+      if (status.manuallyStopped !== undefined) {
+        safeStatus.manuallyStopped = Boolean(status.manuallyStopped);
+      } else if (existing.status?.manuallyStopped !== undefined) {
+        safeStatus.manuallyStopped = Boolean(existing.status.manuallyStopped);
+      }
 
-      // Chống ghi đè nếu trạng thái trong payload cũ hơn trạng thái đang có
+      const managerNow = new Date();
+
+      // SYNC-16-01: Chống ghi đè trạng thái nếu payload cũ hơn trạng thái đang có (Worker time lastStateAt),
+      // nhưng VẪN PHẢI cập nhật lastHeartbeat (Manager time) để tránh clock skew làm worker bị coi là offline/unreachable
       if (safeStatus.lastStateAt && existing.status?.lastStateAt) {
         if (safeStatus.lastStateAt.getTime() < new Date(existing.status.lastStateAt).getTime()) {
-          return this.publicView(existing);
+          const refreshed = await this.store.update(id, { lastHeartbeat: managerNow });
+          return this.publicView(refreshed || { ...existing, lastHeartbeat: managerNow });
         }
       }
 
       // Bảo tồn cờ enabled của admin, KHÔNG tự ý set enabled: true
-      const updated = await this.store.update(id, { status: safeStatus, lastHeartbeat: new Date() });
+      const updated = await this.store.update(id, { status: safeStatus, lastHeartbeat: managerNow });
 
       this.summaryLastAppliedSeq.set(id, currentSeq);
       this.summaryCache.set(id, { timestamp: Date.now(), data: safeStatus });
@@ -325,8 +461,22 @@ class WorkerRegistry {
     });
   }
 
+  async touchHeartbeat(workerId) {
+    const id = String(workerId || '').trim().toLowerCase();
+    const existing = await this.find(id);
+    if (!existing || existing.enabled === false) return null;
+    const now = new Date();
+    const updated = await this.store.update(id, { lastHeartbeat: now });
+    return this.publicView(updated || { ...existing, lastHeartbeat: now });
+  }
+
   async addEvent(workerId, event) {
     const id = String(workerId || '').trim().toLowerCase();
+    const existing = await this.find(id);
+    if (!existing || existing.enabled === false) {
+      return null;
+    }
+
     const rawMsg = event?.message || event?.reason || '';
     const cleanMsg = extractChatMessage(rawMsg);
     const safeEvent = {
@@ -526,10 +676,6 @@ class WorkerRegistry {
     return this.updateSettings(workerId, config);
   }
 
-  verifyBotSecret(workerId, secret) {
-    return this.isBotSecretRequestForBot(secret, workerId);
-  }
-
   getAdminPassword() {
     return this.adminPassword || null;
   }
@@ -547,4 +693,13 @@ class WorkerRegistry {
   }
 }
 
-module.exports = { WorkerRegistry, ACTIONS };
+WorkerRegistry.WorkerRegistry = WorkerRegistry;
+WorkerRegistry.ACTIONS = ACTIONS;
+WorkerRegistry.validateWorkerStatus = validateWorkerStatus;
+WorkerRegistry.VALID_WORKER_STATES = VALID_WORKER_STATES;
+
+module.exports = WorkerRegistry;
+module.exports.WorkerRegistry = WorkerRegistry;
+module.exports.ACTIONS = ACTIONS;
+module.exports.validateWorkerStatus = validateWorkerStatus;
+module.exports.VALID_WORKER_STATES = VALID_WORKER_STATES;

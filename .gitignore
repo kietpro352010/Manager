@@ -7,3 +7,5 @@ logs/
 coverage/
 npm-debug.log*
 
+*.log  
+scratch/ 

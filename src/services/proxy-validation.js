@@ -78,7 +78,11 @@ function isLocalOrPrivateHost(hostname) {
       host = host.split(':')[0];
     }
   } catch (_) {}
-  if (['localhost', 'localhost.localdomain', '127.0.0.1', '::1', '0.0.0.0'].includes(host) || /\.(?:localhost|local|internal|lan)$/.test(host)) return true;
+  if (['localhost', 'localhost.localdomain', '127.0.0.1', '::1', '0.0.0.0', 'instance-data'].includes(host) ||
+      /\.(?:localhost|local|internal|lan)$/.test(host) ||
+      host === 'metadata.google.internal' ||
+      host.endsWith('.metadata.google.internal') ||
+      host.endsWith('.instance-data')) return true;
   return isPrivateOrBlockedIp(host);
 }
 
@@ -158,7 +162,7 @@ async function validateSafeBotUrl(rawUrl) {
   return url.toString().replace(/\/+$/, '');
 }
 
-function validateProxyUrl(rawUrl) {
+async function validateProxyUrl(rawUrl) {
   const raw = String(rawUrl || '').trim();
   if (!raw) return '';
 
@@ -178,8 +182,31 @@ function validateProxyUrl(rawUrl) {
     throw new Error('Proxy URL phải có cổng hợp lệ (1-65535).');
   }
 
-  if (isLocalOrPrivateHost(url.hostname)) {
+  const hostname = url.hostname.toLowerCase();
+
+  if (isLocalOrPrivateHost(hostname)) {
     throw new Error('Proxy không được trỏ về địa chỉ nội bộ hoặc loopback.');
+  }
+
+  if (net.isIP(hostname) !== 0) {
+    if (isPrivateOrBlockedIp(hostname)) {
+      throw new Error('Proxy không được trỏ về địa chỉ nội bộ hoặc loopback.');
+    }
+  } else {
+    try {
+      const records = await dns.promises.lookup(hostname, { all: true });
+      if (!records || records.length === 0) {
+        throw new Error(`Không thể phân giải DNS cho hostname '${hostname}'.`);
+      }
+      for (const rec of records) {
+        if (isPrivateOrBlockedIp(rec.address)) {
+          throw new Error('Proxy không được trỏ về địa chỉ nội bộ hoặc loopback.');
+        }
+      }
+    } catch (e) {
+      if (e.message.includes('Proxy không được trỏ')) throw e;
+      throw new Error(`Lỗi phân giải DNS cho proxy '${hostname}': ${e.message}`);
+    }
   }
 
   let username = '';

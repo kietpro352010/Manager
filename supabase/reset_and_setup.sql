@@ -8,6 +8,14 @@
 -- PHẦN 1: XÓA SẠCH TOÀN BỘ BẢNG, VIEW, SEQUENCE & HÀM CŨ/SAI TRONG `public`
 BEGIN;
 
+-- DISASTER RECOVERY GUARD: Prevent accidental execution on production/staging
+DO $$
+BEGIN
+  IF current_setting('kingmc.allow_reset', true) IS DISTINCT FROM 'true' THEN
+    RAISE EXCEPTION 'DISASTER RECOVERY GUARD: reset_and_setup.sql will drop all manager and bot tables. To proceed, execute "SET kingmc.allow_reset = ''true'';" before running this script.';
+  END IF;
+END $$;
+
 DO $$
 DECLARE
   v_rel record;
@@ -2422,6 +2430,8 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $reset_data$
+DECLARE
+  v_row_count integer := 0;
 BEGIN
   UPDATE public.manager_workers
   SET settings = '{}'::jsonb,
@@ -2430,7 +2440,8 @@ BEGIN
       last_event = NULL,
       updated_at = now()
   WHERE worker_id = p_worker_id;
-  RETURN true;
+  GET DIAGNOSTICS v_row_count = ROW_COUNT;
+  RETURN v_row_count > 0;
 END;
 $reset_data$;
 REVOKE ALL ON FUNCTION public.manager_reset_worker_data(text) FROM PUBLIC, anon, authenticated;
@@ -3561,6 +3572,7 @@ BEGIN
       updated_at = v_now
   WHERE attempt_id = p_attempt_id
     AND status = 'processing'
+    AND (user_id IS NULL OR user_id = '' OR user_id = p_user_id)
   RETURNING * INTO v_attempt;
 
   IF NOT FOUND THEN

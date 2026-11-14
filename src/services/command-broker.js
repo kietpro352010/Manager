@@ -68,7 +68,7 @@ class CommandBroker {
       const store = this.commandStore?.adapter || this.registry?.store?.adapter;
       if (!store || typeof store.claimOutboxBatch !== 'function') return;
 
-      const batch = await store.claimOutboxBatch(`mgr_${process.pid}`, 10, 60);
+      const batch = await store.claimOutboxBatch(this.instanceId, 10, 60);
       if (!Array.isArray(batch) || batch.length === 0) return;
 
       for (const item of batch) {
@@ -79,13 +79,13 @@ class CommandBroker {
         try {
           const worker = await this.registry.find(workerId);
           if (!worker || !worker.enabled) {
-            await store.failOutboxItem(item.id, `mgr_${process.pid}`, 'WORKER_DISABLED_OR_NOT_FOUND');
+            await store.failOutboxItem(item.id, this.instanceId, 'WORKER_DISABLED_OR_NOT_FOUND');
             continue;
           }
 
           if (worker.provider === 'render' && worker.serviceUrl) {
             await this.dispatchRender(worker, { commandId: item.id, action, payload });
-            await store.completeOutboxItem(item.id, `mgr_${process.pid}`);
+            await store.completeOutboxItem(item.id, this.instanceId);
           } else {
             // WispByte pull mode
             if (this.hasActivePoller(workerId)) {
@@ -95,11 +95,11 @@ class CommandBroker {
         } catch (err) {
           const attempts = Number(item.attempts || 1);
           if (attempts >= 8) {
-            await store.failOutboxItem(item.id, `mgr_${process.pid}`, err.message || 'MAX_RETRIES_EXCEEDED');
+            await store.failOutboxItem(item.id, this.instanceId, err.message || 'MAX_RETRIES_EXCEEDED');
           } else {
             const nextRetryDelaySec = Math.min(3600, Math.pow(2, attempts) * 10);
             const nextRetryAtIso = new Date(Date.now() + nextRetryDelaySec * 1000).toISOString();
-            await store.rescheduleOutboxItem(item.id, `mgr_${process.pid}`, nextRetryAtIso, err.message);
+            await store.rescheduleOutboxItem(item.id, this.instanceId, nextRetryAtIso, err.message);
           }
         }
       }
@@ -156,19 +156,35 @@ class CommandBroker {
   async dispatchRender(worker, command) {
     const baseUrl = worker.serviceUrl;
     const secret = await this.registry.credential(worker.workerId);
-    const response = await this.fetch(`${baseUrl}/api/v1/bots/${encodeURIComponent(worker.workerId)}/command`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-worker-secret': secret,
-        'x-manager-bot-id': String(worker.workerId)
-      },
-      body: JSON.stringify({ action: command.action, payload: command.payload }),
-      signal: AbortSignal.timeout(30000)
-    });
+    let response;
+    let body;
+    try {
+      response = await this.fetch(`${baseUrl}/api/v1/bots/${encodeURIComponent(worker.workerId)}/command`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-worker-secret': secret,
+          'x-manager-bot-id': String(worker.workerId)
+        },
+        body: JSON.stringify({ action: command.action, payload: command.payload }),
+        signal: AbortSignal.timeout(30000)
+      });
+      body = await readJson(response);
+    } catch (fetchErr) {
+      if (fetchErr.name === 'TimeoutError' || fetchErr.code === 'ETIMEDOUT' || /timed out/i.test(fetchErr.message)) {
+        const timeoutErr = new Error('Command execution timed out waiting for worker response.');
+        timeoutErr.code = 'result_timeout';
+        timeoutErr.timedOut = true;
+        throw timeoutErr;
+      }
+      throw fetchErr;
+    }
 
-    const body = await readJson(response);
-    if (!response.ok || !body.ok) throw new Error(body.error || `Worker returned HTTP ${response.status}.`);
+    if (!response.ok || !body.ok) {
+      const err = new Error(body.error || `Worker returned HTTP ${response.status}.`);
+      if (body.error === 'execution_timeout') err.code = 'execution_timeout';
+      throw err;
+    }
 
     const workerStatus = body.result?.worker || body.result || {};
     const isSuccess = body.result ? body.result.ok === true : body.ok === true;
@@ -204,7 +220,14 @@ class CommandBroker {
         });
       }
     }
-    return { delivered: true, result: body.result || body };
+    return {
+      ok: isSuccess,
+      delivered: true,
+      timedOut: false,
+      commandId: command.commandId,
+      action: command.action,
+      result: body.result || body
+    };
   }
 
   async dispatchPoll(worker, command) {
@@ -229,7 +252,15 @@ class CommandBroker {
         pending.done = true;
         if (pending.timer) clearTimeout(pending.timer);
         this.pendingResults.delete(actualCommandId);
-        resolveCompletion({ delivered: true, result });
+        const isSuccess = result ? (result.ok !== false) : true;
+        resolveCompletion({
+          ok: isSuccess,
+          delivered: true,
+          timedOut: false,
+          commandId: actualCommandId,
+          action: command.action,
+          result
+        });
       }
     };
 
@@ -252,7 +283,14 @@ class CommandBroker {
         if (pending.done) return;
         pending.done = true;
         this.pendingResults.delete(actualCommandId);
-        resolveCompletion({ delivered: false, timedOut: true, commandId: actualCommandId });
+        resolveCompletion({
+          ok: false,
+          delivered: false,
+          timedOut: true,
+          commandId: actualCommandId,
+          action: command.action,
+          result: null
+        });
       }, this.config.commandResultTimeoutMs);
       pending.timer.unref?.();
     }
@@ -319,16 +357,143 @@ class CommandBroker {
     return res?.result?.worker || res?.result?.detail || res?.result || {};
   }
 
+  validateResultPayload(action, rawResult) {
+    if (!rawResult || typeof rawResult !== 'object' || Array.isArray(rawResult)) {
+      throw new Error(`Invalid command result: expected an object for action '${action}'.`);
+    }
+    const validated = { ...rawResult };
+    validated.ok = Boolean(rawResult.ok ?? (rawResult.result ? rawResult.result.ok : !rawResult.error));
+    if (rawResult.error) {
+      validated.error = String(rawResult.error).slice(0, 500);
+    }
+    if (action) {
+      validated.action = String(action);
+    }
+
+    if (['start', 'stop', 'restart', 'reconnect', 'status', 'reset'].includes(action)) {
+      const rawWorker = rawResult.worker || rawResult.result?.worker ||
+        (('state' in rawResult || 'online' in rawResult || 'connected' in rawResult) ? rawResult : null);
+      if (rawWorker && typeof rawWorker === 'object') {
+        const validator = this.registry?.constructor?.validateWorkerStatus || this.registry?.validateWorkerStatus;
+        if (typeof validator === 'function') {
+          validated.worker = validator(rawWorker, 'command-result');
+        }
+      }
+    } else if (action === 'chat') {
+      if (rawResult.message !== undefined) {
+        validated.message = String(rawResult.message || '').slice(0, 256);
+      }
+    } else if (action === 'inventory') {
+      if (rawResult.items !== undefined && !Array.isArray(rawResult.items)) {
+        throw new Error("Invalid inventory result: 'items' must be an array.");
+      }
+    } else if (action === 'window_click') {
+      if (rawResult.slot !== undefined && rawResult.slot !== null && !Number.isInteger(Number(rawResult.slot))) {
+        throw new Error("Invalid window_click result: 'slot' must be an integer.");
+      }
+    }
+
+    return validated;
+  }
+
+  async waitForResult(commandId, { timeoutMs = (this.config?.commandResultTimeoutMs || 30000) } = {}) {
+    const cid = String(commandId || '').trim();
+    // 1. Check in-memory waiter
+    const pending = this.pendingResults.get(cid);
+    if (pending) {
+      return new Promise((resolve) => {
+        const origFinish = pending.finish;
+        pending.finish = (res) => {
+          try { origFinish(res); } catch (_) {}
+          resolve({
+            ok: res?.ok !== false,
+            delivered: true,
+            timedOut: false,
+            commandId: cid,
+            action: pending.action,
+            result: res
+          });
+        };
+      });
+    }
+
+    // 2. Durable lookup in DB
+    if (typeof this.commandStore?.get === 'function') {
+      try {
+        const stored = await this.commandStore.get(cid);
+        if (stored) {
+          if (stored.status === 'completed') {
+            return {
+              ok: true,
+              delivered: true,
+              timedOut: false,
+              commandId: cid,
+              action: stored.action,
+              result: stored.result
+            };
+          }
+          if (stored.status === 'failed') {
+            return {
+              ok: false,
+              delivered: true,
+              timedOut: false,
+              commandId: cid,
+              action: stored.action,
+              result: stored.result,
+              error: 'command_failed'
+            };
+          }
+          if (stored.status === 'expired') {
+            return {
+              ok: false,
+              delivered: false,
+              timedOut: true,
+              commandId: cid,
+              action: stored.action,
+              result: null
+            };
+          }
+        }
+      } catch (err) {
+        this.logger?.warn?.('waitForResult_db_lookup_failed', { commandId: cid, error: err.message });
+      }
+    }
+
+    // 3. Fallback wait with polling on DB if command is still in-flight
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeoutMs) {
+      await new Promise((r) => setTimeout(r, 200));
+      if (typeof this.commandStore?.get === 'function') {
+        try {
+          const stored = await this.commandStore.get(cid);
+          if (stored && (stored.status === 'completed' || stored.status === 'failed' || stored.status === 'expired')) {
+            const isCompleted = stored.status === 'completed';
+            return {
+              ok: isCompleted,
+              delivered: stored.status !== 'expired',
+              timedOut: stored.status === 'expired',
+              commandId: cid,
+              action: stored.action,
+              result: stored.result
+            };
+          }
+        } catch (_) {}
+      }
+    }
+
+    return { ok: false, delivered: false, timedOut: true, commandId: cid, result: null };
+  }
+
   async acceptResult(workerId, payload = {}) {
     const commandId = String(payload.commandId || '');
-    const result = (payload.result && typeof payload.result === 'object') ? { ...payload.result } : {};
-    if (payload.action && !result.action) {
-      result.action = payload.action;
-    }
+    let result = (payload.result && typeof payload.result === 'object') ? { ...payload.result } : { ...(payload || {}) };
+    delete result.commandId;
+    const action = payload.action || result.action;
+    result = this.validateResultPayload(action, result);
     return this.reportResult(workerId, commandId, result);
   }
 
-  cancelWorker(workerId) {
+  async cancelWorker(workerId) {
     const id = String(workerId);
     const waiters = this.pollWaiters.get(id);
     if (waiters && waiters.length) {
@@ -347,7 +512,11 @@ class CommandBroker {
       }
     }
     if (typeof this.commandStore.clearWorker === 'function') {
-      void this.commandStore.clearWorker(id).catch(() => {});
+      try {
+        await this.commandStore.clearWorker(id);
+      } catch (err) {
+        this.logger?.warn?.('clear_worker_failed_on_cancel', { workerId: id, error: err?.message });
+      }
     }
   }
 
@@ -834,7 +1003,7 @@ class CommandBroker {
     }
   }
 
-  async reportResult(workerId, commandId, result) {
+  async reportResult(workerId, commandId, rawResult) {
     const wid = String(workerId || '').trim().toLowerCase();
     const cid = String(commandId || '').trim();
     const pending = this.pendingResults.get(cid);
@@ -844,7 +1013,7 @@ class CommandBroker {
 
     // Look up command metadata BEFORE transitioning state so RESET is detected reliably
     let storedCommand = null;
-    if ((!pending || !pending.action) && !result?.action && typeof this.commandStore?.get === 'function') {
+    if (typeof this.commandStore?.get === 'function') {
       try {
         storedCommand = await this.commandStore.get(cid);
       } catch (err) {
@@ -856,12 +1025,48 @@ class CommandBroker {
       }
     }
 
-    const action = pending?.action || result?.action || storedCommand?.action;
+    if (storedCommand && storedCommand.workerId && String(storedCommand.workerId).toLowerCase() !== wid) {
+      return { ok: false, error: 'COMMAND_OWNERSHIP_MISMATCH' };
+    }
+
+    const action = pending?.action || rawResult?.action || storedCommand?.action;
+    const result = this.validateResultPayload(action, rawResult);
+
+    // If storedCommand is already completed, return idempotent success
+    if (storedCommand?.status === 'completed') {
+      if (pending && pending.workerId === wid && typeof pending.finish === 'function') {
+        pending.finish(result);
+      }
+      return { ok: true, alreadyCompleted: true };
+    }
+
     const isSuccess = result?.ok === true || result?.result?.ok === true;
     const candidateStatus = result?.worker || result?.result?.worker || result?.status ||
       (result && typeof result === 'object' && ('state' in result || 'online' in result || 'connected' in result)
         ? result
         : null);
+
+    // If storedCommand was expired, accept late result idempotently
+    if (storedCommand?.status === 'expired') {
+      try {
+        if (this.commandStore.client && typeof this.commandStore.client.from === 'function') {
+          await this.commandStore.client.from('manager_commands').update({
+            status: 'completed',
+            result: result ?? {},
+            completed_at: new Date().toISOString()
+          }).eq('command_id', cid).eq('worker_id', wid);
+        }
+      } catch (_) {}
+      if (candidateStatus && typeof candidateStatus === 'object' && typeof this.registry?.updateStatus === 'function') {
+        try {
+          await this.registry.updateStatus(wid, candidateStatus, 'manager-command-poll-late');
+        } catch (_) {}
+      }
+      if (pending && pending.workerId === wid && typeof pending.finish === 'function') {
+        pending.finish(result);
+      }
+      return { ok: true, lateResult: true, status: 'completed' };
+    }
 
     // Two-phase durable execution + state sync for RESET commands:
     // Never mark a reset command terminally 'completed' before state sync succeeds.

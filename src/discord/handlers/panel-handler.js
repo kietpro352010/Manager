@@ -154,8 +154,16 @@ function checkBotOwnership(user, workerId, worker = null) {
 
 // Get user's accessible bots
 async function getUserBots(user, services) {
+  if (!user) return [];
   const allWorkers = await services.registry.list();
   if (user.role === 'admin') return allWorkers;
+
+  if (services?.accessControl?.isEntitled) {
+    const normalizedUser = { ...user, expiresAt: user.expiresAt || user.expiresAtRental || null };
+    if (!services.accessControl.isEntitled(normalizedUser)) {
+      return [];
+    }
+  }
 
   const assigned = Array.isArray(user.assignedBotIds)
     ? user.assignedBotIds.map((id) => String(id).trim().toLowerCase()).filter(Boolean)
@@ -285,11 +293,23 @@ async function handlePanelInteraction(interaction, services) {
     return safeUpdate(interaction, { embeds: [errorEmbed], components: [] });
   }
 
-  if (user.role !== 'admin' && String(user.status || 'active').toLowerCase() === 'disabled') {
-    return safeUpdate(interaction, {
-      embeds: [embed('⛔ TÀI KHOẢN BỊ KHÓA', 'Tài khoản của bạn đã bị vô hiệu hóa bởi Quản trị viên.', 0xef4444)],
-      components: []
-    });
+  if (user.role !== 'admin') {
+    const normalizedUser = { ...user, expiresAt: user.expiresAt || user.expiresAtRental || null };
+    const isEntitled = services?.accessControl?.isEntitled
+      ? services.accessControl.isEntitled(normalizedUser)
+      : (String(normalizedUser.status || 'active').toLowerCase() !== 'disabled' && (normalizedUser.isPermanent === true || (normalizedUser.expiresAt && new Date(normalizedUser.expiresAt).getTime() > Date.now())));
+
+    if (!isEntitled) {
+      const isLocked = String(normalizedUser.status || 'active').toLowerCase() === 'disabled';
+      const title = isLocked ? '⛔ TÀI KHOẢN BỊ KHÓA' : '⛔ TÀI KHOẢN HẾT HẠN HOẶC BỊ KHÓA';
+      const desc = isLocked
+        ? 'Tài khoản của bạn đã bị vô hiệu hóa bởi Quản trị viên.'
+        : 'Tài khoản của bạn đã hết hạn thuê bot hoặc bị vô hiệu hóa. Vui lòng gia hạn trên Web Manager để tiếp tục sử dụng bot.';
+      return safeUpdate(interaction, {
+        embeds: [embed(title, desc, 0xef4444)],
+        components: []
+      });
+    }
   }
 
   // 1. Back to / Refresh Bots list: bots:list, bots:refresh, bots:page:{num}

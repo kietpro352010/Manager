@@ -47,21 +47,39 @@ class AsyncKeyLock {
     }
 
     let execTimer = null;
+    let timedOut = false;
+    let taskPromise;
+    try {
+      taskPromise = Promise.resolve(task());
+    } catch (syncErr) {
+      taskPromise = Promise.reject(syncErr);
+    }
+
     const execTimeoutPromise = new Promise((_, reject) => {
       if (executionTimeoutMs > 0) {
         execTimer = setTimeout(() => {
+          timedOut = true;
           reject(new Error(`Execution timeout for local key lock: ${key} (${executionTimeoutMs}ms)`));
         }, executionTimeoutMs);
         execTimer.unref?.();
       }
     });
 
+    taskPromise.finally(() => {
+      if (timedOut) {
+        release();
+        this.decrementCount(key, tail);
+      }
+    }).catch(() => {});
+
     try {
-      return await Promise.race([task(), execTimeoutPromise]);
+      return await Promise.race([taskPromise, execTimeoutPromise]);
     } finally {
       if (execTimer) clearTimeout(execTimer);
-      release();
-      this.decrementCount(key, tail);
+      if (!timedOut) {
+        release();
+        this.decrementCount(key, tail);
+      }
     }
   }
 
@@ -72,9 +90,6 @@ class AsyncKeyLock {
       this.tails.delete(key);
     } else {
       this.counts.set(key, current);
-      if (this.tails.get(key) === tail) {
-        this.tails.delete(key);
-      }
     }
   }
 

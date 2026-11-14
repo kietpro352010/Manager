@@ -1,8 +1,26 @@
 'use strict';
 
+const AsyncKeyLock = require('../services/async-key-lock');
+
 const TABLE = 'manager_workers';
 const REGISTRY_TABLE = 'bot_registry';
 const SETTINGS_TABLE = 'bot_settings';
+
+function isRpcUnavailableError(error) {
+  if (!error) return false;
+  const msg = String(error?.message || '').toLowerCase();
+  const code = String(error?.code || '').toUpperCase();
+  return (
+    code === 'PGRST202' ||
+    code === '42883' ||
+    msg.includes('could not find the function') ||
+    msg.includes('function does not exist') ||
+    msg.includes('does not exist') ||
+    msg.includes('not found') ||
+    msg.includes('not implemented') ||
+    msg.includes('schema cache')
+  );
+}
 
 const FIELDS = {
   workerId: 'worker_id', botNumber: 'bot_number', name: 'name', provider: 'provider',
@@ -31,6 +49,8 @@ class SupabaseWorkerStore {
   constructor(client) {
     this.client = client;
     this.adapter = client.adapter || null;
+    this.sequenceLock = new AsyncKeyLock();
+    this.lastAllocatedBotNumber = 0;
   }
 
   async initialize() {
@@ -65,15 +85,34 @@ class SupabaseWorkerStore {
   }
 
   async nextBotNumber() {
-    try {
-      const { data, error } = await this.client.rpc('manager_next_bot_number');
-      if (!error && data !== null && data !== undefined) return Number(data);
-    } catch (_) {}
+    return this.sequenceLock.run('next_bot_number', async () => {
+      let rpcError = null;
+      try {
+        const { data, error } = await this.client.rpc('manager_next_bot_number');
+        if (!error && data !== null && data !== undefined) {
+          const num = Number(data);
+          if (Number.isInteger(num) && num > 0) {
+            this.lastAllocatedBotNumber = Math.max(this.lastAllocatedBotNumber, num);
+            return num;
+          }
+        }
+        rpcError = error;
+      } catch (err) {
+        rpcError = err;
+      }
 
-    // Fallback: tính max bot_number + 1
-    const workers = await this.list();
-    const numbers = workers.map((w) => Number(w.botNumber || 0)).filter((n) => Number.isInteger(n) && n > 0);
-    return (numbers.length > 0 ? Math.max(...numbers) : 0) + 1;
+      if (rpcError && !isRpcUnavailableError(rpcError)) {
+        throw rpcError;
+      }
+
+      // Fallback: tính max bot_number + 1
+      const workers = await this.list();
+      const numbers = workers.map((w) => Number(w.botNumber || 0)).filter((n) => Number.isInteger(n) && n > 0);
+      const dbMax = numbers.length > 0 ? Math.max(...numbers) : 0;
+      const nextNum = Math.max(dbMax, this.lastAllocatedBotNumber) + 1;
+      this.lastAllocatedBotNumber = nextNum;
+      return nextNum;
+    });
   }
 
   async create(worker) {
@@ -91,13 +130,21 @@ class SupabaseWorkerStore {
   }
 
   async patchSettings(workerId, patch) {
+    let rpcError = null;
     try {
       const { data, error } = await this.client.rpc('manager_patch_worker_settings', {
         p_worker_id: workerId,
         p_patch: patch
       });
       if (!error) return data;
-    } catch (_) {}
+      rpcError = error;
+    } catch (err) {
+      rpcError = err;
+    }
+
+    if (rpcError && !isRpcUnavailableError(rpcError)) {
+      throw rpcError;
+    }
 
     // Fallback: đọc trực tiếp và update JSON settings
     const current = await this.get(workerId);
@@ -108,10 +155,24 @@ class SupabaseWorkerStore {
   }
 
   async resetData(workerId) {
+    let rpcError = null;
     try {
       const { data, error } = await this.client.rpc('manager_reset_worker_data', { p_worker_id: workerId });
-      if (!error && data === true) return;
-    } catch (_) {}
+      if (!error) {
+        if (data === true) return;
+        throw new Error(`Worker ${workerId} could not be reset or does not exist.`);
+      }
+      rpcError = error;
+    } catch (err) {
+      if (err.message && err.message.includes('could not be reset')) {
+        throw err;
+      }
+      rpcError = err;
+    }
+
+    if (rpcError && !isRpcUnavailableError(rpcError)) {
+      throw rpcError;
+    }
 
     // Fallback: reset settings về rỗng
     await this.update(workerId, {
@@ -129,13 +190,42 @@ class SupabaseWorkerStore {
   }
 
   async addEvent(workerId, event) {
+    let rpcError = null;
     try {
       const { error } = await this.client.rpc('manager_append_worker_event', { p_worker_id: workerId, p_event: event });
       if (!error) return;
-    } catch (_) {}
+      rpcError = error;
+    } catch (err) {
+      rpcError = err;
+    }
 
-    // Fallback: cập nhật last_event trên worker row
-    await this.update(workerId, { lastEvent: event });
+    if (rpcError && !isRpcUnavailableError(rpcError)) {
+      throw rpcError;
+    }
+
+    // SYNC-16-02: Fallback đáng tin cậy khi RPC manager_append_worker_event chưa khả dụng:
+    // Đọc worker hiện tại, kiểm tra idempotency key/nội dung để tránh duplicate,
+    // duy trì mảng events bounded 100 phần tử (tương đồng logic SQL) và cập nhật lastEvent
+    const current = await this.get(workerId);
+    if (!current) throw new Error(`Worker ${workerId} không tồn tại.`);
+
+    const eventId = String(event?.id || event?.eventId || '').trim() ||
+      `${event?.type || 'event'}_${new Date(event?.occurredAt || Date.now()).getTime()}_${Math.random().toString(36).slice(2, 8)}`;
+    const safeEvent = { ...(event || {}), id: eventId };
+
+    const existingEvents = Array.isArray(current.events) ? current.events : [];
+    const isDuplicate = existingEvents.some((e) =>
+      (safeEvent.id && e.id === safeEvent.id) ||
+      (Boolean(safeEvent.message) && Boolean(safeEvent.occurredAt) &&
+       e.type === safeEvent.type && e.message === safeEvent.message && String(e.occurredAt) === String(safeEvent.occurredAt))
+    );
+
+    const updatedEvents = isDuplicate ? existingEvents : [...existingEvents, safeEvent].slice(-100);
+
+    await this.update(workerId, {
+      lastEvent: safeEvent,
+      events: updatedEvents
+    });
   }
 
   // --------------------------------------------------------------------------
@@ -212,5 +302,7 @@ class SupabaseWorkerStore {
     if (error) throw error;
   }
 }
+
+SupabaseWorkerStore.isRpcUnavailableError = isRpcUnavailableError;
 
 module.exports = SupabaseWorkerStore;

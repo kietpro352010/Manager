@@ -94,6 +94,17 @@ async function withLocalProcessLock(lockKey, fn) {
   }
 }
 
+function sanitizeBackupPayload(payload) {
+  if (!payload || typeof payload !== 'object') return {};
+  return {
+    ...payload,
+    registry: Array.isArray(payload.registry) ? payload.registry : [],
+    users: Array.isArray(payload.users) ? payload.users : [],
+    keys: Array.isArray(payload.keys) ? payload.keys : [],
+    createdAt: payload.createdAt || payload.timestamp || new Date().toISOString()
+  };
+}
+
 class SupabaseAdapter {
     constructor(config = {}) {
         this.url = (config.url || process.env.SUPABASE_URL || '').trim().replace(/\/+$/, '');
@@ -472,6 +483,8 @@ class SupabaseAdapter {
             let encPassword;
             if (!process.env.MANAGER_MASTER_KEY_PREVIOUS && u._rawEncryptedPassword && isStoredCredentialCiphertext(u._rawEncryptedPassword) && String(u.password ?? '') === u._decryptedPasswordSnapshot) {
                 encPassword = u._rawEncryptedPassword;
+            } else if (String(u.password ?? '').startsWith('scrypt$')) {
+                encPassword = String(u.password);
             } else {
                 encPassword = encryptUserPassword(String(u.password ?? ''));
             }
@@ -1230,7 +1243,7 @@ class SupabaseAdapter {
         }
         const row = {
             token_hash: String(session.tokenHash || ''), user_id: String(session.userId || ''),
-            username: String(session.username || ''), role: 'user',
+            username: String(session.username || ''), role: String(session.role || 'user'),
             assigned_bot_ids: Array.isArray(session.assignedBotIds) ? session.assignedBotIds : [],
             expires_at: Number(session.expiresAt), plan_name: String(session.planName || 'Gói thường'),
             allow_account_change: session.allowAccountChange !== false, status: String(session.status || 'active'),
@@ -2301,5 +2314,6 @@ module.exports = {
   buildPostgrestIlikePattern,
   withLocalProcessLock,
   normalizeMaxUses,
-  normalizeManagerRole
+  normalizeManagerRole,
+  sanitizeBackupPayload
 };

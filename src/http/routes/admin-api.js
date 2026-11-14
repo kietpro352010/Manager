@@ -280,9 +280,71 @@ function createAdminApi({
   // 3. AUDIT LOGS
   router.get('/audit-logs', async (req, res) => {
     try {
-      const limit = Math.min(500, Math.max(10, Number(req.query?.limit) || 100));
-      const logs = await store.listAudit(limit);
-      return res.json({ ok: true, logs });
+      const page = Math.max(1, parseInt(req.query?.page, 10) || 1);
+      const limit = Math.min(500, Math.max(1, parseInt(req.query?.limit, 10) || 50));
+      const q = String(req.query?.q || '').trim().toLowerCase();
+      const category = String(req.query?.category || '').trim().toLowerCase();
+      const status = String(req.query?.status || '').trim().toLowerCase();
+      const logType = String(req.query?.logType || '').trim().toLowerCase();
+
+      const fetchLimit = Math.max(1000, page * limit);
+      const allLogs = await store.listAudit(fetchLimit);
+      const logsArray = Array.isArray(allLogs) ? allLogs : [];
+
+      let filtered = logsArray;
+
+      if (q) {
+        filtered = filtered.filter((log) => {
+          const actionStr = String(log.action || '').toLowerCase();
+          const actorStr = String(log.actorId || log.actor || log.user || '').toLowerCase();
+          const targetStr = String(log.target || log.targetId || '').toLowerCase();
+          const messageStr = String(log.message || log.msg || '').toLowerCase();
+          let detailsStr = '';
+          if (log.details) {
+            detailsStr = typeof log.details === 'object' ? JSON.stringify(log.details).toLowerCase() : String(log.details).toLowerCase();
+          }
+          return actionStr.includes(q) ||
+            actorStr.includes(q) ||
+            targetStr.includes(q) ||
+            messageStr.includes(q) ||
+            detailsStr.includes(q);
+        });
+      }
+
+      if (category) {
+        filtered = filtered.filter((log) => {
+          const logCategory = String(log.category || log.details?.category || '').toLowerCase();
+          return logCategory === category;
+        });
+      }
+
+      if (status) {
+        filtered = filtered.filter((log) => {
+          const logStatus = String(log.status || log.details?.status || '').toLowerCase();
+          return logStatus === status;
+        });
+      }
+
+      if (logType) {
+        filtered = filtered.filter((log) => {
+          const logTypeVal = String(log.logType || log.details?.logType || log.action || '').toLowerCase();
+          return logTypeVal === logType;
+        });
+      }
+
+      const total = filtered.length;
+      const totalPages = Math.max(1, Math.ceil(total / limit));
+      const startIndex = (page - 1) * limit;
+      const paginatedLogs = filtered.slice(startIndex, startIndex + limit);
+
+      return res.json({
+        ok: true,
+        logs: paginatedLogs,
+        page,
+        limit,
+        total,
+        totalPages
+      });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }
@@ -443,7 +505,7 @@ function createAdminApi({
 
   router.post('/backups/create', async (req, res) => {
     try {
-      const name = `backup_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      const name = 'backup-' + new Date().toISOString().slice(0, 19).replace(/:/g, '-') + '.json';
       const payload = {
         registry: await registry.list(),
         users: await store.listAccess(),
@@ -463,11 +525,44 @@ function createAdminApi({
       const backup = await store.fetchBackupPayload(filename);
       if (!backup) return res.status(404).json({ ok: false, error: 'Không tìm thấy bản sao lưu.' });
 
-      if (backup.registry) {
+      // 1. Restore registry
+      if (Array.isArray(backup.registry)) {
         for (const bot of backup.registry) {
-          await registry.saveConfig(bot.workerId, bot);
+          if (bot?.workerId) {
+            await registry.saveConfig(bot.workerId, bot);
+          }
+        }
+      } else if (backup.registry && typeof registry.saveConfig === 'function') {
+        await registry.saveConfig(backup.registry);
+      }
+
+      // 2. Restore users
+      if (Array.isArray(backup.users)) {
+        for (const u of backup.users) {
+          const userId = u.userId || u.id || u.username;
+          if (userId) {
+            if (typeof store.setAccess === 'function') {
+              await store.setAccess(userId, u, 'backup-restore');
+            } else if (typeof store.updateUser === 'function') {
+              await store.updateUser(userId, u);
+            } else if (typeof store.createUser === 'function') {
+              await store.createUser(u);
+            }
+          }
         }
       }
+
+      // 3. Restore keys
+      if (Array.isArray(backup.keys)) {
+        for (const k of backup.keys) {
+          if (typeof store.createKey === 'function') {
+            await store.createKey(k);
+          } else if (store.client) {
+            await store.client.from('manager_keys').upsert(k);
+          }
+        }
+      }
+
       return res.json({ ok: true, message: 'Đã khôi phục dữ liệu từ bản sao lưu.' });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
@@ -476,8 +571,27 @@ function createAdminApi({
 
   router.delete('/backups/:filename', async (req, res) => {
     try {
+      const { filename } = req.params;
+      if (!filename) return res.status(400).json({ ok: false, error: 'Thiếu tên bản sao lưu.' });
+
+      if (typeof store.deleteBackup === 'function') {
+        const deleted = await store.deleteBackup(filename);
+        if (deleted === false) {
+          return res.status(404).json({ ok: false, error: 'Không tìm thấy bản sao lưu hoặc xóa thất bại.' });
+        }
+      } else if (store.client) {
+        const { error, count } = await store.client.from('manager_backups').delete({ count: 'exact' }).eq('name', filename);
+        if (error) throw error;
+        if (count === 0) {
+          return res.status(404).json({ ok: false, error: 'Không tìm thấy bản sao lưu.' });
+        }
+      }
+
       return res.json({ ok: true, message: 'Đã xóa bản sao lưu.' });
     } catch (error) {
+      if (error.status === 404 || error.statusCode === 404 || /not found|không tìm thấy/i.test(error.message)) {
+        return res.status(404).json({ ok: false, error: error.message || 'Không tìm thấy bản sao lưu.' });
+      }
       return res.status(500).json({ ok: false, error: error.message });
     }
   });
@@ -583,20 +697,94 @@ function createAdminApi({
 
   // 10. SYSTEM RUNTIME SETTINGS & ADMIN CREDENTIALS
   router.get('/settings/system', async (_req, res) => {
-    return res.json({
-      ok: true,
-      publicBaseUrl: config.publicBaseUrl || '',
-      renderApiKey: config.renderApiKey ? '********' : '',
-      link4mApiToken: config.link4mApiToken ? '********' : '',
-      wispbyteEnabled: true
-    });
+    try {
+      const defaultSettings = {
+        publicBaseUrl: config.publicBaseUrl || '',
+        renderApiKey: config.renderApiKey ? '********' : '',
+        link4mApiToken: config.link4mApiToken ? '********' : '',
+        wispbyteEnabled: true,
+        trialGiftEnabled: Boolean(config.trialGiftEnabled ?? false),
+        trialDays: Number(config.trialDays || 3)
+      };
+
+      let persisted = null;
+      if (typeof store.getSetting === 'function') {
+        persisted = await store.getSetting('system_settings').catch(() => null);
+      } else if (store.client) {
+        const { data } = await store.client.from('manager_settings').select('value').eq('key', 'system_settings').maybeSingle().catch(() => ({}));
+        persisted = data?.value;
+      }
+
+      const mergedSettings = {
+        ...defaultSettings,
+        ...(persisted && typeof persisted === 'object' ? persisted : {})
+      };
+      mergedSettings.trialGiftEnabled = Boolean(mergedSettings.trialGiftEnabled);
+      mergedSettings.trialDays = Number.isFinite(Number(mergedSettings.trialDays)) ? Number(mergedSettings.trialDays) : 3;
+
+      return res.json({
+        ok: true,
+        settings: mergedSettings,
+        ...mergedSettings
+      });
+    } catch (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
   });
 
   router.post('/settings/system', async (req, res) => {
     try {
       const patch = req.body || {};
-      if (patch.publicBaseUrl) config.publicBaseUrl = String(patch.publicBaseUrl).trim();
-      return res.json({ ok: true, message: 'Đã cập nhật cấu hình hệ thống.' });
+      if (patch.publicBaseUrl !== undefined) config.publicBaseUrl = String(patch.publicBaseUrl).trim();
+      if (patch.trialGiftEnabled !== undefined) config.trialGiftEnabled = Boolean(patch.trialGiftEnabled);
+      if (patch.trialDays !== undefined) config.trialDays = Number(patch.trialDays) || 3;
+
+      let currentSettings = {};
+      if (typeof store.getSetting === 'function') {
+        const persisted = await store.getSetting('system_settings').catch(() => null);
+        if (persisted && typeof persisted === 'object') {
+          currentSettings = persisted;
+        }
+      } else if (store.client) {
+        const { data } = await store.client.from('manager_settings').select('value').eq('key', 'system_settings').maybeSingle().catch(() => ({}));
+        if (data?.value && typeof data.value === 'object') {
+          currentSettings = data.value;
+        }
+      }
+
+      const mergedSettings = {
+        publicBaseUrl: config.publicBaseUrl || '',
+        renderApiKey: config.renderApiKey ? '********' : '',
+        link4mApiToken: config.link4mApiToken ? '********' : '',
+        wispbyteEnabled: true,
+        trialGiftEnabled: Boolean(config.trialGiftEnabled ?? false),
+        trialDays: Number(config.trialDays || 3),
+        ...currentSettings,
+        ...patch
+      };
+
+      if (patch.trialGiftEnabled !== undefined) {
+        mergedSettings.trialGiftEnabled = Boolean(patch.trialGiftEnabled);
+      }
+      if (patch.trialDays !== undefined) {
+        mergedSettings.trialDays = Number(patch.trialDays) || 3;
+      }
+
+      if (typeof store.setSetting === 'function') {
+        await store.setSetting('system_settings', mergedSettings);
+      } else if (store.client) {
+        await store.client.from('manager_settings').upsert({
+          key: 'system_settings',
+          value: mergedSettings,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'key' });
+      }
+
+      return res.json({
+        ok: true,
+        message: 'Đã cập nhật cấu hình hệ thống.',
+        settings: mergedSettings
+      });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }

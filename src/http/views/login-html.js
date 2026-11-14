@@ -1483,7 +1483,7 @@ html, body {
                 <span id="regLicenseKeyHint" class="field-hint-inline">(Có thể bỏ trống)</span>
               </label>
               <div class="input-wrap">
-                <input id="regLicenseKey" class="field-input key-input" type="text" autocomplete="off" placeholder="Có thể bỏ trống nếu chưa có mã Key...">
+                <input id="regLicenseKey" class="field-input key-input" type="text" autocomplete="off" placeholder="Nhập mã License Key (nếu có)...">
               </div>
             </div>
 
@@ -1888,19 +1888,18 @@ function renderTrialCallout(trialGiftEnabled, rawTrialDays) {
   const text = document.getElementById('publicTrialCalloutText');
   const keyHint = document.getElementById('regLicenseKeyHint');
   const keyInput = document.getElementById('regLicenseKey');
-  if (!badge) return;
 
   if (trialGiftEnabled === false) {
-    badge.hidden = true;
-    if (keyHint) keyHint.textContent = '(Có thể bỏ trống)';
-    if (keyInput) keyInput.placeholder = 'Có thể bỏ trống nếu chưa có mã Key...';
+    if (badge) badge.hidden = true;
+    if (keyHint) keyHint.textContent = '(Bắt buộc nếu tắt dùng thử)';
+    if (keyInput) keyInput.placeholder = 'Nhập mã License Key để kích hoạt tài khoản...';
     return;
   }
 
   const parsedDays = Number.parseInt(rawTrialDays, 10);
   const days = Number.isFinite(parsedDays) && parsedDays > 0 && parsedDays <= 365 ? parsedDays : 1;
 
-  badge.hidden = false;
+  if (badge) badge.hidden = false;
   if (text) {
     const strongTitle = document.createElement('strong');
     strongTitle.textContent = 'ĐẶC QUYỀN MỚI:';
@@ -1915,7 +1914,7 @@ function renderTrialCallout(trialGiftEnabled, rawTrialDays) {
     );
   }
   if (keyHint) keyHint.textContent = '(Có thể bỏ trống)';
-  if (keyInput) keyInput.placeholder = 'Có thể bỏ trống nếu chưa có mã Key...';
+  if (keyInput) keyInput.placeholder = 'Nhập mã License Key (nếu có)...';
 }
 
 function parseBoundedInt(value, maxVal) {
@@ -1942,15 +1941,30 @@ async function pingServerHealth() {
 
 async function loadPublicSystemInfo() {
   try {
-    const [sysRes, healthRes] = await Promise.all([
-      fetch('/api/public/system-info', { credentials: 'same-origin' }),
-      fetch('/health', { credentials: 'same-origin' }).catch(() => null)
+    const [sysRes, healthRes, loginCfgRes] = await Promise.all([
+      fetch('/api/public/system-info', { credentials: 'same-origin' }).catch(() => null),
+      fetch('/health', { credentials: 'same-origin' }).catch(() => null),
+      fetch('/api/auth/login-config', { credentials: 'same-origin' }).catch(() => null)
     ]);
-    const sysData = await sysRes.json().catch(() => ({}));
+    const sysData = sysRes ? await sysRes.json().catch(() => ({})) : {};
     const healthData = healthRes ? await healthRes.json().catch(() => ({})) : null;
+    const loginCfgData = loginCfgRes ? await loginCfgRes.json().catch(() => ({})) : {};
 
-    if (sysRes.ok && sysData && sysData.ok) {
-      renderTrialCallout(sysData.trialGiftEnabled, sysData.trialDays);
+    const trialGiftEnabled = loginCfgData && loginCfgData.trialGiftEnabled !== undefined
+      ? loginCfgData.trialGiftEnabled
+      : sysData?.trialGiftEnabled;
+    const trialDays = loginCfgData && loginCfgData.trialDays !== undefined
+      ? loginCfgData.trialDays
+      : sysData?.trialDays;
+
+    if (trialGiftEnabled !== undefined) {
+      renderTrialCallout(trialGiftEnabled, trialDays);
+    }
+
+    if (sysRes && sysRes.ok && sysData && sysData.ok) {
+      if (trialGiftEnabled === undefined && sysData.trialGiftEnabled !== undefined) {
+        renderTrialCallout(sysData.trialGiftEnabled, sysData.trialDays);
+      }
 
       const totalBots = parseBoundedInt(sysData.totalBots, 99999);
       const onlineBots = parseBoundedInt(sysData.onlineBots, totalBots || 99999);
@@ -2451,6 +2465,8 @@ window.switchPublicAuthTab = switchPublicAuthTab;
 window.togglePublicPass = togglePublicPass;
 window.handlePublicLoginSubmit = handlePublicLoginSubmit;
 window.handlePublicRegisterSubmit = handlePublicRegisterSubmit;
+window.renderTrialCallout = renderTrialCallout;
+window.loadPublicSystemInfo = loadPublicSystemInfo;
 </script>
 </body>
 </html>`;

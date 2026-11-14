@@ -4757,6 +4757,13 @@ body.sidebar-collapsed .sidebar-nav-btn[data-tooltip]:hover::after {
   min-height: 100dvh;
 }
 
+.app-main-content {
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
 #homePage,
 #detailPage,
 #userManagementPage,
@@ -5666,6 +5673,7 @@ button.primary:hover:not(:disabled),
     </div>
   </header>
 
+  <main id="mainContent" class="app-main-content" role="main">
   <section id="homePage">
     <!-- FLEET HERO WELCOME HEADER -->
     <div class="fleet-welcome-header">
@@ -6392,6 +6400,7 @@ button.primary:hover:not(:disabled),
       <div id="backupTotalCount" style="color:var(--muted);font-size:12px;">Tổng cộng: 0 bản sao lưu (Tối đa 30)</div>
     </div>
   </section>
+  </main>
 
   <div class="app-footer">
     <div class="footer-recent-wrap">
@@ -9673,7 +9682,134 @@ function closeGlobalProfileDropdown() {
 }
 window.closeGlobalProfileDropdown = closeGlobalProfileDropdown;
 
-// ⌨️ ACCESSIBILITY: Đóng menu/cổng/modal khi nhấn phím Escape
+// ⌨️ ACCESSIBILITY: MODAL FOCUS TRAPPING, ESCAPE LISTENER & FOCUS RESTORATION (G5-02)
+const MODAL_FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function getVisibleFocusableElements(container) {
+  if (!container) return [];
+  const all = Array.from(container.querySelectorAll(MODAL_FOCUSABLE_SELECTOR));
+  return all.filter(el => {
+    if (el.disabled || el.hidden) return false;
+    if (el.style && (el.style.display === 'none' || el.style.visibility === 'hidden')) return false;
+    return true;
+  });
+}
+
+function trapModalFocus(modalEl) {
+  if (!modalEl) return;
+  if (!modalEl.hasAttribute('role')) modalEl.setAttribute('role', 'dialog');
+  if (!modalEl.hasAttribute('aria-modal')) modalEl.setAttribute('aria-modal', 'true');
+  if (!modalEl.hasAttribute('aria-labelledby') && !modalEl.hasAttribute('aria-label')) {
+    const heading = modalEl.querySelector('h1, h2, h3, h4, .modal-title');
+    if (heading) {
+      if (!heading.id) heading.id = 'modalTitle_' + Math.random().toString(36).slice(2, 9);
+      modalEl.setAttribute('aria-labelledby', heading.id);
+    } else {
+      modalEl.setAttribute('aria-label', 'Hộp thoại');
+    }
+  }
+
+  if (modalEl._hasModalFocusTrap) return;
+  modalEl._hasModalFocusTrap = true;
+
+  modalEl.addEventListener('keydown', function(e) {
+    if (e.key !== 'Tab') return;
+    const focusable = getVisibleFocusableElements(modalEl);
+    if (!focusable.length) {
+      e.preventDefault();
+      modalEl.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey) {
+      if (document.activeElement === first || document.activeElement === modalEl || !modalEl.contains(document.activeElement)) {
+        e.preventDefault();
+        last.focus();
+      }
+    } else {
+      if (document.activeElement === last || !modalEl.contains(document.activeElement)) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+  });
+}
+
+function openAccessibleModal(modalEl) {
+  if (!modalEl) return;
+  modalEl._previousActiveElement = document.activeElement;
+  modalEl.classList.remove('hidden');
+  trapModalFocus(modalEl);
+  setTimeout(() => {
+    const focusable = getVisibleFocusableElements(modalEl);
+    if (focusable.length > 0) {
+      focusable[0].focus();
+    } else {
+      if (!modalEl.hasAttribute('tabindex')) modalEl.setAttribute('tabindex', '-1');
+      modalEl.focus();
+    }
+  }, 10);
+}
+
+function closeAccessibleModal(modalEl) {
+  if (!modalEl) return;
+  modalEl.classList.add('hidden');
+  if (modalEl._previousActiveElement && typeof modalEl._previousActiveElement.focus === 'function') {
+    try { modalEl._previousActiveElement.focus(); } catch (_) {}
+    modalEl._previousActiveElement = null;
+  }
+}
+
+function setupAccessibleModals() {
+  const modals = document.querySelectorAll('.modal, .account-restriction-overlay');
+  modals.forEach(modal => {
+    trapModalFocus(modal);
+    if (typeof MutationObserver !== 'undefined' && !modal._hasModalObserver) {
+      modal._hasModalObserver = true;
+      let wasHidden = modal.classList.contains('hidden') || (modal.style && modal.style.display === 'none');
+      const observer = new MutationObserver(() => {
+        const isHidden = modal.classList.contains('hidden') || (modal.style && modal.style.display === 'none');
+        if (wasHidden && !isHidden) {
+          // Modal opened: record previous active element and focus first interactive element
+          modal._previousActiveElement = document.activeElement;
+          setTimeout(() => {
+            const focusable = getVisibleFocusableElements(modal);
+            if (focusable.length > 0) {
+              focusable[0].focus();
+            } else {
+              if (!modal.hasAttribute('tabindex')) modal.setAttribute('tabindex', '-1');
+              modal.focus();
+            }
+          }, 10);
+        } else if (!wasHidden && isHidden) {
+          // Modal closed: restore focus
+          if (modal._previousActiveElement && typeof modal._previousActiveElement.focus === 'function') {
+            try { modal._previousActiveElement.focus(); } catch (_) {}
+            modal._previousActiveElement = null;
+          }
+        }
+        wasHidden = isHidden;
+      });
+      observer.observe(modal, { attributes: true, attributeFilter: ['class', 'style', 'hidden'] });
+    }
+  });
+}
+
+window.trapModalFocus = trapModalFocus;
+window.openAccessibleModal = openAccessibleModal;
+window.closeAccessibleModal = closeAccessibleModal;
+window.setupAccessibleModals = setupAccessibleModals;
+
+if (typeof document !== 'undefined') {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', setupAccessibleModals);
+  } else {
+    setTimeout(setupAccessibleModals, 0);
+  }
+}
+
+// ⌨️ ACCESSIBILITY: Đóng menu/cổng/modal khi nhấn phím Escape và khôi phục focus
 window.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   const dropdown = document.getElementById('globalUserProfileDropdown');
@@ -9687,10 +9823,12 @@ window.addEventListener('keydown', (e) => {
     if (currentUser) hideLoginGate();
     return;
   }
-  const openModals = document.querySelectorAll('.modal:not(.hidden)');
-  openModals.forEach(modal => {
-    modal.classList.add('hidden');
-  });
+  const openModals = Array.from(document.querySelectorAll('.modal:not(.hidden), .account-restriction-overlay:not(.hidden)'));
+  if (openModals.length > 0) {
+    const modal = openModals[openModals.length - 1];
+    closeAccessibleModal(modal);
+    e.preventDefault();
+  }
 });
 
 // Chuyển tab Đăng nhập / Đăng ký tại Login Gate
@@ -10640,55 +10778,78 @@ async function submitCreateKeysFromMgmt() {
 }
 window.submitCreateKeysFromMgmt = submitCreateKeysFromMgmt;
 
+const _inFlightQuickActions = new Set();
 async function quickBotAction(event, id, action) {
-  event.stopPropagation();
-  var targetBot = bots.find(function(b) { return String(b.id) === String(id) || String(b.workerId) === String(id) || (Number(b.id) === Number(id) && !isNaN(Number(id))); });
-  if (action === 'start' && (!targetBot?.username || targetBot.username === 'Chưa đặt')) {
-    showToast('⚠️ Bot chưa cài đặt tài khoản Minecraft! Đang mở bảng Chi tiết để cài đặt...', 'warning', 4000);
-    openBot(id);
+  if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+  const btn = event?.currentTarget || (event?.target && typeof event.target.closest === 'function' ? event.target.closest('button') : null);
+  const actionKey = String(id) + ':' + String(action);
+  if (_inFlightQuickActions.has(actionKey) || btn?.dataset?.inFlight === 'true') {
     return;
   }
-  if (targetBot) {
-    if (action === 'start') {
-      targetBot.status = 'waking';
-      targetBot.manuallyStopped = false;
-      targetBot.available = true;
-    } else if (action === 'stop') {
-      targetBot.status = 'offline';
-      targetBot.manuallyStopped = true;
-    }
-    renderHome();
+  _inFlightQuickActions.add(actionKey);
+  if (btn) {
+    btn.dataset.inFlight = 'true';
+    btn.disabled = true;
+    btn.classList.add('is-busy');
   }
-  showToast('Đang gửi lệnh ' + action + ' tới Bot ' + id + '...');
+
   try {
-    const res = await requestJson('/api/manager/bot/' + id + '/' + action, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({})
-    });
-    if (res.ok) {
-      showToast('Đã thực hiện ' + action + ' Bot ' + id + ' thành công!', 'success');
-      lastHomeSig = '';
-      void refreshHome();
-      setTimeout(() => { lastHomeSig = ''; void refreshHome(); }, 800);
-      setTimeout(() => { lastHomeSig = ''; void refreshHome(); }, 2000);
-    } else {
-      var errText = res.data?.error || ('Lỗi khi ' + action + ' bot.');
-      if (errText.indexOf('username') !== -1 || errText.indexOf('password') !== -1 || errText.indexOf('chưa có') !== -1) {
-        showToast('⚠️ ' + errText + ' Đang mở Chi tiết để cài đặt...', 'warning', 4000);
-        openBot(id);
-      } else {
-        showToast(errText, 'error');
+    var targetBot = bots.find(function(b) { return String(b.id) === String(id) || String(b.workerId) === String(id) || (Number(b.id) === Number(id) && !isNaN(Number(id))); });
+    if (action === 'start' && (!targetBot?.username || targetBot.username === 'Chưa đặt')) {
+      showToast('⚠️ Bot chưa cài đặt tài khoản Minecraft! Đang mở bảng Chi tiết để cài đặt...', 'warning', 4000);
+      openBot(id);
+      return;
+    }
+    if (targetBot) {
+      if (action === 'start') {
+        targetBot.status = 'waking';
+        targetBot.manuallyStopped = false;
+        targetBot.available = true;
+      } else if (action === 'stop') {
+        targetBot.status = 'offline';
+        targetBot.manuallyStopped = true;
+      }
+      renderHome();
+    }
+    showToast('Đang gửi lệnh ' + action + ' tới Bot ' + id + '...');
+    try {
+      const res = await requestJson('/api/manager/bot/' + id + '/' + action, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      if (res.ok) {
+        showToast('Đã thực hiện ' + action + ' Bot ' + id + ' thành công!', 'success');
         lastHomeSig = '';
         void refreshHome();
+        setTimeout(() => { lastHomeSig = ''; void refreshHome(); }, 800);
+        setTimeout(() => { lastHomeSig = ''; void refreshHome(); }, 2000);
+      } else {
+        var errText = res.data?.error || ('Lỗi khi ' + action + ' bot.');
+        if (errText.indexOf('username') !== -1 || errText.indexOf('password') !== -1 || errText.indexOf('chưa có') !== -1) {
+          showToast('⚠️ ' + errText + ' Đang mở Chi tiết để cài đặt...', 'warning', 4000);
+          openBot(id);
+        } else {
+          showToast(errText, 'error');
+          lastHomeSig = '';
+          void refreshHome();
+        }
       }
+    } catch (err) {
+      showToast(err.message || 'Lỗi kết nối.', 'error');
+      lastHomeSig = '';
+      void refreshHome();
     }
-  } catch (err) {
-    showToast(err.message || 'Lỗi kết nối.', 'error');
-    lastHomeSig = '';
-    void refreshHome();
+  } finally {
+    _inFlightQuickActions.delete(actionKey);
+    if (btn) {
+      delete btn.dataset.inFlight;
+      btn.disabled = false;
+      btn.classList.remove('is-busy');
+    }
   }
 }
+window._inFlightQuickActions = _inFlightQuickActions;
 window.quickBotAction = quickBotAction;
 
 let activeStatusFilter = 'all';
@@ -12683,19 +12844,24 @@ function renderDetailRemoteGui(win) {
   if (!container) return;
   container.innerHTML = win.slots.slice(0, 54).map(function(item, idx) {
     if (!item) {
-      return '<div onclick="clickDetailGuiSlot(' + idx + ')" style="aspect-ratio:1;background:var(--surface-soft);border:1px solid var(--border);border-radius:6px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:10px;font-family:monospace;" title="Ô #' + idx + ' (Trống)">' + idx + '</div>';
+      return '<div role="button" tabindex="0" onclick="clickDetailGuiSlot(' + idx + ')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();clickDetailGuiSlot(' + idx + ');}" aria-label="Ô GUI #' + idx + ': (Trống)" style="aspect-ratio:1;background:var(--surface-soft);border:1px solid var(--border);border-radius:6px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:10px;font-family:monospace;" title="Ô #' + idx + ' (Trống)">' + idx + '</div>';
     }
     const rawName = String(item.displayName || item.name || 'Vật phẩm');
     const safeName = escapeHtml(rawName);
-    return '<div onclick="clickDetailGuiSlot(' + idx + ')" style="aspect-ratio:1;background:var(--accent-soft);border:1px solid var(--border-strong);border-radius:8px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;padding:3px;text-align:center;box-shadow:var(--shadow-sm);transition:transform 0.15s ease,border-color 0.15s ease;" onmouseenter="this.style.transform=\'scale(1.04)\'" onmouseleave="this.style.transform=\'none\'" title="Ô #' + idx + ': ' + safeName + ' (Click để chọn)">' +
+    const ariaLabel = 'Ô GUI #' + idx + ': ' + safeName + (item.count > 1 ? ' x' + item.count : '');
+    return '<div role="button" tabindex="0" onclick="clickDetailGuiSlot(' + idx + ')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();clickDetailGuiSlot(' + idx + ');}" aria-label="' + escapeHtml(ariaLabel) + '" style="aspect-ratio:1;background:var(--accent-soft);border:1px solid var(--border-strong);border-radius:8px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;padding:3px;text-align:center;box-shadow:var(--shadow-sm);transition:transform 0.15s ease,border-color 0.15s ease;" onmouseenter="this.style.transform=\'scale(1.04)\'" onmouseleave="this.style.transform=\'none\'" title="Ô #' + idx + ': ' + safeName + ' (Click để chọn)">' +
       '<span style="font-size:11px;font-weight:700;color:var(--text);overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.2;max-width:100%;word-break:break-word;">' + safeName + '</span>' +
       (item.count > 1 ? '<span style="position:absolute;bottom:2px;right:2px;font-size:9.5px;font-weight:800;background:var(--bg-elevated);border:1px solid var(--border-strong);padding:0 4px;border-radius:4px;color:var(--accent-text);">x' + item.count + '</span>' : '') +
       '</div>';
   }).join('');
 }
 
+const _inFlightGuiSlotClicks = new Set();
 async function clickDetailGuiSlot(slot) {
   if (!selectedBotId) return;
+  const slotKey = String(selectedBotId) + ':' + String(slot);
+  if (_inFlightGuiSlotClicks.has(slotKey)) return;
+  _inFlightGuiSlotClicks.add(slotKey);
   try {
     const res = await requestJson('/api/manager/bot/' + selectedBotId + '/window/click', {
       method: 'POST',
@@ -12711,8 +12877,11 @@ async function clickDetailGuiSlot(slot) {
     }
   } catch(e) {
     showToast('Lỗi gửi click GUI', 'error');
+  } finally {
+    _inFlightGuiSlotClicks.delete(slotKey);
   }
 }
+window._inFlightGuiSlotClicks = _inFlightGuiSlotClicks;
 
 async function closeDetailGuiWindow() {
   if (!selectedBotId) return;
@@ -13294,6 +13463,17 @@ function createDetailSlot(item,slot,selected) {
   el.className='inventory-slot'+(selected?' selected':'')+(!item?' empty':'');
   el.draggable=!!item;
   el.dataset.slot=String(slot);
+  el.setAttribute('role', 'button');
+  el.setAttribute('tabindex', '0');
+  const safeName = item ? itemLabel(item) : '(Trống)';
+  const countStr = item && Number(item.count || 0) > 1 ? ' x' + item.count : '';
+  el.setAttribute('aria-label', 'Ô GUI #' + slot + ': ' + safeName + countStr);
+  el.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      handleDetailSlotClick(slot, item, e);
+    }
+  });
   el.ondragstart=function(e){detailDragged={type:'slot',slot};try{e.dataTransfer.setData('text/plain',String(slot));e.dataTransfer.effectAllowed='move';}catch(_) {}};
   el.ondragover=allowDrop;
   el.ondragleave=clearDragOver;

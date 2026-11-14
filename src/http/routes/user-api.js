@@ -67,6 +67,41 @@ function createUserApi({
     return null;
   }
 
+  // Helper: Evaluate command broker dispatch result for consistent HTTP status mapping
+  function evaluateCommandDispatch(dispatchResult, defaultErrorMessage = 'Thao tác không hoàn tất') {
+    if (!dispatchResult || dispatchResult.timedOut || dispatchResult.delivered === false) {
+      return {
+        success: false,
+        status: 504,
+        payload: {
+          ok: false,
+          error: 'Lệnh tới Bot quá thời gian chờ phản hồi (Gateway Timeout).',
+          timedOut: true
+        }
+      };
+    }
+
+    const innerResult = dispatchResult.result;
+    if (innerResult && typeof innerResult === 'object' && innerResult.ok === false) {
+      const reason = innerResult.detail || innerResult.error || defaultErrorMessage;
+      return {
+        success: false,
+        status: 500,
+        payload: {
+          ok: false,
+          error: `${defaultErrorMessage}: ${reason}`,
+          code: innerResult.error || null,
+          result: innerResult
+        }
+      };
+    }
+
+    return {
+      success: true,
+      result: innerResult || null
+    };
+  }
+
   // Helper: Extract decrypted Minecraft username from worker credentials if configured
   function getBotUsername(worker) {
     if (!worker) return '';
@@ -237,7 +272,40 @@ function createUserApi({
 
   // 2. REORDER BOTS (Drag and drop in UI)
   router.post('/bots/reorder', requireSession, async (req, res) => {
-    return res.json({ ok: true, message: 'Đã lưu thứ tự bot.' });
+    const rawOrder = req.body?.botIds || req.body?.order;
+    if (
+      !Array.isArray(rawOrder) ||
+      rawOrder.length === 0 ||
+      !rawOrder.every((id) => typeof id === 'string' && id.trim().length > 0)
+    ) {
+      return res.status(400).json({ ok: false, error: 'Danh sách thứ tự bot không hợp lệ (phải là mảng chuỗi ID không rỗng).' });
+    }
+
+    const session = req.managerAuthSession;
+    const assigned = Array.isArray(session?.assignedBotIds) ? session.assignedBotIds.map(String) : [];
+
+    // Verify all submitted bot IDs belong to session.assignedBotIds
+    const unauthorized = rawOrder.some((id) => !assigned.includes(String(id)));
+    if (unauthorized) {
+      return res.status(403).json({ ok: false, error: 'Chứa bot ID không thuộc quyền quản lý của bạn.' });
+    }
+
+    const updatedOrder = rawOrder.map(String);
+
+    try {
+      const userId = session.userId || session.id || session.username;
+      if (store && typeof store.setAccess === 'function') {
+        await store.setAccess(userId, { workerIds: updatedOrder }, session.username || 'user');
+      } else if (store && typeof store.updateUser === 'function') {
+        await store.updateUser(userId, { assigned_bot_ids: updatedOrder });
+      }
+
+      session.assignedBotIds = updatedOrder;
+      return res.json({ ok: true, message: 'Đã lưu thứ tự bot.', order: updatedOrder });
+    } catch (error) {
+      logger?.error('Failed to reorder bots', { error: error.message });
+      return res.status(500).json({ ok: false, error: error.message });
+    }
   });
 
   // 3. GET SYSTEM ANNOUNCEMENT
@@ -417,7 +485,12 @@ function createUserApi({
     if (!message) return res.status(400).json({ ok: false, error: 'Nội dung tin nhắn không được để trống.' });
 
     try {
-      await broker.dispatch(worker.workerId, 'chat', { message });
+      const dispatchResult = await broker.dispatch(worker.workerId, 'chat', { message });
+      const evaluated = evaluateCommandDispatch(dispatchResult, 'Không thể gửi tin nhắn chat');
+      if (!evaluated.success) {
+        return res.status(evaluated.status).json(evaluated.payload);
+      }
+
       await store.addAudit({
         action: 'BOT_CHAT_SENT',
         targetId: worker.workerId,
@@ -425,7 +498,11 @@ function createUserApi({
         details: { message: message.slice(0, 100) }
       });
 
-      return res.json({ ok: true, message: `Đã gửi tin nhắn tới server: "${message}"` });
+      return res.json({
+        ok: true,
+        message: `Đã gửi tin nhắn tới server: "${message}"`,
+        result: evaluated.result
+      });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }
@@ -436,8 +513,12 @@ function createUserApi({
     const perm = await checkBotPermissionAsync(req, req.params.id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
 
+    if (!Array.isArray(req.body?.autoChatSchedules)) {
+      return res.status(400).json({ ok: false, error: 'Schedules must be an array.' });
+    }
+
     const worker = perm.worker;
-    const schedules = Array.isArray(req.body?.autoChatSchedules) ? req.body.autoChatSchedules : [];
+    const schedules = req.body.autoChatSchedules;
 
     try {
       await registry.updateSettings(worker.workerId, { autoChatSchedules: schedules });
@@ -451,8 +532,12 @@ function createUserApi({
     const perm = await checkBotPermissionAsync(req, req.params.id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
 
+    if (!Array.isArray(req.body?.botSchedules)) {
+      return res.status(400).json({ ok: false, error: 'Schedules must be an array.' });
+    }
+
     const worker = perm.worker;
-    const schedules = Array.isArray(req.body?.botSchedules) ? req.body.botSchedules : [];
+    const schedules = req.body.botSchedules;
 
     try {
       await registry.updateSettings(worker.workerId, { botSchedules: schedules });
@@ -479,8 +564,12 @@ function createUserApi({
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
 
     try {
-      const result = await broker.dispatch(perm.worker.workerId, 'window_click', req.body || {});
-      return res.json({ ok: true, message: 'Đã gửi thao tác click giao diện.', result: result?.result || null });
+      const dispatchResult = await broker.dispatch(perm.worker.workerId, 'window_click', req.body || {});
+      const evaluated = evaluateCommandDispatch(dispatchResult, 'Thao tác click giao diện không thành công');
+      if (!evaluated.success) {
+        return res.status(evaluated.status).json(evaluated.payload);
+      }
+      return res.json({ ok: true, message: 'Đã gửi thao tác click giao diện.', result: evaluated.result });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }
@@ -491,8 +580,12 @@ function createUserApi({
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
 
     try {
-      const result = await broker.dispatch(perm.worker.workerId, 'window_close', req.body || {});
-      return res.json({ ok: true, message: 'Đã gửi thao tác đóng giao diện.', result: result?.result || null });
+      const dispatchResult = await broker.dispatch(perm.worker.workerId, 'window_close', req.body || {});
+      const evaluated = evaluateCommandDispatch(dispatchResult, 'Thao tác đóng giao diện không thành công');
+      if (!evaluated.success) {
+        return res.status(evaluated.status).json(evaluated.payload);
+      }
+      return res.json({ ok: true, message: 'Đã gửi thao tác đóng giao diện.', result: evaluated.result });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }
@@ -505,8 +598,12 @@ function createUserApi({
 
     const invAction = req.params.invAction;
     try {
-      const result = await broker.dispatch(perm.worker.workerId, 'inventory', { action: invAction, ...req.body });
-      return res.json({ ok: true, message: `Đã thực hiện thao tác ${invAction} kho đồ.`, result: result?.result || null });
+      const dispatchResult = await broker.dispatch(perm.worker.workerId, 'inventory', { action: invAction, ...req.body });
+      const evaluated = evaluateCommandDispatch(dispatchResult, `Thao tác ${invAction} kho đồ không thành công`);
+      if (!evaluated.success) {
+        return res.status(evaluated.status).json(evaluated.payload);
+      }
+      return res.json({ ok: true, message: `Đã thực hiện thao tác ${invAction} kho đồ.`, result: evaluated.result });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }
@@ -520,7 +617,7 @@ function createUserApi({
     const proxyUrl = String(req.body?.proxy || req.body?.proxyUrl || '').trim();
     if (proxyUrl) {
       try {
-        validateProxyUrl(proxyUrl);
+        await validateProxyUrl(proxyUrl);
       } catch (validationErr) {
         return res.status(400).json({ ok: false, error: 'Proxy không hợp lệ: ' + validationErr.message });
       }
@@ -543,7 +640,7 @@ function createUserApi({
     const proxyUrl = String(req.body?.proxy || req.body?.proxyUrl || '').trim();
     if (proxyUrl) {
       try {
-        validateProxyUrl(proxyUrl);
+        await validateProxyUrl(proxyUrl);
       } catch (validationErr) {
         return res.status(400).json({ ok: false, error: 'Proxy không hợp lệ hoặc bị từ chối: ' + validationErr.message });
       }
@@ -589,7 +686,7 @@ function createUserApi({
         details: { username: updatedConfig.username, host: updatedConfig.serverHost }
       });
 
-      return res.json({ ok: true, message: 'Đã cập nhật cài đặt bot thành công.', bot: updatedConfig });
+      return res.json({ ok: true, message: 'Đã cập nhật cài đặt bot thành công.', bot: sanitizeBotForSession(updatedConfig, req.managerAuthSession) });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }
@@ -640,20 +737,18 @@ function createUserApi({
       const worker = perm.worker;
       const resolvedAction = action === 'reconnect' ? 'restart' : action;
 
-      // Track manual stop status
-      if (action === 'stop') {
-        await registry.updateStatus(worker.workerId, { ...worker.status, manuallyStopped: true }, 'user-stop');
-      } else if (action === 'start' || action === 'restart' || action === 'reconnect') {
-        await registry.updateStatus(worker.workerId, { ...worker.status, manuallyStopped: false }, 'user-start');
-      }
-
+      // API-07: Defer manuallyStopped flag mutation until worker execution is confirmed
       const result = await broker.dispatch(worker.workerId, resolvedAction, req.body || {});
-      await store.addAudit({
-        action: `BOT_${action.toUpperCase()}`,
-        targetId: worker.workerId,
-        actorId: req.managerAuthSession.username,
-        details: { result: result?.result || 'dispatched' }
-      });
+
+      // API-08: Check timeout and unconfirmed delivery first
+      if (!result || result.timedOut || result.delivered === false) {
+        logger?.warn?.('Bot action timed out or undelivered', { botId: worker.workerId, action });
+        return res.status(504).json({
+          ok: false,
+          error: `Thực thi lệnh ${action} quá thời gian chờ (Gateway Timeout).`,
+          timedOut: true
+        });
+      }
 
       if (result?.result && typeof result.result === 'object' && result.result.ok === false) {
         const reason = result.result.detail || result.result.error || 'UNKNOWN_ERROR';
@@ -670,6 +765,24 @@ function createUserApi({
           result: result.result
         });
       }
+
+      // API-07: Worker confirmed execution -> now safely update manuallyStopped flag
+      if (action === 'stop') {
+        const currentWorker = await registry.find(worker.workerId);
+        const currentStatus = currentWorker?.status || worker.status || {};
+        await registry.updateStatus(worker.workerId, { ...currentStatus, manuallyStopped: true }, 'user-stop');
+      } else if (action === 'start' || action === 'restart' || action === 'reconnect') {
+        const currentWorker = await registry.find(worker.workerId);
+        const currentStatus = currentWorker?.status || worker.status || {};
+        await registry.updateStatus(worker.workerId, { ...currentStatus, manuallyStopped: false }, 'user-start');
+      }
+
+      await store.addAudit({
+        action: `BOT_${action.toUpperCase()}`,
+        targetId: worker.workerId,
+        actorId: req.managerAuthSession.username,
+        details: { result: result?.result || 'confirmed' }
+      });
 
       return res.json({
         ok: true,
@@ -734,7 +847,7 @@ function createUserApi({
 
   router.post(['/rewards/link4m/start', '/start'], requireSession, async (req, res) => {
     try {
-      const clientIp = req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '127.0.0.1';
+      const clientIp = req.ip || req.socket?.remoteAddress || '127.0.0.1';
       const result = await link4mService.createLinkAttempt(req.managerAuthSession.userId, clientIp);
       return res.json(result);
     } catch (error) {
@@ -840,6 +953,8 @@ function createUserApi({
       uptime: Math.floor(process.uptime()),
       totalBots: bots.length,
       onlineBots: onlineCount,
+      trialGiftEnabled: Boolean(config?.trialGiftEnabled ?? false),
+      trialDays: Number(config?.trialDays || 1),
       memory: {
         rssMb: Math.round(memory.rss / (1024 * 1024)),
         heapUsedMb: Math.round(memory.heapUsed / (1024 * 1024)),

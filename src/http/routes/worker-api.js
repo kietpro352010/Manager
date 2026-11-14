@@ -28,7 +28,10 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
   router.post('/events', auth, async (req, res, next) => {
     try {
       const event = req.body || {};
-      await registry.addEvent(req.workerId, event);
+      const result = await registry.addEvent(req.workerId, event);
+      if (!result) {
+        return res.status(404).json({ ok: false, error: 'worker_not_found_or_disabled' });
+      }
 
       // Check alerts
       if (adminNotifier) {
@@ -87,8 +90,25 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
       if (!workerId) return res.status(400).json({ ok: false, error: 'missing_worker_id' });
 
       const globalSecret = config.botSecretKey || '';
-      const isAuthed = (globalSecret && timingSafeStringEquals(incomingSecret, globalSecret)) ||
-                       (await registry.authenticate(workerId, incomingSecret));
+      const isGlobal = Boolean(globalSecret && timingSafeStringEquals(incomingSecret, globalSecret));
+      let isAuthed = isGlobal;
+      if (isGlobal) {
+        logger?.warn?.('GLOBAL_BOT_SECRET_USED', {
+          action: 'worker-report',
+          workerId,
+          ip: req.ip
+        });
+        if (typeof workerStore?.addAudit === 'function') {
+          await workerStore.addAudit({
+            action: 'GLOBAL_BOT_SECRET_USED',
+            targetId: workerId,
+            actorId: 'system:global_secret',
+            details: { ip: req.ip, endpoint: '/report' }
+          }).catch(() => null);
+        }
+      } else {
+        isAuthed = await registry.authenticate(workerId, incomingSecret);
+      }
 
       if (!isAuthed) {
         return res.status(401).json({ ok: false, error: 'unauthorized_worker_secret' });

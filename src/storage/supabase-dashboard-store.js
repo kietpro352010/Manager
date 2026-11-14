@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const AsyncKeyLock = require('../services/async-key-lock');
 const {
+  hashPassword,
   encryptUserPassword,
   decryptUserPassword,
   isStoredCredentialCiphertext,
@@ -367,31 +368,45 @@ class SupabaseDashboardStore {
 
     // 1. Thử lưu vào manager_users nếu có bảng
     try {
+      let existingUser = null;
+      try {
+        existingUser = (await this.resolveUserRow(userId)) || (fields.username ? await this.resolveUserRow(fields.username) : null);
+      } catch (_) {}
+
       const cleanUsername = fields.username
         ? String(fields.username).trim().toLowerCase()
-        : String(userId).trim().toLowerCase().replace(/^usr_/, '');
-      const assigned = [...new Set(workerIds)].map(String);
+        : (existingUser?.username || String(userId).trim().toLowerCase().replace(/^usr_/, ''));
+      const assigned = (workerIds && workerIds.length > 0)
+        ? [...new Set(workerIds)].map(String)
+        : (Array.isArray(existingUser?.assigned_bot_ids) ? existingUser.assigned_bot_ids.map(String) : []);
       const userRow = {
-        id: userId,
+        id: existingUser?.id || userId,
         username: cleanUsername,
-        role: String(fields.role || 'user'),
-        status: String(fields.status || 'active'),
-        is_permanent: Boolean(fields.isPermanent),
-        expires_at: fields.expiresAt || null,
-        plan_name: String(fields.planName || 'Gói mặc định'),
+        role: String(fields.role || existingUser?.role || 'user'),
+        status: String(fields.status || existingUser?.status || 'active'),
+        is_permanent: fields.isPermanent !== undefined ? Boolean(fields.isPermanent) : Boolean(existingUser?.is_permanent),
+        expires_at: fields.expiresAt !== undefined ? (fields.expiresAt || null) : (existingUser?.expires_at || null),
+        plan_name: String(fields.planName || existingUser?.plan_name || 'Gói mặc định'),
         assigned_bot_ids: assigned,
-        bot_count: Math.max(1, Number(fields.botCount || assigned.length || 1)),
-        allow_account_change: fields.allowAccountChange !== false,
-        lock_reason: String(fields.lockReason || ''),
-        note: String(fields.note || ''),
+        bot_count: Math.max(1, Number(fields.botCount || existingUser?.bot_count || assigned.length || 1)),
+        allow_account_change: fields.allowAccountChange !== undefined ? (fields.allowAccountChange !== false) : (existingUser?.allow_account_change !== false),
+        lock_reason: String(fields.lockReason !== undefined ? fields.lockReason : (existingUser?.lock_reason || '')),
+        note: String(fields.note !== undefined ? fields.note : (existingUser?.note || '')),
         updated_at: new Date().toISOString()
       };
-      if (fields.isTrial !== undefined) userRow.is_trial = Boolean(fields.isTrial);
-      if (fields.trialBotId !== undefined) userRow.trial_bot_id = fields.trialBotId || null;
+      if (fields.isTrial !== undefined || existingUser?.is_trial !== undefined) {
+        userRow.is_trial = fields.isTrial !== undefined ? Boolean(fields.isTrial) : Boolean(existingUser?.is_trial);
+      }
+      if (fields.trialBotId !== undefined || existingUser?.trial_bot_id !== undefined) {
+        userRow.trial_bot_id = fields.trialBotId !== undefined ? (fields.trialBotId || null) : (existingUser?.trial_bot_id || null);
+      }
       if (fields.password) {
-        userRow.password = isStoredCredentialCiphertext(fields.password)
-          ? fields.password
-          : encryptUserPassword(fields.password);
+        const p = String(fields.password);
+        userRow.password = (p.startsWith('scrypt$') || isStoredCredentialCiphertext(p))
+          ? p
+          : hashPassword(p);
+      } else if (existingUser?.password) {
+        userRow.password = existingUser.password;
       }
       const { data, error } = await this.client.from(USERS).upsert(userRow, { onConflict: 'username' }).select('*').maybeSingle();
       if (!error && data) {
@@ -530,26 +545,112 @@ class SupabaseDashboardStore {
   }
 
   async assignedUser(workerId) {
-    const { data, error } = await this.client.from(ASSIGNMENTS).select('worker_id,user_id,assigned_by,assigned_at').eq('worker_id', workerId).maybeSingle();
+    const cleanId = String(workerId || '').trim().toLowerCase();
+    const { data, error } = await this.client.from(ASSIGNMENTS).select('worker_id,user_id,assigned_by,assigned_at').eq('worker_id', cleanId).maybeSingle();
     if (!error && data) {
       return { workerId: data.worker_id, userId: data.user_id, assignedBy: data.assigned_by, assignedAt: data.assigned_at };
     }
 
     // Fallback: tìm trong manager_users
     try {
-      const { data: users, error: uErr } = await this.client.from(USERS).select('id,username,assigned_bot_ids').contains('assigned_bot_ids', [workerId]).limit(1);
+      const { data: users, error: uErr } = await this.client.from(USERS).select('id,username,assigned_bot_ids').contains('assigned_bot_ids', [cleanId]).limit(1);
       if (!uErr && users?.[0]) {
-        return { workerId, userId: users[0].id || users[0].username, assignedBy: 'system', assignedAt: new Date().toISOString() };
+        return { workerId: cleanId, userId: users[0].id || users[0].username, assignedBy: 'system', assignedAt: new Date().toISOString() };
       }
-    } catch (_) {}
+      if (uErr && !isMissingSchemaError(uErr) && String(uErr?.code || '') !== '42501') {
+        this.logger?.warn?.('assignedUser_fallback_query_error', { workerId: cleanId, error: uErr.message || uErr });
+      }
+    } catch (err) {
+      if (!isMissingSchemaError(err) && String(err?.code || '') !== '42501') {
+        this.logger?.warn?.('assignedUser_fallback_exception', { workerId: cleanId, error: err.message });
+      }
+    }
 
     return null;
   }
 
   async removeWorkerAssignments(workerId) {
+    if (!workerId) return;
+    const targetId = String(workerId).trim().toLowerCase();
+    this.invalidateCache();
+
+    // 1. Delete from manager_assignments (ASSIGNMENTS table)
     try {
-      await this.client.from(ASSIGNMENTS).delete().eq('worker_id', workerId);
-    } catch (_) {}
+      const assignRes = await this.client.from(ASSIGNMENTS).delete().eq('worker_id', targetId);
+      if (assignRes?.error && !isMissingSchemaError(assignRes.error) && String(assignRes.error?.code || '') !== '42501') {
+        throw assignRes.error instanceof Error ? assignRes.error : new Error(assignRes.error.message || 'Lỗi khi xóa phân bổ bot.');
+      }
+    } catch (err) {
+      if (!isMissingSchemaError(err) && String(err?.code || '') !== '42501') {
+        throw err instanceof Error ? err : new Error(err.message || 'Lỗi khi xóa phân bổ bot.');
+      }
+    }
+
+    // 2. Synchronously clean up assigned_bot_ids from manager_users
+    try {
+      let usersToUpdate = [];
+      let usedFallback = false;
+
+      try {
+        const { data: users, error: findErr } = await this.client
+          .from(USERS)
+          .select('id, username, assigned_bot_ids')
+          .contains('assigned_bot_ids', [targetId]);
+        if (!findErr && Array.isArray(users)) {
+          usersToUpdate = users;
+        } else if (findErr) {
+          if (!isMissingSchemaError(findErr)) {
+            usedFallback = true;
+          }
+        }
+      } catch (findErr) {
+        if (!isMissingSchemaError(findErr)) {
+          usedFallback = true;
+        }
+      }
+
+      if (usedFallback || (!usersToUpdate.length && typeof this.client.from(USERS).select === 'function')) {
+        try {
+          const { data: allUsers, error: allErr } = await this.client
+            .from(USERS)
+            .select('id, username, assigned_bot_ids');
+          if (!allErr && Array.isArray(allUsers)) {
+            usersToUpdate = allUsers.filter((u) => {
+              const ids = Array.isArray(u.assigned_bot_ids)
+                ? u.assigned_bot_ids.map((x) => String(x).toLowerCase())
+                : (typeof u.assigned_bot_ids === 'string' ? JSON.parse(u.assigned_bot_ids || '[]').map((x) => String(x).toLowerCase()) : []);
+              return ids.includes(targetId);
+            });
+          } else if (allErr && !isMissingSchemaError(allErr) && String(allErr?.code || '') !== '42501') {
+            throw allErr;
+          }
+        } catch (scanErr) {
+          if (!isMissingSchemaError(scanErr) && String(scanErr?.code || '') !== '42501') {
+            throw scanErr;
+          }
+        }
+      }
+
+      for (const u of usersToUpdate) {
+        const rawIds = Array.isArray(u.assigned_bot_ids)
+          ? u.assigned_bot_ids
+          : (typeof u.assigned_bot_ids === 'string' ? JSON.parse(u.assigned_bot_ids || '[]') : []);
+        const filtered = rawIds.filter((id) => String(id).trim().toLowerCase() !== targetId);
+        if (filtered.length !== rawIds.length) {
+          const updateRes = await this.client
+            .from(USERS)
+            .update({ assigned_bot_ids: filtered, updated_at: new Date().toISOString() })
+            .eq('id', u.id);
+          if (updateRes?.error && !isMissingSchemaError(updateRes.error) && String(updateRes.error?.code || '') !== '42501') {
+            throw updateRes.error instanceof Error ? updateRes.error : new Error(updateRes.error.message || 'Lỗi cập nhật assigned_bot_ids.');
+          }
+        }
+      }
+    } catch (err) {
+      if (!isMissingSchemaError(err) && String(err?.code || '') !== '42501') {
+        throw err instanceof Error ? err : new Error(err.message || 'Lỗi khi đồng bộ danh sách bot người dùng.');
+      }
+    }
   }
 
   // --------------------------------------------------------------------------
@@ -570,11 +671,13 @@ class SupabaseDashboardStore {
     return { ok: false, error: 'Adapter not initialized.' };
   }
 
-  async getUser(username) {
+  async getUser(username, { bypassCache = false } = {}) {
     if (!username) return null;
     const cacheKey = `user:${String(username).toLowerCase()}`;
-    const cached = this.getCached(cacheKey);
-    if (cached) return cached;
+    if (!bypassCache) {
+      const cached = this.getCached(cacheKey);
+      if (cached) return cached;
+    }
 
     let user = null;
     if (this.adapter && typeof this.adapter.fetchUserAuthorization === 'function') {
@@ -582,7 +685,7 @@ class SupabaseDashboardStore {
       if (res.ok && res.user) user = res.user;
     }
     if (!user) {
-      user = await this.getAccess(username);
+      user = await this.getAccess(username, { bypassCache });
     }
     if (user) {
       this.setCached(cacheKey, user);
@@ -608,7 +711,7 @@ class SupabaseDashboardStore {
       throw new Error('Tên đăng nhập không hợp lệ.');
     }
     const safePassword = password
-      ? (isStoredCredentialCiphertext(password) ? password : encryptUserPassword(password))
+      ? ((String(password).startsWith('scrypt$') || isStoredCredentialCiphertext(password)) ? password : hashPassword(password))
       : '';
 
     // 1. Try Supabase RPC (fail closed on DB/business errors; fallback only if RPC is absent)

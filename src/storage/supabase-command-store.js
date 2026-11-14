@@ -48,13 +48,19 @@ function computeRpcLeaseSeconds(leaseMsValue) {
 }
 
 function isRpcUnavailableError(error) {
+  if (!error) return false;
   const msg = String(error?.message || '').toLowerCase();
   const code = String(error?.code || '').toUpperCase();
-  return code === 'PGRST202' ||
+  return (
+    code === 'PGRST202' ||
     code === '42883' ||
     msg.includes('could not find the function') ||
+    msg.includes('function does not exist') ||
     msg.includes('does not exist') ||
-    msg.includes('not found');
+    msg.includes('not found') ||
+    msg.includes('not implemented') ||
+    msg.includes('schema cache')
+  );
 }
 
 function cloneObj(value) {
@@ -279,7 +285,18 @@ class SupabaseCommandStore {
         const row = unwrap(data);
         if (row) return fromRow(row);
       }
-    } catch (_) {}
+      if (error) {
+        if (!isRpcUnavailableError(error)) {
+          const err = new Error(error.message || 'manager_enqueue_worker_command failed');
+          if (error.code) err.code = error.code;
+          throw err;
+        }
+      }
+    } catch (rpcErr) {
+      if (!isRpcUnavailableError(rpcErr)) {
+        throw rpcErr;
+      }
+    }
 
     // 2. Fallback cho coalesceable action khi RPC chưa triển khai:
     // Sử dụng AsyncKeyLock để đảm bảo tính nguyên tử tuyệt đối trong tiến trình Node.js
@@ -353,36 +370,55 @@ class SupabaseCommandStore {
   }
 
   async take(workerId) {
-    // 1. Thử gọi RPC manager_take_worker_command
+    // 1. Thử gọi RPC manager_take_worker_command (thực thi FOR UPDATE SKIP LOCKED trong SQL)
     try {
       const { data, error } = await this.client.rpc('manager_take_worker_command', { p_worker_id: String(workerId) });
-      if (!error && data) return fromRow(unwrap(data));
-    } catch (_) {}
-
-    // 2. Fallback: đọc trực tiếp lệnh queued đầu tiên
-    try {
-      const now = new Date().toISOString();
-      const { data, error } = await this.client.from(TABLE)
-        .select('*')
-        .eq('worker_id', String(workerId))
-        .eq('status', 'queued')
-        .gt('expires_at', now)
-        .order('created_at', { ascending: true })
-        .limit(1)
-        .maybeSingle();
-
       if (!error && data) {
+        const row = unwrap(data);
+        if (row) return fromRow(row);
+      }
+      if (error && !isRpcUnavailableError(error)) {
+        const err = new Error(error.message || 'manager_take_worker_command failed');
+        if (error.code) err.code = error.code;
+        throw err;
+      }
+    } catch (err) {
+      if (!isRpcUnavailableError(err)) throw err;
+    }
+
+    // 2. Fallback an toàn với retry loop khi có tranh chấp đồng quy giữa nhiều poller
+    const MAX_POLL_RETRIES = 3;
+    for (let attempt = 0; attempt < MAX_POLL_RETRIES; attempt++) {
+      try {
+        const now = new Date().toISOString();
+        const { data, error } = await this.client.from(TABLE)
+          .select('*')
+          .eq('worker_id', String(workerId))
+          .eq('status', 'queued')
+          .gt('expires_at', now)
+          .order('created_at', { ascending: true })
+          .limit(1)
+          .maybeSingle();
+
+        if (error || !data) {
+          return null;
+        }
+
         const { data: updated, error: updErr } = await this.client.from(TABLE)
           .update({ status: 'delivered', delivered_at: now })
           .eq('command_id', data.command_id)
           .eq('status', 'queued')
           .select('*')
           .maybeSingle();
+
         if (!updErr && updated) {
           return fromRow(updated);
         }
+        // Tranh chấp: command vừa được worker khác lấy, tiếp tục vòng lặp để lấy command tiếp theo
+      } catch (_) {
+        break;
       }
-    } catch (_) {}
+    }
 
     return null;
   }
@@ -395,9 +431,16 @@ class SupabaseCommandStore {
         p_result: result ?? null
       });
       if (!error && data === true) return true;
-    } catch (_) {}
+      if (error && !isRpcUnavailableError(error)) {
+        const err = new Error(error.message || 'manager_complete_worker_command failed');
+        if (error.code) err.code = error.code;
+        throw err;
+      }
+    } catch (err) {
+      if (!isRpcUnavailableError(err)) throw err;
+    }
 
-    // Fallback: update status completed
+    // Fallback: update status completed (yêu cầu trạng thái phải là 'delivered', không cho phép 'queued')
     try {
       const { data, error } = await this.client.from(TABLE).update({
         status: 'completed',
@@ -406,7 +449,7 @@ class SupabaseCommandStore {
       })
       .eq('command_id', String(commandId))
       .eq('worker_id', String(workerId))
-      .in('status', ['delivered', 'queued'])
+      .eq('status', 'delivered')
       .select('command_id')
       .maybeSingle();
 
