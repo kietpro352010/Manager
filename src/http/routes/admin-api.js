@@ -658,6 +658,9 @@ function createAdminApi({
     try {
       const announcement = String(req.body?.announcement || req.body?.message || '').trim();
       store.cachedAnnouncement = announcement;
+      if (store && typeof store.setSetting === 'function') {
+        await store.setSetting('system_announcement', { message: announcement, updatedAt: new Date().toISOString() });
+      }
       return res.json({ ok: true, message: 'Đã cập nhật thông báo hệ thống.', announcement });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
@@ -800,6 +803,9 @@ function createAdminApi({
       const hashed = hashAdminPassword(password);
       if (typeof registry.setAdminPassword === 'function') {
         registry.setAdminPassword(hashed);
+      }
+      if (store && typeof store.setSetting === 'function') {
+        await store.setSetting('admin_credentials', { passwordHash: hashed, updatedAt: new Date().toISOString() });
       }
       return res.json({ ok: true, message: 'Đã cập nhật mật khẩu quản trị viên.' });
     } catch (error) {

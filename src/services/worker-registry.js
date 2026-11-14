@@ -627,6 +627,36 @@ class WorkerRegistry {
       next.proxyManaged = true;
     }
     if (Object.hasOwn(patch, 'proxyManaged')) next.proxyManaged = Boolean(patch.proxyManaged);
+    if (Object.hasOwn(patch, 'serverHost') && patch.serverHost) {
+      const serverHost = String(patch.serverHost).trim();
+      next.serverHost = serverHost;
+      if (typeof this.store.update === 'function') {
+        await this.store.update(worker.workerId, { serverHost });
+      }
+    }
+    if (Object.hasOwn(patch, 'serverPort') && patch.serverPort) {
+      const serverPort = Number(patch.serverPort);
+      if (Number.isInteger(serverPort) && serverPort > 0 && serverPort <= 65535) {
+        next.serverPort = serverPort;
+        if (typeof this.store.update === 'function') {
+          await this.store.update(worker.workerId, { serverPort });
+        }
+      }
+    }
+    if (Object.hasOwn(patch, 'version') && patch.version) {
+      const version = String(patch.version).trim();
+      next.version = version;
+      if (typeof this.store.update === 'function') {
+        await this.store.update(worker.workerId, { version });
+      }
+    }
+    if (Object.hasOwn(patch, 'username') && patch.username) {
+      const username = String(patch.username).trim();
+      next.username = username;
+      if (typeof this.store.update === 'function') {
+        await this.store.update(worker.workerId, { username });
+      }
+    }
     const updated = typeof this.store.patchSettings === 'function'
       ? await this.store.patchSettings(worker.workerId, next)
       : await this.store.update(worker.workerId, { settings: { ...(worker.settings || {}), ...next } });

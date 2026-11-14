@@ -680,7 +680,21 @@ class SupabaseDashboardStore {
     }
 
     let user = null;
-    if (this.adapter && typeof this.adapter.fetchUserAuthorization === 'function') {
+    const row = await this.resolveUserRow(username);
+    if (row) {
+      user = this.adapter && typeof this.adapter.mapDatabaseUser === 'function'
+        ? this.adapter.mapDatabaseUser(row)
+        : {
+            ...row,
+            userId: row.id || ('usr_' + row.username),
+            assignedBotIds: Array.isArray(row.assigned_bot_ids) ? row.assigned_bot_ids.map(String) : [],
+            isPermanent: Boolean(row.is_permanent),
+            expiresAt: row.expires_at || null,
+            planName: row.plan_name || 'Gói mặc định',
+            allowAccountChange: row.allow_account_change !== false
+          };
+    }
+    if (!user && this.adapter && typeof this.adapter.fetchUserAuthorization === 'function') {
       const res = await this.adapter.fetchUserAuthorization(null, username);
       if (res.ok && res.user) user = res.user;
     }
@@ -1370,13 +1384,17 @@ class SupabaseDashboardStore {
   // --------------------------------------------------------------------------
   async addAudit(entry) {
     const auditId = String(entry.id || ('audit_' + crypto.randomUUID()));
+    const targetObj = (entry.target && typeof entry.target === 'object')
+      ? entry.target
+      : { raw: String(entry.target || entry.targetId || '').slice(0, 160) };
+
     if (this.adapter && typeof this.adapter.insertAuditLog === 'function') {
       return await this.adapter.insertAuditLog({
         id: auditId,
         actor: { username: entry.actorId || 'system', role: entry.actorRole || 'system', ip: entry.actorIp || '127.0.0.1' },
         action: entry.action,
         actionLabel: entry.actionLabel || entry.action,
-        target: typeof entry.target === 'object' ? (entry.target || {}) : { raw: String(entry.target || '') },
+        target: targetObj,
         details: typeof entry.details === 'object' ? JSON.stringify(entry.details) : String(entry.details || ''),
         status: entry.status || 'SUCCESS',
         timestamp: new Date().toISOString()
@@ -1390,7 +1408,7 @@ class SupabaseDashboardStore {
       actor_username: entry.actorId || 'system',
       action: String(entry.action || 'unknown').slice(0, 80),
       action_label: String(entry.action || 'unknown').slice(0, 80),
-      target: typeof entry.target === 'object' ? (entry.target || {}) : { raw: String(entry.target || '').slice(0, 160) },
+      target: targetObj,
       details: typeof entry.details === 'object' ? JSON.stringify(entry.details) : String(entry.details || ''),
       status: 'SUCCESS',
       timestamp: nowIso

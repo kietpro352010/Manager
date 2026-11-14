@@ -132,6 +132,15 @@ async function main() {
   const registry = new WorkerRegistry({ store, accessStore, encryptionKey: config.encryptionKey, renderApi, adminNotifier });
   await registry.load().catch(() => {});
 
+  const savedAdminCreds = await accessStore.getSetting('admin_credentials').catch(() => null);
+  if (savedAdminCreds?.passwordHash && typeof registry.setAdminPassword === 'function') {
+    registry.setAdminPassword(savedAdminCreds.passwordHash);
+  }
+  const savedAnnouncement = await accessStore.getSetting('system_announcement').catch(() => null);
+  if (savedAnnouncement?.message) {
+    accessStore.cachedAnnouncement = savedAnnouncement.message;
+  }
+
   const broker = new CommandBroker({ registry, commandStore, config: runtimeConfig, logger });
   const fleetOperations = new FleetOperations({ registry, broker, renderApi, logger });
   const entitlementService = new EntitlementService({ store: accessStore, registry, accessControl, userLock });

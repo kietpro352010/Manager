@@ -241,7 +241,10 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       const dbAdapterEnabled = typeof store.adapter?.isEnabled !== 'function' || store.adapter.isEnabled();
       if (typeof store.adapter?.createManagerUserSession === 'function' && dbAdapterEnabled) {
         try {
-          const persistRes = await store.adapter.createManagerUserSession(session, 1);
+          const currentRev = typeof store.adapter.fetchUsersSnapshot === 'function'
+            ? (await store.adapter.fetchUsersSnapshot().catch(() => null))?.revision || 1
+            : 1;
+          const persistRes = await store.adapter.createManagerUserSession(session, currentRev);
           if (!persistRes || (typeof persistRes === 'object' && persistRes.ok === false)) {
             activeSessions.delete(tokenHash);
             return res.status(503).json({
@@ -342,7 +345,10 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
           const dbAdapterEnabled = typeof store.adapter?.isEnabled !== 'function' || store.adapter.isEnabled();
           if (typeof store.adapter?.createManagerUserSession === 'function' && dbAdapterEnabled) {
             try {
-              const persistRes = await store.adapter.createManagerUserSession(session, 1);
+              const currentRev = typeof store.adapter.fetchUsersSnapshot === 'function'
+                ? (await store.adapter.fetchUsersSnapshot().catch(() => null))?.revision || 1
+                : 1;
+              const persistRes = await store.adapter.createManagerUserSession(session, currentRev);
               if (!persistRes || (typeof persistRes === 'object' && persistRes.ok === false)) {
                 activeSessions.delete(tokenHash);
                 return res.status(503).json({
@@ -431,9 +437,10 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
 
       // Refresh user details after key redemption
       const updatedAccess = await store.getAccess(userId);
-      const assignedIds = Array.isArray(updatedAccess?.workerIds)
-        ? updatedAccess.workerIds.map(Number).filter(n => Number.isFinite(n))
-        : (Array.isArray(user.assignedBotIds) ? user.assignedBotIds.map(Number) : []);
+      const rawAssigned = Array.isArray(updatedAccess?.workerIds)
+        ? updatedAccess.workerIds
+        : (Array.isArray(user.assignedBotIds) ? user.assignedBotIds : []);
+      const assignedIds = rawAssigned.map((id) => String(id).trim()).filter(Boolean);
 
       const isPermanent = Boolean(updatedAccess?.isPermanent ?? user.isPermanent);
       const expiresAtDate = updatedAccess?.expiresAt || user.expiresAt;
@@ -462,7 +469,10 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       const dbAdapterEnabled = typeof store.adapter?.isEnabled !== 'function' || store.adapter.isEnabled();
       if (typeof store.adapter?.createManagerUserSession === 'function' && dbAdapterEnabled) {
         try {
-          const persistRes = await store.adapter.createManagerUserSession(session, 1);
+          const currentRev = typeof store.adapter.fetchUsersSnapshot === 'function'
+            ? (await store.adapter.fetchUsersSnapshot().catch(() => null))?.revision || 1
+            : 1;
+          const persistRes = await store.adapter.createManagerUserSession(session, currentRev);
           if (!persistRes || (typeof persistRes === 'object' && persistRes.ok === false)) {
             activeSessions.delete(tokenHash);
             return res.status(503).json({

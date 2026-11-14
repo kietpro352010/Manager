@@ -439,6 +439,17 @@ async function handlePanelInteraction(interaction, services) {
       const allWorkers = await services.registry.list();
       const onlineWorkers = allWorkers.filter((w) => w.status?.online).length;
       const stats = { totalWorkers: allWorkers.length, onlineWorkers };
+      let dbCheck = { ok: true, latencyMs: 0 };
+      if (services.store?.adapter && typeof services.store.adapter.testConnection === 'function') {
+        const start = Date.now();
+        const testRes = await services.store.adapter.testConnection().catch((err) => ({ ok: false, error: err.message }));
+        dbCheck = { ok: Boolean(testRes?.ok), latencyMs: Date.now() - start, error: testRes?.error };
+      } else if (services.store && typeof services.store.ping === 'function') {
+        const start = Date.now();
+        const pingRes = await services.store.ping().catch((err) => ({ ok: false, error: err.message }));
+        dbCheck = { ok: Boolean(pingRes?.ok), latencyMs: Date.now() - start };
+      }
+
       const systemInfo = {
         uptime: process.uptime(),
         memory: {
@@ -446,7 +457,7 @@ async function handlePanelInteraction(interaction, services) {
           heapUsedMb: Math.round(process.memoryUsage().heapUsed / (1024 * 1024))
         },
         checks: {
-          database: { ok: true, latencyMs: 12 },
+          database: dbCheck,
           discord: { ok: true }
         }
       };

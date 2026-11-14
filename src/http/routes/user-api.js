@@ -667,26 +667,26 @@ function createUserApi({
       const patch = req.body || {};
       const worker = perm.worker;
 
-      const updatedConfig = {
-        ...worker,
-        alias: patch.alias ? String(patch.alias).trim().slice(0, 32) : worker.alias,
-        serverHost: patch.serverHost ? String(patch.serverHost).trim() : worker.serverHost,
-        serverPort: patch.serverPort ? Number(patch.serverPort) : worker.serverPort,
-        username: patch.username ? String(patch.username).trim() : worker.username,
-        auth: patch.auth || worker.auth,
-        proxy: patch.proxy !== undefined ? patch.proxy : worker.proxy,
-        version: patch.version ? String(patch.version).trim() : worker.version
-      };
+      const settingsPatch = {};
+      if (patch.alias !== undefined) settingsPatch.alias = String(patch.alias).trim().slice(0, 32);
+      if (patch.proxy !== undefined && patch.proxy !== null) settingsPatch.proxyUrl = patch.proxy;
+      else if (patch.proxyUrl !== undefined && patch.proxyUrl !== null) settingsPatch.proxyUrl = patch.proxyUrl;
+      if (patch.serverHost !== undefined) settingsPatch.serverHost = String(patch.serverHost).trim();
+      if (patch.serverPort !== undefined) settingsPatch.serverPort = Number(patch.serverPort);
+      if (patch.version !== undefined) settingsPatch.version = String(patch.version).trim();
+      if (patch.username !== undefined) settingsPatch.username = String(patch.username).trim();
 
-      await registry.saveConfig(worker.workerId, updatedConfig);
+      await registry.updateSettings(worker.workerId, settingsPatch);
+      const updatedWorker = await registry.find(worker.workerId);
+
       await store.addAudit({
         action: 'BOT_SETTINGS_UPDATED',
         targetId: worker.workerId,
         actorId: req.managerAuthSession.username,
-        details: { username: updatedConfig.username, host: updatedConfig.serverHost }
+        details: { username: updatedWorker?.username || worker.username, host: updatedWorker?.serverHost || worker.serverHost }
       });
 
-      return res.json({ ok: true, message: 'Đã cập nhật cài đặt bot thành công.', bot: sanitizeBotForSession(updatedConfig, req.managerAuthSession) });
+      return res.json({ ok: true, message: 'Đã cập nhật cài đặt bot thành công.', bot: sanitizeBotForSession(updatedWorker || worker, req.managerAuthSession) });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }
@@ -808,7 +808,7 @@ function createUserApi({
       const result = await entitlementService.redeem(session.userId, key, session.role);
 
       // Refresh session assigned bots and expiry in memory
-      session.assignedBotIds = result.workerIds.map(Number).filter((n) => Number.isFinite(n));
+      session.assignedBotIds = (Array.isArray(result.workerIds) ? result.workerIds : []).map((id) => String(id).trim()).filter(Boolean);
       session.isPermanent = result.isPermanent;
       session.status = 'active';
       session.expiresAtRental = result.expiresAt;

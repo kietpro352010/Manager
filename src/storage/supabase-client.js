@@ -105,6 +105,45 @@ function sanitizeBackupPayload(payload) {
   };
 }
 
+function stableJson(value) {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return '[' + value.map(stableJson).join(',') + ']';
+  }
+  const keys = Object.keys(value).sort();
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableJson(value[k])).join(',') + '}';
+}
+
+function readPositiveInt(val, fallback = 1, min = 1, max = Number.MAX_SAFE_INTEGER) {
+  const num = parseInt(val, 10);
+  if (!Number.isFinite(num) || num < min) return fallback;
+  if (num > max) return max;
+  return num;
+}
+
+function normalizeKeyCode(key) {
+  if (typeof key === 'string') return key.trim().toUpperCase();
+  return String(key?.code || key?.key || '').trim().toUpperCase();
+}
+
+function normalizeBotRentalDisabled(val) {
+  if (val === true || val === 'true' || val === 1 || val === '1') return true;
+  return false;
+}
+
+function serializeBotSecretsForCloud(secretsMap) {
+  if (!secretsMap || typeof secretsMap !== 'object' || Array.isArray(secretsMap)) return {};
+  const serialized = {};
+  for (const [botId, secret] of Object.entries(secretsMap)) {
+    if (!secret) continue;
+    const s = String(secret);
+    serialized[botId] = isStoredCredentialCiphertext(s) ? s : encryptUserPassword(s);
+  }
+  return serialized;
+}
+
 class SupabaseAdapter {
     constructor(config = {}) {
         this.url = (config.url || process.env.SUPABASE_URL || '').trim().replace(/\/+$/, '');
@@ -581,7 +620,7 @@ class SupabaseAdapter {
             return { ok: true, session: {
                 tokenHash: String(row.token_hash || ''), userId: String(row.user_id || ''),
                 username: String(row.username || ''), role: String(row.role || 'user'),
-                assignedBotIds: Array.isArray(row.assigned_bot_ids) ? row.assigned_bot_ids.map(Number) : [],
+                assignedBotIds: Array.isArray(row.assigned_bot_ids) ? row.assigned_bot_ids.map((id) => String(id).trim()).filter(Boolean) : [],
                 expiresAt: Number(row.expires_at || 0), planName: String(row.plan_name || 'Gói thường'),
                 allowAccountChange: row.allow_account_change !== false, status: String(row.status || 'active')
             } };
@@ -603,13 +642,13 @@ class SupabaseAdapter {
                 session: sessionRow ? {
                     tokenHash: String(sessionRow.token_hash || ''), userId: String(sessionRow.user_id || ''),
                     username: String(sessionRow.username || ''), role: normalizeManagerRole(sessionRow.role),
-                    assignedBotIds: Array.isArray(sessionRow.assigned_bot_ids) ? sessionRow.assigned_bot_ids.map(Number) : [],
+                    assignedBotIds: Array.isArray(sessionRow.assigned_bot_ids) ? sessionRow.assigned_bot_ids.map((id) => String(id).trim()).filter(Boolean) : [],
                     expiresAt: Number(sessionRow.expires_at || 0), planName: String(sessionRow.plan_name || 'Gói thường'),
                     allowAccountChange: sessionRow.allow_account_change !== false, status: String(sessionRow.status || 'active')
                 } : null,
                 user: userRow ? {
                     id: String(userRow.id || ''), username: String(userRow.username || ''), status: String(userRow.status || 'active'),
-                    assignedBotIds: Array.isArray(userRow.assigned_bot_ids) ? userRow.assigned_bot_ids.map(Number) : [],
+                    assignedBotIds: Array.isArray(userRow.assigned_bot_ids) ? userRow.assigned_bot_ids.map((id) => String(id).trim()).filter(Boolean) : [],
                     expiresAt: userRow.expires_at || null, planName: String(userRow.plan_name || 'Gói thường'),
                     isPermanent: Boolean(userRow.is_permanent === true || (!userRow.expires_at && String(userRow.status || 'active').toLowerCase() === 'active')),
                     allowAccountChange: userRow.allow_account_change !== false, lockReason: String(userRow.lock_reason || ''),
@@ -639,7 +678,7 @@ class SupabaseAdapter {
             const row = rows[0];
             return { ok: true, user: row ? {
                 id: String(row.id || ''), username: String(row.username || ''), status: String(row.status || 'active'),
-                assignedBotIds: Array.isArray(row.assigned_bot_ids) ? row.assigned_bot_ids.map(Number) : [],
+                assignedBotIds: Array.isArray(row.assigned_bot_ids) ? row.assigned_bot_ids.map((id) => String(id).trim()).filter(Boolean) : [],
                 expiresAt: row.expires_at || null, planName: String(row.plan_name || 'Gói thường'),
                 isPermanent: Boolean(row.is_permanent === true || (!row.expires_at && String(row.status || 'active').toLowerCase() === 'active')),
                 allowAccountChange: row.allow_account_change !== false, lockReason: String(row.lock_reason || ''),
@@ -1045,7 +1084,7 @@ class SupabaseAdapter {
                         const stored = String(webhook[field] || '');
                         if (stored === '[CONFIGURED]') {
                             legacyMaskedSecret = true;
-                            if (registry?.webhook?.[field] && registry.webhook[field] !== '[CONFIGURED]') {
+                            if (typeof registry !== 'undefined' && registry?.webhook?.[field] && registry.webhook[field] !== '[CONFIGURED]') {
                                 webhook[field] = registry.webhook[field];
                             } else {
                                 delete webhook[field];
@@ -1111,7 +1150,7 @@ class SupabaseAdapter {
                 botSecrets: serializeBotSecretsForCloud(
                     (payload.botSecrets && typeof payload.botSecrets === 'object' && !Array.isArray(payload.botSecrets))
                         ? payload.botSecrets
-                        : registry.botSecrets
+                        : (typeof registry !== 'undefined' && registry?.botSecrets ? registry.botSecrets : {})
                 ),
                 botRentalDisabled: normalizeBotRentalDisabled(payload.botRentalDisabled),
                 systemSettings: encryptedSystemSettings,
@@ -1121,10 +1160,10 @@ class SupabaseAdapter {
                     : {},
                 pendingAllocations: (payload.pendingAllocations && Array.isArray(payload.pendingAllocations))
                     ? payload.pendingAllocations
-                    : (Array.isArray(registry.pendingAllocations) ? registry.pendingAllocations : []),
+                    : (typeof registry !== 'undefined' && Array.isArray(registry?.pendingAllocations) ? registry.pendingAllocations : []),
                 outboxQueue: (payload.outboxQueue && Array.isArray(payload.outboxQueue))
                     ? payload.outboxQueue
-                    : (Array.isArray(registry.outboxQueue) ? registry.outboxQueue : []),
+                    : (typeof registry !== 'undefined' && Array.isArray(registry?.outboxQueue) ? registry.outboxQueue : []),
                 mustChangePassword: payload.mustChangePassword === true,
                 supabase: payload.supabase ? {
                     url: payload.supabase.url || '',
@@ -1149,7 +1188,7 @@ class SupabaseAdapter {
             // trong RAM sẽ HỒI SINH từ Cloud nếu không truyền p_pending_reset_deletes
             // (saveRegistryUnlocked đã diff baseline đúng cách; đường full-save này trước
             // giờ truyền [] nên checkpoint 'completed' cứ sống lại sau mỗi sync).
-            const baselineResetsForDelete = (registryCloudBaseline && registryCloudBaseline.pendingResets && typeof registryCloudBaseline.pendingResets === 'object' && !Array.isArray(registryCloudBaseline.pendingResets))
+            const baselineResetsForDelete = (typeof registryCloudBaseline !== 'undefined' && registryCloudBaseline?.pendingResets && typeof registryCloudBaseline.pendingResets === 'object' && !Array.isArray(registryCloudBaseline.pendingResets))
                 ? registryCloudBaseline.pendingResets
                 : {};
             const pendingResetDeletes = Object.keys(baselineResetsForDelete)
@@ -1234,11 +1273,14 @@ class SupabaseAdapter {
         }
     }
 
-    async createManagerUserSession(session, expectedUserRevision) {
+    async createManagerUserSession(session, expectedUserRevision = 1) {
         if (!this.isEnabled()) {
             return { ok: true };
         }
-        if (!session || !Number.isSafeInteger(Number(expectedUserRevision)) || Number(expectedUserRevision) < 1) {
+        const rev = Number.isSafeInteger(Number(expectedUserRevision)) && Number(expectedUserRevision) >= 1
+            ? Number(expectedUserRevision)
+            : 1;
+        if (!session) {
             return { ok: false, error: 'INVALID_SESSION_TRANSACTION' };
         }
         const row = {
@@ -1251,7 +1293,7 @@ class SupabaseAdapter {
         };
         try {
             const data = await this.callRpc('create_manager_user_session', {
-                p_expected_revision: Number(expectedUserRevision), p_session: row
+                p_expected_revision: rev, p_session: row
             }, 12000);
             const result = Array.isArray(data) ? data[0] : data;
             return result && typeof result === 'object' ? result : { ok: false, error: 'INVALID_SESSION_RESPONSE' };
@@ -2315,5 +2357,10 @@ module.exports = {
   withLocalProcessLock,
   normalizeMaxUses,
   normalizeManagerRole,
-  sanitizeBackupPayload
+  sanitizeBackupPayload,
+  stableJson,
+  readPositiveInt,
+  normalizeKeyCode,
+  normalizeBotRentalDisabled,
+  serializeBotSecretsForCloud
 };
