@@ -11,8 +11,12 @@ const { createWorkerApi } = require('../src/http/routes/worker-api');
 const { WorkerRegistry, validateWorkerStatus, VALID_WORKER_STATES } = require('../src/services/worker-registry');
 const SupabaseWorkerStore = require('../src/storage/supabase-worker-store');
 const { encryptSecret, decryptSecret, generateWorkerSecret } = require('../src/utils/secrets');
-const { createRouter: createWorkerHttpRouter } = require('../../worker/src/http/routes');
-const { requireWorkerSecret } = require('../../worker/src/http/auth');
+let createWorkerHttpRouter = null;
+let requireWorkerSecret = null;
+try {
+  createWorkerHttpRouter = require('../../worker/src/http/routes').createRouter;
+  requireWorkerSecret = require('../../worker/src/http/auth').requireWorkerSecret;
+} catch (_) {}
 
 function createMockLogger() {
   const logs = { info: [], warn: [], error: [], debug: [] };
