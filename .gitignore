@@ -9,3 +9,11 @@ npm-debug.log*
 
 *.log  
 scratch/ 
+
+# Local internal notes & agent docs (archived locally in D:\kbot_internal_archive)
+.agents/
+agent-notes/
+docs/
+CLAUDE.md
+SETUP.md
+FEATURES.md

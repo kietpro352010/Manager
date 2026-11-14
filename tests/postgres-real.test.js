@@ -1427,6 +1427,16 @@ async function runSuiteFSecurityAndIsolation(harness) {
     const seedUsersRes = await svc.rpc('insert_manager_users_if_absent', {
       p_users: [
         {
+          id: 'admin',
+          username: 'admin',
+          password: encryptUserPassword('pg-admin-password'),
+          role: 'admin',
+          status: 'active',
+          assigned_bot_ids: [],
+          is_permanent: true,
+          plan_name: 'Enterprise Admin'
+        },
+        {
           id: 'usr_sec_3',
           username: 'secuser3',
           password: encryptUserPassword('secuser3-pass'),
