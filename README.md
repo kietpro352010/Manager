@@ -24,7 +24,24 @@ Hệ thống được thiết kế tối ưu để bạn **chỉ cần nhập đ
 
 ---
 
-## 2. Hướng dẫn triển khai trên Render (3 bước)
+## 2. Thiết lập Cơ sở dữ liệu Supabase (Chạy 1 lần trong SQL Editor)
+
+Trước khi khởi động Manager lần đầu, bạn cần khởi tạo các bảng và RPC trên Supabase:
+1. Đăng nhập [Supabase Dashboard](https://supabase.com/dashboard) -> Chọn Project của bạn -> Vào mục **SQL Editor** (biểu tượng `>_` bên trái).
+2. **Khởi tạo mới hoặc Nâng cấp (An toàn, bảo toàn dữ liệu)**:
+   - Mở file [`supabase/setup.sql`](supabase/setup.sql), sao chép toàn bộ nội dung dán vào SQL Editor và bấm **Run**.
+   - Kịch bản thiết lập 27 bảng, 4 view bảo mật và 52 thủ tục RPC tự động, kích hoạt đầy đủ RLS (Row Level Security).
+3. **Xóa sạch / Reset toàn bộ bảng (Tùy chọn)**:
+   - Khi muốn xóa trắng toàn bộ dữ liệu để dựng lại từ đầu, mở file [`supabase/reset_and_setup.sql`](supabase/reset_and_setup.sql).
+   - Script tích hợp cơ chế bảo vệ thảm họa (**Disaster Recovery Guard**). Để thực thi xóa sạch, bạn mở file, bỏ comment hoặc thêm dòng:
+     ```sql
+     SET kingmc.allow_reset = 'true';
+     ```
+     ở dòng đầu tiên rồi bấm **Run**. Nếu không có cờ này, transaction sẽ tự động hủy bỏ để bảo vệ dữ liệu.
+
+---
+
+## 3. Hướng dẫn triển khai trên Render (3 bước)
 
 1. Đăng nhập [Render Dashboard](https://dashboard.render.com) -> chọn **New +** -> **Web Service**.
 2. Kết nối với repository `kietpro352010/Manager`:
@@ -38,7 +55,7 @@ Hệ thống được thiết kế tối ưu để bạn **chỉ cần nhập đ
 
 ---
 
-## 3. Thiết lập hệ thống sau khi Deploy (Qua Discord & Web)
+## 4. Thiết lập hệ thống sau khi Deploy (Qua Discord & Web)
 
 ### Bước A: Phân quyền quản trị trên Discord (1 phút)
 Trong Discord Server của bạn, gõ lệnh:
@@ -54,7 +71,7 @@ Bạn có 2 cách cực kỳ tiện lợi:
 
 ---
 
-## 4. Hệ thống lệnh Discord Slash Commands
+## 5. Hệ thống lệnh Discord Slash Commands
 
 - `/bots`: Mở bảng điều khiển tương tác trực tiếp danh sách bot (Bật, Tắt, Khởi động lại, Xem trạng thái).
 - `/admin`: Bảng điều khiển quản trị viên (`status`, `health`, `bots`, `setup`, `password`).

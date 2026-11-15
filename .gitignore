@@ -22,7 +22,7 @@ tests/
 test/
 TEST_INFRA.md
 TEST_READY.md
-supabase/
+supabase/migrations/
 scripts/
 render.yaml
 .github/
