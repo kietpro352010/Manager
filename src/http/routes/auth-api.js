@@ -150,48 +150,69 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       const userId = `usr_${crypto.randomUUID().slice(0, 12)}`;
       const hashedPassword = hashPassword(cleanPassword);
 
-      // Register user with atomic Free Trial allocation
-      let registered;
+      // Check trial configuration from store / config
+      let isTrialEnabled = config?.trialGiftEnabled !== undefined ? Boolean(config.trialGiftEnabled) : true;
+      let trialDays = Number(config?.trialDays || 1);
       try {
-        if (typeof store.registerTrialUser === 'function') {
+        if (typeof store.getSetting === 'function') {
+          const sys = await store.getSetting('system_settings').catch(() => null);
+          if (sys && sys.trialGiftEnabled !== undefined) {
+            isTrialEnabled = Boolean(sys.trialGiftEnabled);
+          }
+          if (sys && sys.trialDays !== undefined) {
+            trialDays = Number(sys.trialDays) || trialDays;
+          }
+        }
+      } catch (_) {}
+
+      // Register user:
+      // If trial is enabled and no key is provided, attempt atomic Free Trial allocation.
+      // If trial is disabled or no workers are available, create account without bot (unassigned) cleanly.
+      let registered = null;
+      const shouldAttemptTrial = isTrialEnabled && !providedKey;
+
+      if (shouldAttemptTrial && typeof store.registerTrialUser === 'function') {
+        try {
           registered = await store.registerTrialUser({
             userId,
             username: cleanUsername,
             password: hashedPassword,
-            trialDays: config.trialDays || 1,
+            trialDays,
             planName: 'FREE TRIAL'
           });
-        } else {
-          const newUser = {
-            id: userId,
-            userId,
-            username: cleanUsername,
-            password: hashedPassword,
-            role: 'user',
-            status: 'active',
-            isPermanent: false,
-            isTrial: true,
-            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-            planName: 'FREE TRIAL',
-            workerIds: [],
-            assignedBotIds: [],
-            note: 'Đăng ký tài khoản Web',
-            createdAt: new Date().toISOString()
-          };
-          await store.setAccess(userId, newUser, 'system-register');
-          registered = { ok: true, userId, username: cleanUsername, planName: 'FREE TRIAL', workerId: null };
+        } catch (regErr) {
+          if (regErr.message && regErr.message.includes('NO_WORKERS_AVAILABLE')) {
+            // Free trial worker pool exhausted -> allow registration without bot
+            registered = null;
+          } else if (regErr.message && regErr.message.includes('đã có người sử dụng')) {
+            return res.status(409).json({ ok: false, error: 'Tên đăng nhập này đã có người sử dụng.' });
+          } else {
+            throw regErr;
+          }
         }
-      } catch (regErr) {
-        if (regErr.message && regErr.message.includes('NO_WORKERS_AVAILABLE')) {
-          return res.status(503).json({
-            ok: false,
-            error: 'Hiện tại hệ thống không còn Bot rảnh để cấp dùng thử. Vui lòng liên hệ Quản trị viên hoặc thử lại sau.'
-          });
-        }
-        if (regErr.message && regErr.message.includes('đã có người sử dụng')) {
-          return res.status(409).json({ ok: false, error: 'Tên đăng nhập này đã có người sử dụng.' });
-        }
-        throw regErr;
+      }
+
+      if (!registered) {
+        // Create user without bot (unassigned, 0 bots)
+        const newUser = {
+          id: userId,
+          userId,
+          username: cleanUsername,
+          password: hashedPassword,
+          role: 'user',
+          status: 'active',
+          isPermanent: false,
+          isTrial: false,
+          expiresAt: null,
+          planName: 'Chưa kích hoạt',
+          workerIds: [],
+          assignedBotIds: [],
+          botCount: 0,
+          note: 'Đăng ký tài khoản Web',
+          createdAt: new Date().toISOString()
+        };
+        await store.setAccess(userId, newUser, 'system-register');
+        registered = { ok: true, userId, username: cleanUsername, planName: 'Chưa kích hoạt', workerId: null };
       }
 
       let assignedBotIds = registered?.workerId ? [registered.workerId] : [];
@@ -264,12 +285,14 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         }
       }
 
-      await store.addAudit({
-        action: 'AUTH_REGISTER',
-        targetId: userId,
-        actorId: cleanUsername,
-        details: { ip: clientIp, username: cleanUsername }
-      });
+      if (typeof store.addAudit === 'function') {
+        await store.addAudit({
+          action: 'AUTH_REGISTER',
+          targetId: userId,
+          actorId: cleanUsername,
+          details: { ip: clientIp, username: cleanUsername }
+        }).catch(() => {});
+      }
 
       res.setHeader('Set-Cookie', serializeCookie('kingmc_mgr_session', token, { maxAge: cookieMaxAge, secure: isHttps(req) }));
       const responsePayload = {
@@ -573,11 +596,21 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
   });
 
   // 3.5. PUBLIC LOGIN CONFIG
-  router.get('/login-config', (_req, res) => {
+  router.get('/login-config', async (_req, res) => {
+    let persisted = null;
+    try {
+      if (typeof store.getSetting === 'function') {
+        persisted = await store.getSetting('system_settings').catch(() => null);
+      }
+    } catch (_) {}
+    const trialGiftEnabled = persisted?.trialGiftEnabled !== undefined
+      ? Boolean(persisted.trialGiftEnabled)
+      : Boolean(config?.trialGiftEnabled ?? false);
+    const trialDays = Number(persisted?.trialDays || config?.trialDays || 1);
     return res.json({
       ok: true,
-      trialGiftEnabled: Boolean(config?.trialGiftEnabled ?? false),
-      trialDays: Number(config?.trialDays || 1)
+      trialGiftEnabled,
+      trialDays
     });
   });
 
