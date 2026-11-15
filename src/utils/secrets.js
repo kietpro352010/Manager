@@ -93,13 +93,25 @@ function encryptSecret(plaintext, key) {
   return [iv, cipher.getAuthTag(), ciphertext].map((part) => part.toString('base64')).join('.');
 }
 
-function decryptSecret(record, key) {
-  const keyBuf = toKeyBuffer(key);
+function decryptSecret(record, key, previousKey = null) {
   const [ivPart, tagPart, ciphertextPart] = String(record || '').split('.');
   if (!ivPart || !tagPart || !ciphertextPart) throw new Error('Stored worker credential is malformed.');
-  const decipher = crypto.createDecipheriv('aes-256-gcm', keyBuf, Buffer.from(ivPart, 'base64'));
-  decipher.setAuthTag(Buffer.from(tagPart, 'base64'));
-  return Buffer.concat([decipher.update(Buffer.from(ciphertextPart, 'base64')), decipher.final()]).toString('utf8');
+  const iv = Buffer.from(ivPart, 'base64');
+  const tag = Buffer.from(tagPart, 'base64');
+  const ciphertext = Buffer.from(ciphertextPart, 'base64');
+
+  const candidates = getLegacyCredentialKeys(key, previousKey);
+  let lastError = null;
+  for (const candidate of candidates) {
+    try {
+      const decipher = crypto.createDecipheriv('aes-256-gcm', candidate, iv);
+      decipher.setAuthTag(tag);
+      return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError || new Error('Không thể giải mã dữ liệu (sai khóa hoặc dữ liệu bị hỏng).');
 }
 
 // ----------------------------------------------------------------------------

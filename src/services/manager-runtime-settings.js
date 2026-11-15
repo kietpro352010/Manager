@@ -15,8 +15,15 @@ class ManagerRuntimeSettings {
 
   async initialize() {
     const stored = await this.store.getSetting(SETTING_KEY);
-    const storedSecrets = stored?.secretsCiphertext
-      ? JSON.parse(decryptSecret(stored.secretsCiphertext, this.encryptionKey)) : null;
+    let storedSecrets = null;
+    if (stored?.secretsCiphertext) {
+      try {
+        const decrypted = decryptSecret(stored.secretsCiphertext, this.encryptionKey);
+        if (decrypted) storedSecrets = JSON.parse(decrypted);
+      } catch (_) {
+        storedSecrets = null;
+      }
+    }
     this.values = {
       publicBaseUrl: normalizePublicUrl(stored?.publicBaseUrl || this.initial.publicBaseUrl),
       renderApiKey: String(storedSecrets?.renderApiKey ?? this.initial.renderApiKey ?? '').trim(),
