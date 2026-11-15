@@ -89,19 +89,57 @@ function commandReply(message) {
   return message;
 }
 
-async function rejectOutsideGuild(interaction, logger, allowedGuildId) {
-  if (interaction.inGuild?.() && interaction.guildId === allowedGuildId) return false;
-  logger.warn('discord_interaction_outside_allowed_guild', {
-    actorId: interaction.user?.id,
-    guildId: interaction.guildId || null,
-    interactionType: interaction.commandName || interaction.customId || 'unknown'
+async function getEffectiveAllowedGuildId(config, services) {
+  if (config?.discordGuildId && String(config.discordGuildId).trim()) {
+    return String(config.discordGuildId).trim();
+  }
+  try {
+    const roleSettings = await services?.managerRuntimeSettings?.getRoleSettings?.();
+    if (roleSettings?.guildId && String(roleSettings.guildId).trim()) {
+      return String(roleSettings.guildId).trim();
+    }
+  } catch (_) {}
+  return '';
+}
+
+async function rejectOutsideGuild(interaction, logger, allowedGuildOrConfig, services) {
+  if (!interaction?.isChatInputCommand?.() && !interaction?.isButton?.() && !interaction?.isStringSelectMenu?.() && !interaction?.isModalSubmit?.()) {
+    return false;
+  }
+
+  let allowedGuildId = '';
+  if (typeof allowedGuildOrConfig === 'string') {
+    allowedGuildId = allowedGuildOrConfig.trim();
+    if (!allowedGuildId && services) {
+      allowedGuildId = await getEffectiveAllowedGuildId(services?.config, services);
+    }
+  } else if (allowedGuildOrConfig && typeof allowedGuildOrConfig === 'object') {
+    allowedGuildId = await getEffectiveAllowedGuildId(allowedGuildOrConfig, services);
+  } else {
+    allowedGuildId = await getEffectiveAllowedGuildId(services?.config, services);
+  }
+
+  // If neither config nor dynamic settings define a guild ID, allow interaction (initial zero-config setup)
+  if (!allowedGuildId) {
+    return false;
+  }
+
+  if (interaction?.guildId === allowedGuildId) {
+    return false;
+  }
+
+  logger?.warn?.('discord_interaction_outside_allowed_guild', {
+    actorId: interaction?.user?.id,
+    guildId: interaction?.guildId || null,
+    allowedGuildId,
+    interactionType: interaction?.commandName || interaction?.customId || 'unknown'
   });
   const reply = {
     content: 'This manager is available only in its configured Discord server.',
     allowedMentions: { parse: [] },
     ephemeral: true
   };
-  await interaction.reply(reply).catch(() => {});
+  await interaction?.reply?.(reply)?.catch?.(() => {});
   return true;
 }
 
@@ -112,7 +150,7 @@ function attachInteractionHandler(client, { config, services, logger }) {
         || interaction.isButton?.()
         || interaction.isStringSelectMenu?.()
         || interaction.isModalSubmit?.();
-      if (supportedInteraction && await rejectOutsideGuild(interaction, logger, config.discordGuildId)) return;
+      if (supportedInteraction && await rejectOutsideGuild(interaction, logger, config, services)) return;
 
       if (interaction.isChatInputCommand()) {
         const command = commandMap.get(interaction.commandName);
@@ -181,6 +219,8 @@ function attachInteractionHandler(client, { config, services, logger }) {
 module.exports = {
   attachInteractionHandler,
   isUserAdmin,
+  rejectOutsideGuild,
+  getEffectiveAllowedGuildId,
   requiredRole: () => 'user',
   roleAllows: () => true
 };

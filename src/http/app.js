@@ -453,7 +453,11 @@ function createApp({
     config,
     logger
   });
+  app.use('/api/manager', userRouter);
+  app.use('/api/rewards/link4m', userRouter);
+  app.use('/api/public', userRouter);
   app.use('/api/user', userRouter);
+  app.use('/api', userRouter);
 
   const adminRouter = createAdminApi({
     store,
@@ -466,6 +470,7 @@ function createApp({
     logger,
     invalidateUserSessions
   });
+  app.use('/api/admin', adminRouter);
   app.use('/api/manager', adminRouter);
 
   const workerRouter = createWorkerApi({

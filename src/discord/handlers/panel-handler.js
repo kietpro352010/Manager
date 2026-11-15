@@ -176,6 +176,23 @@ async function getUserBots(user, services) {
 }
 
 async function handlePanelInteraction(interaction, services) {
+  // Dynamic guild resolution
+  const configGuildId = String(services?.config?.discordGuildId || '').trim();
+  let effectiveGuildId = configGuildId;
+  if (!effectiveGuildId) {
+    try {
+      const roleSettings = await services?.managerRuntimeSettings?.getRoleSettings?.();
+      if (roleSettings?.guildId) effectiveGuildId = String(roleSettings.guildId).trim();
+    } catch (_) {}
+  }
+  if (effectiveGuildId && interaction?.guildId && interaction.guildId !== effectiveGuildId) {
+    await safeReply(interaction, {
+      content: 'This manager is available only in its configured Discord server.',
+      flags: MessageFlags.Ephemeral
+    });
+    return;
+  }
+
   const discordUserId = interaction.user?.id;
 
   // --------------------------------------------------------------------------

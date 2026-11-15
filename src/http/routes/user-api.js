@@ -722,7 +722,7 @@ function createUserApi({
   // 16. EXECUTE LIFECYCLE ACTION ON BOT (start, stop, restart, reconnect, respawn, look, toss, reset)
   router.post('/bot/:id/:action', requireSession, async (req, res, next) => {
     const { id, action } = req.params;
-    if (['send', 'settings', 'alias', 'tags', 'proxy', 'account', 'window', 'inventory', 'logs', 'chat-logs', 'auto-chat', 'autoChat', 'bot-schedules', 'botSchedules'].includes(action)) {
+    if (['send', 'settings', 'alias', 'tags', 'proxy', 'account', 'window', 'inventory', 'logs', 'chat-logs', 'auto-chat', 'autoChat', 'bot-schedules', 'botSchedules', 'reset-customer'].includes(action)) {
       return next();
     }
     const perm = await checkBotPermissionAsync(req, id);

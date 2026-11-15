@@ -19,6 +19,9 @@ CLAUDE.md
 SETUP.md
 FEATURES.md
 tests/
+test/
+TEST_INFRA.md
+TEST_READY.md
 supabase/
 scripts/
 render.yaml

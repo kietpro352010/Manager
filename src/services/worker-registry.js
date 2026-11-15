@@ -172,7 +172,14 @@ class WorkerRegistry {
 
     if (await this.store.get(id)) throw new Error(`Worker ${id} already exists.`);
 
-    const secret = customSecret ? String(customSecret).trim() : generateWorkerSecret();
+    if (customSecret !== undefined && customSecret !== null) {
+      const trimmedSecret = typeof customSecret === 'string' ? customSecret.trim() : String(customSecret).trim();
+      if (typeof customSecret !== 'string' || trimmedSecret.length < 32) {
+        throw new Error('Worker secret must be at least 32 characters');
+      }
+    }
+
+    const secret = (customSecret !== undefined && customSecret !== null) ? String(customSecret).trim() : generateWorkerSecret();
     const now = new Date();
     const record = {
       botNumber,
@@ -297,8 +304,10 @@ class WorkerRegistry {
     if (!record || !record.enabled) {
       throw new Error(`Worker ${workerId} is not registered or is disabled.`);
     }
-    const trimmed = String(secret || '').trim();
-    if (!trimmed) throw new Error('Secret cannot be empty.');
+    if (secret === undefined || secret === null || typeof secret !== 'string' || secret.trim().length < 32) {
+      throw new Error('Worker secret must be at least 32 characters');
+    }
+    const trimmed = secret.trim();
     await this.store.update(record.workerId, { secretCiphertext: encryptSecret(trimmed, this.encryptionKey) });
     this.secretCache.set(record.workerId, {
       secret: trimmed,

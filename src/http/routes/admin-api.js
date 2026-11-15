@@ -196,7 +196,18 @@ function createAdminApi({
       const baseLabel = String(body.label || body.name || '').trim();
       const explicitWorkerId = body.workerId ? String(body.workerId).trim().toLowerCase() : undefined;
       const explicitProvider = body.provider ? String(body.provider).trim().toLowerCase() : undefined;
-      const explicitSecret = body.secret || body.secretKey ? String(body.secret || body.secretKey).trim() : undefined;
+      const rawSecret = body.secret !== undefined ? body.secret : body.secretKey;
+      let explicitSecret = undefined;
+      if (rawSecret !== undefined && rawSecret !== null) {
+        if (typeof rawSecret !== 'string' || rawSecret.trim().length < 32) {
+          return res.status(400).json({
+            ok: false,
+            success: false,
+            error: 'Worker secret must be at least 32 characters'
+          });
+        }
+        explicitSecret = rawSecret.trim();
+      }
 
       const managerBaseUrl = String(config.publicBaseUrl || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
 
@@ -239,15 +250,32 @@ function createAdminApi({
         // Probe worker /health endpoint if accessible
         if (provider === 'render' && isHttpUrl) {
           try {
-            const probe = await (global.fetch || fetch)(`${rawUrl}/health`, { signal: AbortSignal.timeout(2500) });
-            if (probe.ok) {
-              const probeData = await probe.json().catch(() => ({}));
-              if (Number.isInteger(probeData.botCount) && probeData.botCount >= 1 && probeData.botCount <= 2) {
-                slots = probeData.botCount;
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 2500);
+            try {
+              const fetchFn = typeof globalThis.fetch === 'function' ? globalThis.fetch : null;
+              if (fetchFn) {
+                const probe = await fetchFn(`${rawUrl}/health`, {
+                  signal: controller.signal,
+                  headers: { 'Accept': 'application/json' }
+                });
+                if (probe && probe.ok) {
+                  const probeData = await probe.json().catch(() => ({}));
+                  const reportedCount = Number(probeData.botCount || probeData.slots || probeData.slotCount);
+                  if (Number.isInteger(reportedCount) && reportedCount >= 1 && reportedCount <= 2) {
+                    slots = reportedCount;
+                  }
+                }
               }
+            } finally {
+              clearTimeout(timer);
             }
-          } catch (_) {
+          } catch (probeErr) {
             // Worker might be booting or cold-starting; keep default dual-slot
+            logger?.info?.('Worker probe cold-start or timeout, defaulting to dual-slot', {
+              url: rawUrl,
+              error: probeErr?.message
+            });
             slots = 2;
           }
         }
@@ -372,6 +400,18 @@ function createAdminApi({
     try {
       const worker = await resolveWorker(req.params.id);
       if (!worker) return res.status(404).json({ ok: false, error: 'Không tìm thấy bot.' });
+
+      // Guarantee physical in-memory Minecraft session disconnects
+      if (broker && typeof broker.dispatch === 'function') {
+        try {
+          await broker.dispatch(worker.workerId, 'stop', { reason: 'reset-customer' });
+        } catch (dispatchErr) {
+          logger?.warn?.('DISPATCH_STOP_FAILED_ON_RESET_CUSTOMER', {
+            workerId: worker.workerId,
+            error: dispatchErr.message
+          });
+        }
+      }
 
       await registry.resetData(worker.workerId);
       await store.addAudit({

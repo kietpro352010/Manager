@@ -1,7 +1,7 @@
 'use strict';
 
 const express = require('express');
-const { createWorkerAuth } = require('../middleware/worker-auth');
+const { createWorkerAuth, extractWorkerSecret } = require('../middleware/worker-auth');
 const { timingSafeStringEquals } = require('../../utils/secrets');
 
 function createWorkerApi({ registry, broker, workerStore, adminNotifier, config, logger }) {
@@ -85,7 +85,7 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
   // 2. Direct Worker Node Endpoints (WispByte pull/report architecture)
   router.post('/report', async (req, res) => {
     try {
-      const incomingSecret = req.headers['x-bot-secret'] || req.headers['x-worker-secret'] || '';
+      const incomingSecret = extractWorkerSecret(req);
       const workerId = String(req.body?.workerId || req.body?.id || req.headers['x-manager-bot-id'] || '').trim().toLowerCase();
       if (!workerId) return res.status(400).json({ ok: false, error: 'missing_worker_id' });
 

@@ -187,7 +187,7 @@ class CommandBroker {
     }
 
     const workerStatus = body.result?.worker || body.result || {};
-    const isSuccess = body.result ? body.result.ok === true : body.ok === true;
+    const isSuccess = body.result ? (body.result.ok !== false) : body.ok === true;
     if (command.action === 'reset' && isSuccess) {
       const { partialResetFailures } = await this.syncResetState(
         worker.workerId,

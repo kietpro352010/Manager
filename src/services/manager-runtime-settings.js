@@ -72,6 +72,23 @@ class ManagerRuntimeSettings {
       secretsCiphertext: encryptSecret(JSON.stringify(secrets), this.encryptionKey)
     });
   }
+
+  async getRoleSettings() {
+    try {
+      if (this.store && typeof this.store.getSetting === 'function') {
+        const stored = await this.store.getSetting('discord_access');
+        if (stored && typeof stored === 'object') {
+          return {
+            guildId: String(stored.guildId || '').trim(),
+            adminRoleId: String(stored.adminRoleId || '').trim(),
+            userRoleId: String(stored.userRoleId || '').trim(),
+            adminUserId: String(stored.adminUserId || '').trim()
+          };
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
 }
 
 module.exports = { ManagerRuntimeSettings, SETTING_KEY };
