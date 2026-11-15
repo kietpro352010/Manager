@@ -5,9 +5,7 @@
   "description": "Discord-only control plane for KingMC AFK workers.",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "test": "node tests/integration.test.js && node tests/services-wiring.test.js && node tests/storage-sql.test.js && node tests/auth-regression.test.js && node tests/worker-registry-audit.test.js && node tests/command-execution-audit.test.js && node tests/gate4-database-schema.test.js && node tests/gate5-ui-worker.test.js && node tests/remediation-audit.test.js",
-    "commands:register": "node scripts/register-commands.js"
+    "start": "node src/index.js"
   },
   "engines": {
     "node": ">=20"
@@ -18,8 +16,5 @@
     "dotenv": "^17.4.2",
     "express": "^4.21.2",
     "helmet": "^8.1.0"
-  },
-  "devDependencies": {
-    "pg": "^8.23.1"
   }
 }

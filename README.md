@@ -4,7 +4,7 @@ Control plane và hệ thống quản trị trung tâm cho KingMC AFK Workers.
 
 ---
 
-## Cấu trúc dự án
+## Cấu trúc mã nguồn
 
 | Thành phần | Đường dẫn | Mô tả |
 |---|---|---|
@@ -13,23 +13,35 @@ Control plane và hệ thống quản trị trung tâm cho KingMC AFK Workers.
 | Discord Bot UI | [`src/discord/`](src/discord) | 6 slash commands (`/admin`, `/bots`, `/help`, `/login`, `/logout`, `/logs`), panel renderer & interaction handlers |
 | Web Dashboard & REST API | [`src/http/`](src/http) | Express app ([`app.js`](src/http/app.js)), `/health`, `/ready`, `/api/auth`, `/api/manager`, `/api/user`, `/api/v1/workers`, SPA views |
 | Domain Services | [`src/services/`](src/services) | `CommandBroker`, `WorkerRegistry`, `FleetOperations`, `EntitlementService`, `Link4mService`, `AccessControl`, `ManagerRuntimeSettings` |
-| Storage & SQL Contracts | [`src/storage/`](src/storage) | [`schema-sql.js`](src/storage/schema-sql.js), [`supabase-client.js`](src/storage/supabase-client.js), worker/dashboard/command stores |
+| Storage & Schema | [`src/storage/`](src/storage) | [`schema-sql.js`](src/storage/schema-sql.js), [`supabase-client.js`](src/storage/supabase-client.js), worker/dashboard/command stores |
 | Utilities | [`src/utils/`](src/utils) | `http.js`, `logger.js`, `secrets.js` (AES-256-GCM, Scrypt), `text-format.js` |
-| Supabase Migrations | [`supabase/`](supabase) | DDL schema và migrations định kỳ đồng bộ RPC |
-| Test Suite & CI | [`tests/`](tests), [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Unit, integration & real PostgreSQL 16 CI workflow |
-| Deploy Manifest | [`package.json`](package.json), [`render.yaml`](render.yaml) | Render Web Service manifest (`/health`), `npm start`, `npm test` |
 
 ---
 
-## Hướng dẫn cài đặt & Kiểm thử
+## Biến môi trường (Environment Variables)
 
-```bash
-npm ci
-npm test
-```
+Cấu hình trên Render Dashboard (Environment Variables):
 
-## Khởi động Production
+| Tên biến | Bắt buộc | Mô tả |
+|---|---|---|
+| `NODE_ENV` | Có | `production` |
+| `DISCORD_TOKEN` | Có | Bot token Discord |
+| `DISCORD_CLIENT_ID` | Có | Application Client ID của bot Discord |
+| `DISCORD_GUILD_ID` | Có | Server ID máy chủ Discord |
+| `SUPABASE_URL` | Có | HTTPS URL của project Supabase |
+| `SUPABASE_SECRET_KEY` | Có | Service Role Key của Supabase |
+| `MANAGER_ENCRYPTION_KEY` | Có | Khóa mã hóa AES-256-GCM (32 bytes hex) |
+| `RENDER_API_BASE_URL` | Không | `https://api.render.com/v1` (tùy chọn) |
+| `LINK4M_REWARD_ENABLED` | Không | Bật/tắt vượt link Link4M (`false` / `true`) |
 
-```bash
-npm start
-```
+---
+
+## Triển khai trên Render
+
+1. Tạo mới **Web Service** trên Render Dashboard kết nối với repository này.
+2. Thiết lập thông số:
+   - **Runtime**: `Node`
+   - **Build Command**: `npm ci --omit=dev`
+   - **Start Command**: `npm start`
+   - **Health Check Path**: `/health`
+3. Thêm các biến môi trường như bảng trên.
