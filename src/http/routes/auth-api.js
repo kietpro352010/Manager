@@ -319,10 +319,25 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       if (cleanUsername.toLowerCase() === adminUsername.toLowerCase()) {
         const storedAdminPass = registry.getAdminPassword() || config.adminPassword;
         if (!storedAdminPass) {
-          return res.status(403).json({ ok: false, error: 'Tài khoản Quản trị viên chưa được cấu hình mật khẩu hệ thống (ADMIN_PASSWORD).' });
+          // Khởi tạo mật khẩu admin lần đầu tiên nếu chưa cấu hình trên Render/DB
+          if (cleanPassword.length < 6) {
+            return res.status(400).json({ ok: false, error: 'Mật khẩu khởi tạo Quản trị viên phải có ít nhất 6 ký tự.' });
+          }
+          const hashed = hashAdminPassword(cleanPassword);
+          if (typeof registry.setAdminPassword === 'function') {
+            registry.setAdminPassword(hashed);
+          }
+          if (store && typeof store.setSetting === 'function') {
+            await store.setSetting('admin_credentials', { passwordHash: hashed, updatedAt: new Date().toISOString() });
+          }
+        } else {
+          const isMatch = verifyAdminPassword(cleanPassword, storedAdminPass);
+          if (!isMatch) {
+            recordFailedAttempt(clientIp, cleanUsername);
+            return res.status(401).json({ ok: false, error: 'Tên đăng nhập hoặc mật khẩu quản trị viên không chính xác.' });
+          }
         }
-        const isMatch = verifyAdminPassword(cleanPassword, storedAdminPass);
-        if (isMatch) {
+        if (true) {
           resetRateLimit(clientIp, cleanUsername);
           const token = crypto.randomBytes(32).toString('hex');
           const tokenHash = hashSessionToken(token);

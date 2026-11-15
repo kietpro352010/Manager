@@ -88,7 +88,7 @@ async function main() {
 
   // 3. Discord Access Control & Setup
   let roleSettings = await accessStore.getSetting('discord_access');
-  if (roleSettings?.guildId && roleSettings.guildId !== config.discordGuildId) {
+  if (roleSettings?.guildId && config.discordGuildId && roleSettings.guildId !== config.discordGuildId) {
     logger.warn('discord_guild_mismatch', { configGuild: config.discordGuildId, storedGuild: roleSettings.guildId });
   }
 
@@ -229,21 +229,32 @@ async function main() {
   if (config.discordToken) {
     attachInteractionHandler(client, { config: runtimeConfig, services, logger });
 
-    if (config.discordClientId) {
+    const targetGuildId = config.discordGuildId || roleSettings?.guildId || '';
+    const registerSlash = async (gId = targetGuildId) => {
+      const cId = config.discordClientId || client.user?.id;
+      if (!cId) return;
       try {
         const commandRegistration = await registerCommands({
           token: config.discordToken,
-          clientId: config.discordClientId,
-          guildId: config.discordGuildId
+          clientId: cId,
+          guildId: gId || null
         });
         logger.info('discord_commands_registered', commandRegistration);
       } catch (regErr) {
         logger.warn('discord_commands_registration_failed', { error: regErr.message });
       }
+    };
+
+    if (config.discordClientId) {
+      await registerSlash();
     }
 
-    client.once(Events?.ClientReady || 'clientReady', () => {
+    client.once(Events?.ClientReady || 'clientReady', async () => {
       logger.info('discord_bot_ready', { botUserId: client.user?.id || 'unknown' });
+      if (!config.discordClientId || !targetGuildId) {
+        const autoGuildId = targetGuildId || client.guilds?.cache?.first()?.id || null;
+        await registerSlash(autoGuildId);
+      }
       wispbyteKeepAlive.start({ discordClient: client, adminRoleId: accessControl.adminRoleId });
     });
 

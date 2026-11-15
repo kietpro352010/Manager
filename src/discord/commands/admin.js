@@ -26,6 +26,10 @@ const definition = new SlashCommandBuilder()
       .addRoleOption((opt) => opt.setName('admin_role').setDescription('Role dành cho Quản trị viên (Admin)').setRequired(true))
       .addRoleOption((opt) => opt.setName('user_role').setDescription('Role dành cho Thành viên thuê bot (User)').setRequired(true))
       .addUserOption((opt) => opt.setName('admin_user').setDescription('User Discord được chỉ định làm SuperAdmin (tùy chọn)').setRequired(false))
+  )
+  .addSubcommand((cmd) =>
+    cmd.setName('password').setDescription('Thiết lập hoặc đổi mật khẩu Web cho tài khoản Quản trị viên (admin)')
+      .addStringOption((opt) => opt.setName('new_password').setDescription('Mật khẩu quản trị mới (ít nhất 6 ký tự)').setRequired(true))
   );
 
 async function execute(interaction, services) {
@@ -76,6 +80,19 @@ async function execute(interaction, services) {
       configuredBy: interaction.user?.id || 'discord-setup'
     });
 
+    // Tự động đồng bộ slash commands vào server này ngay lập tức
+    try {
+      const { registerCommands } = require('../register-commands');
+      const cId = services.config?.discordClientId || interaction.client?.user?.id;
+      if (services.config?.discordToken && cId && interaction.guildId) {
+        await registerCommands({
+          token: services.config.discordToken,
+          clientId: cId,
+          guildId: interaction.guildId
+        });
+      }
+    } catch (_) {}
+
     return {
       embeds: [
         embed(
@@ -84,6 +101,49 @@ async function execute(interaction, services) {
           `• **Admin Role:** <@&${adminRole.id}>\n` +
           `• **User Role:** <@&${userRole.id}>\n` +
           `• **Super Admin:** ${adminUser ? `<@${adminUser.id}>` : (services.config.adminUserId ? `<@${services.config.adminUserId}>` : 'Chủ sở hữu máy chủ')}`,
+          0x22c55e
+        )
+      ]
+    };
+  }
+
+  // 1B. PASSWORD (Đổi mật khẩu Web cho admin ngay trên Discord)
+  if (subcommand === 'password') {
+    const isSuperAdmin = user?.role === 'admin' ||
+      (services?.config?.adminUserId && services.config.adminUserId === interaction.user?.id) ||
+      (services?.accessControl?.adminUserId && services.accessControl.adminUserId === interaction.user?.id) ||
+      interaction.guild?.ownerId === interaction.user?.id;
+
+    if (!isSuperAdmin) {
+      return {
+        embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Chỉ Chủ sở hữu server hoặc SuperAdmin mới có quyền đổi mật khẩu quản trị viên.', 0xef4444)]
+      };
+    }
+
+    const newPassword = interaction.options.getString('new_password');
+    if (!newPassword || newPassword.length < 6) {
+      return {
+        embeds: [embed('❌ LỖI', 'Mật khẩu quản trị viên phải có ít nhất 6 ký tự.', 0xef4444)]
+      };
+    }
+
+    const { hashAdminPassword } = require('../../utils/secrets');
+    const hashed = hashAdminPassword(newPassword);
+    if (typeof services.registry?.setAdminPassword === 'function') {
+      services.registry.setAdminPassword(hashed);
+    }
+    if (services.accessStore && typeof services.accessStore.setSetting === 'function') {
+      await services.accessStore.setSetting('admin_credentials', {
+        passwordHash: hashed,
+        updatedAt: new Date().toISOString()
+      });
+    }
+
+    return {
+      embeds: [
+        embed(
+          '✅ ĐỔI MẬT KHẨU ADMIN THÀNH CÔNG',
+          'Đã cập nhật mật khẩu cho tài khoản Quản trị viên Web (`admin`). Bạn có thể dùng mật khẩu mới này để đăng nhập vào Web Dashboard ngay lập tức.',
           0x22c55e
         )
       ]

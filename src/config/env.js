@@ -89,10 +89,26 @@ function loadConfig(env = process.env) {
     throw new Error('If role IDs are set in the environment, ADMIN_ROLE_ID and USER_ROLE_ID must both be valid and different.');
   }
 
-  const discordClientId = required(env, 'DISCORD_CLIENT_ID');
-  const discordGuildId = required(env, 'DISCORD_GUILD_ID');
-  if (!/^\d{17,20}$/.test(discordClientId)) throw new Error('DISCORD_CLIENT_ID must be a Discord application ID.');
-  if (!/^\d{17,20}$/.test(discordGuildId)) throw new Error('DISCORD_GUILD_ID must be the Discord server ID where this manager is allowed to operate.');
+  const discordToken = required(env, 'DISCORD_TOKEN');
+
+  let discordClientId = String(env.DISCORD_CLIENT_ID || '').trim();
+  if (!discordClientId && discordToken) {
+    try {
+      const firstPart = discordToken.split('.')[0];
+      const decoded = Buffer.from(firstPart, 'base64').toString('utf8');
+      if (/^\d{17,20}$/.test(decoded)) {
+        discordClientId = decoded;
+      }
+    } catch (_) {}
+  }
+  if (discordClientId && !/^\d{17,20}$/.test(discordClientId)) {
+    throw new Error('DISCORD_CLIENT_ID must be a Discord application ID (17-20 digits).');
+  }
+
+  const discordGuildId = String(env.DISCORD_GUILD_ID || '').trim();
+  if (discordGuildId && !/^\d{17,20}$/.test(discordGuildId)) {
+    throw new Error('DISCORD_GUILD_ID must be the Discord server ID where this manager is allowed to operate (17-20 digits).');
+  }
 
   const supabaseUrl = required(env, 'SUPABASE_URL').replace(/\/+$/, '');
   const isLocalOrTest = (env.NODE_ENV !== 'production') || /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(supabaseUrl);
@@ -111,7 +127,7 @@ function loadConfig(env = process.env) {
     port: hostRuntime.port,
     platform: hostRuntime.platform,
     portSource: hostRuntime.portSource,
-    discordToken: required(env, 'DISCORD_TOKEN'),
+    discordToken,
     discordClientId,
     discordGuildId,
     adminRoleId,
