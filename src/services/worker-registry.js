@@ -146,7 +146,7 @@ class WorkerRegistry {
     }
   }
 
-  async add({ workerId, name, provider, serviceUrl = '', serviceId = '' }) {
+  async add({ workerId, name, provider, serviceUrl = '', serviceId = '', secret: customSecret }) {
     const botNumber = await this.store.nextBotNumber();
     const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
     const defaultId = pad(botNumber);
@@ -172,7 +172,7 @@ class WorkerRegistry {
 
     if (await this.store.get(id)) throw new Error(`Worker ${id} already exists.`);
 
-    const secret = generateWorkerSecret();
+    const secret = customSecret ? String(customSecret).trim() : generateWorkerSecret();
     const now = new Date();
     const record = {
       botNumber,
@@ -290,6 +290,22 @@ class WorkerRegistry {
       cachedAt: Date.now()
     });
     return secret;
+  }
+
+  async setSecret(workerId, secret) {
+    const record = await this.find(workerId);
+    if (!record || !record.enabled) {
+      throw new Error(`Worker ${workerId} is not registered or is disabled.`);
+    }
+    const trimmed = String(secret || '').trim();
+    if (!trimmed) throw new Error('Secret cannot be empty.');
+    await this.store.update(record.workerId, { secretCiphertext: encryptSecret(trimmed, this.encryptionKey) });
+    this.secretCache.set(record.workerId, {
+      secret: trimmed,
+      enabled: Boolean(record.enabled),
+      cachedAt: Date.now()
+    });
+    return trimmed;
   }
 
   invalidateWorkerSecret(workerId) {

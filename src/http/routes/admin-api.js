@@ -188,19 +188,125 @@ function createAdminApi({
   // 2. BOT REGISTRATION & MANAGEMENT (ADMIN)
   router.post(['/bots', '/bot'], async (req, res) => {
     try {
-      const { name, provider, serviceUrl, serviceId, workerId } = req.body || {};
-      const result = await registry.add({
-        workerId: workerId ? String(workerId).trim().toLowerCase() : undefined,
-        name: name ? String(name).trim() : undefined,
-        provider: provider || 'wispbyte',
-        serviceUrl: serviceUrl || '',
-        serviceId: serviceId || ''
-      });
+      const body = req.body || {};
+      const rawUrls = Array.isArray(body.urls) && body.urls.length
+        ? body.urls
+        : (body.url || body.serviceUrl ? [body.url || body.serviceUrl] : []);
+
+      const baseLabel = String(body.label || body.name || '').trim();
+      const explicitWorkerId = body.workerId ? String(body.workerId).trim().toLowerCase() : undefined;
+      const explicitProvider = body.provider ? String(body.provider).trim().toLowerCase() : undefined;
+      const explicitSecret = body.secret || body.secretKey ? String(body.secret || body.secretKey).trim() : undefined;
+
+      const managerBaseUrl = String(config.publicBaseUrl || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+
+      // Case 1: No URLs provided (manual / wispbyte worker)
+      if (!rawUrls.length) {
+        const result = await registry.add({
+          workerId: explicitWorkerId,
+          name: baseLabel || undefined,
+          provider: explicitProvider || 'wispbyte',
+          serviceUrl: body.serviceUrl || '',
+          serviceId: body.serviceId || '',
+          secret: explicitSecret
+        });
+
+        const envConfig = `MANAGER_URL=${managerBaseUrl}\nWORKER_ID_1=${result.worker.workerId}\nWORKER_SECRET_1=${result.secret}`;
+
+        return res.status(201).json({
+          ok: true,
+          message: 'Đã thêm Bot mới thành công.',
+          bot: result.worker,
+          bots: [result.worker],
+          secret: result.secret,
+          envConfig
+        });
+      }
+
+      // Case 2: One or more URLs provided (Render / Web workers with Dual-Slot auto detection)
+      const added = [];
+      const skipped = [];
+      const envConfigs = [];
+
+      for (let i = 0; i < rawUrls.length; i++) {
+        const rawUrl = String(rawUrls[i] || '').trim().replace(/\/+$/, '');
+        if (!rawUrl) continue;
+
+        const isHttpUrl = /^https?:\/\//i.test(rawUrl);
+        const provider = explicitProvider || (isHttpUrl ? 'render' : 'wispbyte');
+        let slots = 2; // Default dual-slot (1 worker = 2 bot) for Render / host instances
+
+        // Probe worker /health endpoint if accessible
+        if (provider === 'render' && isHttpUrl) {
+          try {
+            const probe = await (global.fetch || fetch)(`${rawUrl}/health`, { signal: AbortSignal.timeout(2500) });
+            if (probe.ok) {
+              const probeData = await probe.json().catch(() => ({}));
+              if (Number.isInteger(probeData.botCount) && probeData.botCount >= 1 && probeData.botCount <= 2) {
+                slots = probeData.botCount;
+              }
+            }
+          } catch (_) {
+            // Worker might be booting or cold-starting; keep default dual-slot
+            slots = 2;
+          }
+        }
+
+        const clusterBots = [];
+        for (let slot = 1; slot <= slots; slot++) {
+          try {
+            const botLabel = baseLabel
+              ? (slots > 1 ? `${baseLabel} (Slot ${slot})` : baseLabel)
+              : undefined;
+            const slotWorkerId = (explicitWorkerId && slots === 1) ? explicitWorkerId : undefined;
+            const slotSecret = (explicitSecret && slots === 1) ? explicitSecret : undefined;
+
+            const result = await registry.add({
+              workerId: slotWorkerId,
+              name: botLabel,
+              provider,
+              serviceUrl: isHttpUrl ? rawUrl : '',
+              serviceId: body.serviceId || '',
+              secret: slotSecret
+            });
+
+            clusterBots.push({
+              worker: result.worker,
+              secret: result.secret,
+              slot
+            });
+            added.push(result.worker);
+          } catch (err) {
+            skipped.push({ url: rawUrl, slot, reason: err.message });
+          }
+        }
+
+        if (clusterBots.length > 0) {
+          let envChunk = `# Cấu hình Worker: ${rawUrl}\nMANAGER_URL=${managerBaseUrl}\n`;
+          clusterBots.forEach((cb) => {
+            envChunk += `WORKER_ID_${cb.slot}=${cb.worker.workerId}\nWORKER_SECRET_${cb.slot}=${cb.secret}\n`;
+          });
+          envConfigs.push(envChunk.trim());
+        }
+      }
+
+      if (added.length === 0 && skipped.length > 0) {
+        return res.status(400).json({
+          ok: false,
+          error: skipped[0].reason || 'Không thể thêm bot.',
+          skipped
+        });
+      }
+
+      const totalEnv = envConfigs.join('\n\n');
       return res.status(201).json({
         ok: true,
-        message: 'Đã thêm Bot mới thành công.',
-        bot: result.worker,
-        secret: result.secret
+        message: `Đã thêm thành công ${added.length} Bot!` + (skipped.length ? ` (Bỏ qua ${skipped.length})` : ''),
+        bots: added,
+        bot: added[0],
+        secret: added[0]?.secret,
+        envConfig: totalEnv,
+        skipped
       });
     } catch (error) {
       return res.status(400).json({ ok: false, error: error.message });

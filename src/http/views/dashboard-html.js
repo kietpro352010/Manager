@@ -6571,28 +6571,50 @@ button.primary:hover:not(:disabled),
   </div>
 </div>
 <div id="addBotModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="addBotModalTitle">
-  <div class="modal-card" style="max-width:520px;">
+  <div class="modal-card" style="max-width:540px;">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-      <h3 id="addBotModalTitle" style="margin:0;color:#38bdf8;display:flex;align-items:center;gap:8px;">➕ Thêm Bot Con (Hỗ Trợ Thêm Hàng Loạt)</h3>
+      <h3 id="addBotModalTitle" style="margin:0;color:#38bdf8;display:flex;align-items:center;gap:8px;">➕ Thêm Bot Con (Cụm 2-in-1 & Hàng Loạt)</h3>
       <button type="button" class="small" onclick="closeAddBotModal()" aria-label="Đóng">✕</button>
     </div>
-    <div class="form-row">
-      <label for="addBotUrl" style="display:flex;justify-content:space-between;align-items:center;">
-        <span>Web URL của bot con (1 hoặc nhiều link)</span>
-        <span id="addBotUrlCountBadge" style="font-size:11.5px;color:#38bdf8;font-weight:700;">0 link</span>
-      </label>
-      <textarea id="addBotUrl" rows="5" autocomplete="off" oninput="updateAddBotUrlCounter()" placeholder="Dán 1 hoặc nhiều link bot tại đây, phân biệt bằng dấu cách hoặc xuống dòng:&#10;https://kbot-1.onrender.com&#10;https://kbot-2.onrender.com" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:12.5px;padding:10px;resize:vertical;line-height:1.45;"></textarea>
+
+    <!-- FORM VIEW -->
+    <div id="addBotFormView">
+      <div class="form-row">
+        <label for="addBotUrl" style="display:flex;justify-content:space-between;align-items:center;">
+          <span>Web URL của bot con (1 hoặc nhiều link Render / Wispbyte)</span>
+          <span id="addBotUrlCountBadge" style="font-size:11.5px;color:#38bdf8;font-weight:700;">0 link</span>
+        </label>
+        <textarea id="addBotUrl" rows="4" autocomplete="off" oninput="updateAddBotUrlCounter()" placeholder="Dán 1 hoặc nhiều link bot tại đây, phân biệt bằng dấu cách hoặc xuống dòng:&#10;https://kbot-worker.onrender.com" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:12.5px;padding:10px;resize:vertical;line-height:1.45;"></textarea>
+      </div>
+      <div class="form-row">
+        <label for="addBotLabel">Tên hiển thị / Tiền tố đặt tên (Không bắt buộc)</label>
+        <input id="addBotLabel" autocomplete="off" placeholder="Ví dụ: Bot (Để trống sẽ tự động đặt theo Bot #ID)">
+      </div>
+      <div class="note" style="line-height:1.5;">
+        💡 <strong>Tự động nhận diện Dual-Slot (2-in-1):</strong> Mỗi link Worker Render/Wispbyte sẽ tự động bung <strong>2 Bot độc lập</strong> (Slot 1 & Slot 2). Hệ thống tự sinh ID và Secret bí mật.
+      </div>
+      <div class="modal-actions" style="margin-top:16px;">
+        <button type="button" onclick="closeAddBotModal()">Hủy</button>
+        <button type="button" id="confirmAddBotButton" class="primary" onclick="addBotFromWeb()">➕ Thêm Bot</button>
+      </div>
     </div>
-    <div class="form-row">
-      <label for="addBotLabel">Tên hiển thị / Tiền tố đặt tên (Không bắt buộc)</label>
-      <input id="addBotLabel" autocomplete="off" placeholder="Ví dụ: Bot (Để trống sẽ tự động lấy tên bot hoặc Bot #ID)">
-    </div>
-    <div class="note" style="line-height:1.5;">
-      💡 <strong>Thêm hàng loạt & Tự động nhận diện 3-in-1:</strong> Bạn có thể dán nhiều link cùng lúc (ngăn cách bằng <strong>xuống dòng</strong> hoặc <strong>dấu cách</strong>). Hệ thống sẽ tự động kiểm tra, phát hiện cụm Worker 3-in-1 để tự bung 3 bot độc lập (Slot 1, 2, 3) cho từng link!
-    </div>
-    <div class="modal-actions" style="margin-top:16px;">
-      <button type="button" onclick="closeAddBotModal()">Hủy</button>
-      <button type="button" id="confirmAddBotButton" class="primary" onclick="addBotFromWeb()">➕ Thêm Bot</button>
+
+    <!-- RESULT VIEW -->
+    <div id="addBotResultView" style="display:none;">
+      <div style="background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.35);border-radius:8px;padding:12px;margin-bottom:12px;">
+        <div id="addBotResultSuccessTitle" style="color:#4ade80;font-weight:700;font-size:14px;margin-bottom:4px;">🎉 Đã thêm thành công!</div>
+        <div style="font-size:12px;color:var(--text);opacity:0.9;">Hệ thống đã tự động gán ID và sinh khóa bảo mật (Secret Key) riêng biệt cho từng Bot.</div>
+      </div>
+      <div class="form-row">
+        <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;font-size:12px;font-weight:700;color:#38bdf8;">
+          <span>Biến môi trường mẫu cần dán vào Render / Wispbyte:</span>
+          <button type="button" class="small primary" onclick="copyText(document.getElementById('addBotEnvConfigArea')?.value)">📋 Sao chép</button>
+        </label>
+        <textarea id="addBotEnvConfigArea" readonly rows="7" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:12px;padding:10px;background:rgba(0,0,0,0.5);color:#a5f3fc;border:1px solid var(--border);border-radius:6px;resize:vertical;line-height:1.45;"></textarea>
+      </div>
+      <div class="modal-actions" style="margin-top:16px;">
+        <button type="button" class="primary" onclick="finishAddBotModal()">Hoàn tất & Cập nhật</button>
+      </div>
     </div>
   </div>
 </div>
@@ -11914,10 +11936,14 @@ window.updateAddBotUrlCounter = updateAddBotUrlCounter;
 
 function openAddBotModal() {
   const modal = document.getElementById('addBotModal');
+  const formView = document.getElementById('addBotFormView');
+  const resultView = document.getElementById('addBotResultView');
   const url = document.getElementById('addBotUrl');
   const label = document.getElementById('addBotLabel');
   if (url) url.value = '';
   if (label) label.value = '';
+  if (formView) formView.style.display = 'block';
+  if (resultView) resultView.style.display = 'none';
   updateAddBotUrlCounter();
   if (modal) modal.classList.remove('hidden');
   setTimeout(() => url && url.focus(), 50);
@@ -11927,6 +11953,13 @@ function closeAddBotModal() {
   const modal = document.getElementById('addBotModal');
   if (modal) modal.classList.add('hidden');
 }
+
+function finishAddBotModal() {
+  closeAddBotModal();
+  lastHomeSig = '';
+  refreshHome();
+}
+window.finishAddBotModal = finishAddBotModal;
 
 async function addBotFromWeb() {
   const button = document.getElementById('confirmAddBotButton');
@@ -11953,10 +11986,25 @@ async function addBotFromWeb() {
     });
     const data = result.data || {};
     if (!result.ok) throw new Error(data.error || 'Không thể thêm bot.');
-    closeAddBotModal();
-    showToast(data.message || 'Đã thêm bot thành công!');
-    lastHomeSig = '';
-    await refreshHome();
+
+    if (data.envConfig) {
+      const formView = document.getElementById('addBotFormView');
+      const resultView = document.getElementById('addBotResultView');
+      const envArea = document.getElementById('addBotEnvConfigArea');
+      const successTitle = document.getElementById('addBotResultSuccessTitle');
+      if (envArea) envArea.value = data.envConfig;
+      if (successTitle) successTitle.textContent = '🎉 ' + (data.message || 'Đã thêm Bot thành công!');
+      if (formView) formView.style.display = 'none';
+      if (resultView) resultView.style.display = 'block';
+      showToast(data.message || 'Đã thêm bot thành công!', 'success', 4000);
+      lastHomeSig = '';
+      await refreshHome();
+    } else {
+      closeAddBotModal();
+      showToast(data.message || 'Đã thêm bot thành công!');
+      lastHomeSig = '';
+      await refreshHome();
+    }
   } catch (err) {
     showToast(err.message || 'Không thể thêm bot.');
   } finally {
