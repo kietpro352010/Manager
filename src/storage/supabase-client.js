@@ -1291,6 +1291,20 @@ class SupabaseAdapter {
             allow_account_change: session.allowAccountChange !== false, status: String(session.status || 'active'),
             updated_at: new Date().toISOString()
         };
+        if (row.role === 'admin') {
+            try {
+                const res = await this.fetchWithRetry(`${this.url}/rest/v1/manager_sessions`, {
+                    method: 'POST',
+                    headers: this.getHeaders({ 'Prefer': 'resolution=merge-duplicates,return=representation' }),
+                    body: JSON.stringify(row)
+                }, 12000);
+                if (res && res.ok) {
+                    return { ok: true, revision: rev };
+                }
+            } catch (err) {
+                return { ok: false, status: err.status || 503, error: err.message || 'Không lưu được session admin trên Supabase.' };
+            }
+        }
         try {
             const data = await this.callRpc('create_manager_user_session', {
                 p_expected_revision: rev, p_session: row

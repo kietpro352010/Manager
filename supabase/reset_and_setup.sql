@@ -1282,7 +1282,7 @@ BEGIN
      OR v_expires_at <= (extract(epoch FROM now()) * 1000)::bigint THEN
     RETURN jsonb_build_object('ok', false, 'error', 'INVALID_SESSION');
   END IF;
-  IF NOT EXISTS (
+  IF lower(COALESCE(p_session->>'role', 'user')) <> 'admin' AND NOT EXISTS (
     SELECT 1 FROM public.manager_users AS u
     WHERE u.id = v_user_id AND lower(u.username) = lower(v_username)
       AND lower(COALESCE(u.status, 'active')) <> 'disabled'
@@ -1296,7 +1296,7 @@ BEGIN
     token_hash, user_id, username, role, assigned_bot_ids, expires_at,
     plan_name, allow_account_change, status, updated_at
   ) VALUES (
-    v_token_hash, v_user_id, v_username, 'user',
+    v_token_hash, v_user_id, v_username, COALESCE(NULLIF(p_session->>'role', ''), 'user'),
     COALESCE(p_session->'assigned_bot_ids', '[]'::jsonb), v_expires_at,
     COALESCE(NULLIF(p_session->>'plan_name', ''), 'Gói thường'),
     COALESCE((p_session->>'allow_account_change')::boolean, true),
