@@ -9160,64 +9160,31 @@ function initCosmicStars() {
         }
       }
     } else if (curTheme === 'violet-dusk') {
-      // THEME 3: Violet Dusk - Twilight Horizon Glow & Living Fireflies with Trailing Stardust
-      var tDusk = (timestamp || Date.now()) * 0.0005;
-      var duskWaveY = h * 0.8 + Math.sin(tDusk) * (h * 0.05);
-      var gDusk = ctx.createRadialGradient(w * 0.5, duskWaveY, 20, w * 0.5, duskWaveY, w * 0.65);
-      gDusk.addColorStop(0, 'rgba(126, 91, 239, 0.14)');
-      gDusk.addColorStop(0.45, 'rgba(245, 158, 11, 0.06)');
-      gDusk.addColorStop(1, 'rgba(18, 17, 24, 0)');
-      ctx.fillStyle = gDusk;
-      ctx.fillRect(0, 0, w, h);
-
+      // THEME 3: Violet Dusk - Floating mystic fireflies / embers meandering in twilight
       for (var i = 0; i < stars.length; i++) {
         var s = stars[i];
-        s.phase += 0.016 + (s.z * 0.004);
-        s.x += Math.cos(s.seed + s.phase) * (0.42 + s.z * 0.18);
-        s.y += Math.sin(s.seed * 1.4 + s.phase * 0.8) * 0.38 - 0.07;
-        s.a += s.da * 0.7;
-        if (s.a > 0.95 || s.a < 0.2) s.da = -s.da;
-
+        s.phase += 0.015;
+        s.x += Math.cos(s.seed + s.phase) * 0.45;
+        s.y += Math.sin(s.seed * 1.3 + s.phase * 0.8) * 0.35 - 0.08;
+        s.a += s.da * 0.6;
+        if (s.a > 0.85 || s.a < 0.16) s.da = -s.da;
         if (s.y < -20) s.y = h + 15;
-        if (s.y > h + 20) s.y = -15;
+        if (s.y > h + 20) s.y = -10;
         if (s.x < -20) s.x = w + 15;
-        if (s.x > w + 20) s.x = -15;
+        if (s.x > w + 20) s.x = -10;
 
-        if (!s.trail) s.trail = [];
-        if (Math.random() < 0.22) {
-          s.trail.push({ x: s.x, y: s.y, a: s.a * 0.4 });
-          if (s.trail.length > 3) s.trail.shift();
-        }
-
+        var emberRadius = Math.max(1.2, s.r * s.z * 0.95);
         var isWarmAmber = (i % 2 === 0);
-        var coreRgb = isWarmAmber ? '251, 191, 36' : '232, 121, 249';
-        var haloRgb = isWarmAmber ? '245, 158, 11' : '168, 85, 247';
-        var eRad = Math.max(1.4, s.r * s.z * 1.05);
-
-        for (var k = 0; k < s.trail.length; k++) {
-          var pt = s.trail[k];
-          pt.a -= 0.012;
-          if (pt.a > 0.02) {
-            ctx.beginPath();
-            ctx.arc(pt.x | 0, pt.y | 0, eRad * 0.55, 0, Math.PI * 2);
-            ctx.fillStyle = 'rgba(' + coreRgb + ', ' + pt.a.toFixed(2) + ')';
-            ctx.fill();
-          }
-        }
+        var emberColor = isWarmAmber ? '251, 191, 36' : '216, 180, 254';
 
         ctx.beginPath();
-        ctx.arc(s.x | 0, s.y | 0, eRad * 3.2, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(' + haloRgb + ', ' + (s.a * 0.16).toFixed(2) + ')';
+        ctx.arc(s.x | 0, s.y | 0, emberRadius * 2.2, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + emberColor + ', ' + (s.a * 0.16).toFixed(2) + ')';
         ctx.fill();
 
         ctx.beginPath();
-        ctx.arc(s.x | 0, s.y | 0, eRad * 1.6, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(' + haloRgb + ', ' + (s.a * 0.38).toFixed(2) + ')';
-        ctx.fill();
-
-        ctx.beginPath();
-        ctx.arc(s.x | 0, s.y | 0, eRad, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(' + coreRgb + ', ' + (s.a * 0.95).toFixed(2) + ')';
+        ctx.arc(s.x | 0, s.y | 0, emberRadius, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + emberColor + ', ' + (s.a * 0.75).toFixed(2) + ')';
         ctx.fill();
       }
     } else if (curTheme === 'moonlight') {
@@ -9295,7 +9262,7 @@ function initCosmicStars() {
 
       for (var i = 0; i < stars.length; i++) {
         var s = stars[i];
-        s.y -= 0.07 * s.z * dt;
+        s.y -= 0.22 * s.z * dt;
         s.a += s.da;
         if (s.a > 0.95 || s.a < 0.2) s.da = -s.da;
         if (s.y < -15) {

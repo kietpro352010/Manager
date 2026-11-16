@@ -2599,6 +2599,34 @@ async function loadPublicSystemInfo() {
           ctx.fill();
         }
       }
+    } else if (theme === 'violet-dusk') {
+      // THEME 3: Violet Dusk - Floating mystic fireflies / embers meandering in twilight
+      for (let i = 0; i < stars.length; i++) {
+        const s = stars[i];
+        s.phase += 0.015;
+        s.x += Math.cos(s.seed + s.phase) * 0.45;
+        s.y += Math.sin(s.seed * 1.3 + s.phase * 0.8) * 0.35 - 0.08;
+        s.a += s.da * 0.6;
+        if (s.a > 0.85 || s.a < 0.16) s.da = -s.da;
+        if (s.y < -20) s.y = h + 15;
+        if (s.y > h + 20) s.y = -10;
+        if (s.x < -20) s.x = w + 15;
+        if (s.x > w + 20) s.x = -10;
+
+        const emberRadius = Math.max(1.2, s.r * s.z * 0.95);
+        const isWarmAmber = (i % 2 === 0);
+        const emberColor = isWarmAmber ? '251, 191, 36' : '216, 180, 254';
+
+        ctx.beginPath();
+        ctx.arc(s.x | 0, s.y | 0, emberRadius * 2.2, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + emberColor + ', ' + (s.a * 0.16).toFixed(2) + ')';
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(s.x | 0, s.y | 0, emberRadius, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + emberColor + ', ' + (s.a * 0.75).toFixed(2) + ')';
+        ctx.fill();
+      }
     } else {
       // THEME 1: Deep Galaxy - Batched Constellation Single Path & Obsidian Micro Dust Stars
       const maxDist = isMobile ? 65 : 95;
@@ -2624,7 +2652,7 @@ async function loadPublicSystemInfo() {
 
       for (let i = 0; i < stars.length; i++) {
         const s = stars[i];
-        s.y -= 0.07 * s.z;
+        s.y -= 0.22 * s.z;
         s.a += s.da;
         if (s.a > 0.95 || s.a < 0.2) s.da = -s.da;
         if (s.y < -15) {
