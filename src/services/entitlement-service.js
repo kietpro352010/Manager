@@ -82,13 +82,22 @@ function isWorkerStopConfirmed(res) {
   return Boolean(acknowledged && objects.some((obj) => obj.stopped === true));
 }
 
+const DEFAULT_GRACE_PERIOD_MS = 6 * 60 * 60 * 1000; // 6 hours
+
 class EntitlementService {
-  constructor({ store, registry, accessControl, logger, userLock }) {
+  constructor({ store, registry, accessControl, logger, userLock, gracePeriodMs, config } = {}) {
     this.store = store;
     this.registry = registry;
     this.accessControl = accessControl;
     this.logger = logger;
     this.userLock = userLock;
+    this.gracePeriodMs = Number.isFinite(gracePeriodMs) && gracePeriodMs >= 0
+      ? gracePeriodMs
+      : (config?.botExpirationGraceHours !== undefined
+          ? config.botExpirationGraceHours * 3600 * 1000
+          : (process.env.BOT_EXPIRATION_GRACE_HOURS !== undefined && !Number.isNaN(Number(process.env.BOT_EXPIRATION_GRACE_HOURS))
+              ? Number(process.env.BOT_EXPIRATION_GRACE_HOURS) * 3600 * 1000
+              : DEFAULT_GRACE_PERIOD_MS));
   }
 
   async createCode({ days, permanent = false, botCount = 0, workerIds = [], maxUses = 1, planName = 'Standard', expiresAt = null, actorId }) {
@@ -401,11 +410,14 @@ class EntitlementService {
     this.pendingCompensations?.clear();
   }
 
-  async checkExpiredUsersAndGracefulStop({ broker, fleetOperations } = {}) {
+  async checkExpiredUsersAndGracefulStop({ broker, fleetOperations, gracePeriodMs } = {}) {
     try {
       const users = await this.store.listAccess();
       if (!Array.isArray(users) || users.length === 0) return { checked: 0, expired: 0 };
       const now = Date.now();
+      const effectiveGracePeriodMs = Number.isFinite(gracePeriodMs) && gracePeriodMs >= 0
+        ? gracePeriodMs
+        : this.gracePeriodMs;
       let expiredCount = 0;
 
       for (const u of users) {
@@ -417,6 +429,28 @@ class EntitlementService {
         // Skip permanently disabled accounts
         if (u.status === 'disabled') continue;
 
+        // Distinguish isInGracePeriod: if expiryTime < now <= expiryTime + gracePeriodMs
+        if (now <= expiryTime + effectiveGracePeriodMs) {
+          // DO NOT stop worker. Keep bot running in game.
+          if (u.status !== 'grace_period' || !u.inGracePeriod) {
+            await this.store.setAccess(u.userId, {
+              ...u,
+              status: 'grace_period',
+              inGracePeriod: true
+            }, 'system:grace_period');
+          }
+          const remainingGraceMs = Math.max(0, (expiryTime + effectiveGracePeriodMs) - now);
+          this.logger?.info('user_in_grace_period_bot_kept_running', {
+            userId: u.userId,
+            username: u.username,
+            expiresAt: u.expiresAt,
+            remainingGraceMs,
+            remainingMinutes: Math.round(remainingGraceMs / 60000)
+          });
+          continue;
+        }
+
+        // If here: isGracePeriodExpired (now > expiryTime + gracePeriodMs)
         // If already fully expired and has no pending unstopped bots, skip
         if (u.status === 'expired' && (!u.stopPendingWorkers || u.stopPendingWorkers.length === 0)) {
           continue;
@@ -433,7 +467,7 @@ class EntitlementService {
 
         if (botsToStop.length === 0) {
           if (u.status !== 'expired') {
-            await this.store.setAccess(u.userId, { ...u, status: 'expired', stopPendingWorkers: [] }, 'system:expiration');
+            await this.store.setAccess(u.userId, { ...u, status: 'expired', inGracePeriod: false, stopPendingWorkers: [] }, 'system:expiration');
             expiredCount++;
           }
           continue;
@@ -447,10 +481,11 @@ class EntitlementService {
         });
 
         // Mark as expiring while waiting for STOP results
-        if (u.status === 'active') {
+        if (u.status === 'active' || u.status === 'grace_period') {
           await this.store.setAccess(u.userId, {
             ...u,
             status: 'expiring',
+            inGracePeriod: false,
             stopPendingWorkers: botsToStop
           }, 'system:expiring');
         }
@@ -463,10 +498,10 @@ class EntitlementService {
             if (isCachedWorkerStopped(currentWorker)) {
               stopped = true;
             } else if (fleetOperations && typeof fleetOperations.stopWorker === 'function') {
-              const res = await fleetOperations.stopWorker(workerId, 'Gói thuê đã hết hạn');
+              const res = await fleetOperations.stopWorker(workerId, 'Gói thuê đã hết hạn ân hạn 6 giờ');
               stopped = isWorkerStopConfirmed(res);
             } else if (broker && typeof broker.dispatch === 'function') {
-              const res = await broker.dispatch(workerId, 'stop', { reason: 'Gói thuê đã hết hạn' });
+              const res = await broker.dispatch(workerId, 'stop', { reason: 'Gói thuê đã hết hạn ân hạn 6 giờ' });
               stopped = isWorkerStopConfirmed(res);
             }
           } catch (stopErr) {
@@ -483,14 +518,21 @@ class EntitlementService {
           await this.store.setAccess(u.userId, {
             ...u,
             status: 'expired',
+            inGracePeriod: false,
             stopPendingWorkers: []
           }, 'system:expiration');
           expiredCount++;
+          this.logger?.info('user_grace_period_expired_bots_stopped', {
+            userId: u.userId,
+            username: u.username,
+            stoppedWorkers: botsToStop
+          });
         } else {
           // Some stops unconfirmed: retain in 'expiring' for automatic retry on next cycle
           await this.store.setAccess(u.userId, {
             ...u,
             status: 'expiring',
+            inGracePeriod: false,
             stopPendingWorkers: remainingFailed
           }, 'system:expiration_retry');
           this.logger?.warn('user_expiration_partially_failed_will_retry', {
@@ -518,4 +560,4 @@ class EntitlementService {
   }
 }
 
-module.exports = { EntitlementService, isWorkerStopConfirmed, normalizeCode, hashCode };
+module.exports = { EntitlementService, DEFAULT_GRACE_PERIOD_MS, isWorkerStopConfirmed, normalizeCode, hashCode };

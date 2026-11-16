@@ -414,10 +414,12 @@ function createAdminApi({
       }
 
       await registry.resetData(worker.workerId);
+      await store?.removeWorkerAssignments?.(worker.workerId);
       await store.addAudit({
         action: 'ADMIN_RESET_BOT_CUSTOMER',
         targetId: worker.workerId,
-        actorId: req.managerAuthSession.username
+        actorId: req.managerAuthSession.username,
+        details: { reason: 'admin_manually_reset_customer_bot' }
       });
 
       return res.json({ ok: true, message: `Đã đặt lại dữ liệu Bot #${worker.botNumber || worker.workerId} về mặc định.` });

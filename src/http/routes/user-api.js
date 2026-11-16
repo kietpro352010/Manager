@@ -137,18 +137,32 @@ function createUserApi({
 
     if (session.role === 'admin') return { allowed: true, user: session, worker };
 
+    const assigned = Array.isArray(session.assignedBotIds) ? session.assignedBotIds.map(String) : [];
+    if (!assigned.includes(String(worker.workerId)) && !assigned.includes(String(worker.botNumber))) {
+      return { allowed: false, status: 403, error: 'Bạn không có quyền quản lý bot này.' };
+    }
+
     const isExpired = session.status === 'expired' ||
-      (session.expiresAtRental && Date.now() > Date.parse(session.expiresAtRental));
+      session.status === 'grace_period' ||
+      session.inGracePeriod === true ||
+      (!session.isPermanent && session.expiresAtRental && Date.now() > Date.parse(session.expiresAtRental));
 
     if (isExpired) {
-      return { allowed: false, status: 403, error: 'Tài khoản của bạn đã hết hạn thuê bot. Vui lòng gia hạn để tiếp tục sử dụng.' };
+      const method = String(req.method || 'GET').toUpperCase();
+      const path = String(req.originalUrl || req.path || '');
+      const isReadRequest = method === 'GET' || method === 'HEAD';
+      const isRenewRequest = path.includes('/renew') || path.includes('/redeem');
+
+      if (!isReadRequest && !isRenewRequest) {
+        return {
+          allowed: false,
+          status: 403,
+          error: 'Gói bot của bạn đã hết hạn, tính năng điều khiển bị vô hiệu hóa. Vui lòng gia hạn để tiếp tục sử dụng.'
+        };
+      }
     }
 
-    const assigned = Array.isArray(session.assignedBotIds) ? session.assignedBotIds.map(String) : [];
-    if (assigned.includes(String(worker.workerId)) || assigned.includes(String(worker.botNumber))) {
-      return { allowed: true, user: session, worker };
-    }
-    return { allowed: false, status: 403, error: 'Bạn không có quyền quản lý bot này.' };
+    return { allowed: true, user: session, worker };
   }
 
   // Helper: Build standardized safe bot payload for API responses
@@ -272,6 +286,18 @@ function createUserApi({
 
   // 2. REORDER BOTS (Drag and drop in UI)
   router.post('/bots/reorder', requireSession, async (req, res) => {
+    const session = req.managerAuthSession;
+    const isExpired = session?.status === 'expired' ||
+      session?.status === 'grace_period' ||
+      session?.inGracePeriod === true ||
+      (!session?.isPermanent && session?.expiresAtRental && Date.now() > Date.parse(session.expiresAtRental));
+    if (isExpired && session?.role !== 'admin') {
+      return res.status(403).json({
+        ok: false,
+        error: 'Gói bot của bạn đã hết hạn, tính năng điều khiển bị vô hiệu hóa. Vui lòng gia hạn để tiếp tục sử dụng.'
+      });
+    }
+
     const rawOrder = req.body?.botIds || req.body?.order;
     if (
       !Array.isArray(rawOrder) ||
@@ -281,7 +307,6 @@ function createUserApi({
       return res.status(400).json({ ok: false, error: 'Danh sách thứ tự bot không hợp lệ (phải là mảng chuỗi ID không rỗng).' });
     }
 
-    const session = req.managerAuthSession;
     const assigned = Array.isArray(session?.assignedBotIds) ? session.assignedBotIds.map(String) : [];
 
     // Verify all submitted bot IDs belong to session.assignedBotIds
@@ -811,6 +836,7 @@ function createUserApi({
       session.assignedBotIds = (Array.isArray(result.workerIds) ? result.workerIds : []).map((id) => String(id).trim()).filter(Boolean);
       session.isPermanent = result.isPermanent;
       session.status = 'active';
+      session.inGracePeriod = false;
       session.expiresAtRental = result.expiresAt;
 
       await store.addAudit({

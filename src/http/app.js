@@ -1,5 +1,7 @@
 'use strict';
 
+const fs = require('node:fs');
+const path = require('node:path');
 const zlib = require('node:zlib');
 const express = require('express');
 const helmet = require('helmet');
@@ -196,6 +198,14 @@ function createApp({
     return removed;
   }
 
+  const gracePeriodMs = Number.isFinite(config?.botExpirationGraceHours)
+    ? config.botExpirationGraceHours * 3600 * 1000
+    : (entitlementService?.gracePeriodMs !== undefined
+        ? entitlementService.gracePeriodMs
+        : (process.env.BOT_EXPIRATION_GRACE_HOURS !== undefined && !Number.isNaN(Number(process.env.BOT_EXPIRATION_GRACE_HOURS))
+            ? Number(process.env.BOT_EXPIRATION_GRACE_HOURS) * 3600 * 1000
+            : 6 * 60 * 60 * 1000));
+
   function applyFreshAccessToSession(targetSession, userRec) {
     const freshAssigned = Array.isArray(userRec.workerIds) && userRec.workerIds.length
       ? userRec.workerIds
@@ -208,10 +218,30 @@ function createApp({
     targetSession.allowAccountChange = userRec.allowAccountChange !== false;
     const rawStatus = String(userRec.status || targetSession.status || 'active').toLowerCase();
     const effExpiresAt = userRec.expiresAt || targetSession.expiresAtRental;
-    const isTimeExpired = !targetSession.isPermanent && effExpiresAt && Date.parse(effExpiresAt) <= Date.now();
-    targetSession.status = rawStatus === 'disabled'
-      ? 'disabled'
-      : ((rawStatus === 'expired' || isTimeExpired) ? 'expired' : 'active');
+    const expiryTime = effExpiresAt ? Date.parse(effExpiresAt) : null;
+    const isPastExpires = !targetSession.isPermanent && Number.isFinite(expiryTime) && expiryTime <= Date.now();
+
+    if (rawStatus === 'disabled') {
+      targetSession.status = 'disabled';
+      targetSession.inGracePeriod = false;
+    } else if (isPastExpires) {
+      if (Date.now() <= expiryTime + gracePeriodMs) {
+        targetSession.status = 'grace_period';
+        targetSession.inGracePeriod = true;
+      } else {
+        targetSession.status = 'expired';
+        targetSession.inGracePeriod = false;
+      }
+    } else if (rawStatus === 'expired') {
+      targetSession.status = 'expired';
+      targetSession.inGracePeriod = false;
+    } else if (rawStatus === 'grace_period') {
+      targetSession.status = 'grace_period';
+      targetSession.inGracePeriod = true;
+    } else {
+      targetSession.status = 'active';
+      targetSession.inGracePeriod = false;
+    }
   }
 
   // 5. Dynamic Session Authentication Middleware
@@ -483,6 +513,37 @@ function createApp({
   });
   app.use('/api/v1/workers/:workerId', workerRouter);
   app.use('/api/worker', workerRouter);
+
+  // Static GUI Textures Route
+  const texturesCandidates = [
+    process.env.TEXTURES_DIR,
+    'D:/CheckStatsKingMC-main/CheckStatsKingMC-main/public/textures',
+    path.resolve(__dirname, '../../../../CheckStatsKingMC-main/CheckStatsKingMC-main/public/textures'),
+    path.resolve(__dirname, '../../../CheckStatsKingMC-main/CheckStatsKingMC-main/public/textures'),
+    path.resolve(__dirname, '../../public/textures'),
+    path.resolve(process.cwd(), '../CheckStatsKingMC-main/CheckStatsKingMC-main/public/textures'),
+    path.resolve(process.cwd(), 'public/textures')
+  ].filter(Boolean);
+
+  let texturesPath = texturesCandidates.find((p) => {
+    try {
+      return fs.existsSync(p);
+    } catch (_) {
+      return false;
+    }
+  });
+
+  if (texturesPath) {
+    app.use(
+      '/textures',
+      express.static(texturesPath, {
+        maxAge: 86400000,
+        setHeaders: (res) => {
+          res.setHeader('Cache-Control', 'public, max-age=86400');
+        }
+      })
+    );
+  }
 
   // 8. 404 Handler
   app.use((_req, res) => {

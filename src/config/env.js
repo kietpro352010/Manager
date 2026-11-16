@@ -160,6 +160,7 @@ function loadConfig(env = process.env) {
     telegramBotToken: String(env.TELEGRAM_BOT_TOKEN || '').trim(),
     telegramChatId: String(env.TELEGRAM_CHAT_ID || '').trim(),
     webSessionTtlHours: positiveInt(env.WEB_SESSION_TTL_HOURS, 24, 1, 720),
+    botExpirationGraceHours: positiveInt(env.BOT_EXPIRATION_GRACE_HOURS, 6, 0, 720),
     maxLoginAttempts: positiveInt(env.MAX_LOGIN_ATTEMPTS, 5, 3, 20),
     loginWindowMs: positiveInt(env.LOGIN_WINDOW_MS, 15 * 60 * 1000, 60000, 3600000),
     gcIntervalMs: positiveInt(env.GC_INTERVAL_MS, 30000, 10000, 120000),

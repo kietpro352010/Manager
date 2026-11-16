@@ -48,9 +48,9 @@ const HTML = String.raw`<!doctype html>
   --font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
-  /* Deep Galaxy — Minimal Dark Purple (Default) */
-  --bg: #080511;
-  --bg-base: #080511;
+  /* Deep Galaxy — Deep Obsidian Black (#06080e) */
+  --bg: #06080e;
+  --bg-base: #06080e;
   --bg-surface: rgba(18, 13, 34, 0.92);
   --bg-elevated: rgba(24, 18, 44, 0.96);
   --bg-input: rgba(10, 7, 20, 0.92);
@@ -3410,6 +3410,121 @@ select option {
 }
 .account-restriction-overlay.hidden {
   display: none !important;
+}
+
+/* Card-Level Blur & Expire Overlays */
+.bot-card.is-card-expired {
+  border-left-color: #f59e0b !important;
+}
+.bot-card.is-card-expired.grace-expired {
+  border-left-color: #ef4444 !important;
+}
+.bot-card-expire-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  padding: 18px 14px;
+  background: rgba(8, 14, 26, 0.88);
+  backdrop-filter: blur(6px) saturate(120%);
+  -webkit-backdrop-filter: blur(6px) saturate(120%);
+  border-radius: inherit;
+  transition: opacity 0.25s ease;
+  pointer-events: auto;
+}
+.bot-card-expire-overlay.amber {
+  border: 1.5px solid rgba(245, 158, 11, 0.55);
+  box-shadow: inset 0 0 28px rgba(245, 158, 11, 0.12);
+}
+.bot-card-expire-overlay.red {
+  border: 1.5px solid rgba(239, 68, 68, 0.55);
+  box-shadow: inset 0 0 28px rgba(239, 68, 68, 0.14);
+}
+.bot-card-expire-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  margin-bottom: 8px;
+}
+.bot-card-expire-overlay.amber .bot-card-expire-badge {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+}
+.bot-card-expire-overlay.red .bot-card-expire-badge {
+  background: rgba(239, 68, 68, 0.2);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.45);
+}
+.bot-card-expire-title {
+  font-size: 13px;
+  font-weight: 800;
+  color: #f8fafc;
+  margin-bottom: 6px;
+  letter-spacing: 0.3px;
+}
+.bot-card-expire-desc {
+  font-size: 11px;
+  color: #cbd5e1;
+  line-height: 1.45;
+  margin-bottom: 12px;
+  max-width: 92%;
+}
+.card-quick-redeem-row {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+  max-width: 270px;
+  margin-bottom: 6px;
+}
+.card-redeem-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  font-size: 11px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #f8fafc;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  outline: none;
+}
+.card-redeem-input:focus {
+  border-color: #38bdf8;
+}
+.card-redeem-btn {
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s ease;
+}
+.card-redeem-btn.amber {
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  color: #0f172a;
+}
+.card-redeem-btn.red {
+  background: linear-gradient(135deg, #ef4444, #dc2626);
+  color: #ffffff;
+}
+.card-redeem-btn:hover {
+  filter: brightness(1.15);
+}
+.card-redeem-msg {
+  font-size: 11px;
+  min-height: 14px;
 }
 .restriction-card {
   width: min(490px, 100%);
@@ -7692,6 +7807,42 @@ function escapeHtml(value) {
     .replace(/'/g,'&#039;');
 }
 
+function getUserExpirationInfo() {
+  const user = (typeof currentUser !== 'undefined') ? currentUser : null;
+  if (!user || user.role === 'admin' || user.isPermanent) {
+    return { isExpired: false, inGracePeriod: false, isGraceExpired: false, remainingGraceMs: 0 };
+  }
+  const status = String(user.status || 'active').toLowerCase();
+  const rawExpiresAt = user.expiresAt;
+  const expiryTime = rawExpiresAt ? Date.parse(rawExpiresAt) : null;
+  const now = Date.now();
+  const GRACE_PERIOD_MS = 6 * 60 * 60 * 1000;
+
+  const isPastTime = Number.isFinite(expiryTime) && expiryTime <= now;
+  const isGraceStatus = status === 'grace_period' || user.inGracePeriod === true;
+  const isExpiredStatus = status === 'expired';
+
+  if (!isPastTime && !isGraceStatus && !isExpiredStatus) {
+    return { isExpired: false, inGracePeriod: false, isGraceExpired: false, remainingGraceMs: 0 };
+  }
+
+  const effectiveExpiry = Number.isFinite(expiryTime) ? expiryTime : (now - 1000);
+  const graceEndTime = effectiveExpiry + GRACE_PERIOD_MS;
+  const remainingGraceMs = Math.max(0, graceEndTime - now);
+
+  const inGracePeriod = (isGraceStatus || isPastTime) && (now <= graceEndTime) && !isExpiredStatus;
+  const isGraceExpired = isExpiredStatus || (now > graceEndTime);
+
+  return {
+    isExpired: true,
+    inGracePeriod,
+    isGraceExpired,
+    remainingGraceMs,
+    expiryTime: effectiveExpiry
+  };
+}
+window.getUserExpirationInfo = getUserExpirationInfo;
+
 function botCardHtml(bot) {
   if (!bot) return '';
   const [color, label, errorType] = statusMeta(bot.status, bot.available, !!bot.manuallyStopped, bot);
@@ -7841,19 +7992,66 @@ function botCardHtml(bot) {
     }
   }
 
-  return '<div class="bot-card ' + statusGlowClass + '" data-bot-id="' + escapeHtml(id) + '" draggable="' + (isAdmin ? 'true' : 'false') + '" ' +
+  const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : { isExpired: false };
+  const isCardLocked = userExp.isExpired && !isAdmin;
+
+  const cardDisabledAttr = isCardLocked ? ' disabled="true"' : '';
+  const cardDisabledStyle = isCardLocked ? ' style="opacity:0.45; cursor:not-allowed;"' : '';
+  const cardDisabledTitle = isCardLocked ? ' title="Tính năng điều khiển bị vô hiệu hóa do gói bot đã hết hạn. Hãy gia hạn key để sử dụng."' : '';
+
+  let cardOverlayHtml = '';
+  if (isCardLocked) {
+    if (userExp.inGracePeriod) {
+      const remainingMin = Math.max(1, Math.round(userExp.remainingGraceMs / 60000));
+      const hours = Math.floor(remainingMin / 60);
+      const mins = remainingMin % 60;
+      const timeStr = (hours > 0 ? (hours + ' giờ ') : '') + mins + ' phút';
+
+      cardOverlayHtml = '<div class="bot-card-expire-overlay amber" onclick="event.stopPropagation()">' +
+        '<div class="bot-card-expire-badge">⏳ THỜI GIAN ÂN HẠN 6 GIỜ</div>' +
+        '<div class="bot-card-expire-title">GÓI BOT ĐÃ HẾT HẠN</div>' +
+        '<div class="bot-card-expire-desc">' +
+          '🎮 <strong>Bot vẫn tiếp tục chạy trong game.</strong><br>' +
+          'Thời gian ân hạn còn lại: <strong class="grace-countdown-timer" data-expiry="' + userExp.expiryTime + '">' + timeStr + '</strong>.<br>' +
+          '<small style="color:var(--muted);">Sau khi hết 6 giờ ân hạn, bot sẽ tự động dừng an toàn.</small>' +
+        '</div>' +
+        '<div class="card-quick-redeem-row" onclick="event.stopPropagation()">' +
+          '<input type="text" class="card-redeem-input" placeholder="Nhập Key gia hạn..." onclick="event.stopPropagation()" onkeydown="if(event.key===\'Enter\'){event.stopPropagation();quickRedeemKeyOnCard(this,' + escapeHtml(idArg) + ');}">' +
+          '<button type="button" class="card-redeem-btn amber" onclick="event.stopPropagation();quickRedeemKeyOnCard(this,' + escapeHtml(idArg) + ')">⚡ Gia Hạn</button>' +
+        '</div>' +
+        '<div class="card-redeem-msg"></div>' +
+      '</div>';
+    } else {
+      cardOverlayHtml = '<div class="bot-card-expire-overlay red" onclick="event.stopPropagation()">' +
+        '<div class="bot-card-expire-badge">🛑 HẾT THỜI GIAN ÂN HẠN</div>' +
+        '<div class="bot-card-expire-title">BOT ĐÃ DỪNG HOẠT ĐỘNG</div>' +
+        '<div class="bot-card-expire-desc">' +
+          'Bot đã được dừng an toàn do quá 6 tiếng chưa gia hạn.<br>' +
+          '🔒 <strong>Bảo lưu dữ liệu 100%:</strong> Tài khoản Minecraft và cài đặt server của bạn được lưu giữ an toàn.' +
+        '</div>' +
+        '<div class="card-quick-redeem-row" onclick="event.stopPropagation()">' +
+          '<input type="text" class="card-redeem-input" placeholder="Nhập Key mở khóa..." onclick="event.stopPropagation()" onkeydown="if(event.key===\'Enter\'){event.stopPropagation();quickRedeemKeyOnCard(this,' + escapeHtml(idArg) + ');}">' +
+          '<button type="button" class="card-redeem-btn red" onclick="event.stopPropagation();quickRedeemKeyOnCard(this,' + escapeHtml(idArg) + ')">🔑 Mở Khóa</button>' +
+        '</div>' +
+        '<div class="card-redeem-msg"></div>' +
+      '</div>';
+    }
+  }
+
+  return '<div class="bot-card ' + statusGlowClass + (isCardLocked ? (' is-card-expired ' + (userExp.inGracePeriod ? 'grace-period' : 'grace-expired')) : '') + '" data-bot-id="' + escapeHtml(id) + '" draggable="' + (isAdmin ? 'true' : 'false') + '" ' +
     (isAdmin ? 'ondragstart="startBotDrag(event,' + escapeHtml(idArg) + ')" ondragover="allowBotDrop(event)" ondrop="dropBot(event,' + escapeHtml(idArg) + ')" ondragend="endBotDrag(event)"' : '') +
     ' onclick="openBot(this.dataset.botId)">' +
+    cardOverlayHtml +
 
     '<div class="bot-card-topbar">' +
       '<div class="bot-card-title-group">' +
         '<span class="bot-id-chip">#' + idStr + '</span>' +
         '<h2 class="bot-card-name" title="' + escapeHtml(bot.label) + '">' + escapeHtml(bot.label) + '</h2>' +
-        '<button type="button" class="bot-mini-btn btn-rename-alias" data-bot-id="' + escapeHtml(id) + '" data-bot-label="' + escapeHtml(bot.label) + '" onclick="event.stopPropagation(); handleRenameClick(this)" title="Đổi tên / Ghi chú hiển thị">✏</button>' +
+        '<button type="button" class="bot-mini-btn btn-rename-alias" data-bot-id="' + escapeHtml(id) + '" data-bot-label="' + escapeHtml(bot.label) + '" ' + cardDisabledAttr + (isCardLocked ? cardDisabledStyle + cardDisabledTitle : 'title="Đổi tên / Ghi chú hiển thị"') + ' onclick="event.stopPropagation(); handleRenameClick(this)">✏</button>' +
         '<div class="bot-card-quick-actions" style="display:inline-flex;margin-left:4px;" onclick="event.stopPropagation()">' +
           (isOffline ?
-            '<button type="button" class="bot-mini-btn" style="background:rgba(16,185,129,0.18);color:#34d399;border:1px solid rgba(16,185,129,0.45);font-weight:700;" onclick="quickCardAction(this,' + escapeHtml(idArg) + ',\'start\')" title="Chạy bot ngay">▶ Chạy</button>' :
-            '<button type="button" class="bot-mini-btn danger" onclick="quickCardAction(this,' + escapeHtml(idArg) + ',\'stop\')" title="Dừng bot ngay">■ Dừng</button>') +
+            '<button type="button" class="bot-mini-btn" ' + cardDisabledAttr + (isCardLocked ? cardDisabledStyle + cardDisabledTitle : 'title="Chạy bot ngay"') + ' style="background:rgba(16,185,129,0.18);color:#34d399;border:1px solid rgba(16,185,129,0.45);font-weight:700;' + (isCardLocked ? 'opacity:0.45;cursor:not-allowed;' : '') + '" onclick="quickCardAction(this,' + escapeHtml(idArg) + ',\'start\')">▶ Chạy</button>' :
+            '<button type="button" class="bot-mini-btn danger" ' + cardDisabledAttr + (isCardLocked ? cardDisabledStyle + cardDisabledTitle : 'title="Dừng bot ngay"') + ' style="' + (isCardLocked ? 'opacity:0.45;cursor:not-allowed;' : '') + '" onclick="quickCardAction(this,' + escapeHtml(idArg) + ',\'stop\')">■ Dừng</button>') +
         '</div>' +
       '</div>' +
       (isAdmin ?
@@ -7937,10 +8135,10 @@ function botCardHtml(bot) {
       '</div>' : '') +
 
     '<div class="card-quick-actions" onclick="event.stopPropagation()">' +
-      '<button type="button" class="small card-btn" onclick="quickBotAction(event,' + escapeHtml(idArg) + ',\'restart\')">⚡ Restart</button>' +
+      '<button type="button" class="small card-btn" ' + cardDisabledAttr + (isCardLocked ? cardDisabledStyle + cardDisabledTitle : '') + ' onclick="quickBotAction(event,' + escapeHtml(idArg) + ',\'restart\')">⚡ Restart</button>' +
       (isOffline ?
-        '<button type="button" class="small card-btn primary" onclick="quickBotAction(event,' + escapeHtml(idArg) + ',\'start\')">▶ Bật</button>' :
-        '<button type="button" class="small card-btn danger" onclick="quickBotAction(event,' + escapeHtml(idArg) + ',\'stop\')">⏹ Dừng</button>'
+        '<button type="button" class="small card-btn primary" ' + cardDisabledAttr + (isCardLocked ? cardDisabledStyle + cardDisabledTitle : '') + ' onclick="quickBotAction(event,' + escapeHtml(idArg) + ',\'start\')">▶ Bật</button>' :
+        '<button type="button" class="small card-btn danger" ' + cardDisabledAttr + (isCardLocked ? cardDisabledStyle + cardDisabledTitle : '') + ' onclick="quickBotAction(event,' + escapeHtml(idArg) + ',\'stop\')">⏹ Dừng</button>'
       ) +
       '<button type="button" class="small card-btn detail-link-btn" onclick="openBot(' + escapeHtml(idArg) + ')">⚙ Chi Tiết →</button>' +
     '</div>' +
@@ -7975,6 +8173,103 @@ async function dropBot(event,targetId){
     await refreshHome();
   }catch(err){showToast(err.message||'Không thể sắp xếp bot.');}
 }
+
+async function quickRedeemKeyOnCard(btnOrInput, botId) {
+  const card = btnOrInput.closest('.bot-card');
+  const input = card ? card.querySelector('.card-redeem-input') : null;
+  const msgEl = card ? card.querySelector('.card-redeem-msg') : null;
+  const key = input ? input.value.trim() : '';
+  if (!key) {
+    if (msgEl) {
+      msgEl.style.color = 'var(--red)';
+      msgEl.textContent = 'Vui lòng nhập mã Key gia hạn.';
+    }
+    return;
+  }
+  const submitBtn = card ? card.querySelector('.card-redeem-btn') : null;
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Đang xử lý...';
+  }
+  if (msgEl) {
+    msgEl.style.color = '#38bdf8';
+    msgEl.textContent = 'Đang kích hoạt Key...';
+  }
+  try {
+    const res = await requestJson('/api/manager/renew', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key })
+    });
+    if (res.ok) {
+      if (currentUser) {
+        currentUser.status = 'active';
+        currentUser.inGracePeriod = false;
+        currentUser.isPermanent = Boolean(res.data.isPermanent);
+        if (res.data.expiresAt !== undefined) currentUser.expiresAt = res.data.expiresAt;
+        if (res.data.planName) currentUser.planName = res.data.planName;
+        if (Array.isArray(res.data.assignedBotIds)) currentUser.assignedBotIds = res.data.assignedBotIds;
+        applyUserRoleUI();
+        updateUserHeaderCountdown();
+      }
+      showToast('🎉 Kích hoạt / Gia hạn Key thành công! Đã mở khóa toàn bộ tính năng.');
+      lastHomeSig = '';
+      await refreshHome();
+      if (selectedBotId !== null) {
+        await refreshDetail(true);
+      }
+    } else {
+      if (msgEl) {
+        msgEl.style.color = 'var(--red)';
+        msgEl.textContent = res.data?.error || 'Kích hoạt thất bại.';
+      }
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = '⚡ Gia Hạn';
+      }
+    }
+  } catch (err) {
+    if (msgEl) {
+      msgEl.style.color = 'var(--red)';
+      msgEl.textContent = err.message || 'Lỗi mạng.';
+    }
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = '⚡ Gia Hạn';
+    }
+  }
+}
+window.quickRedeemKeyOnCard = quickRedeemKeyOnCard;
+
+function updateCardGraceCountdowns() {
+  const timers = document.querySelectorAll('.grace-countdown-timer[data-expiry]');
+  if (!timers || timers.length === 0) return;
+  const now = Date.now();
+  const GRACE_PERIOD_MS = 6 * 60 * 60 * 1000;
+  let hasTransitioned = false;
+
+  timers.forEach(el => {
+    const exp = parseInt(el.dataset.expiry, 10);
+    if (!Number.isFinite(exp)) return;
+    const remainingMs = (exp + GRACE_PERIOD_MS) - now;
+    if (remainingMs <= 0) {
+      hasTransitioned = true;
+      el.textContent = '0 phút (Hết ân hạn)';
+    } else {
+      const remainingSec = Math.floor(remainingMs / 1000);
+      const hours = Math.floor(remainingSec / 3600);
+      const mins = Math.floor((remainingSec % 3600) / 60);
+      const secs = remainingSec % 60;
+      el.textContent = (hours > 0 ? (hours + 'h ') : '') + mins + 'm ' + String(secs).padStart(2, '0') + 's';
+    }
+  });
+
+  if (hasTransitioned) {
+    lastHomeSig = '';
+    void refreshHome();
+  }
+}
+window.updateCardGraceCountdowns = updateCardGraceCountdowns;
 
 function renderEditBotTagSuggestions() {
   const container = document.getElementById('editBotTagSuggestions');
@@ -8386,6 +8681,139 @@ try {
   }
 } catch (_) {}
 
+function getOceanEntities() {
+  var root = (typeof window !== 'undefined') ? window : (typeof globalThis !== 'undefined' ? globalThis : {});
+  if (!root._kbotOceanEntities) {
+    var fish = [];
+    var fCount = 6;
+    for (var f = 0; f < fCount; f++) {
+      fish.push({
+        x: Math.random() * (root.innerWidth || 800),
+        y: Math.random() * (root.innerHeight || 600),
+        baseY: Math.random() * (root.innerHeight || 600),
+        speed: 1.5 + Math.random() * 1.5,
+        freq: 0.03 + Math.random() * 0.04,
+        amp: 10 + Math.random() * 12,
+        phase: Math.random() * Math.PI * 2,
+        size: 8 + Math.random() * 6,
+        color: f % 2 === 0 ? 'rgba(56, 189, 248, 0.85)' : 'rgba(52, 211, 153, 0.85)'
+      });
+    }
+    var jellyfish = [];
+    var jCount = 2;
+    for (var j = 0; j < jCount; j++) {
+      jellyfish.push({
+        x: Math.random() * (root.innerWidth || 800),
+        y: Math.random() * (root.innerHeight || 600),
+        scale: 1,
+        pulsePhase: Math.random() * Math.PI * 2,
+        tentacles: 5,
+        speed: 0.3 + Math.random() * 0.4
+      });
+    }
+    root._kbotOceanEntities = { fish: fish, jellyfish: jellyfish };
+  }
+  return root._kbotOceanEntities;
+}
+if (typeof window !== 'undefined') window.getOceanEntities = getOceanEntities;
+
+function updateFishSchool(fish, w, h, dt) {
+  if (!fish || !Array.isArray(fish)) return;
+  var delta = typeof dt === 'number' ? dt / 16.667 : 1;
+  for (var i = 0; i < fish.length; i++) {
+    var f = fish[i];
+    f.phase = (f.phase || 0) + (f.freq || 0.05) * delta;
+    f.y = (f.baseY !== undefined ? f.baseY : f.y) + Math.sin(f.phase) * (f.amp || 15);
+    f.x += (f.speed || 2) * delta;
+    if (f.x > (w || 800) + 50) {
+      f.x = -50;
+      f.baseY = Math.random() * (h || 600);
+      f.y = f.baseY;
+    }
+  }
+}
+window.updateFishSchool = updateFishSchool;
+
+function updateJellyfish(jellyfish, w, h, dt) {
+  if (!jellyfish || !Array.isArray(jellyfish)) return;
+  var delta = typeof dt === 'number' ? dt / 16.667 : 1;
+  for (var i = 0; i < jellyfish.length; i++) {
+    var j = jellyfish[i];
+    j.pulsePhase = (j.pulsePhase || 0) + 0.04 * delta;
+    j.scale = 1 + Math.sin(j.pulsePhase) * 0.25;
+    j.y -= (j.speed || 0.5) * delta;
+    if (j.y < -60) {
+      j.y = (h || 600) + 60;
+      j.x = Math.random() * (w || 800);
+    }
+  }
+}
+window.updateJellyfish = updateJellyfish;
+
+function drawCartoonCrescentMoon(ctx, w, h) {
+  if (!ctx) return;
+  var mx = w ? w * 0.82 : 650;
+  var my = h ? h * 0.18 : 100;
+  var mr = 36;
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(mx, my, mr * 1.5, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(254, 240, 138, 0.15)';
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.arc(mx, my, mr, -0.4 * Math.PI, 0.7 * Math.PI, false);
+  ctx.bezierCurveTo(mx + mr * 0.3, my + mr * 0.5, mx + mr * 0.3, my - mr * 0.5, mx + mr * Math.cos(-0.4 * Math.PI), my + mr * Math.sin(-0.4 * Math.PI));
+  ctx.fillStyle = '#fef08a';
+  ctx.fill();
+  ctx.restore();
+}
+window.drawCartoonCrescentMoon = drawCartoonCrescentMoon;
+
+function drawAnimeClouds(ctx, w, h, dt) {
+  if (!ctx) return;
+  var root = (typeof window !== 'undefined') ? window : (typeof globalThis !== 'undefined' ? globalThis : {});
+  if (!root._kbotAnimeClouds) {
+    root._kbotAnimeClouds = [
+      { x: (w || 800) * 0.1, y: (h || 600) * 0.15, r: 40, speed: 0.2 },
+      { x: (w || 800) * 0.55, y: (h || 600) * 0.28, r: 55, speed: 0.15 },
+      { x: (w || 800) * 0.85, y: (h || 600) * 0.12, r: 35, speed: 0.25 }
+    ];
+  }
+  var clouds = root._kbotAnimeClouds;
+  var delta = typeof dt === 'number' ? dt / 16.667 : 1;
+  ctx.save();
+  for (var i = 0; i < clouds.length; i++) {
+    var c = clouds[i];
+    c.x += c.speed * delta;
+    if (c.x > (w || 800) + 120) c.x = -120;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.18)';
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+    ctx.arc(c.x + c.r * 0.7, c.y - c.r * 0.2, c.r * 0.8, 0, Math.PI * 2);
+    ctx.arc(c.x - c.r * 0.7, c.y, c.r * 0.7, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+if (typeof window !== 'undefined') window.drawAnimeClouds = drawAnimeClouds;
+
+function drawSparkleStar(ctx, x, y, r, alpha) {
+  if (!ctx) return;
+  ctx.save();
+  ctx.fillStyle = 'rgba(254, 240, 138, ' + (alpha || 0.8) + ')';
+  ctx.beginPath();
+  ctx.moveTo(x, y - r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.quadraticCurveTo(x, y, x, y + r);
+  ctx.quadraticCurveTo(x, y, x - r, y);
+  ctx.quadraticCurveTo(x, y, x, y - r);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+window.drawSparkleStar = drawSparkleStar;
+
 (function initAppGalaxyEngine() {
   var savedTheme = getSavedDashboardTheme();
   setTimeout(function() { applyDashboardCosmicMode(savedTheme); }, 10);
@@ -8416,11 +8844,14 @@ try {
 
   var stars = [];
   var shootingStars = [];
-  var starCount = isMobile ? 22 : 42;
+  var starCount = isMobile ? 40 : 100;
+function initCosmicStars() {
+  stars = [];
+  starCount = isMobile ? 40 : 100;
   for (var i = 0; i < starCount; i++) {
     stars.push({
-      x: Math.random() * w,
-      y: Math.random() * h,
+      x: Math.random() * (w || 1920),
+      y: Math.random() * (h || 1080),
       z: Math.random() * 1.8 + 0.4,
       r: Math.random() * 1.8 + 0.6,
       a: Math.random() * 0.5 + 0.3,
@@ -8432,6 +8863,8 @@ try {
       isAnchor: i < 7
     });
   }
+}
+  initCosmicStars();
 
   function shouldRunCosmicLoop() {
     var isOff = document.body.classList.contains('cosmic-mode-off') || document.body.classList.contains('theme-off');
@@ -8491,11 +8924,14 @@ try {
       stopCosmicLoop();
       return;
     }
+    if (!w || !h) return;
 
+    var dt = timestamp && lastTime ? Math.min((timestamp - lastTime) / 16.667, 3.0) : 1;
     if (timestamp && (timestamp - lastTime < frameInterval)) {
       rafId = requestAnimationFrame(render);
       return;
     }
+    var frameDelta = timestamp && lastTime ? (timestamp - lastTime) : 16.667;
     lastTime = timestamp || (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
     ctx.clearRect(0, 0, w, h);
@@ -8503,7 +8939,33 @@ try {
     var curTheme = getSavedDashboardTheme();
 
     if (curTheme === 'ocean-abyss') {
-      // THEME 2: Ocean Abyss - Volumetric Underwater Caustic Sunbeams & Bioluminescent Glass Bubbles
+      // THEME 2: Ocean Abyss - Marine Life (Sinusoidal Fish & Pulsating Jellyfish)
+      var ocean = getOceanEntities();
+      updateFishSchool(ocean.fish, w, h, frameDelta);
+      updateJellyfish(ocean.jellyfish, w, h, frameDelta);
+
+      // Draw marine life: fish school
+      for (var fIdx = 0; fIdx < ocean.fish.length; fIdx++) {
+        var fi = ocean.fish[fIdx];
+        ctx.save();
+        ctx.fillStyle = fi.color || 'rgba(56, 189, 248, 0.85)';
+        ctx.beginPath();
+        ctx.arc(fi.x, fi.y, (fi.size || 8) * 0.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // Draw jellyfish
+      for (var jIdx = 0; jIdx < ocean.jellyfish.length; jIdx++) {
+        var jf = ocean.jellyfish[jIdx];
+        ctx.save();
+        ctx.fillStyle = 'rgba(167, 139, 250, 0.45)';
+        ctx.beginPath();
+        ctx.arc(jf.x, jf.y, 14 * jf.scale, Math.PI, 0, false);
+        ctx.fill();
+        ctx.restore();
+      }
+
       var tOcean = (timestamp || Date.now()) * 0.0006;
       var rayAlpha1 = 0.045 + Math.sin(tOcean * 1.1) * 0.02;
       var rayAlpha2 = 0.035 + Math.cos(tOcean * 0.85) * 0.015;
@@ -8640,7 +9102,14 @@ try {
         ctx.fill();
       }
     } else if (curTheme === 'moonlight') {
-      // THEME 4: Moonlight - Harmonic Geometric Orbit Rings & Prismatic Daylight Motes
+      // THEME 4: Moonlight - Cartoon Anime Crescent Moon, Clouds & Sparkles
+      drawCartoonCrescentMoon(ctx, w, h);
+      drawAnimeClouds(ctx, w, h, frameDelta);
+      for (var msIdx = 0; msIdx < 6; msIdx++) {
+        var sx = (w * (0.15 + msIdx * 0.14)) % w;
+        var sy = (h * (0.12 + (msIdx % 3) * 0.08)) % h;
+        drawSparkleStar(ctx, sx, sy, 5, 0.75);
+      }
       var tMoon = (timestamp || Date.now()) * 0.0004;
       var ring1R = (Math.min(w, h) * 0.42) + Math.sin(tMoon) * 18;
       var ring2R = (Math.min(w, h) * 0.65) + Math.cos(tMoon * 0.8) * 24;
@@ -8683,29 +9152,12 @@ try {
         }
       }
     } else {
-      // THEME 1: Deep Galaxy - Celestial Nebula Cloud Waves, Constellation Web & Star Comets
-      var tSec = (timestamp || Date.now()) * 0.0006;
-      var neb1X = w * 0.25 + Math.sin(tSec * 0.7) * (w * 0.08);
-      var neb1Y = h * 0.3 + Math.cos(tSec * 0.5) * (h * 0.08);
-      var gNeb1 = ctx.createRadialGradient(neb1X, neb1Y, 10, neb1X, neb1Y, w * 0.45);
-      gNeb1.addColorStop(0, 'rgba(124, 58, 237, 0.12)');
-      gNeb1.addColorStop(0.5, 'rgba(79, 70, 229, 0.05)');
-      gNeb1.addColorStop(1, 'rgba(8, 5, 17, 0)');
-      ctx.fillStyle = gNeb1;
-      ctx.fillRect(0, 0, w, h);
-
-      var neb2X = w * 0.75 + Math.cos(tSec * 0.6) * (w * 0.07);
-      var neb2Y = h * 0.65 + Math.sin(tSec * 0.8) * (h * 0.07);
-      var gNeb2 = ctx.createRadialGradient(neb2X, neb2Y, 10, neb2X, neb2Y, w * 0.4);
-      gNeb2.addColorStop(0, 'rgba(56, 189, 248, 0.08)');
-      gNeb2.addColorStop(0.5, 'rgba(139, 92, 246, 0.04)');
-      gNeb2.addColorStop(1, 'rgba(8, 5, 17, 0)');
-      ctx.fillStyle = gNeb2;
-      ctx.fillRect(0, 0, w, h);
-
+      // THEME 1: Deep Galaxy - High-Performance Constellation Web & Micro Dust (0 radial gradients)
       var maxDist = isMobile ? 65 : 95;
       var maxDistSq = maxDist * maxDist;
       ctx.lineWidth = 0.8;
+      ctx.strokeStyle = 'rgba(196, 181, 253, 0.12)';
+      ctx.beginPath();
       for (var i = 0; i < stars.length; i++) {
         var s1 = stars[i];
         for (var j = i + 1; j < stars.length; j++) {
@@ -8714,20 +9166,16 @@ try {
           var dy = s1.y - s2.y;
           var distSq = dx * dx + dy * dy;
           if (distSq < maxDistSq) {
-            var dist = Math.sqrt(distSq);
-            var lineAlpha = (1 - dist / maxDist) * 0.18 * Math.min(s1.a, s2.a);
-            ctx.strokeStyle = 'rgba(196, 181, 253, ' + lineAlpha.toFixed(3) + ')';
-            ctx.beginPath();
             ctx.moveTo(s1.x | 0, s1.y | 0);
             ctx.lineTo(s2.x | 0, s2.y | 0);
-            ctx.stroke();
           }
         }
       }
+      ctx.stroke();
 
       for (var i = 0; i < stars.length; i++) {
         var s = stars[i];
-        s.y -= 0.07 * s.z;
+        s.y -= 0.07 * s.z * dt;
         s.a += s.da;
         if (s.a > 0.95 || s.a < 0.2) s.da = -s.da;
         if (s.y < -15) {
@@ -8972,7 +9420,6 @@ function applyUserRoleUI() {
   // Kiểm tra hạn thuê và tạm khóa cho tài khoản User
   if (!isAdmin) {
     const isLocked = currentUser.status === 'disabled';
-    const isExpired = currentUser.status === 'expired' || (currentUser.expiresAt && Date.now() > Date.parse(currentUser.expiresAt));
 
     if (isLocked) {
       appEl?.classList.add('account-restricted-blur');
@@ -8982,11 +9429,8 @@ function applyUserRoleUI() {
         if (reasonEl) reasonEl.textContent = currentUser.lockReason || 'Tài khoản của bạn đang bị tạm khóa. Vui lòng liên hệ Admin để được hỗ trợ.';
       }
       if (expiredOverlay) expiredOverlay.classList.add('hidden');
-    } else if (isExpired) {
-      appEl?.classList.add('account-restricted-blur');
-      if (expiredOverlay) expiredOverlay.classList.remove('hidden');
-      if (lockedOverlay) lockedOverlay.classList.add('hidden');
     } else {
+      // Hết hạn / Ân hạn: Bỏ làm mờ toàn màn hình và ẩn popup che khuất, chuyển sang làm mờ trực tiếp từng thẻ bot
       appEl?.classList.remove('account-restricted-blur');
       if (lockedOverlay) lockedOverlay.classList.add('hidden');
       if (expiredOverlay) expiredOverlay.classList.add('hidden');
@@ -10803,6 +11247,12 @@ window.submitCreateKeysFromMgmt = submitCreateKeysFromMgmt;
 const _inFlightQuickActions = new Set();
 async function quickBotAction(event, id, action) {
   if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+  const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : { isExpired: false };
+  const isExpUser = Boolean(userExp && userExp.isExpired && (typeof currentUser === 'undefined' || currentUser?.role !== 'admin'));
+  if (isExpUser) {
+    if (typeof showToast === 'function') showToast('⚠️ Gói bot của bạn đã hết hạn, tính năng điều khiển bị vô hiệu hóa. Vui lòng gia hạn để tiếp tục sử dụng.', 'warning', 4500);
+    return;
+  }
   const btn = event?.currentTarget || (event?.target && typeof event.target.closest === 'function' ? event.target.closest('button') : null);
   const actionKey = String(id) + ':' + String(action);
   if (_inFlightQuickActions.has(actionKey) || btn?.dataset?.inFlight === 'true') {
@@ -12474,9 +12924,23 @@ function detailStatusHtml() {
   // 7. Render Remote GUI Inspector
   renderDetailRemoteGui(detailBot.currentWindow);
 
-  document.getElementById('detailStartButton').disabled=false;
-  document.getElementById('detailStopButton').disabled=false;
-  document.getElementById('detailRestartButton').disabled=false;
+  const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : { isExpired: false };
+  const isExpUser = Boolean(userExp && userExp.isExpired && (typeof currentUser === 'undefined' || currentUser?.role !== 'admin'));
+  ['detailStartButton', 'detailStopButton', 'detailRestartButton'].forEach(id => {
+    const btn = document.getElementById(id);
+    if (btn) {
+      btn.disabled = isExpUser;
+      if (isExpUser) {
+        btn.style.opacity = '0.45';
+        btn.style.cursor = 'not-allowed';
+        btn.title = 'Tính năng bị vô hiệu hóa do tài khoản đã hết hạn. Hãy gia hạn key để sử dụng.';
+      } else {
+        btn.style.opacity = '';
+        btn.style.cursor = '';
+        btn.title = '';
+      }
+    }
+  });
 }
 
 async function detailGet(path) {
@@ -12864,6 +13328,105 @@ async function resetCustomerBot() {
   }
 }
 
+function getItemInitials(name) {
+  if (!name || typeof name !== 'string') return 'IT';
+  var words = name.trim().split(/\s+/);
+  if (words.length >= 2) {
+    return (words[0].charAt(0) + words[1].charAt(0)).toUpperCase();
+  }
+  var clean = words[0].replace(/[^a-zA-Z0-9]/g, '');
+  if (clean.length >= 2) {
+    return clean.slice(0, 2).toUpperCase();
+  }
+  return (clean || 'IT').toUpperCase();
+}
+window.getItemInitials = getItemInitials;
+
+function resolveItemTexture(item) {
+  if (!item || typeof item !== 'object') {
+    return { primary: '/textures/3d/AIR.png', secondary: '/textures/item/air.png', count: 0, label: '(Trống)' };
+  }
+  var rawName = String(item.name || '').trim();
+  if (rawName.startsWith('minecraft:')) {
+    rawName = rawName.slice(10);
+  }
+  var cleanName = rawName.toLowerCase();
+  var disp = String(item.displayName || rawName || '(Trống)').trim();
+  var dispLower = disp.toLowerCase();
+  var count = Number(item.count) || 1;
+
+  var mappedBase = cleanName;
+
+  // Custom Item Keyword Mapping (displayName has priority)
+  if (/khóa|key/i.test(dispLower)) {
+    mappedBase = 'tripwire_hook';
+  } else if (/vé|ticket/i.test(dispLower)) {
+    mappedBase = 'paper';
+  } else if (/túi|backpack|ba lô/i.test(dispLower)) {
+    mappedBase = 'chest';
+  } else if (/pha lê|crystal|đá|ngọc/i.test(dispLower)) {
+    mappedBase = 'amethyst_shard';
+  } else if (/xu|coin|tiền/i.test(dispLower)) {
+    mappedBase = 'sunflower';
+  }
+
+  var upperName = mappedBase.toUpperCase();
+  var lowerName = mappedBase.toLowerCase();
+
+  var isBlock = /stone|dirt|cobblestone|wood|log|plank|ore|sand|gravel|glass|brick|obsidian|bedrock/i.test(cleanName);
+
+  return {
+    primary: '/textures/3d/' + upperName + '.png',
+    secondary: isBlock ? '/textures/block/' + lowerName + '.png' : '/textures/item/' + lowerName + '.png',
+    tertiary: isBlock ? '/textures/item/' + lowerName + '.png' : '/textures/block/' + lowerName + '.png',
+    count: count,
+    label: disp
+  };
+}
+window.resolveItemTexture = resolveItemTexture;
+
+function handleItemTextureError(imgEl) {
+  if (!imgEl) return;
+  var stage = imgEl.dataset ? imgEl.dataset.fallbackStage : 'primary';
+  if (stage === 'primary') {
+    if (imgEl.dataset && imgEl.dataset.secondarySrc) {
+      imgEl.src = imgEl.dataset.secondarySrc;
+      imgEl.dataset.fallbackStage = 'secondary';
+      return;
+    }
+    stage = 'secondary';
+  }
+  if (stage === 'secondary') {
+    if (imgEl.dataset && imgEl.dataset.tertiarySrc) {
+      imgEl.src = imgEl.dataset.tertiarySrc;
+      imgEl.dataset.fallbackStage = 'tertiary';
+      return;
+    }
+    stage = 'tertiary';
+  }
+  if (stage === 'tertiary' || stage === 'exhausted') {
+    imgEl.style.display = 'none';
+    imgEl.onerror = null;
+    if (imgEl.dataset) imgEl.dataset.fallbackStage = 'exhausted';
+    var parent = imgEl.parentNode;
+    if (parent) {
+      var existing = parent.querySelector ? (parent.querySelector('.slot-initials-badge') || parent.querySelector('.slot-text-fallback')) : null;
+      if (!existing) {
+        var badge = (typeof document !== 'undefined' && typeof document.createElement === 'function')
+          ? document.createElement('span')
+          : { tagName: 'SPAN', className: 'slot-initials-badge', textContent: '', style: {} };
+        badge.className = 'slot-initials-badge';
+        badge.textContent = (imgEl.dataset && imgEl.dataset.initials) ? imgEl.dataset.initials : 'IT';
+        badge.style.fontSize = '11px';
+        badge.style.fontWeight = '800';
+        badge.style.color = 'var(--text)';
+        parent.appendChild(badge);
+      }
+    }
+  }
+}
+window.handleItemTextureError = handleItemTextureError;
+
 function renderDetailRemoteGui(win) {
   const card = document.getElementById('detailRemoteGuiCard');
   if (!card) return;
@@ -12894,12 +13457,14 @@ function renderDetailRemoteGui(win) {
     if (!item) {
       return '<div role="button" tabindex="0" onclick="clickDetailGuiSlot(' + idx + ')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();clickDetailGuiSlot(' + idx + ');}" aria-label="Ô GUI #' + idx + ': (Trống)" style="aspect-ratio:1;background:var(--surface-soft);border:1px solid var(--border);border-radius:6px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:10px;font-family:monospace;" title="Ô #' + idx + ' (Trống)">' + idx + '</div>';
     }
-    const rawName = String(item.displayName || item.name || 'Vật phẩm');
-    const safeName = escapeHtml(rawName);
-    const ariaLabel = 'Ô GUI #' + idx + ': ' + safeName + (item.count > 1 ? ' x' + item.count : '');
+    const tex = resolveItemTexture(item);
+    const safeName = escapeHtml(tex.label);
+    const initials = (typeof getItemInitials === 'function') ? getItemInitials(tex.label) : (tex.label ? tex.label.slice(0, 2).toUpperCase() : 'IT');
+    const ariaLabel = 'Ô GUI #' + idx + ': ' + safeName + (tex.count > 1 ? ' x' + tex.count : '');
     return '<div role="button" tabindex="0" onclick="clickDetailGuiSlot(' + idx + ')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();clickDetailGuiSlot(' + idx + ');}" aria-label="' + escapeHtml(ariaLabel) + '" style="aspect-ratio:1;background:var(--accent-soft);border:1px solid var(--border-strong);border-radius:8px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;padding:3px;text-align:center;box-shadow:var(--shadow-sm);transition:transform 0.15s ease,border-color 0.15s ease;" onmouseenter="this.style.transform=\'scale(1.04)\'" onmouseleave="this.style.transform=\'none\'" title="Ô #' + idx + ': ' + safeName + ' (Click để chọn)">' +
-      '<span style="font-size:11px;font-weight:700;color:var(--text);overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.2;max-width:100%;word-break:break-word;">' + safeName + '</span>' +
-      (item.count > 1 ? '<span style="position:absolute;bottom:2px;right:2px;font-size:9.5px;font-weight:800;background:var(--bg-elevated);border:1px solid var(--border-strong);padding:0 4px;border-radius:4px;color:var(--accent-text);">x' + item.count + '</span>' : '') +
+      '<img src="' + tex.primary + '" data-fallback-stage="primary" data-secondary-src="' + tex.secondary + '" data-tertiary-src="' + (tex.tertiary || tex.secondary) + '" data-initials="' + escapeHtml(initials) + '" onerror="handleItemTextureError(this)" style="width:28px;height:28px;object-fit:contain;image-rendering:pixelated;" alt="' + safeName + '">' +
+      '<span class="slot-text-name" style="font-size:9.5px;font-weight:700;color:var(--text);overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;line-height:1.1;max-width:100%;word-break:break-word;margin-top:1px;">' + safeName + '</span>' +
+      (tex.count > 1 ? '<span style="position:absolute;bottom:2px;right:2px;font-size:9.5px;font-weight:800;background:var(--bg-elevated);border:1px solid var(--border-strong);padding:0 4px;border-radius:4px;color:var(--accent-text);">x' + tex.count + '</span>' : '') +
       '</div>';
   }).join('');
 }
@@ -12907,9 +13472,14 @@ function renderDetailRemoteGui(win) {
 const _inFlightGuiSlotClicks = new Set();
 async function clickDetailGuiSlot(slot) {
   if (!selectedBotId) return;
-  const slotKey = String(selectedBotId) + ':' + String(slot);
-  if (_inFlightGuiSlotClicks.has(slotKey)) return;
-  _inFlightGuiSlotClicks.add(slotKey);
+  const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : { isExpired: false };
+  const isExpUser = Boolean(userExp && userExp.isExpired && (typeof currentUser === 'undefined' || currentUser?.role !== 'admin'));
+  if (isExpUser) {
+    if (typeof showToast === 'function') showToast('⚠️ Gói bot của bạn đã hết hạn, tính năng điều khiển bị vô hiệu hóa. Vui lòng gia hạn để tiếp tục sử dụng.', 'warning', 4500);
+    return;
+  }
+  if (_inFlightGuiSlotClicks.has(slot)) return;
+  _inFlightGuiSlotClicks.add(slot);
   try {
     const res = await requestJson('/api/manager/bot/' + selectedBotId + '/window/click', {
       method: 'POST',
@@ -12926,7 +13496,7 @@ async function clickDetailGuiSlot(slot) {
   } catch(e) {
     showToast('Lỗi gửi click GUI', 'error');
   } finally {
-    _inFlightGuiSlotClicks.delete(slotKey);
+    _inFlightGuiSlotClicks.delete(slot);
   }
 }
 window._inFlightGuiSlotClicks = _inFlightGuiSlotClicks;
@@ -13044,8 +13614,34 @@ function updateUserHeaderCountdown() {
 
   const exactFormatted = formatFullDateTime(currentUser.expiresAt);
   const countdown = formatRentalCountdown(currentUser.expiresAt);
+  const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : { isExpired: false };
 
-  if (countdown.expired) {
+  if (countdown.expired || userExp.isExpired) {
+    if (userExp.inGracePeriod) {
+      const remainingMin = Math.max(1, Math.round(userExp.remainingGraceMs / 60000));
+      const hours = Math.floor(remainingMin / 60);
+      const mins = remainingMin % 60;
+      const graceText = (hours > 0 ? (hours + 'h ') : '') + mins + 'm';
+
+      badge.style.display = 'inline-flex';
+      badge.style.background = 'rgba(245,158,11,0.2)';
+      badge.style.color = '#fbbf24';
+      badge.style.border = '1px solid rgba(245,158,11,0.45)';
+      badge.innerHTML = '<span>⏳ Hạn thuê: <b>ĐANG ÂN HẠN 6H (còn ' + graceText + ')</b></span><button class="small primary" onclick="openRenewModal()" style="margin-left:4px;">🎁 Gia Hạn Ngay</button>';
+
+      if (banner) {
+        if (bannerIcon) bannerIcon.textContent = '⏳';
+        if (bannerExactTime) bannerExactTime.textContent = exactFormatted;
+        if (bannerCountdown) {
+          bannerCountdown.textContent = 'ĐANG ÂN HẠN 6H (Bot vẫn chạy, còn ' + graceText + ')';
+          bannerCountdown.style.color = '#fbbf24';
+        }
+        banner.style.background = 'rgba(245,158,11,0.15)';
+        banner.style.borderColor = 'rgba(245,158,11,0.4)';
+      }
+      return;
+    }
+
     badge.style.display = 'inline-flex';
     badge.style.background = 'rgba(239,68,68,0.2)';
     badge.style.color = 'var(--red)';
@@ -13056,7 +13652,7 @@ function updateUserHeaderCountdown() {
       if (bannerIcon) bannerIcon.textContent = '⛔';
       if (bannerExactTime) bannerExactTime.textContent = exactFormatted;
       if (bannerCountdown) {
-        bannerCountdown.textContent = 'ĐÃ HẾT HẠN (Tạm dừng dịch vụ)';
+        bannerCountdown.textContent = 'ĐÃ HẾT HẠN (Bot dừng an toàn sau 6h ân hạn)';
         bannerCountdown.style.color = 'var(--red)';
       }
       banner.style.background = 'rgba(239,68,68,0.15)';
@@ -13510,6 +14106,7 @@ function createDetailSlot(item,slot,selected) {
   const el=document.createElement('div');
   el.className='inventory-slot'+(selected?' selected':'')+(!item?' empty':'');
   el.draggable=!!item;
+  if (!el.dataset) el.dataset = {};
   el.dataset.slot=String(slot);
   el.setAttribute('role', 'button');
   el.setAttribute('tabindex', '0');
@@ -13910,6 +14507,12 @@ window.allowDetailBotScheduleDrop = allowDetailBotScheduleDrop;
 window.dropDetailBotSchedule = dropDetailBotSchedule;
 async function detailPost(path,body){
   if(selectedBotId===null) return {ok:false,status:0,data:{error:'Chưa chọn bot.'}};
+  const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : { isExpired: false };
+  const isExpUser = Boolean(userExp && userExp.isExpired && (typeof currentUser === 'undefined' || currentUser?.role !== 'admin'));
+  if (isExpUser) {
+    if (typeof showToast === 'function') showToast('⚠️ Gói bot của bạn đã hết hạn, tính năng điều khiển bị vô hiệu hóa. Vui lòng gia hạn để tiếp tục sử dụng.', 'warning', 4500);
+    return { ok: false, status: 403, data: { ok: false, error: 'Gói bot của bạn đã hết hạn, tính năng điều khiển bị vô hiệu hóa. Vui lòng gia hạn để tiếp tục sử dụng.' } };
+  }
   invalidateDetailReads();
   return requestJson(
     '/api/manager/bot/'+encodeURIComponent(String(selectedBotId))+path,
@@ -13923,6 +14526,12 @@ async function detailPost(path,body){
 }
 
 async function detailAction(action){
+  const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : { isExpired: false };
+  const isExpUser = Boolean(userExp && userExp.isExpired && (typeof currentUser === 'undefined' || currentUser?.role !== 'admin'));
+  if (isExpUser) {
+    if (typeof showToast === 'function') showToast('⚠️ Gói bot của bạn đã hết hạn, tính năng điều khiển bị vô hiệu hóa. Vui lòng gia hạn để tiếp tục sử dụng.', 'warning', 4500);
+    return;
+  }
   if(detailLifecycleActionInFlight)return;
   invalidateDetailReads();
   detailLifecycleActionInFlight=true;
@@ -14124,6 +14733,12 @@ window.refreshStatus = refreshStatus;
 
 async function quickCardAction(btn, botId, action) {
   if (!botId || btn.disabled) return;
+  const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : { isExpired: false };
+  const isExpUser = Boolean(userExp && userExp.isExpired && (typeof currentUser === 'undefined' || currentUser?.role !== 'admin'));
+  if (isExpUser) {
+    if (typeof showToast === 'function') showToast('⚠️ Gói bot của bạn đã hết hạn, tính năng điều khiển bị vô hiệu hóa. Vui lòng gia hạn để tiếp tục sử dụng.', 'warning', 4500);
+    return;
+  }
   btn.disabled = true;
   const oldText = btn.textContent;
   btn.textContent = '...';
@@ -15502,6 +16117,7 @@ document.addEventListener('change', (e) => {
 
 setInterval(updateDetailUptime, 1000);
 setInterval(updateUserHeaderCountdown, 5000);
+setInterval(updateCardGraceCountdowns, 1000);
 </script>
 
   <!-- MODAL BROADCAST LỆNH -->
