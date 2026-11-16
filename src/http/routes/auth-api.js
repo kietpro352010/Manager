@@ -116,6 +116,17 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
     loginAttempts.delete(key);
   }
 
+  function recordFailedAttempt(ip, username) {
+    const key = `${ip}:${String(username).toLowerCase()}`;
+    const now = Date.now();
+    const record = loginAttempts.get(key);
+    if (!record || now - record.windowStart > RATE_LIMIT_WINDOW_MS) {
+      loginAttempts.set(key, { count: 1, windowStart: now });
+    } else {
+      record.count++;
+    }
+  }
+
   // Periodic cleanup of rate limiter map
   setInterval(() => {
     const now = Date.now();
