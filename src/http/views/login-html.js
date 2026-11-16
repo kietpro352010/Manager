@@ -1487,6 +1487,26 @@ html, body {
               </div>
             </div>
 
+            <div id="regCaptchaGroup" class="field-group">
+              <label class="field-label" for="regCaptchaAnswer">
+                <span>Mã xác thực chống Bot (Captcha)</span>
+                <span class="field-hint-inline">Bắt buộc</span>
+              </label>
+              <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                <div id="regCaptchaImgContainer" style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:4px 8px;min-width:140px;min-height:48px;display:flex;align-items:center;justify-content:center;box-shadow:var(--shadow-sm);cursor:pointer;" title="Nhấn để đổi mã khác">
+                  <span style="font-size:12px;color:var(--muted);">Đang tải Captcha...</span>
+                </div>
+                <button type="button" id="regCaptchaRefreshBtn" class="btn-secondary" style="padding:8px 12px;font-size:12px;border-radius:6px;display:flex;align-items:center;gap:4px;cursor:pointer;background:var(--surface-soft);border:1px solid var(--border);color:var(--text);" title="Đổi mã xác thực khác">
+                  Đổi mã
+                </button>
+              </div>
+              <div class="input-wrap">
+                <input id="regCaptchaAnswer" class="field-input" type="text" autocomplete="off" placeholder="Nhập kết quả phép tính hoặc ký tự trên..." aria-describedby="regCaptchaErr">
+                <input type="hidden" id="regCaptchaToken" value="">
+              </div>
+              <p id="regCaptchaErr" class="field-error" hidden></p>
+            </div>
+
             <button id="publicRegSubmitBtn" type="submit" class="primary-cta">
               <span class="btn-icon" aria-hidden="true">
                 <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
@@ -1705,6 +1725,49 @@ function switchPublicAuthTab(tab) {
   if (announcer) {
     announcer.textContent = isLogin ? 'Đang ở biểu mẫu đăng nhập.' : 'Đang ở biểu mẫu đăng ký tài khoản.';
   }
+  if (!isLogin) {
+    refreshRegisterCaptcha();
+  }
+}
+
+async function refreshRegisterCaptcha() {
+  const container = document.getElementById('regCaptchaImgContainer');
+  const tokenInput = document.getElementById('regCaptchaToken');
+  const answerInput = document.getElementById('regCaptchaAnswer');
+  if (answerInput) answerInput.value = '';
+  if (container) {
+    const span = document.createElement('span');
+    span.style.fontSize = '11px';
+    span.style.color = 'var(--muted)';
+    span.textContent = 'Đang tải Captcha...';
+    container.replaceChildren(span);
+  }
+  try {
+    const res = await fetch('/api/auth/captcha');
+    if (!res.ok) throw new Error('Không thể tải mã xác thực');
+    const data = await res.json();
+    if (data && data.token && data.svg) {
+      if (tokenInput) tokenInput.value = data.token;
+      if (container) {
+        const parser = new DOMParser();
+        const svgDoc = parser.parseFromString(data.svg, 'image/svg+xml');
+        if (svgDoc.documentElement) {
+          container.replaceChildren(svgDoc.documentElement);
+        }
+      }
+    } else {
+      throw new Error('Dữ liệu Captcha không hợp lệ');
+    }
+  } catch (err) {
+    if (container) {
+      const errSpan = document.createElement('span');
+      errSpan.style.fontSize = '11px';
+      errSpan.style.color = 'var(--danger,#ef4444)';
+      errSpan.style.cursor = 'pointer';
+      errSpan.textContent = 'Lỗi tải Captcha. Bấm để thử lại.';
+      container.replaceChildren(errSpan);
+    }
+  }
 }
 
 function togglePublicPass(inputId, btn) {
@@ -1750,9 +1813,11 @@ function validateRegisterFields() {
   const uEl = document.getElementById('regUsername');
   const pEl = document.getElementById('regPassword');
   const p2El = document.getElementById('regPasswordConfirm');
+  const cEl = document.getElementById('regCaptchaAnswer');
   const u = uEl ? uEl.value.trim() : '';
   const p = pEl ? pEl.value : '';
   const p2 = p2El ? p2El.value : '';
+  const c = cEl ? cEl.value.trim() : '';
 
   let firstInvalid = null;
   if (!/^[a-zA-Z0-9_]{3,32}$/.test(u)) {
@@ -1774,6 +1839,13 @@ function validateRegisterFields() {
     firstInvalid = firstInvalid || p2El;
   } else {
     setFieldError('regPasswordConfirm', 'regPasswordConfirmErr', '');
+  }
+
+  if (!c) {
+    setFieldError('regCaptchaAnswer', 'regCaptchaErr', 'Vui lòng nhập kết quả mã xác thực Captcha.');
+    firstInvalid = firstInvalid || cEl;
+  } else {
+    setFieldError('regCaptchaAnswer', 'regCaptchaErr', '');
   }
 
   return { ok: !firstInvalid, firstInvalid };
@@ -1834,7 +1906,8 @@ async function handlePublicRegisterSubmit(e) {
     const uErr = document.getElementById('regUsernameErr');
     const pErr = document.getElementById('regPasswordErr');
     const p2Err = document.getElementById('regPasswordConfirmErr');
-    const summaryMsg = (uErr && uErr.textContent) || (pErr && pErr.textContent) || (p2Err && p2Err.textContent) || 'Vui lòng kiểm tra lại thông tin đăng ký.';
+    const cErr = document.getElementById('regCaptchaErr');
+    const summaryMsg = (uErr && uErr.textContent) || (pErr && pErr.textContent) || (p2Err && p2Err.textContent) || (cErr && cErr.textContent) || 'Vui lòng kiểm tra lại thông tin đăng ký.';
     setLoginAlert('error', summaryMsg, 'tplIconWarn');
     if (check.firstInvalid) check.firstInvalid.focus();
     return;
@@ -1844,6 +1917,8 @@ async function handlePublicRegisterSubmit(e) {
   const p = document.getElementById('regPassword').value;
   const p2 = document.getElementById('regPasswordConfirm').value;
   const k = document.getElementById('regLicenseKey').value.trim();
+  const cToken = (document.getElementById('regCaptchaToken') ? document.getElementById('regCaptchaToken').value : '') || '';
+  const cAnswer = (document.getElementById('regCaptchaAnswer') ? document.getElementById('regCaptchaAnswer').value.trim() : '') || '';
   const btn = document.getElementById('publicRegSubmitBtn');
 
   setLoginAlert('', '');
@@ -1855,7 +1930,15 @@ async function handlePublicRegisterSubmit(e) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
-      body: JSON.stringify({ username: u, password: p, confirmPassword: p2, key: k, licenseKey: k })
+      body: JSON.stringify({
+        username: u,
+        password: p,
+        confirmPassword: p2,
+        key: k,
+        licenseKey: k,
+        captchaToken: cToken,
+        captchaAnswer: cAnswer
+      })
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.ok) {
@@ -1871,6 +1954,7 @@ async function handlePublicRegisterSubmit(e) {
     setLoginAlert('error', err && err.message ? err.message : 'Không thể đăng ký tài khoản.', 'tplIconWarn');
     btn.disabled = false;
     setSubmitButtonState(btn, 'idle', 'HOÀN TẤT ĐĂNG KÝ VÀ BẮT ĐẦU', 'tplIconRegister');
+    refreshRegisterCaptcha();
   }
 }
 
@@ -2032,6 +2116,11 @@ async function loadPublicSystemInfo() {
 
   const regForm = document.getElementById('publicRegisterForm');
   if (regForm) regForm.addEventListener('submit', handlePublicRegisterSubmit);
+
+  const captchaBtn = document.getElementById('regCaptchaRefreshBtn');
+  if (captchaBtn) captchaBtn.addEventListener('click', refreshRegisterCaptcha);
+  const captchaBox = document.getElementById('regCaptchaImgContainer');
+  if (captchaBox) captchaBox.addEventListener('click', refreshRegisterCaptcha);
 })();
 
 (function checkUrlParams() {
@@ -2081,7 +2170,7 @@ async function loadPublicSystemInfo() {
   resize();
 
   const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '') || (window.innerWidth <= 768);
-  const starCount = isMobile ? 22 : 42;
+  const starCount = isMobile ? 40 : 100;
   const stars = [];
   for (let i = 0; i < starCount; i++) {
     stars.push({
@@ -2099,6 +2188,133 @@ async function loadPublicSystemInfo() {
     });
   }
   const shootingStars = [];
+
+  let _publicOceanEntities = null;
+  function getPublicOceanEntities() {
+    if (!_publicOceanEntities) {
+      const fish = [];
+      for (let f = 0; f < 6; f++) {
+        fish.push({
+          x: Math.random() * (w || 800),
+          y: Math.random() * (h || 600),
+          baseY: Math.random() * (h || 600),
+          speed: 1.5 + Math.random() * 1.5,
+          freq: 0.03 + Math.random() * 0.04,
+          amp: 10 + Math.random() * 12,
+          phase: Math.random() * Math.PI * 2,
+          size: 8 + Math.random() * 6,
+          color: f % 2 === 0 ? 'rgba(56, 189, 248, 0.85)' : 'rgba(52, 211, 153, 0.85)'
+        });
+      }
+      const jellyfish = [];
+      for (let j = 0; j < 2; j++) {
+        jellyfish.push({
+          x: Math.random() * (w || 800),
+          y: Math.random() * (h || 600),
+          scale: 1,
+          pulsePhase: Math.random() * Math.PI * 2,
+          tentacles: 5,
+          speed: 0.3 + Math.random() * 0.4
+        });
+      }
+      _publicOceanEntities = { fish, jellyfish };
+    }
+    return _publicOceanEntities;
+  }
+
+  function updatePublicFishSchool(fish, width, height, dt) {
+    if (!fish || !Array.isArray(fish)) return;
+    const delta = typeof dt === 'number' ? dt / 16.667 : 1;
+    for (let i = 0; i < fish.length; i++) {
+      const f = fish[i];
+      f.phase = (f.phase || 0) + (f.freq || 0.05) * delta;
+      f.y = (f.baseY !== undefined ? f.baseY : f.y) + Math.sin(f.phase) * (f.amp || 15);
+      f.x += (f.speed || 2) * delta;
+      if (f.x > (width || 800) + 50) {
+        f.x = -50;
+        f.baseY = Math.random() * (height || 600);
+        f.y = f.baseY;
+      }
+    }
+  }
+
+  function updatePublicJellyfish(jellyfish, width, height, dt) {
+    if (!jellyfish || !Array.isArray(jellyfish)) return;
+    const delta = typeof dt === 'number' ? dt / 16.667 : 1;
+    for (let i = 0; i < jellyfish.length; i++) {
+      const j = jellyfish[i];
+      j.pulsePhase = (j.pulsePhase || 0) + 0.04 * delta;
+      j.scale = 0.85 + Math.sin(j.pulsePhase) * 0.25;
+      j.y -= (j.speed || 0.4) * delta;
+      j.x += Math.sin(j.pulsePhase * 0.5) * 0.5 * delta;
+      if (j.y < -40) {
+        j.y = (height || 600) + 40;
+        j.x = Math.random() * (width || 800);
+      }
+    }
+  }
+
+  function drawCartoonCrescentMoon(cCtx, width, height) {
+    if (!cCtx) return;
+    cCtx.save();
+    const mx = width * 0.82;
+    const my = Math.min(height * 0.22, 160);
+    const mr = Math.min(width, height) * 0.065;
+
+    cCtx.beginPath();
+    cCtx.arc(mx, my, mr * 1.6, 0, Math.PI * 2);
+    cCtx.fillStyle = 'rgba(254, 240, 138, 0.12)';
+    cCtx.fill();
+
+    cCtx.beginPath();
+    cCtx.arc(mx, my, mr, -0.4 * Math.PI, 0.6 * Math.PI, false);
+    cCtx.bezierCurveTo(mx + mr * 0.3, my + mr * 0.5, mx + mr * 0.3, my - mr * 0.5, mx + mr * Math.cos(-0.4 * Math.PI), my + mr * Math.sin(-0.4 * Math.PI));
+    cCtx.fillStyle = '#fef08a';
+    cCtx.fill();
+    cCtx.restore();
+  }
+
+  let _publicAnimeClouds = null;
+  function drawAnimeClouds(cCtx, width, height, dt) {
+    if (!cCtx) return;
+    if (!_publicAnimeClouds) {
+      _publicAnimeClouds = [
+        { x: (width || 800) * 0.1, y: (height || 600) * 0.15, r: 40, speed: 0.2 },
+        { x: (width || 800) * 0.55, y: (height || 600) * 0.28, r: 55, speed: 0.15 },
+        { x: (width || 800) * 0.85, y: (height || 600) * 0.12, r: 35, speed: 0.25 }
+      ];
+    }
+    const clouds = _publicAnimeClouds;
+    const delta = typeof dt === 'number' ? dt / 16.667 : 1;
+    cCtx.save();
+    for (let i = 0; i < clouds.length; i++) {
+      const c = clouds[i];
+      c.x += c.speed * delta;
+      if (c.x > (width || 800) + 120) c.x = -120;
+      cCtx.fillStyle = 'rgba(255, 255, 255, 0.18)';
+      cCtx.beginPath();
+      cCtx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+      cCtx.arc(c.x + c.r * 0.7, c.y - c.r * 0.2, c.r * 0.8, 0, Math.PI * 2);
+      cCtx.arc(c.x - c.r * 0.7, c.y, c.r * 0.7, 0, Math.PI * 2);
+      cCtx.fill();
+    }
+    cCtx.restore();
+  }
+
+  function drawSparkleStar(cCtx, x, y, r, alpha) {
+    if (!cCtx) return;
+    cCtx.save();
+    cCtx.fillStyle = 'rgba(254, 240, 138, ' + (alpha || 0.8) + ')';
+    cCtx.beginPath();
+    cCtx.moveTo(x, y - r);
+    cCtx.quadraticCurveTo(x, y, x + r, y);
+    cCtx.quadraticCurveTo(x, y, x, y + r);
+    cCtx.quadraticCurveTo(x, y, x - r, y);
+    cCtx.quadraticCurveTo(x, y, x, y - r);
+    cCtx.closePath();
+    cCtx.fill();
+    cCtx.restore();
+  }
 
   function stopMotion() {
     if (rafId !== null) {
@@ -2125,13 +2341,40 @@ async function loadPublicSystemInfo() {
       rafId = requestAnimationFrame(frame);
       return;
     }
+    const frameDelta = timestamp && lastTime ? (timestamp - lastTime) : 16.667;
     lastTime = timestamp || (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
     const theme = getActivePublicTheme();
     ctx.clearRect(0, 0, w, h);
 
     if (theme === 'ocean-abyss') {
-      // THEME 2: Ocean Abyss - Volumetric Underwater Caustic Sunbeams & Bioluminescent Glass Bubbles
+      // THEME 2: Ocean Abyss - Marine Life (Sinusoidal Fish & Pulsating Jellyfish)
+      const ocean = getPublicOceanEntities();
+      updatePublicFishSchool(ocean.fish, w, h, frameDelta);
+      updatePublicJellyfish(ocean.jellyfish, w, h, frameDelta);
+
+      // Draw marine life: fish school
+      for (let fIdx = 0; fIdx < ocean.fish.length; fIdx++) {
+        const fi = ocean.fish[fIdx];
+        ctx.save();
+        ctx.fillStyle = fi.color || 'rgba(56, 189, 248, 0.85)';
+        ctx.beginPath();
+        ctx.arc(fi.x, fi.y, (fi.size || 8) * 0.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // Draw jellyfish
+      for (let jIdx = 0; jIdx < ocean.jellyfish.length; jIdx++) {
+        const jf = ocean.jellyfish[jIdx];
+        ctx.save();
+        ctx.fillStyle = 'rgba(167, 139, 250, 0.45)';
+        ctx.beginPath();
+        ctx.arc(jf.x, jf.y, 14 * jf.scale, Math.PI, 0, false);
+        ctx.fill();
+        ctx.restore();
+      }
+
       const tOcean = (timestamp || Date.now()) * 0.0006;
       const rayAlpha1 = 0.045 + Math.sin(tOcean * 1.1) * 0.02;
       const rayAlpha2 = 0.035 + Math.cos(tOcean * 0.85) * 0.015;
@@ -2206,69 +2449,15 @@ async function loadPublicSystemInfo() {
           ctx.fill();
         }
       }
-    } else if (theme === 'violet-dusk') {
-      // THEME 3: Violet Dusk - Twilight Horizon Glow & Living Fireflies with Trailing Stardust
-      const tDusk = (timestamp || Date.now()) * 0.0005;
-      const duskWaveY = h * 0.8 + Math.sin(tDusk) * (h * 0.05);
-      const gDusk = ctx.createRadialGradient(w * 0.5, duskWaveY, 20, w * 0.5, duskWaveY, w * 0.65);
-      gDusk.addColorStop(0, 'rgba(126, 91, 239, 0.14)');
-      gDusk.addColorStop(0.45, 'rgba(245, 158, 11, 0.06)');
-      gDusk.addColorStop(1, 'rgba(18, 17, 24, 0)');
-      ctx.fillStyle = gDusk;
-      ctx.fillRect(0, 0, w, h);
-
-      for (let i = 0; i < stars.length; i++) {
-        const s = stars[i];
-        s.phase += 0.016 + (s.z * 0.004);
-        s.x += Math.cos(s.seed + s.phase) * (0.42 + s.z * 0.18);
-        s.y += Math.sin(s.seed * 1.4 + s.phase * 0.8) * 0.38 - 0.07;
-        s.a += s.da * 0.7;
-        if (s.a > 0.95 || s.a < 0.2) s.da = -s.da;
-
-        if (s.y < -20) s.y = h + 15;
-        if (s.y > h + 20) s.y = -15;
-        if (s.x < -20) s.x = w + 15;
-        if (s.x > w + 20) s.x = -15;
-
-        if (!s.trail) s.trail = [];
-        if (Math.random() < 0.22) {
-          s.trail.push({ x: s.x, y: s.y, a: s.a * 0.4 });
-          if (s.trail.length > 3) s.trail.shift();
-        }
-
-        const isWarmAmber = (i % 2 === 0);
-        const coreRgb = isWarmAmber ? '251, 191, 36' : '232, 121, 249';
-        const haloRgb = isWarmAmber ? '245, 158, 11' : '168, 85, 247';
-        const eRad = Math.max(1.4, s.r * s.z * 1.05);
-
-        for (let k = 0; k < s.trail.length; k++) {
-          const pt = s.trail[k];
-          pt.a -= 0.012;
-          if (pt.a > 0.02) {
-            ctx.beginPath();
-            ctx.arc(pt.x | 0, pt.y | 0, eRad * 0.55, 0, Math.PI * 2);
-            ctx.fillStyle = 'rgba(' + coreRgb + ', ' + pt.a.toFixed(2) + ')';
-            ctx.fill();
-          }
-        }
-
-        ctx.beginPath();
-        ctx.arc(s.x | 0, s.y | 0, eRad * 3.2, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(' + haloRgb + ', ' + (s.a * 0.16).toFixed(2) + ')';
-        ctx.fill();
-
-        ctx.beginPath();
-        ctx.arc(s.x | 0, s.y | 0, eRad * 1.6, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(' + haloRgb + ', ' + (s.a * 0.38).toFixed(2) + ')';
-        ctx.fill();
-
-        ctx.beginPath();
-        ctx.arc(s.x | 0, s.y | 0, eRad, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(' + coreRgb + ', ' + (s.a * 0.95).toFixed(2) + ')';
-        ctx.fill();
-      }
     } else if (theme === 'moonlight') {
-      // THEME 4: Moonlight - Harmonic Geometric Orbit Rings & Prismatic Daylight Motes
+      // THEME 4: Moonlight - Cartoon Anime Crescent Moon, Clouds & Sparkles
+      drawCartoonCrescentMoon(ctx, w, h);
+      drawAnimeClouds(ctx, w, h, frameDelta);
+      for (let msIdx = 0; msIdx < 6; msIdx++) {
+        const sx = (w * (0.15 + msIdx * 0.14)) % w;
+        const sy = (h * (0.12 + (msIdx % 3) * 0.08)) % h;
+        drawSparkleStar(ctx, sx, sy, 5, 0.75);
+      }
       const tMoon = (timestamp || Date.now()) * 0.0004;
       const ring1R = (Math.min(w, h) * 0.42) + Math.sin(tMoon) * 18;
       const ring2R = (Math.min(w, h) * 0.65) + Math.cos(tMoon * 0.8) * 24;
@@ -2311,29 +2500,11 @@ async function loadPublicSystemInfo() {
         }
       }
     } else {
-      // THEME 1: Deep Galaxy - Celestial Nebula Cloud Waves, Constellation Web & Star Comets
-      const tSec = (timestamp || Date.now()) * 0.0006;
-      const neb1X = w * 0.25 + Math.sin(tSec * 0.7) * (w * 0.08);
-      const neb1Y = h * 0.3 + Math.cos(tSec * 0.5) * (h * 0.08);
-      const gNeb1 = ctx.createRadialGradient(neb1X, neb1Y, 10, neb1X, neb1Y, w * 0.45);
-      gNeb1.addColorStop(0, 'rgba(124, 58, 237, 0.12)');
-      gNeb1.addColorStop(0.5, 'rgba(79, 70, 229, 0.05)');
-      gNeb1.addColorStop(1, 'rgba(8, 5, 17, 0)');
-      ctx.fillStyle = gNeb1;
-      ctx.fillRect(0, 0, w, h);
-
-      const neb2X = w * 0.75 + Math.cos(tSec * 0.6) * (w * 0.07);
-      const neb2Y = h * 0.65 + Math.sin(tSec * 0.8) * (h * 0.07);
-      const gNeb2 = ctx.createRadialGradient(neb2X, neb2Y, 10, neb2X, neb2Y, w * 0.4);
-      gNeb2.addColorStop(0, 'rgba(56, 189, 248, 0.08)');
-      gNeb2.addColorStop(0.5, 'rgba(139, 92, 246, 0.04)');
-      gNeb2.addColorStop(1, 'rgba(8, 5, 17, 0)');
-      ctx.fillStyle = gNeb2;
-      ctx.fillRect(0, 0, w, h);
-
+      // THEME 1: Deep Galaxy - Batched Constellation Single Path & Obsidian Micro Dust Stars
       const maxDist = isMobile ? 65 : 95;
       const maxDistSq = maxDist * maxDist;
       ctx.lineWidth = 0.8;
+      ctx.beginPath();
       for (let i = 0; i < stars.length; i++) {
         const s1 = stars[i];
         for (let j = i + 1; j < stars.length; j++) {
@@ -2342,16 +2513,13 @@ async function loadPublicSystemInfo() {
           const dy = s1.y - s2.y;
           const distSq = dx * dx + dy * dy;
           if (distSq < maxDistSq) {
-            const dist = Math.sqrt(distSq);
-            const lineAlpha = (1 - dist / maxDist) * 0.18 * Math.min(s1.a, s2.a);
-            ctx.strokeStyle = 'rgba(196, 181, 253, ' + lineAlpha.toFixed(3) + ')';
-            ctx.beginPath();
             ctx.moveTo(s1.x | 0, s1.y | 0);
             ctx.lineTo(s2.x | 0, s2.y | 0);
-            ctx.stroke();
           }
         }
       }
+      ctx.strokeStyle = 'rgba(196, 181, 253, 0.12)';
+      ctx.stroke();
 
       for (let i = 0; i < stars.length; i++) {
         const s = stars[i];

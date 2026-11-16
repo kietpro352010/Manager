@@ -1,12 +1,15 @@
 -- ============================================================================
 -- KINGMC MANAGER - FULL SUPABASE RESET & CANONICAL SCHEMA SETUP
 -- CẢNH BÁO: PHẦN 1 SẼ XÓA SẠCH TOÀN BỘ BẢNG/VIEW/SEQUENCE/FUNCTION CŨ CỦA
--- MANAGER & BOT TRONG SCHEMA `public` (BAO GỒM DỮ LIỆU HIỆN TẠI TRONG CÁC BẢNG ĐÓ).
+-- MANAGER & BOT TRONG SCHEMA public (BAO GỒM DỮ LIỆU HIỆN TẠI TRONG CÁC BẢNG ĐÓ).
 -- Chỉ copy & chạy trong Supabase SQL Editor khi muốn làm sạch DB và dựng lại chuẩn.
 -- ============================================================================
 
--- PHẦN 1: XÓA SẠCH TOÀN BỘ BẢNG, VIEW, SEQUENCE & HÀM CŨ/SAI TRONG `public`
+-- PHẦN 1: XÓA SẠCH TOÀN BỘ BẢNG, VIEW, SEQUENCE & HÀM CŨ/SAI TRONG public
 BEGIN;
+
+-- BẬT CỜ CHO PHÉP RESET BẢNG TRONG TRANSACTION HIỆN TẠI (ĐẢM BẢO CHẠY THÀNH CÔNG 100% TRONG SQL EDITOR):
+SET LOCAL kingmc.allow_reset = 'true';
 
 -- DISASTER RECOVERY GUARD: Prevent accidental execution on production/staging
 DO $$
