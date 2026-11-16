@@ -171,6 +171,12 @@ ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS discord_user_id text;
 CREATE INDEX IF NOT EXISTS idx_manager_users_discord_user_id ON public.manager_users(discord_user_id);
 ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS is_trial boolean NOT NULL DEFAULT false;
 ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS trial_bot_id text;
+ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS registration_ip text;
+ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS device_fingerprint text;
+ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS registration_user_agent text;
+CREATE INDEX IF NOT EXISTS idx_users_reg_ip ON public.manager_users(registration_ip);
+CREATE INDEX IF NOT EXISTS idx_users_fingerprint ON public.manager_users(device_fingerprint);
+
 CREATE TABLE IF NOT EXISTS public.manager_assignments (
   worker_id text PRIMARY KEY,
   user_id text NOT NULL,
@@ -3181,13 +3187,16 @@ BEGIN
         note = COALESCE(p_values->>'note', manager_users.note),
         bot_count = GREATEST(COALESCE((p_values->>'bot_count')::integer, manager_users.bot_count, 1), v_worker_count),
         assigned_bot_ids = v_worker_json,
+        registration_ip = COALESCE(p_values->>'registration_ip', manager_users.registration_ip),
+        device_fingerprint = COALESCE(p_values->>'device_fingerprint', manager_users.device_fingerprint),
+        registration_user_agent = COALESCE(p_values->>'registration_user_agent', manager_users.registration_user_agent),
         updated_at = v_now
     WHERE username = v_user.username;
   ELSE
     INSERT INTO public.manager_users (
       id, username, role, status, is_permanent, expires_at, plan_name,
       bot_aliases, allow_account_change, lock_reason, note, bot_count,
-      assigned_bot_ids, updated_at
+      assigned_bot_ids, registration_ip, device_fingerprint, registration_user_agent, updated_at
     ) VALUES (
       v_target_id,
       v_target_username,
@@ -3202,6 +3211,9 @@ BEGIN
       COALESCE(p_values->>'note', ''),
       GREATEST(COALESCE((p_values->>'bot_count')::integer, 1), v_worker_count),
       v_worker_json,
+      NULLIF(p_values->>'registration_ip', ''),
+      NULLIF(p_values->>'device_fingerprint', ''),
+      NULLIF(p_values->>'registration_user_agent', ''),
       v_now
     )
     ON CONFLICT (username) DO UPDATE SET
@@ -3216,6 +3228,9 @@ BEGIN
       note = COALESCE(EXCLUDED.note, manager_users.note),
       bot_count = GREATEST(COALESCE(EXCLUDED.bot_count, manager_users.bot_count, 1), v_worker_count),
       assigned_bot_ids = v_worker_json,
+      registration_ip = COALESCE(EXCLUDED.registration_ip, manager_users.registration_ip),
+      device_fingerprint = COALESCE(EXCLUDED.device_fingerprint, manager_users.device_fingerprint),
+      registration_user_agent = COALESCE(EXCLUDED.registration_user_agent, manager_users.registration_user_agent),
       updated_at = v_now;
   END IF;
 

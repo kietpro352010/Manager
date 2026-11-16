@@ -67,6 +67,12 @@ ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS discord_user_id text;
 CREATE INDEX IF NOT EXISTS idx_manager_users_discord_user_id ON public.manager_users(discord_user_id);
 ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS is_trial boolean NOT NULL DEFAULT false;
 ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS trial_bot_id text;
+ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS registration_ip text;
+ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS device_fingerprint text;
+ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS registration_user_agent text;
+CREATE INDEX IF NOT EXISTS idx_users_reg_ip ON public.manager_users(registration_ip);
+CREATE INDEX IF NOT EXISTS idx_users_fingerprint ON public.manager_users(device_fingerprint);
+
 CREATE TABLE IF NOT EXISTS public.manager_assignments (
   worker_id text PRIMARY KEY,
   user_id text NOT NULL,

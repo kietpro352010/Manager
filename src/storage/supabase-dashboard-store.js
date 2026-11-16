@@ -26,7 +26,8 @@ const BACKUPS = 'manager_backups';
 const ACCESS_FIELDS = {
   userId: 'user_id', role: 'role', status: 'status', isPermanent: 'is_permanent', expiresAt: 'expires_at',
   planName: 'plan_name', note: 'note', username: 'username', createdAt: 'created_at', updatedAt: 'updated_at',
-  createdBy: 'created_by', updatedBy: 'updated_by'
+  createdBy: 'created_by', updatedBy: 'updated_by',
+  registrationIp: 'registration_ip', deviceFingerprint: 'device_fingerprint', registrationUserAgent: 'registration_user_agent'
 };
 
 const KEY_FIELDS = {
@@ -544,6 +545,117 @@ class SupabaseDashboardStore {
     }
   }
 
+  async countUsersByIp(ip) {
+    const cleanIp = String(ip || '').trim();
+    if (!cleanIp) return 0;
+    try {
+      if (this.client) {
+        const { count, error } = await this.client
+          .from(USERS)
+          .select('*', { count: 'exact', head: true })
+          .eq('registration_ip', cleanIp);
+        if (!error && typeof count === 'number') return count;
+      }
+    } catch (_) {}
+    const users = await this.listAccess().catch(() => []);
+    return users.filter(u => String(u.registrationIp || u.registration_ip || '') === cleanIp).length;
+  }
+
+  async countUsersByFingerprint(fingerprint) {
+    const cleanFp = String(fingerprint || '').trim();
+    if (!cleanFp || cleanFp === 'dfp_unknown') return 0;
+    try {
+      if (this.client) {
+        const { count, error } = await this.client
+          .from(USERS)
+          .select('*', { count: 'exact', head: true })
+          .eq('device_fingerprint', cleanFp);
+        if (!error && typeof count === 'number') return count;
+      }
+    } catch (_) {}
+    const users = await this.listAccess().catch(() => []);
+    return users.filter(u => String(u.deviceFingerprint || u.device_fingerprint || '') === cleanFp).length;
+  }
+
+  async isIpWhitelisted(ip) {
+    const cleanIp = String(ip || '').trim();
+    if (!cleanIp) return false;
+    try {
+      if (this.client) {
+        const { data, error } = await this.client
+          .from('manager_ip_whitelist')
+          .select('ip')
+          .eq('ip', cleanIp)
+          .maybeSingle();
+        if (!error && data?.ip) return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  async listIpWhitelist() {
+    try {
+      if (this.client) {
+        const { data, error } = await this.client
+          .from('manager_ip_whitelist')
+          .select('*')
+          .order('created_at', { ascending: false });
+        if (!error && Array.isArray(data)) return data;
+      }
+    } catch (_) {}
+    return [];
+  }
+
+  async addIpWhitelist({ ip, reason = '', createdBy = 'admin' }) {
+    const cleanIp = String(ip || '').trim();
+    if (!cleanIp) throw new Error('Địa chỉ IP không hợp lệ.');
+    if (this.client) {
+      const { error } = await this.client
+        .from('manager_ip_whitelist')
+        .upsert({
+          ip: cleanIp,
+          reason: String(reason || ''),
+          created_by: String(createdBy || 'admin'),
+          created_at: new Date().toISOString()
+        });
+      if (error) throw error;
+    }
+    return { ok: true, ip: cleanIp };
+  }
+
+  async removeIpWhitelist(ip) {
+    const cleanIp = String(ip || '').trim();
+    if (!cleanIp) return false;
+    if (this.client) {
+      const { error } = await this.client
+        .from('manager_ip_whitelist')
+        .delete()
+        .eq('ip', cleanIp);
+      if (error) throw error;
+    }
+    return true;
+  }
+
+  async isRecentAdminIp(ip) {
+    const cleanIp = String(ip || '').trim();
+    if (!cleanIp) return false;
+    if (cleanIp === '127.0.0.1' || cleanIp === '::1' || cleanIp === 'localhost') return true;
+    try {
+      if (this.client) {
+        const { data, error } = await this.client
+          .from('audit_logs')
+          .select('id, actor_id')
+          .eq('ip', cleanIp)
+          .limit(5);
+        if (!error && Array.isArray(data) && data.length > 0) {
+          const hasAdminLog = data.some(d => String(d.actor_id || '').toLowerCase() === 'admin');
+          if (hasAdminLog) return true;
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
+
   async assignedUser(workerId) {
     const cleanId = String(workerId || '').trim().toLowerCase();
     const { data, error } = await this.client.from(ASSIGNMENTS).select('worker_id,user_id,assigned_by,assigned_at').eq('worker_id', cleanId).maybeSingle();
@@ -718,7 +830,7 @@ class SupabaseDashboardStore {
   // --------------------------------------------------------------------------
   // DISCORD ACCOUNT LINKING (P0 / Dual-Engine Synchronization)
   // --------------------------------------------------------------------------
-  async registerTrialUser({ userId, username, password, trialDays = 1, planName = 'FREE TRIAL' }) {
+  async registerTrialUser({ userId, username, password, trialDays = 1, planName = 'FREE TRIAL', registrationIp = null, deviceFingerprint = null, registrationUserAgent = null }) {
     this.invalidateCache();
     const cleanUsername = String(username || '').toLowerCase().trim();
     if (!cleanUsername) {
@@ -738,7 +850,19 @@ class SupabaseDashboardStore {
           p_trial_days: trialDays,
           p_plan_name: planName
         });
-        if (!error && data?.ok) return unwrapRpc(data);
+        if (!error && data?.ok) {
+          const res = unwrapRpc(data);
+          if (registrationIp || deviceFingerprint) {
+            try {
+              await this.client.from(USERS).update({
+                registration_ip: registrationIp,
+                device_fingerprint: deviceFingerprint,
+                registration_user_agent: registrationUserAgent
+              }).eq('username', cleanUsername);
+            } catch (_) {}
+          }
+          return res;
+        }
         if (error) {
           if (error.message && error.message.includes('NO_WORKERS_AVAILABLE')) {
             throw new Error('NO_WORKERS_AVAILABLE: Hiện tại hệ thống không còn Bot rảnh để cấp dùng thử.');
@@ -845,6 +969,9 @@ class SupabaseDashboardStore {
           assignedBotIds: [freeWorkerId],
           botCount: 1,
           note: 'Đăng ký mới (Free Trial 1 Bot)',
+          registrationIp: registrationIp || null,
+          deviceFingerprint: deviceFingerprint || null,
+          registrationUserAgent: registrationUserAgent || null,
           createdAt: new Date().toISOString()
         };
 

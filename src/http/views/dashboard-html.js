@@ -51,23 +51,23 @@ const HTML = String.raw`<!doctype html>
   /* Deep Galaxy — Deep Obsidian Black (#06080e) */
   --bg: #06080e;
   --bg-base: #06080e;
-  --bg-surface: rgba(18, 13, 34, 0.92);
-  --bg-elevated: rgba(24, 18, 44, 0.96);
-  --bg-input: rgba(10, 7, 20, 0.92);
+  --bg-surface: rgba(12, 13, 20, 0.94);
+  --bg-elevated: rgba(18, 19, 28, 0.96);
+  --bg-input: rgba(8, 9, 14, 0.94);
   --bg-gradient:
-    radial-gradient(ellipse at 14% 12%, rgba(124, 58, 237, 0.16) 0%, transparent 48%),
-    radial-gradient(ellipse at 86% 84%, rgba(91, 33, 182, 0.14) 0%, transparent 52%),
-    radial-gradient(circle at 50% 45%, #0e091d 0%, #080511 100%);
+    radial-gradient(ellipse at 14% 12%, rgba(79, 70, 229, 0.09) 0%, transparent 48%),
+    radial-gradient(ellipse at 86% 84%, rgba(59, 130, 246, 0.07) 0%, transparent 52%),
+    radial-gradient(circle at 50% 45%, #080912 0%, #06080e 100%);
 
-  --card: rgba(18, 13, 34, 0.92);
-  --card-hover: rgba(26, 19, 48, 0.96);
-  --card2: rgba(13, 9, 26, 0.90);
-  --sidebar-bg: rgba(13, 9, 26, 0.96);
+  --card: rgba(12, 13, 20, 0.94);
+  --card-hover: rgba(20, 22, 32, 0.96);
+  --card2: rgba(9, 10, 16, 0.92);
+  --sidebar-bg: rgba(8, 9, 14, 0.96);
 
   /* Hairline Borders */
-  --border: rgba(167, 139, 250, 0.22);
-  --border-subtle: rgba(167, 139, 250, 0.16);
-  --border-strong: rgba(167, 139, 250, 0.42);
+  --border: rgba(148, 163, 184, 0.20);
+  --border-subtle: rgba(148, 163, 184, 0.12);
+  --border-strong: rgba(167, 139, 250, 0.35);
   --border-glow: rgba(139, 92, 246, 0.45);
   --border-focus: #8b5cf6;
 
@@ -222,20 +222,20 @@ const HTML = String.raw`<!doctype html>
 
 :root[data-theme="moonlight"] {
   color-scheme: light;
-  --bg: #edf1f7;
-  --bg-base: #edf1f7;
-  --bg-surface: #ffffff;
+  --bg: #e6eaf2;
+  --bg-base: #e6eaf2;
+  --bg-surface: #f1f5fb;
   --bg-elevated: #ffffff;
   --bg-input: #ffffff;
   --bg-gradient:
-    radial-gradient(ellipse at 18% 10%, rgba(99, 102, 241, 0.08) 0%, transparent 50%),
+    radial-gradient(ellipse at 18% 10%, rgba(99, 102, 241, 0.07) 0%, transparent 50%),
     radial-gradient(ellipse at 85% 90%, rgba(14, 165, 233, 0.06) 0%, transparent 55%),
-    linear-gradient(180deg, #f1f5f9 0%, #edf1f7 100%);
+    linear-gradient(180deg, #e9eef6 0%, #dfe5ef 100%);
 
   --card: #ffffff;
   --card-hover: #f8fafc;
-  --card2: #f1f5f9;
-  --sidebar-bg: #f8fafc;
+  --card2: #f1f5fb;
+  --sidebar-bg: #e9eef6;
 
   --border: #cbd5e1;
   --border-subtle: #e2e8f0;
@@ -6263,6 +6263,9 @@ button.primary:hover:not(:disabled),
       <button type="button" role="tab" aria-selected="false" aria-controls="subPanelKeys" class="sub-tab-btn" id="subTabKeys" onclick="switchUserMgmtSubTab('keys')">
         🎟️ Quản Lý Key Gia Hạn (<span id="keyMgmtTotalCount">0</span>)
       </button>
+      <button type="button" role="tab" aria-selected="false" aria-controls="subPanelWhitelist" class="sub-tab-btn" id="subTabWhitelist" onclick="switchUserMgmtSubTab('whitelist')">
+        🛡️ Whitelist IP (<span id="whitelistTotalCount">0</span>)
+      </button>
     </div>
 
     <!-- SUB-PANEL 1: DANH SÁCH USER -->
@@ -6370,6 +6373,43 @@ button.primary:hover:not(:disabled),
           </thead>
           <tbody id="keysFullTableBody">
             <tr><td colspan="6" style="text-align:center;padding:28px;color:var(--muted);">Đang tải danh sách key...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- SUB-PANEL 3: WHITELIST IP (Anti-Bot Multi-Account Exemption) -->
+    <div id="subPanelWhitelist" class="sub-panel hidden" role="tabpanel" aria-labelledby="subTabWhitelist">
+      <div class="mgmt-filter-bar" style="background:rgba(15,23,42,0.6);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:16px;">
+        <div style="font-size:12.5px;color:var(--text);margin-bottom:10px;">
+          🛡️ <strong>Danh sách IP Ngoại lệ (Whitelist):</strong> Các địa chỉ IP trong danh sách này được phép đăng ký không giới hạn số lượng tài khoản (bỏ qua giới hạn tối đa 2 acc/IP). Thích hợp cho phòng máy Net, bạn bè, máy chủ nội bộ hoặc dịch vụ KBot.
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+          <div style="flex:1;min-width:180px;">
+            <label for="newWhitelistIp" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">ĐỊA CHỈ IP:</label>
+            <input type="text" id="newWhitelistIp" placeholder="VD: 103.21.244.2 hoặc 192.168.1.1" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:100%;box-sizing:border-box;" />
+          </div>
+          <div style="flex:2;min-width:220px;">
+            <label for="newWhitelistReason" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">LÝ DO / GHI CHÚ:</label>
+            <input type="text" id="newWhitelistReason" placeholder="VD: KBot Service Host, VIP Net Cafe..." style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:100%;box-sizing:border-box;" />
+          </div>
+          <button type="button" class="primary" onclick="submitAddIpWhitelist()" style="padding:9px 18px;font-weight:750;">+ Thêm Vào Whitelist</button>
+        </div>
+      </div>
+
+      <div class="user-table-wrap">
+        <table class="user-table">
+          <thead>
+            <tr>
+              <th style="min-width:160px;">ĐỊA CHỈ IP</th>
+              <th style="min-width:240px;">LÝ DO / GHI CHÚ</th>
+              <th style="min-width:120px;">NGƯỜI THÊM</th>
+              <th style="min-width:160px;">THỜI GIAN TẠO</th>
+              <th style="min-width:100px;text-align:right;">THAO TÁC</th>
+            </tr>
+          </thead>
+          <tbody id="whitelistFullTableBody">
+            <tr><td colspan="5" style="text-align:center;padding:28px;color:var(--muted);">Đang tải danh sách Whitelist IP...</td></tr>
           </tbody>
         </table>
       </div>
@@ -8685,30 +8725,31 @@ function getOceanEntities() {
   var root = (typeof window !== 'undefined') ? window : (typeof globalThis !== 'undefined' ? globalThis : {});
   if (!root._kbotOceanEntities) {
     var fish = [];
-    var fCount = 6;
+    var fCount = 8;
     for (var f = 0; f < fCount; f++) {
       fish.push({
         x: Math.random() * (root.innerWidth || 800),
         y: Math.random() * (root.innerHeight || 600),
         baseY: Math.random() * (root.innerHeight || 600),
-        speed: 1.5 + Math.random() * 1.5,
+        speed: 1.6 + Math.random() * 1.6,
         freq: 0.03 + Math.random() * 0.04,
-        amp: 10 + Math.random() * 12,
+        amp: 10 + Math.random() * 14,
         phase: Math.random() * Math.PI * 2,
-        size: 8 + Math.random() * 6,
-        color: f % 2 === 0 ? 'rgba(56, 189, 248, 0.85)' : 'rgba(52, 211, 153, 0.85)'
+        size: 10 + Math.random() * 6,
+        color: f % 2 === 0 ? 'rgba(56, 189, 248, 0.92)' : 'rgba(52, 211, 153, 0.90)',
+        tailColor: f % 2 === 0 ? 'rgba(14, 165, 233, 0.85)' : 'rgba(16, 185, 129, 0.85)'
       });
     }
     var jellyfish = [];
-    var jCount = 2;
+    var jCount = 3;
     for (var j = 0; j < jCount; j++) {
       jellyfish.push({
         x: Math.random() * (root.innerWidth || 800),
         y: Math.random() * (root.innerHeight || 600),
-        scale: 1,
+        scale: 0.85 + Math.random() * 0.35,
         pulsePhase: Math.random() * Math.PI * 2,
         tentacles: 5,
-        speed: 0.3 + Math.random() * 0.4
+        speed: 0.35 + Math.random() * 0.35
       });
     }
     root._kbotOceanEntities = { fish: fish, jellyfish: jellyfish };
@@ -8716,6 +8757,75 @@ function getOceanEntities() {
   return root._kbotOceanEntities;
 }
 if (typeof window !== 'undefined') window.getOceanEntities = getOceanEntities;
+
+function drawAquariumFish(ctx, f) {
+  ctx.save();
+  ctx.translate(f.x, f.y);
+  var angle = Math.atan2(Math.cos(f.phase) * ((f.amp || 12) * (f.freq || 0.04)), f.speed || 1.8);
+  ctx.rotate(angle);
+  var sz = f.size || 12;
+
+  // Fish Body (smooth ellipse)
+  ctx.beginPath();
+  ctx.ellipse(0, 0, sz, sz * 0.45, 0, 0, Math.PI * 2);
+  ctx.fillStyle = f.color || 'rgba(56, 189, 248, 0.9)';
+  ctx.fill();
+
+  // Waving Tail Fin
+  var wag = Math.sin(f.phase * 3.2) * (sz * 0.28);
+  ctx.beginPath();
+  ctx.moveTo(-sz * 0.8, 0);
+  ctx.lineTo(-sz * 1.55, -sz * 0.42 + wag);
+  ctx.lineTo(-sz * 1.3, wag * 0.5);
+  ctx.lineTo(-sz * 1.55, sz * 0.42 + wag);
+  ctx.closePath();
+  ctx.fillStyle = f.tailColor || 'rgba(14, 165, 233, 0.8)';
+  ctx.fill();
+
+  // Little Eye
+  ctx.beginPath();
+  ctx.arc(sz * 0.55, -sz * 0.12, Math.max(1, sz * 0.14), 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(sz * 0.6, -sz * 0.12, Math.max(0.6, sz * 0.08), 0, Math.PI * 2);
+  ctx.fillStyle = '#0f172a';
+  ctx.fill();
+
+  ctx.restore();
+}
+window.drawAquariumFish = drawAquariumFish;
+
+function drawAquariumJellyfish(ctx, jf) {
+  ctx.save();
+  ctx.translate(jf.x, jf.y);
+  var scale = jf.scale || 1;
+  var r = 16 * scale;
+
+  // Bell Dome
+  ctx.beginPath();
+  ctx.arc(0, 0, r, Math.PI, 0, false);
+  ctx.quadraticCurveTo(0, r * 0.22, -r, 0);
+  ctx.fillStyle = 'rgba(192, 132, 252, 0.45)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(232, 121, 249, 0.65)';
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+
+  // Trailing Tentacles
+  ctx.strokeStyle = 'rgba(216, 180, 254, 0.45)';
+  ctx.lineWidth = 1;
+  for (var k = -2; k <= 2; k++) {
+    var tx = k * (r * 0.35);
+    var wave = Math.sin(jf.pulsePhase + k * 1.1) * (r * 0.32);
+    ctx.beginPath();
+    ctx.moveTo(tx, r * 0.1);
+    ctx.quadraticCurveTo(tx + wave, r * 0.85, tx - wave * 0.4, r * 1.7);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+window.drawAquariumJellyfish = drawAquariumJellyfish;
 
 function updateFishSchool(fish, w, h, dt) {
   if (!fish || !Array.isArray(fish)) return;
@@ -8753,19 +8863,40 @@ window.updateJellyfish = updateJellyfish;
 function drawCartoonCrescentMoon(ctx, w, h) {
   if (!ctx) return;
   var mx = w ? w * 0.82 : 650;
-  var my = h ? h * 0.18 : 100;
-  var mr = 36;
+  var my = h ? Math.min(h * 0.20, 160) : 120;
+  var mr = Math.min(w || 800, h || 600) * 0.065;
+  if (mr < 28) mr = 28;
+  if (mr > 48) mr = 48;
+
   ctx.save();
+  // Outer celestial aura
   ctx.beginPath();
-  ctx.arc(mx, my, mr * 1.5, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(254, 240, 138, 0.15)';
+  ctx.arc(mx, my, mr * 1.8, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(254, 240, 138, 0.12)';
   ctx.fill();
 
+  // Crescent shape
   ctx.beginPath();
-  ctx.arc(mx, my, mr, -0.4 * Math.PI, 0.7 * Math.PI, false);
-  ctx.bezierCurveTo(mx + mr * 0.3, my + mr * 0.5, mx + mr * 0.3, my - mr * 0.5, mx + mr * Math.cos(-0.4 * Math.PI), my + mr * Math.sin(-0.4 * Math.PI));
+  ctx.arc(mx, my, mr, -0.42 * Math.PI, 0.62 * Math.PI, false);
+  ctx.bezierCurveTo(mx + mr * 0.32, my + mr * 0.48, mx + mr * 0.32, my - mr * 0.48, mx + mr * Math.cos(-0.42 * Math.PI), my + mr * Math.sin(-0.42 * Math.PI));
   ctx.fillStyle = '#fef08a';
   ctx.fill();
+
+  // Cute cartoon sleeping face on crescent
+  var eyeX = mx - mr * 0.15;
+  var eyeY = my - mr * 0.10;
+  ctx.strokeStyle = '#854d0e';
+  ctx.lineWidth = 1.6;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.arc(eyeX, eyeY, 3.2, Math.PI * 0.9, Math.PI * 2.1, false);
+  ctx.stroke();
+  // Cute blush
+  ctx.fillStyle = 'rgba(248, 113, 113, 0.45)';
+  ctx.beginPath();
+  ctx.arc(eyeX - 3, eyeY + 6, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+
   ctx.restore();
 }
 window.drawCartoonCrescentMoon = drawCartoonCrescentMoon;
@@ -8844,23 +8975,23 @@ window.drawSparkleStar = drawSparkleStar;
 
   var stars = [];
   var shootingStars = [];
-  var starCount = isMobile ? 40 : 100;
+  var starCount = isMobile ? 60 : 100;
 function initCosmicStars() {
   stars = [];
-  starCount = isMobile ? 40 : 100;
+  starCount = isMobile ? 60 : 100;
   for (var i = 0; i < starCount; i++) {
     stars.push({
       x: Math.random() * (w || 1920),
       y: Math.random() * (h || 1080),
-      z: Math.random() * 1.8 + 0.4,
-      r: Math.random() * 1.8 + 0.6,
-      a: Math.random() * 0.5 + 0.3,
+      z: Math.random() * 1.6 + 0.4,
+      r: Math.random() * 0.85 + 0.35,
+      a: Math.random() * 0.6 + 0.3,
       da: (Math.random() * 0.008 + 0.003) * (Math.random() < 0.5 ? 1 : -1),
-      rgb: Math.random() < 0.6 ? '237,233,254' : '196,181,253',
+      rgb: Math.random() < 0.7 ? '248,250,252' : (Math.random() < 0.5 ? '226,232,240' : '219,234,254'),
       seed: Math.random() * 100,
       phase: Math.random() * Math.PI * 2,
       trail: [],
-      isAnchor: i < 7
+      isAnchor: i < 8
     });
   }
 }
@@ -8946,24 +9077,12 @@ function initCosmicStars() {
 
       // Draw marine life: fish school
       for (var fIdx = 0; fIdx < ocean.fish.length; fIdx++) {
-        var fi = ocean.fish[fIdx];
-        ctx.save();
-        ctx.fillStyle = fi.color || 'rgba(56, 189, 248, 0.85)';
-        ctx.beginPath();
-        ctx.arc(fi.x, fi.y, (fi.size || 8) * 0.5, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
+        drawAquariumFish(ctx, ocean.fish[fIdx]);
       }
 
       // Draw jellyfish
       for (var jIdx = 0; jIdx < ocean.jellyfish.length; jIdx++) {
-        var jf = ocean.jellyfish[jIdx];
-        ctx.save();
-        ctx.fillStyle = 'rgba(167, 139, 250, 0.45)';
-        ctx.beginPath();
-        ctx.arc(jf.x, jf.y, 14 * jf.scale, Math.PI, 0, false);
-        ctx.fill();
-        ctx.restore();
+        drawAquariumJellyfish(ctx, ocean.jellyfish[jIdx]);
       }
 
       var tOcean = (timestamp || Date.now()) * 0.0006;
@@ -9156,11 +9275,12 @@ function initCosmicStars() {
       var maxDist = isMobile ? 65 : 95;
       var maxDistSq = maxDist * maxDist;
       ctx.lineWidth = 0.8;
-      ctx.strokeStyle = 'rgba(196, 181, 253, 0.12)';
+      ctx.strokeStyle = 'rgba(226, 232, 240, 0.10)';
       ctx.beginPath();
-      for (var i = 0; i < stars.length; i++) {
+      var connectLimit = Math.min(stars.length, isMobile ? 22 : 36);
+      for (var i = 0; i < connectLimit; i++) {
         var s1 = stars[i];
-        for (var j = i + 1; j < stars.length; j++) {
+        for (var j = i + 1; j < connectLimit; j++) {
           var s2 = stars[j];
           var dx = s1.x - s2.x;
           var dy = s1.y - s2.y;
@@ -10449,28 +10569,119 @@ async function redeemKeyFromExpiredOverlay() {
 }
 window.redeemKeyFromExpiredOverlay = redeemKeyFromExpiredOverlay;
 
-// Chuyển Sub-Tab giữa User List và Key List trên trang Quản lý User
+// Chuyển Sub-Tab giữa User List, Key List và Whitelist IP trên trang Quản lý User
 function switchUserMgmtSubTab(subTab) {
   const panelUsers = document.getElementById('subPanelUsers');
   const panelKeys = document.getElementById('subPanelKeys');
+  const panelWhitelist = document.getElementById('subPanelWhitelist');
   const tabUsers = document.getElementById('subTabUsers');
   const tabKeys = document.getElementById('subTabKeys');
+  const tabWhitelist = document.getElementById('subTabWhitelist');
+
+  if (panelUsers) panelUsers.classList.add('hidden');
+  if (panelKeys) panelKeys.classList.add('hidden');
+  if (panelWhitelist) panelWhitelist.classList.add('hidden');
+  if (tabUsers) { tabUsers.classList.remove('active'); tabUsers.setAttribute('aria-selected', 'false'); }
+  if (tabKeys) { tabKeys.classList.remove('active'); tabKeys.setAttribute('aria-selected', 'false'); }
+  if (tabWhitelist) { tabWhitelist.classList.remove('active'); tabWhitelist.setAttribute('aria-selected', 'false'); }
 
   if (subTab === 'keys') {
-    if (panelUsers) panelUsers.classList.add('hidden');
     if (panelKeys) panelKeys.classList.remove('hidden');
     if (tabKeys) { tabKeys.classList.add('active'); tabKeys.setAttribute('aria-selected', 'true'); }
-    if (tabUsers) { tabUsers.classList.remove('active'); tabUsers.setAttribute('aria-selected', 'false'); }
     refreshKeysTable();
+  } else if (subTab === 'whitelist') {
+    if (panelWhitelist) panelWhitelist.classList.remove('hidden');
+    if (tabWhitelist) { tabWhitelist.classList.add('active'); tabWhitelist.setAttribute('aria-selected', 'true'); }
+    refreshWhitelistTable();
   } else {
     if (panelUsers) panelUsers.classList.remove('hidden');
-    if (panelKeys) panelKeys.classList.add('hidden');
     if (tabUsers) { tabUsers.classList.add('active'); tabUsers.setAttribute('aria-selected', 'true'); }
-    if (tabKeys) { tabKeys.classList.remove('active'); tabKeys.setAttribute('aria-selected', 'false'); }
     refreshUserManagementPage();
   }
 }
 window.switchUserMgmtSubTab = switchUserMgmtSubTab;
+
+async function refreshWhitelistTable() {
+  const tbody = document.getElementById('whitelistFullTableBody');
+  const countEl = document.getElementById('whitelistTotalCount');
+  if (tbody) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--muted);">Đang tải danh sách Whitelist...</td></tr>';
+  }
+  try {
+    const res = await requestJson('/api/admin/ip-whitelist');
+    if (!res.ok) throw new Error(res.data?.error || 'Không thể tải danh sách Whitelist.');
+    const list = Array.isArray(res.data?.whitelist) ? res.data.whitelist : [];
+    if (countEl) countEl.textContent = list.length;
+
+    if (!list.length) {
+      if (tbody) tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:32px;color:var(--muted);">Chưa có IP nào trong Whitelist. Thêm IP ở trên để bỏ qua giới hạn tạo acc.</td></tr>';
+      return;
+    }
+
+    if (tbody) {
+      tbody.innerHTML = list.map(item => {
+        const ipEsc = escapeHtml(item.ip);
+        const reasonEsc = escapeHtml(item.reason || '—');
+        const byEsc = escapeHtml(item.created_by || 'admin');
+        const timeEsc = item.created_at ? new Date(item.created_at).toLocaleString('vi-VN') : '—';
+        return '<tr>' +
+          '<td><strong style="font-family:var(--font-mono);color:#38bdf8;">' + ipEsc + '</strong></td>' +
+          '<td>' + reasonEsc + '</td>' +
+          '<td><span class="chip" style="font-size:11px;">' + byEsc + '</span></td>' +
+          '<td style="font-size:12px;color:var(--muted);">' + timeEsc + '</td>' +
+          '<td style="text-align:right;">' +
+            '<button type="button" class="small danger" onclick="deleteIpWhitelist(\'' + ipEsc + '\')" style="padding:4px 8px;font-size:11px;">🗑 Xóa</button>' +
+          '</td>' +
+        '</tr>';
+      }).join('');
+    }
+  } catch (err) {
+    if (tbody) tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--red);padding:24px;">Lỗi: ' + escapeHtml(err.message) + '</td></tr>';
+  }
+}
+window.refreshWhitelistTable = refreshWhitelistTable;
+
+async function submitAddIpWhitelist() {
+  const ipInput = document.getElementById('newWhitelistIp');
+  const reasonInput = document.getElementById('newWhitelistReason');
+  const ip = String(ipInput?.value || '').trim();
+  const reason = String(reasonInput?.value || '').trim();
+
+  if (!ip) {
+    showToast('Vui lòng nhập địa chỉ IP cần thêm vào Whitelist.', 'warning');
+    return;
+  }
+
+  try {
+    const res = await requestJson('/api/admin/ip-whitelist', {
+      method: 'POST',
+      body: JSON.stringify({ ip, reason })
+    });
+    if (!res.ok) throw new Error(res.data?.error || 'Thêm IP thất bại.');
+    showToast(res.data?.message || 'Đã thêm IP vào Whitelist thành công!', 'success');
+    if (ipInput) ipInput.value = '';
+    if (reasonInput) reasonInput.value = '';
+    refreshWhitelistTable();
+  } catch (err) {
+    showToast('Lỗi: ' + err.message, 'error');
+  }
+}
+window.submitAddIpWhitelist = submitAddIpWhitelist;
+
+async function deleteIpWhitelist(ip) {
+  if (!confirm('Bạn có chắc chắn muốn xóa IP ' + ip + ' khỏi Whitelist?')) return;
+  try {
+    const res = await requestJson('/api/admin/ip-whitelist/' + encodeURIComponent(ip), {
+      method: 'DELETE'
+    });
+    if (!res.ok) throw new Error(res.data?.error || 'Xóa IP thất bại.');
+    showToast(res.data?.message || 'Đã xóa IP khỏi Whitelist.', 'success');
+    refreshWhitelistTable();
+  } catch (err) {
+    showToast('Lỗi: ' + err.message, 'error');
+  }
+}
+window.deleteIpWhitelist = deleteIpWhitelist;
 
 async function openUserManagementModal() {
   if (currentUser?.role !== 'admin') {
@@ -10682,6 +10893,12 @@ function renderUserTable() {
       '</div>' +
       (u.note ? '<div style="font-size:11px;color:var(--muted);margin-top:2px;">📝 ' + escapeHtml(u.note) + '</div>' : '') +
       (u.planName ? '<div style="font-size:11px;color:#38bdf8;margin-top:1px;font-weight:700;">' + escapeHtml(u.planName) + '</div>' : '') +
+      (u.registrationIp || u.registration_ip
+        ? '<div style="font-size:10.5px;color:var(--muted);margin-top:2px;">🌐 IP: <span style="font-family:var(--font-mono);color:#38bdf8;">' + escapeHtml(u.registrationIp || u.registration_ip) + '</span></div>'
+        : '') +
+      (u.deviceFingerprint || u.device_fingerprint
+        ? '<div style="font-size:10px;color:var(--muted);margin-top:1px;">📱 FP: <span style="font-family:var(--font-mono);color:#a78bfa;">' + escapeHtml(u.deviceFingerprint || u.device_fingerprint) + '</span></div>'
+        : '') +
     '</div>';
 
     // Cột 2: Mật khẩu (Peek Toggle)

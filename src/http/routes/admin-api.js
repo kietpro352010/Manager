@@ -584,6 +584,44 @@ function createAdminApi({
     }
   });
 
+  // 4b. IP WHITELIST MANAGEMENT (Anti-bot multi-account exemption)
+  router.get('/ip-whitelist', async (_req, res) => {
+    try {
+      const list = typeof store.listIpWhitelist === 'function' ? await store.listIpWhitelist() : [];
+      return res.json({ ok: true, whitelist: list });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.post('/ip-whitelist', async (req, res) => {
+    try {
+      const { ip, reason } = req.body || {};
+      const cleanIp = String(ip || '').trim();
+      if (!cleanIp) {
+        return res.status(400).json({ ok: false, error: 'Vui lòng cung cấp địa chỉ IP.' });
+      }
+      if (typeof store.addIpWhitelist === 'function') {
+        await store.addIpWhitelist({ ip: cleanIp, reason, createdBy: req.managerAuthSession?.username || 'admin' });
+      }
+      return res.json({ ok: true, message: `Đã thêm IP ${cleanIp} vào Whitelist thành công.` });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.delete('/ip-whitelist/:ip', async (req, res) => {
+    try {
+      const ip = req.params?.ip;
+      if (typeof store.removeIpWhitelist === 'function') {
+        await store.removeIpWhitelist(ip);
+      }
+      return res.json({ ok: true, message: `Đã xóa IP ${ip} khỏi Whitelist.` });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
   // 5. SUPABASE CLOUD MANAGEMENT
   router.get('/supabase/status', async (_req, res) => {
     const isEnabled = Boolean(store.adapter && store.adapter.isEnabled());

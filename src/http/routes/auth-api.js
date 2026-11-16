@@ -12,6 +12,12 @@ const {
   timingSafeStringEquals
 } = require('../../utils/secrets');
 
+const {
+  generateCaptcha,
+  verifyCaptchaToken,
+  resolveClientIp
+} = require('../../services/captcha');
+
 function hashSessionToken(token) {
   if (!token || typeof token !== 'string') return '';
   return crypto.createHash('sha256').update(token.trim()).digest('hex');
@@ -118,14 +124,52 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
     }
   }, 5 * 60 * 1000).unref();
 
+  // 0. CAPTCHA
+  router.get('/captcha', (_req, res) => {
+    try {
+      const captchaSecret = String(config.captchaSecret || config.sessionSecret || '').trim() || undefined;
+      const captcha = generateCaptcha(captchaSecret);
+      return res.json(captcha);
+    } catch (err) {
+      logger?.error?.('Failed to generate captcha', { error: err.message });
+      return res.status(500).json({ ok: false, error: 'Không thể tạo mã xác thực Captcha.' });
+    }
+  });
+
   // 1. REGISTER
   router.post('/register', async (req, res) => {
     try {
-      const { username, password, confirmPassword, key: rawKey } = req.body || {};
+      const {
+        username,
+        password,
+        confirmPassword,
+        key: rawKey,
+        licenseKey: rawLicenseKey,
+        captchaToken,
+        captchaAnswer,
+        deviceFingerprint: rawFingerprint
+      } = req.body || {};
       const cleanUsername = String(username || '').trim();
       const cleanPassword = String(password || '');
       const cleanConfirm = String(confirmPassword || '');
-      const providedKey = String(rawKey || '').trim();
+      const providedKey = String(rawKey || rawLicenseKey || '').trim();
+      const deviceFingerprint = String(rawFingerprint || '').trim();
+
+      // Validate Captcha
+      const cleanCaptchaToken = String(captchaToken || '').trim();
+      const cleanCaptchaAnswer = String(captchaAnswer || '').trim();
+      const isCaptchaEnforced = config?.captchaRequired === true;
+
+      if (cleanCaptchaToken || cleanCaptchaAnswer || isCaptchaEnforced) {
+        if (!cleanCaptchaToken || !cleanCaptchaAnswer) {
+          return res.status(400).json({ ok: false, error: 'Vui lòng nhập kết quả mã xác thực Captcha.' });
+        }
+        const captchaSecret = String(config.captchaSecret || config.sessionSecret || '').trim() || undefined;
+        const captchaRes = verifyCaptchaToken(cleanCaptchaToken, cleanCaptchaAnswer, captchaSecret);
+        if (!captchaRes.valid) {
+          return res.status(400).json({ ok: false, error: captchaRes.error || 'Mã xác thực Captcha không chính xác hoặc đã hết hạn.' });
+        }
+      }
 
       if (!/^[a-zA-Z0-9_]{3,32}$/.test(cleanUsername)) {
         return res.status(400).json({ ok: false, error: 'Tên đăng nhập phải từ 3 đến 32 ký tự, chỉ gồm chữ, số và dấu gạch dưới.' });
@@ -146,7 +190,54 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         return res.status(409).json({ ok: false, error: 'Tên đăng nhập này đã có người sử dụng.' });
       }
 
-      const clientIp = req.ip || req.socket?.remoteAddress || '127.0.0.1';
+      const clientIp = resolveClientIp(req);
+
+      // Check Multi-Account Limits & Whitelist Exemptions
+      let isExempt = false;
+      if (req.managerAuthSession?.role === 'admin') {
+        isExempt = true;
+      }
+      if (!isExempt && typeof store.isIpWhitelisted === 'function') {
+        isExempt = await store.isIpWhitelisted(clientIp).catch(() => false);
+      }
+      if (!isExempt && typeof store.isRecentAdminIp === 'function') {
+        isExempt = await store.isRecentAdminIp(clientIp).catch(() => false);
+      }
+      if (!isExempt && providedKey && typeof store.getKey === 'function') {
+        try {
+          const keyRow = await store.getKey(providedKey);
+          if (keyRow && (keyRow.status === 'active' || keyRow.status === 'UNUSED' || !keyRow.status)) {
+            isExempt = true;
+          }
+        } catch (_) {}
+      }
+
+      if (!isExempt) {
+        // Enforce max 2 accounts per IP
+        if (typeof store.countUsersByIp === 'function') {
+          const ipCount = await store.countUsersByIp(clientIp).catch(() => 0);
+          if (ipCount >= 2) {
+            logger?.warn?.('MULTI_ACCOUNT_BLOCKED_BY_IP', { ip: clientIp, username: cleanUsername });
+            return res.status(403).json({
+              ok: false,
+              error: 'Địa chỉ IP này đã đạt giới hạn tối đa 2 tài khoản. Vui lòng liên hệ Quản trị viên để được hỗ trợ.'
+            });
+          }
+        }
+
+        // Enforce max 2 accounts per device fingerprint
+        if (deviceFingerprint && deviceFingerprint !== 'dfp_unknown' && typeof store.countUsersByFingerprint === 'function') {
+          const fpCount = await store.countUsersByFingerprint(deviceFingerprint).catch(() => 0);
+          if (fpCount >= 2) {
+            logger?.warn?.('MULTI_ACCOUNT_BLOCKED_BY_FINGERPRINT', { fingerprint: deviceFingerprint, ip: clientIp, username: cleanUsername });
+            return res.status(403).json({
+              ok: false,
+              error: 'Thiết bị này đã đạt giới hạn tối đa 2 tài khoản. Vui lòng liên hệ Quản trị viên để được hỗ trợ.'
+            });
+          }
+        }
+      }
+
       const userId = `usr_${crypto.randomUUID().slice(0, 12)}`;
       const hashedPassword = hashPassword(cleanPassword);
 
@@ -166,8 +257,6 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       } catch (_) {}
 
       // Register user:
-      // If trial is enabled and no key is provided, attempt atomic Free Trial allocation.
-      // If trial is disabled or no workers are available, create account without bot (unassigned) cleanly.
       let registered = null;
       const shouldAttemptTrial = isTrialEnabled && !providedKey;
 
@@ -178,7 +267,10 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
             username: cleanUsername,
             password: hashedPassword,
             trialDays,
-            planName: 'FREE TRIAL'
+            planName: 'FREE TRIAL',
+            registrationIp: clientIp,
+            deviceFingerprint,
+            registrationUserAgent: req.headers['user-agent']
           });
         } catch (regErr) {
           if (regErr.message && regErr.message.includes('NO_WORKERS_AVAILABLE')) {
@@ -209,10 +301,23 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
           assignedBotIds: [],
           botCount: 0,
           note: 'Đăng ký tài khoản Web',
+          registrationIp: clientIp,
+          deviceFingerprint,
+          registrationUserAgent: req.headers['user-agent'],
           createdAt: new Date().toISOString()
         };
         await store.setAccess(userId, newUser, 'system-register');
         registered = { ok: true, userId, username: cleanUsername, planName: 'Chưa kích hoạt', workerId: null };
+      } else {
+        // Ensure registration IP and fingerprint are saved
+        try {
+          await store.setAccess(userId, {
+            ...registered,
+            registrationIp: clientIp,
+            deviceFingerprint,
+            registrationUserAgent: req.headers['user-agent']
+          }, 'system-register');
+        } catch (_) {}
       }
 
       let assignedBotIds = registered?.workerId ? [registered.workerId] : [];
@@ -290,7 +395,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
           action: 'AUTH_REGISTER',
           targetId: userId,
           actorId: cleanUsername,
-          details: { ip: clientIp, username: cleanUsername }
+          details: { ip: clientIp, username: cleanUsername, deviceFingerprint }
         }).catch(() => {});
       }
 

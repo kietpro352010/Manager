@@ -41,17 +41,17 @@ const PUBLIC_LOGIN_HTML = `<!doctype html>
 :root,
 :root[data-theme="deep-galaxy"] {
   color-scheme: dark;
-  --bg-base: #080511;
-  --bg-elevated: #110b22;
-  --bg-glow-1: rgba(124, 58, 237, 0.24);
-  --bg-glow-2: rgba(91, 33, 182, 0.18);
-  --bg-glow-3: rgba(56, 189, 248, 0.08);
-  --surface-card: rgba(19, 14, 36, 0.90);
-  --surface-panel: rgba(24, 18, 46, 0.86);
-  --surface-soft: rgba(34, 26, 62, 0.72);
-  --surface-input: rgba(10, 7, 20, 0.92);
-  --border-subtle: rgba(167, 139, 250, 0.22);
-  --border-strong: rgba(167, 139, 250, 0.42);
+  --bg-base: #06080e;
+  --bg-elevated: #0a0b12;
+  --bg-glow-1: rgba(79, 70, 229, 0.12);
+  --bg-glow-2: rgba(59, 130, 246, 0.08);
+  --bg-glow-3: rgba(148, 163, 184, 0.06);
+  --surface-card: rgba(14, 15, 22, 0.94);
+  --surface-panel: rgba(18, 19, 28, 0.90);
+  --surface-soft: rgba(26, 28, 42, 0.72);
+  --surface-input: rgba(9, 10, 16, 0.94);
+  --border-subtle: rgba(148, 163, 184, 0.20);
+  --border-strong: rgba(167, 139, 250, 0.35);
   --text-primary: #f5f3ff;
   --text-secondary: #cbc4e6;
   --text-muted: #9b92bf;
@@ -158,14 +158,14 @@ const PUBLIC_LOGIN_HTML = `<!doctype html>
 
 :root[data-theme="moonlight"] {
   color-scheme: light;
-  --bg-base: #edf1f7;
-  --bg-elevated: #ffffff;
+  --bg-base: #e6eaf2;
+  --bg-elevated: #f1f5fb;
   --bg-glow-1: rgba(99, 102, 241, 0.08);
   --bg-glow-2: rgba(14, 165, 233, 0.06);
   --bg-glow-3: rgba(148, 163, 184, 0.05);
   --surface-card: #ffffff;
   --surface-panel: #ffffff;
-  --surface-soft: #f1f5f9;
+  --surface-soft: #e2e8f0;
   --surface-input: #ffffff;
   --border-subtle: #cbd5e1;
   --border-strong: #94a3b8;
@@ -1730,6 +1730,40 @@ function switchPublicAuthTab(tab) {
   }
 }
 
+function getDeviceFingerprint() {
+  try {
+    const parts = [
+      screen.width || 0,
+      screen.height || 0,
+      screen.colorDepth || 0,
+      navigator.hardwareConcurrency || 1,
+      navigator.languages ? navigator.languages.join(',') : (navigator.language || ''),
+      Intl.DateTimeFormat().resolvedOptions().timeZone || ''
+    ];
+    try {
+      const c = document.createElement('canvas');
+      c.width = 100;
+      c.height = 30;
+      const ctx = c.getContext('2d');
+      if (ctx) {
+        ctx.textBaseline = 'top';
+        ctx.font = '12px sans-serif';
+        ctx.fillText('kbot_fp_seed', 2, 2);
+        parts.push(c.toDataURL().slice(-30));
+      }
+    } catch (_) {}
+    const raw = parts.join(';');
+    let h = 2166136261;
+    for (let i = 0; i < raw.length; i++) {
+      h ^= raw.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return 'dfp_' + (h >>> 0).toString(16);
+  } catch (_) {
+    return 'dfp_unknown';
+  }
+}
+
 async function refreshRegisterCaptcha() {
   const container = document.getElementById('regCaptchaImgContainer');
   const tokenInput = document.getElementById('regCaptchaToken');
@@ -1937,7 +1971,8 @@ async function handlePublicRegisterSubmit(e) {
         key: k,
         licenseKey: k,
         captchaToken: cToken,
-        captchaAnswer: cAnswer
+        captchaAnswer: cAnswer,
+        deviceFingerprint: getDeviceFingerprint()
       })
     });
     const data = await res.json().catch(() => ({}));
@@ -2170,21 +2205,21 @@ async function loadPublicSystemInfo() {
   resize();
 
   const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '') || (window.innerWidth <= 768);
-  const starCount = isMobile ? 40 : 100;
+  const starCount = isMobile ? 60 : 100;
   const stars = [];
   for (let i = 0; i < starCount; i++) {
     stars.push({
       x: Math.random() * w,
       y: Math.random() * h,
-      z: Math.random() * 1.8 + 0.4,
-      r: Math.random() * 1.8 + 0.6,
-      a: Math.random() * 0.5 + 0.3,
+      z: Math.random() * 1.6 + 0.4,
+      r: Math.random() * 0.85 + 0.35,
+      a: Math.random() * 0.6 + 0.3,
       da: (Math.random() * 0.008 + 0.003) * (Math.random() < 0.5 ? 1 : -1),
-      rgb: Math.random() < 0.6 ? '237,233,254' : '196,181,253',
+      rgb: Math.random() < 0.7 ? '248,250,252' : (Math.random() < 0.5 ? '226,232,240' : '219,234,254'),
       seed: Math.random() * 100,
       phase: Math.random() * Math.PI * 2,
       trail: [],
-      isAnchor: i < 7
+      isAnchor: i < 8
     });
   }
   const shootingStars = [];
@@ -2254,6 +2289,68 @@ async function loadPublicSystemInfo() {
     }
   }
 
+  function drawPublicAquariumFish(cCtx, f) {
+    cCtx.save();
+    cCtx.translate(f.x, f.y);
+    const angle = Math.atan2(Math.cos(f.phase) * ((f.amp || 12) * (f.freq || 0.04)), f.speed || 1.8);
+    cCtx.rotate(angle);
+    const sz = f.size || 12;
+
+    cCtx.beginPath();
+    cCtx.ellipse(0, 0, sz, sz * 0.45, 0, 0, Math.PI * 2);
+    cCtx.fillStyle = f.color || 'rgba(56, 189, 248, 0.9)';
+    cCtx.fill();
+
+    const wag = Math.sin(f.phase * 3.2) * (sz * 0.28);
+    cCtx.beginPath();
+    cCtx.moveTo(-sz * 0.8, 0);
+    cCtx.lineTo(-sz * 1.55, -sz * 0.42 + wag);
+    cCtx.lineTo(-sz * 1.3, wag * 0.5);
+    cCtx.lineTo(-sz * 1.55, sz * 0.42 + wag);
+    cCtx.closePath();
+    cCtx.fillStyle = f.tailColor || 'rgba(14, 165, 233, 0.8)';
+    cCtx.fill();
+
+    cCtx.beginPath();
+    cCtx.arc(sz * 0.55, -sz * 0.12, Math.max(1, sz * 0.14), 0, Math.PI * 2);
+    cCtx.fillStyle = '#ffffff';
+    cCtx.fill();
+    cCtx.beginPath();
+    cCtx.arc(sz * 0.6, -sz * 0.12, Math.max(0.6, sz * 0.08), 0, Math.PI * 2);
+    cCtx.fillStyle = '#0f172a';
+    cCtx.fill();
+
+    cCtx.restore();
+  }
+
+  function drawPublicAquariumJellyfish(cCtx, jf) {
+    cCtx.save();
+    cCtx.translate(jf.x, jf.y);
+    const scale = jf.scale || 1;
+    const r = 16 * scale;
+
+    cCtx.beginPath();
+    cCtx.arc(0, 0, r, Math.PI, 0, false);
+    cCtx.quadraticCurveTo(0, r * 0.22, -r, 0);
+    cCtx.fillStyle = 'rgba(192, 132, 252, 0.45)';
+    cCtx.fill();
+    cCtx.strokeStyle = 'rgba(232, 121, 249, 0.65)';
+    cCtx.lineWidth = 1.2;
+    cCtx.stroke();
+
+    cCtx.strokeStyle = 'rgba(216, 180, 254, 0.45)';
+    cCtx.lineWidth = 1;
+    for (let k = -2; k <= 2; k++) {
+      const tx = k * (r * 0.35);
+      const wave = Math.sin(jf.pulsePhase + k * 1.1) * (r * 0.32);
+      cCtx.beginPath();
+      cCtx.moveTo(tx, r * 0.1);
+      cCtx.quadraticCurveTo(tx + wave, r * 0.85, tx - wave * 0.4, r * 1.7);
+      cCtx.stroke();
+    }
+    cCtx.restore();
+  }
+
   function drawCartoonCrescentMoon(cCtx, width, height) {
     if (!cCtx) return;
     cCtx.save();
@@ -2271,6 +2368,21 @@ async function loadPublicSystemInfo() {
     cCtx.bezierCurveTo(mx + mr * 0.3, my + mr * 0.5, mx + mr * 0.3, my - mr * 0.5, mx + mr * Math.cos(-0.4 * Math.PI), my + mr * Math.sin(-0.4 * Math.PI));
     cCtx.fillStyle = '#fef08a';
     cCtx.fill();
+
+    const eyeX = mx - mr * 0.15;
+    const eyeY = my - mr * 0.10;
+    cCtx.strokeStyle = '#854d0e';
+    cCtx.lineWidth = 1.6;
+    cCtx.lineCap = 'round';
+    cCtx.beginPath();
+    cCtx.arc(eyeX, eyeY, 3.2, Math.PI * 0.9, Math.PI * 2.1, false);
+    cCtx.stroke();
+
+    cCtx.fillStyle = 'rgba(248, 113, 113, 0.45)';
+    cCtx.beginPath();
+    cCtx.arc(eyeX - 3, eyeY + 6, 2.5, 0, Math.PI * 2);
+    cCtx.fill();
+
     cCtx.restore();
   }
 
@@ -2355,24 +2467,12 @@ async function loadPublicSystemInfo() {
 
       // Draw marine life: fish school
       for (let fIdx = 0; fIdx < ocean.fish.length; fIdx++) {
-        const fi = ocean.fish[fIdx];
-        ctx.save();
-        ctx.fillStyle = fi.color || 'rgba(56, 189, 248, 0.85)';
-        ctx.beginPath();
-        ctx.arc(fi.x, fi.y, (fi.size || 8) * 0.5, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
+        drawPublicAquariumFish(ctx, ocean.fish[fIdx]);
       }
 
       // Draw jellyfish
       for (let jIdx = 0; jIdx < ocean.jellyfish.length; jIdx++) {
-        const jf = ocean.jellyfish[jIdx];
-        ctx.save();
-        ctx.fillStyle = 'rgba(167, 139, 250, 0.45)';
-        ctx.beginPath();
-        ctx.arc(jf.x, jf.y, 14 * jf.scale, Math.PI, 0, false);
-        ctx.fill();
-        ctx.restore();
+        drawPublicAquariumJellyfish(ctx, ocean.jellyfish[jIdx]);
       }
 
       const tOcean = (timestamp || Date.now()) * 0.0006;
@@ -2504,10 +2604,12 @@ async function loadPublicSystemInfo() {
       const maxDist = isMobile ? 65 : 95;
       const maxDistSq = maxDist * maxDist;
       ctx.lineWidth = 0.8;
+      ctx.strokeStyle = 'rgba(226, 232, 240, 0.10)';
       ctx.beginPath();
-      for (let i = 0; i < stars.length; i++) {
+      const connectLimit = Math.min(stars.length, isMobile ? 22 : 36);
+      for (let i = 0; i < connectLimit; i++) {
         const s1 = stars[i];
-        for (let j = i + 1; j < stars.length; j++) {
+        for (let j = i + 1; j < connectLimit; j++) {
           const s2 = stars[j];
           const dx = s1.x - s2.x;
           const dy = s1.y - s2.y;
@@ -2518,7 +2620,6 @@ async function loadPublicSystemInfo() {
           }
         }
       }
-      ctx.strokeStyle = 'rgba(196, 181, 253, 0.12)';
       ctx.stroke();
 
       for (let i = 0; i < stars.length; i++) {
