@@ -198,7 +198,7 @@ class WorkerRegistry {
     };
 
     await this.store.create(record);
-    this.secretCache.set(id, secret);
+    this.secretCache.set(id, { secret, enabled: true, cachedAt: Date.now() });
     return { worker: this.publicView(record), secret };
   }
 

@@ -125,8 +125,18 @@ function createAdminApi({
       const user = await store.getUser(id);
       if (!user) return res.status(404).json({ ok: false, error: 'Không tìm thấy người dùng.' });
 
+      if (String(user.password || '').startsWith('scrypt$')) {
+        return res.status(409).json({
+          ok: false,
+          code: 'PASSWORD_NOT_REVERSIBLE',
+          error: 'Mật khẩu đã được băm một chiều nên không thể xem lại. Hãy đặt lại mật khẩu nếu cần.'
+        });
+      }
       const decrypted = decryptUserPassword(user.password);
-      return res.json({ ok: true, password: decrypted || '(Không thể giải mã hoặc mật khẩu trống)' });
+      if (decrypted === null) {
+        return res.status(409).json({ ok: false, code: 'PASSWORD_NOT_REVERSIBLE', error: 'Không thể giải mã mật khẩu đã lưu.' });
+      }
+      return res.json({ ok: true, password: decrypted || '' });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }
@@ -985,13 +995,15 @@ function createAdminApi({
   router.post('/admin/credentials', async (req, res) => {
     try {
       const { password } = req.body || {};
-      if (!password) return res.status(400).json({ ok: false, error: 'Mật khẩu mới không được để trống.' });
-      const hashed = hashAdminPassword(password);
-      if (typeof registry.setAdminPassword === 'function') {
-        registry.setAdminPassword(hashed);
+      if (typeof password !== 'string' || password.length < 6 || password.length > 256) {
+        return res.status(400).json({ ok: false, error: 'Mật khẩu phải dài từ 6 đến 256 ký tự.' });
       }
+      const hashed = hashAdminPassword(password);
       if (store && typeof store.setSetting === 'function') {
         await store.setSetting('admin_credentials', { passwordHash: hashed, updatedAt: new Date().toISOString() });
+      }
+      if (typeof registry.setAdminPassword === 'function') {
+        registry.setAdminPassword(hashed);
       }
       return res.json({ ok: true, message: 'Đã cập nhật mật khẩu quản trị viên.' });
     } catch (error) {

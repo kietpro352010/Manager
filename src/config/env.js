@@ -14,13 +14,18 @@ function required(env, key, fallbackAlternatives = []) {
 }
 
 function positiveInt(value, fallback, min, max) {
-  const parsed = Number.parseInt(value, 10);
+  const text = String(value ?? '').trim();
+  if (!/^\d+$/.test(text)) return fallback;
+  const parsed = Number(text);
   return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
 }
 
 function bool(value, fallback = false) {
   if (value === undefined || value === '') return fallback;
-  return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  throw new Error(`Boolean environment value is invalid: ${String(value).slice(0, 32)}`);
 }
 
 function isServerSupabaseKey(value) {
@@ -84,6 +89,9 @@ function loadConfig(env = process.env) {
   const adminUserId = String(env.ADMIN_DISCORD_USER_ID || env.ADMIN_USER_ID || '').trim();
   const adminUsername = String(env.ADMIN_USERNAME || 'admin').trim();
   const adminPassword = String(env.ADMIN_PASSWORD || '').trim();
+  if (adminPassword && (adminPassword.length < 6 || adminPassword.length > 256)) {
+    throw new Error('ADMIN_PASSWORD must contain 6–256 characters when configured.');
+  }
 
   if ((adminRoleId || userRoleId) && (![adminRoleId, userRoleId].every((id) => /^\d{17,20}$/.test(id)) || adminRoleId === userRoleId)) {
     throw new Error('If role IDs are set in the environment, ADMIN_ROLE_ID and USER_ROLE_ID must both be valid and different.');
@@ -117,7 +125,7 @@ function loadConfig(env = process.env) {
   }
 
   const supabaseSecretKey = required(env, 'SUPABASE_SECRET_KEY', ['SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_KEY']);
-  if (!isServerSupabaseKey(supabaseSecretKey) && process.env.NODE_ENV === 'production' && !env.KBOT_ALLOW_ANON_KEY) {
+  if (!isServerSupabaseKey(supabaseSecretKey) && env.NODE_ENV === 'production' && !bool(env.KBOT_ALLOW_ANON_KEY, false)) {
     throw new Error('Configure a server-only SUPABASE_SECRET_KEY or legacy SUPABASE_SERVICE_ROLE_KEY; publishable/anon keys are not accepted in production.');
   }
 

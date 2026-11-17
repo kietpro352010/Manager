@@ -6,6 +6,8 @@ const { ACTIONS } = require('./worker-registry');
 
 const ALL_RESET_SYNC_STEPS = Object.freeze(['registry.resetData', 'commandStore.clearWorker', 'registry.updateStatus']);
 const DEFAULT_MAX_STATE_SYNC_ATTEMPTS = 8;
+// Worker commands can spend up to 30s queued, then up to 15s executing.
+const DEFAULT_RENDER_COMMAND_TIMEOUT_MS = 50000;
 
 class CommandBroker {
   constructor({ registry, commandStore, config, logger, fetchImpl = global.fetch }) {
@@ -112,27 +114,57 @@ class CommandBroker {
 
   normalizePayload(action, payload = {}) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-      throw new Error('Command payload must be an object.');
+      const err = new Error('Command payload must be an object.');
+      err.code = 'INVALID_PAYLOAD';
+      err.status = 400;
+      throw err;
     }
+    // These are WorkerRuntime controls, not user-facing command options. Keeping
+    // them out preserves the Manager's dispatch deadline and the Worker's queue.
+    const safePayload = { ...payload };
+    delete safePayload.timeoutMs;
+    delete safePayload.execTimeoutMs;
+    delete safePayload.queueTimeoutMs;
     if (action === 'chat') {
-      const message = String(payload.message || '').replace(/[\r\n\u0000-\u001f\u007f]/g, ' ').trim();
-      if (!message || message.length > 256) throw new Error('Chat message must contain 1–256 characters.');
+      const message = String(safePayload.message || '').replace(/[\r\n\u0000-\u001f\u007f]/g, ' ').trim();
+      if (!message || message.length > 256) {
+        const err = new Error('Chat message must contain 1–256 characters.');
+        err.code = 'INVALID_PAYLOAD';
+        err.status = 400;
+        throw err;
+      }
       return { message };
     }
     if (action === 'set-afk-mode') {
       return { mode: 'still' };
     }
     if (action === 'set-proxy') {
-      return { url: String(payload.url || '').trim() };
+      return { url: String(safePayload.url || '').trim() };
     }
-    return payload;
+    return safePayload;
   }
 
   async dispatch(workerId, action, payload = {}) {
-    if (!ACTIONS.has(action)) throw new Error(`Unsupported worker action: ${action}`);
+    if (!ACTIONS.has(action)) {
+      const err = new Error(`Unsupported worker action: ${action}`);
+      err.code = 'UNSUPPORTED_ACTION';
+      err.status = 400;
+      throw err;
+    }
     const safePayload = this.normalizePayload(action, payload);
     const worker = await this.registry.find(workerId);
-    if (!worker || !worker.enabled) throw new Error(`Worker ${workerId} is not registered or is disabled.`);
+    if (!worker) {
+      const err = new Error(`Worker ${workerId} is not registered.`);
+      err.code = 'WORKER_NOT_FOUND';
+      err.status = 404;
+      throw err;
+    }
+    if (!worker.enabled) {
+      const err = new Error(`Worker ${workerId} is disabled.`);
+      err.code = 'WORKER_DISABLED';
+      err.status = 409;
+      throw err;
+    }
 
     this.logger.info('worker_command_dispatch', { workerId, provider: worker.provider, action });
     const resolvedAction = action === 'reconnect' ? 'restart' : action;
@@ -148,7 +180,10 @@ class CommandBroker {
     }
 
     if (!worker.lastHeartbeat || Date.now() - new Date(worker.lastHeartbeat).getTime() > 120000) {
-      throw new Error(`Wispbyte worker ${workerId} has not checked in recently.`);
+      const err = new Error(`Wispbyte worker ${workerId} has not checked in recently.`);
+      err.code = 'WORKER_UNAVAILABLE';
+      err.status = 503;
+      throw err;
     }
     return this.dispatchPoll(worker, command);
   }
@@ -167,7 +202,7 @@ class CommandBroker {
           'x-manager-bot-id': String(worker.workerId)
         },
         body: JSON.stringify({ action: command.action, payload: command.payload }),
-        signal: AbortSignal.timeout(30000)
+        signal: AbortSignal.timeout(DEFAULT_RENDER_COMMAND_TIMEOUT_MS)
       });
       body = await readJson(response);
     } catch (fetchErr) {
@@ -182,7 +217,9 @@ class CommandBroker {
 
     if (!response.ok || !body.ok) {
       const err = new Error(body.error || `Worker returned HTTP ${response.status}.`);
-      if (body.error === 'execution_timeout') err.code = 'execution_timeout';
+      if (body.code || body.error === 'execution_timeout') err.code = body.code || body.error;
+      const upstreamStatus = Number(response.status);
+      err.status = [400, 409, 422, 429, 503, 504].includes(upstreamStatus) ? upstreamStatus : 502;
       throw err;
     }
 
@@ -234,7 +271,12 @@ class CommandBroker {
     command.expiresAt = new Date(Date.now() + this.config.commandResultTimeoutMs).toISOString();
 
     const queued = await this.commandStore.enqueue({ ...command, workerId: worker.workerId });
-    if (!queued) throw new Error('Worker command queue is full or the worker is disabled.');
+    if (!queued) {
+      const err = new Error('Worker command queue is full or the worker is disabled.');
+      err.code = 'QUEUE_BUSY';
+      err.status = 503;
+      throw err;
+    }
 
     const actualCommandId = String(queued.commandId || command.commandId);
 
