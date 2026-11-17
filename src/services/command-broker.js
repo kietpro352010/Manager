@@ -114,7 +114,10 @@ class CommandBroker {
 
   normalizePayload(action, payload = {}) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-      throw new Error('Command payload must be an object.');
+      const err = new Error('Command payload must be an object.');
+      err.code = 'INVALID_PAYLOAD';
+      err.status = 400;
+      throw err;
     }
     // These are WorkerRuntime controls, not user-facing command options. Keeping
     // them out preserves the Manager's dispatch deadline and the Worker's queue.
@@ -124,7 +127,12 @@ class CommandBroker {
     delete safePayload.queueTimeoutMs;
     if (action === 'chat') {
       const message = String(safePayload.message || '').replace(/[\r\n\u0000-\u001f\u007f]/g, ' ').trim();
-      if (!message || message.length > 256) throw new Error('Chat message must contain 1–256 characters.');
+      if (!message || message.length > 256) {
+        const err = new Error('Chat message must contain 1–256 characters.');
+        err.code = 'INVALID_PAYLOAD';
+        err.status = 400;
+        throw err;
+      }
       return { message };
     }
     if (action === 'set-afk-mode') {
