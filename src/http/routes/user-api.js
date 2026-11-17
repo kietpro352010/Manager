@@ -67,6 +67,37 @@ function createUserApi({
     return null;
   }
 
+  function commandErrorStatus(failure) {
+    const code = String(failure?.code || failure?.error || '').trim().toUpperCase();
+    const statusByCode = {
+      CREDENTIALS_MISSING: 422,
+      UNSUPPORTED_ACTION: 400,
+      INVALID_PAYLOAD: 400,
+      WORKER_NOT_FOUND: 404,
+      LIFECYCLE_CONFLICT: 409,
+      WORKER_DISABLED: 409,
+      RATE_LIMIT: 429,
+      QUEUE_BUSY: 503,
+      WORKER_UNAVAILABLE: 503,
+      ETIMEDOUT: 504,
+      EXECUTION_TIMEOUT: 504,
+      RESULT_TIMEOUT: 504,
+      COMMAND_EXPIRED: 504
+    };
+    if (statusByCode[code]) return statusByCode[code];
+
+    const upstreamStatus = Number(failure?.status);
+    return [400, 404, 409, 422, 429, 502, 503, 504].includes(upstreamStatus) ? upstreamStatus : 500;
+  }
+
+  function commandErrorResponse(res, error) {
+    return res.status(commandErrorStatus(error)).json({
+      ok: false,
+      error: error?.message || 'Không thể thực thi lệnh.',
+      code: error?.code || null
+    });
+  }
+
   // Helper: Evaluate command broker dispatch result for consistent HTTP status mapping
   function evaluateCommandDispatch(dispatchResult, defaultErrorMessage = 'Thao tác không hoàn tất') {
     if (!dispatchResult || dispatchResult.timedOut || dispatchResult.delivered === false) {
@@ -83,14 +114,15 @@ function createUserApi({
 
     const innerResult = dispatchResult.result;
     if (innerResult && typeof innerResult === 'object' && innerResult.ok === false) {
-      const reason = innerResult.detail || innerResult.error || defaultErrorMessage;
+      const code = innerResult.code || innerResult.error || null;
+      const reason = innerResult.detail || innerResult.message || innerResult.error || defaultErrorMessage;
       return {
         success: false,
-        status: 500,
+        status: commandErrorStatus({ code, status: innerResult.status }),
         payload: {
           ok: false,
           error: `${defaultErrorMessage}: ${reason}`,
-          code: innerResult.error || null,
+          code,
           result: innerResult
         }
       };
@@ -529,7 +561,7 @@ function createUserApi({
         result: evaluated.result
       });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      return commandErrorResponse(res, error);
     }
   });
 
@@ -596,7 +628,7 @@ function createUserApi({
       }
       return res.json({ ok: true, message: 'Đã gửi thao tác click giao diện.', result: evaluated.result });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      return commandErrorResponse(res, error);
     }
   });
 
@@ -612,7 +644,7 @@ function createUserApi({
       }
       return res.json({ ok: true, message: 'Đã gửi thao tác đóng giao diện.', result: evaluated.result });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      return commandErrorResponse(res, error);
     }
   });
 
@@ -630,7 +662,7 @@ function createUserApi({
       }
       return res.json({ ok: true, message: `Đã thực hiện thao tác ${invAction} kho đồ.`, result: evaluated.result });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      return commandErrorResponse(res, error);
     }
   });
 
@@ -776,17 +808,18 @@ function createUserApi({
       }
 
       if (result?.result && typeof result.result === 'object' && result.result.ok === false) {
-        const reason = result.result.detail || result.result.error || 'UNKNOWN_ERROR';
+        const code = result.result.code || result.result.error || null;
+        const reason = result.result.detail || result.result.message || result.result.error || 'UNKNOWN_ERROR';
         logger?.error?.('Bot action state sync or execution failed', {
           botId: worker.workerId,
           action,
-          error: result.result.error || null,
+          error: code,
           detail: result.result.detail || null
         });
-        return res.status(500).json({
+        return res.status(commandErrorStatus({ code, status: result.result.status })).json({
           ok: false,
           error: `Thực thi lệnh ${action} không hoàn tất: ${reason}`,
-          code: result.result.error || null,
+          code,
           result: result.result
         });
       }
@@ -815,8 +848,12 @@ function createUserApi({
         result: result?.result || null
       });
     } catch (error) {
-      logger.error('Bot action failed', { botId: id, action, error: error.message });
-      return res.status(500).json({ ok: false, error: 'Không thể thực thi lệnh: ' + error.message });
+      logger.error('Bot action failed', { botId: id, action, error: error.message, code: error.code || null });
+      return res.status(commandErrorStatus(error)).json({
+        ok: false,
+        error: 'Không thể thực thi lệnh: ' + error.message,
+        code: error.code || null
+      });
     }
   });
 

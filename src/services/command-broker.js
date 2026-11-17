@@ -140,7 +140,18 @@ class CommandBroker {
     if (!ACTIONS.has(action)) throw new Error(`Unsupported worker action: ${action}`);
     const safePayload = this.normalizePayload(action, payload);
     const worker = await this.registry.find(workerId);
-    if (!worker || !worker.enabled) throw new Error(`Worker ${workerId} is not registered or is disabled.`);
+    if (!worker) {
+      const err = new Error(`Worker ${workerId} is not registered.`);
+      err.code = 'WORKER_NOT_FOUND';
+      err.status = 404;
+      throw err;
+    }
+    if (!worker.enabled) {
+      const err = new Error(`Worker ${workerId} is disabled.`);
+      err.code = 'WORKER_DISABLED';
+      err.status = 409;
+      throw err;
+    }
 
     this.logger.info('worker_command_dispatch', { workerId, provider: worker.provider, action });
     const resolvedAction = action === 'reconnect' ? 'restart' : action;
@@ -156,7 +167,10 @@ class CommandBroker {
     }
 
     if (!worker.lastHeartbeat || Date.now() - new Date(worker.lastHeartbeat).getTime() > 120000) {
-      throw new Error(`Wispbyte worker ${workerId} has not checked in recently.`);
+      const err = new Error(`Wispbyte worker ${workerId} has not checked in recently.`);
+      err.code = 'WORKER_UNAVAILABLE';
+      err.status = 503;
+      throw err;
     }
     return this.dispatchPoll(worker, command);
   }
@@ -190,7 +204,9 @@ class CommandBroker {
 
     if (!response.ok || !body.ok) {
       const err = new Error(body.error || `Worker returned HTTP ${response.status}.`);
-      if (body.error === 'execution_timeout') err.code = 'execution_timeout';
+      if (body.code || body.error === 'execution_timeout') err.code = body.code || body.error;
+      const upstreamStatus = Number(response.status);
+      err.status = [400, 409, 422, 429, 503, 504].includes(upstreamStatus) ? upstreamStatus : 502;
       throw err;
     }
 
@@ -242,7 +258,12 @@ class CommandBroker {
     command.expiresAt = new Date(Date.now() + this.config.commandResultTimeoutMs).toISOString();
 
     const queued = await this.commandStore.enqueue({ ...command, workerId: worker.workerId });
-    if (!queued) throw new Error('Worker command queue is full or the worker is disabled.');
+    if (!queued) {
+      const err = new Error('Worker command queue is full or the worker is disabled.');
+      err.code = 'QUEUE_BUSY';
+      err.status = 503;
+      throw err;
+    }
 
     const actualCommandId = String(queued.commandId || command.commandId);
 
