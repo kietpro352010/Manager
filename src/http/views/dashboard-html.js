@@ -7886,6 +7886,11 @@ function escapeHtml(value) {
     .replace(/'/g,'&#039;');
 }
 
+function formatHardwareMetric(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric.toFixed(1) : '0.0';
+}
+
 function getUserExpirationInfo() {
   const user = (typeof currentUser !== 'undefined') ? currentUser : null;
   if (!user || user.role === 'admin' || user.isPermanent) {
@@ -7980,11 +7985,16 @@ function botCardHtml(bot) {
   const hostRamTotalMb = hw ? Number(hw.ramTotalMb) : (isEco ? 220 : 380);
   const hostRamPercent = hw ? Number(hw.ramPercent) : (hostRamTotalMb > 0 ? Math.min(100, Math.round((botRamMb / hostRamTotalMb) * 100)) : 0);
   const ramColor = hostRamPercent > 85 ? 'var(--red)' : hostRamPercent > 70 ? 'var(--yellow)' : 'var(--green)';
+  const botRamDisplay = formatHardwareMetric(botRamMb);
+  const botHeapDisplay = formatHardwareMetric(botHeapMb);
+  const hostRamUsedDisplay = formatHardwareMetric(hostRamUsedMb);
+  const hostRamTotalDisplay = formatHardwareMetric(hostRamTotalMb);
+  const hostRamPercentDisplay = formatHardwareMetric(hostRamPercent);
 
   // Host CPU & Net
-  const hostCpuText = hw ? (hw.cpuPercent + '% / ' + hw.cpuCores + ' Cores') : '--';
+  const hostCpuPercentDisplay = hw ? formatHardwareMetric(hw.cpuPercent) : '--';
   const cpuColor = hw && hw.cpuPercent > 85 ? 'var(--red)' : hw && hw.cpuPercent > 60 ? 'var(--yellow)' : '#38bdf8';
-  const netText = hw ? ('↓ ' + hw.netDownKb + ' • ↑ ' + hw.netUpKb + ' KB/s') : '--';
+  const netText = hw ? ('↓ ' + formatHardwareMetric(hw.netDownKb) + ' • ↑ ' + formatHardwareMetric(hw.netUpKb) + ' KB/s') : '--';
 
   const pingSpark = generateSparklineSvg(bot.history?.ping, '#38bdf8');
   const ramSpark = generateSparklineSvg(bot.history?.ram, ramColor);
@@ -8204,12 +8214,12 @@ function botCardHtml(bot) {
     (isAdmin && hostRamTotalMb > 0 ?
       '<div class="bot-ram-meter-box">' +
         '<div class="bot-ram-meter-labels" style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;font-size:11px;">' +
-          '<span>🧠 RAM: <strong style="color:' + ramColor + ';">' + botRamMb + ' MB</strong>' + (botHeapMb > 0 ? ' <small style="color:var(--muted);">(Heap: ' + botHeapMb + 'MB)</small>' : '') + '</span>' +
-          '<span>⚡ CPU: <strong style="color:' + cpuColor + ';">' + (hw ? hw.cpuPercent + '%' : '--') + '</strong></span>' +
+          '<span>🧠 RAM: <strong style="color:' + ramColor + ';">' + botRamDisplay + ' MB</strong>' + (botHeapMb > 0 ? ' <small style="color:var(--muted);">(Heap: ' + botHeapDisplay + 'MB)</small>' : '') + '</span>' +
+          '<span>⚡ CPU: <strong style="color:' + cpuColor + ';">' + (hw ? hostCpuPercentDisplay + '%' : '--') + '</strong></span>' +
           '<span>🌐 Net: <strong style="color:#a78bfa;">' + netText + '</strong></span>' +
         '</div>' +
         '<div class="ram-meter-track" style="margin-top:6px;">' +
-          '<div class="ram-meter-bar-fill" style="width:' + Math.max(4, Math.min(100, hostRamPercent)) + '%;background:' + ramColor + ';" title="Host RAM: ' + hostRamUsedMb + '/' + hostRamTotalMb + ' MB (' + hostRamPercent + '%)"></div>' +
+          '<div class="ram-meter-bar-fill" style="width:' + Math.max(4, Math.min(100, hostRamPercent)) + '%;background:' + ramColor + ';" title="Host RAM: ' + hostRamUsedDisplay + '/' + hostRamTotalDisplay + ' MB (' + hostRamPercentDisplay + '%)"></div>' +
         '</div>' +
       '</div>' : '') +
 
@@ -10491,7 +10501,7 @@ async function handleInAppRegisterSubmit(event) {
     });
 
     if (!res.ok) {
-      throw new Error(res.data?.error || 'Đăng ký tài khoản thất bại.');
+      throw new Error(res.data?.message || res.data?.error || 'Đăng ký tài khoản thất bại.');
     }
 
     const data = res.data || {};
@@ -11535,9 +11545,11 @@ window._inFlightQuickActions = _inFlightQuickActions;
 window.quickBotAction = quickBotAction;
 
 let activeStatusFilter = 'all';
-function isMinecraftOfflineOrKicked(bot) {
+const MINECRAFT_ONLINE_STATES = new Set(['online', 'waking', 'connecting', 'authenticating', 'entering']);
+const MINECRAFT_ACTIVE_STATES = new Set([...MINECRAFT_ONLINE_STATES, 'afk']);
+function isMinecraftOffline(bot) {
   const status = String(bot?.status || '').toLowerCase();
-  return bot?.available === true && (status === 'offline' || status === 'kicked');
+  return bot?.available === true && !MINECRAFT_ACTIVE_STATES.has(status);
 }
 
 function setStatusFilter(filter) {
@@ -11714,8 +11726,8 @@ window.changeBotSort = changeBotSort;
 function updateKpis() {
   const total = bots.length;
   const afk = bots.filter(b => b.available && b.status === 'afk').length;
-  const online = bots.filter(b => b.available && ['online','waking','connecting','authenticating','entering'].includes(b.status)).length;
-  const offline = bots.filter(isMinecraftOfflineOrKicked).length;
+  const online = bots.filter(b => b.available && MINECRAFT_ONLINE_STATES.has(String(b.status || '').toLowerCase())).length;
+  const offline = bots.filter(isMinecraftOffline).length;
   const unreachable = bots.filter(b => b.available !== true).length;
 
   const tEl = document.getElementById('kpiTotal'); if(tEl) tEl.textContent = String(total);
@@ -11730,7 +11742,7 @@ function updateKpis() {
   const ecoCount = bots.filter(b => b.available && b.settings?.ecoMode !== false && b.ecoMode !== false).length;
   const activeBots = bots.filter(b => b.available && b.status !== 'offline' && b.status !== 'kicked');
   const totalFleetRam = bots.reduce((sum, b) => sum + Number(b.hostHardware?.botRssMb || b.ramRss || b.rssMb || b.memory?.rssMb || 0), 0);
-  const avgFleetRam = activeBots.length > 0 ? Math.round(totalFleetRam / activeBots.length) : 0;
+  const avgFleetRam = activeBots.length > 0 ? totalFleetRam / activeBots.length : 0;
 
   // Tính tổng RAM đã dùng / Tổng RAM được cấp, Trung bình % CPU và Tổng băng thông toàn hạm đội
   const botsWithHw = activeBots.filter(b => b.hostHardware && Number(b.hostHardware.ramTotalMb) > 0);
@@ -11756,16 +11768,16 @@ function updateKpis() {
   const totalRamEl = document.getElementById('fleetTotalRam');
   if (totalRamEl) {
     if (fleetRamTotalMb > 0) {
-      totalRamEl.textContent = fleetRamUsedMb + ' / ' + fleetRamTotalMb + ' MB (' + fleetRamPercent + '%)';
+      totalRamEl.textContent = formatHardwareMetric(fleetRamUsedMb) + ' / ' + formatHardwareMetric(fleetRamTotalMb) + ' MB (' + formatHardwareMetric(fleetRamPercent) + '%)';
     } else {
-      totalRamEl.textContent = totalFleetRam + ' MB RSS';
+      totalRamEl.textContent = formatHardwareMetric(totalFleetRam) + ' MB RSS';
     }
   }
-  const avgRamEl = document.getElementById('fleetAvgRam'); if(avgRamEl) avgRamEl.textContent = avgFleetRam + ' MB RSS';
+  const avgRamEl = document.getElementById('fleetAvgRam'); if(avgRamEl) avgRamEl.textContent = formatHardwareMetric(avgFleetRam) + ' MB RSS';
   const cpuSavedEl = document.getElementById('fleetCpuSaved');
   if (cpuSavedEl) {
     if (botsWithHw.length > 0) {
-      cpuSavedEl.textContent = avgFleetCpu + '% TB' + (fleetRxKbps > 0 || fleetTxKbps > 0 ? ' • ↓' + Math.round(fleetRxKbps) + ' ↑' + Math.round(fleetTxKbps) + 'KB/s' : '');
+      cpuSavedEl.textContent = formatHardwareMetric(avgFleetCpu) + '% TB' + (fleetRxKbps > 0 || fleetTxKbps > 0 ? ' • ↓' + formatHardwareMetric(fleetRxKbps) + ' ↑' + formatHardwareMetric(fleetTxKbps) + ' KB/s' : '');
     } else {
       cpuSavedEl.textContent = ecoCount > 0 ? '~80%' : '0%';
     }
@@ -11900,8 +11912,8 @@ function filterBots() {
     // 1. Lọc theo Tab trạng thái
     const status = String(b.status || '').toLowerCase();
     if (activeStatusFilter === 'afk' && status !== 'afk') return false;
-    if (activeStatusFilter === 'online' && !['online','waking','connecting','authenticating','entering'].includes(status)) return false;
-    if (activeStatusFilter === 'offline' && !isMinecraftOfflineOrKicked(b)) return false;
+    if (activeStatusFilter === 'online' && !MINECRAFT_ONLINE_STATES.has(status)) return false;
+    if (activeStatusFilter === 'offline' && !isMinecraftOffline(b)) return false;
     if (activeStatusFilter === 'unreachable' && b.available === true) return false;
 
     // 2. Lọc theo Tag phân loại & Trạng thái thuê
@@ -13064,7 +13076,7 @@ function detailStatusHtml() {
   const hostRamEl = document.getElementById('detailHostRam');
   if (hostRamEl) {
     if (hw && hw.ramTotalMb > 0) {
-      hostRamEl.textContent = hw.ramUsedMb + ' / ' + hw.ramTotalMb + ' MB (' + hw.ramPercent + '%)';
+      hostRamEl.textContent = formatHardwareMetric(hw.ramUsedMb) + ' / ' + formatHardwareMetric(hw.ramTotalMb) + ' MB (' + formatHardwareMetric(hw.ramPercent) + '%)';
       hostRamEl.style.color = hw.ramPercent > 85 ? 'var(--red)' : hw.ramPercent > 70 ? 'var(--yellow)' : 'var(--green)';
     } else {
       hostRamEl.textContent = '--';
@@ -13075,7 +13087,7 @@ function detailStatusHtml() {
   const hostCpuEl = document.getElementById('detailHostCpu');
   if (hostCpuEl) {
     if (hw) {
-      hostCpuEl.textContent = hw.cpuPercent + '% / ' + hw.cpuCores + ' Cores';
+      hostCpuEl.textContent = formatHardwareMetric(hw.cpuPercent) + '% / ' + hw.cpuCores + ' Cores';
       hostCpuEl.style.color = hw.cpuPercent > 85 ? 'var(--red)' : hw.cpuPercent > 60 ? 'var(--yellow)' : '#38bdf8';
     } else {
       hostCpuEl.textContent = '--';
@@ -13086,7 +13098,7 @@ function detailStatusHtml() {
   const hostNetEl = document.getElementById('detailHostNet');
   if (hostNetEl) {
     if (hw) {
-      hostNetEl.textContent = '↓ ' + hw.netDownKb + ' KB/s • ↑ ' + hw.netUpKb + ' KB/s (Tổng: ' + hw.netTotalRxMb + ' MB)';
+      hostNetEl.textContent = '↓ ' + formatHardwareMetric(hw.netDownKb) + ' KB/s • ↑ ' + formatHardwareMetric(hw.netUpKb) + ' KB/s (Tổng: ' + formatHardwareMetric(hw.netTotalRxMb) + ' MB)';
     } else {
       hostNetEl.textContent = '--';
     }
@@ -13095,7 +13107,7 @@ function detailStatusHtml() {
   // 4. RAM Bot con
   const ramEl = document.getElementById('detailRam');
   if (ramEl) {
-    ramEl.textContent = botRamMb > 0 ? (botRamMb + ' MB RSS') : '--';
+    ramEl.textContent = botRamMb > 0 ? (formatHardwareMetric(botRamMb) + ' MB RSS') : '--';
   }
 
   // 5. Uptime & Reconnects

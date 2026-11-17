@@ -274,9 +274,18 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
 
       // Register user:
       let registered = null;
+      let registeredWorkerIds = [];
       const shouldAttemptTrial = isTrialEnabled && !providedKey;
 
-      if (shouldAttemptTrial && typeof store.registerTrialUser === 'function') {
+      if (shouldAttemptTrial && typeof store.registerTrialUser !== 'function') {
+        return res.status(503).json({
+          ok: false,
+          error: 'trial_allocation_unavailable',
+          message: 'Hệ thống chưa sẵn sàng cấp bot dùng thử. Vui lòng thử lại sau hoặc liên hệ Quản trị viên.'
+        });
+      }
+
+      if (shouldAttemptTrial) {
         try {
           registered = await store.registerTrialUser({
             userId,
@@ -290,17 +299,44 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
           });
         } catch (regErr) {
           if (regErr.message && regErr.message.includes('NO_WORKERS_AVAILABLE')) {
-            // Free trial worker pool exhausted -> allow registration without bot
-            registered = null;
+            logger?.warn?.('trial_registration_no_workers', { username: cleanUsername });
+            return res.status(409).json({
+              ok: false,
+              error: 'trial_bot_unavailable',
+              message: 'Hiện chưa có bot trống để cấp dùng thử. Vui lòng thử lại sau hoặc liên hệ Quản trị viên.'
+            });
           } else if (regErr.message && regErr.message.includes('đã có người sử dụng')) {
             return res.status(409).json({ ok: false, error: 'Tên đăng nhập này đã có người sử dụng.' });
           } else {
             throw regErr;
           }
         }
+
+        const returnedWorkerIds = [
+          ...(Array.isArray(registered?.workerIds) ? registered.workerIds : []),
+          ...(Array.isArray(registered?.assignedBotIds) ? registered.assignedBotIds : []),
+          ...(registered?.workerId ? [registered.workerId] : [])
+        ].map((id) => String(id || '').trim()).filter(Boolean);
+        registeredWorkerIds = [...new Set(returnedWorkerIds)].slice(0, 1);
+
+        if (!registered || registered.ok === false || registeredWorkerIds.length !== 1) {
+          logger?.error?.('trial_registration_missing_worker', { username: cleanUsername });
+          return res.status(503).json({
+            ok: false,
+            error: 'trial_bot_assignment_failed',
+            message: 'Tài khoản dùng thử chưa thể được gán bot. Vui lòng thử lại sau hoặc liên hệ Quản trị viên.'
+          });
+        }
       }
 
       if (!registered) {
+        if (shouldAttemptTrial) {
+          return res.status(503).json({
+            ok: false,
+            error: 'trial_registration_failed',
+            message: 'Không thể hoàn tất đăng ký dùng thử. Vui lòng thử lại sau.'
+          });
+        }
         // Create user without bot (unassigned, 0 bots)
         const newUser = {
           id: userId,
@@ -328,7 +364,17 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         // Ensure registration IP and fingerprint are saved
         try {
           await store.setAccess(userId, {
-            ...registered,
+            username: cleanUsername,
+            password: hashedPassword,
+            role: 'user',
+            status: 'active',
+            isPermanent: false,
+            isTrial: shouldAttemptTrial,
+            trialBotId: shouldAttemptTrial ? registeredWorkerIds[0] : undefined,
+            botCount: shouldAttemptTrial ? 1 : undefined,
+            workerIds: shouldAttemptTrial ? registeredWorkerIds : [],
+            expiresAt: registered.expiresAt || null,
+            planName: registered.planName || 'FREE TRIAL',
             registrationIp: clientIp,
             deviceFingerprint,
             registrationUserAgent: req.headers['user-agent']
@@ -336,7 +382,9 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         } catch (_) {}
       }
 
-      let assignedBotIds = registered?.workerId ? [registered.workerId] : [];
+      let assignedBotIds = registeredWorkerIds.length
+        ? registeredWorkerIds
+        : (registered?.workerId ? [String(registered.workerId)] : []);
       let planName = registered?.planName || 'FREE TRIAL';
       let isPermanent = false;
 
