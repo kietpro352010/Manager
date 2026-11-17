@@ -6,6 +6,8 @@ const { ACTIONS } = require('./worker-registry');
 
 const ALL_RESET_SYNC_STEPS = Object.freeze(['registry.resetData', 'commandStore.clearWorker', 'registry.updateStatus']);
 const DEFAULT_MAX_STATE_SYNC_ATTEMPTS = 8;
+// Worker commands can spend up to 30s queued, then up to 15s executing.
+const DEFAULT_RENDER_COMMAND_TIMEOUT_MS = 50000;
 
 class CommandBroker {
   constructor({ registry, commandStore, config, logger, fetchImpl = global.fetch }) {
@@ -114,8 +116,14 @@ class CommandBroker {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
       throw new Error('Command payload must be an object.');
     }
+    // These are WorkerRuntime controls, not user-facing command options. Keeping
+    // them out preserves the Manager's dispatch deadline and the Worker's queue.
+    const safePayload = { ...payload };
+    delete safePayload.timeoutMs;
+    delete safePayload.execTimeoutMs;
+    delete safePayload.queueTimeoutMs;
     if (action === 'chat') {
-      const message = String(payload.message || '').replace(/[\r\n\u0000-\u001f\u007f]/g, ' ').trim();
+      const message = String(safePayload.message || '').replace(/[\r\n\u0000-\u001f\u007f]/g, ' ').trim();
       if (!message || message.length > 256) throw new Error('Chat message must contain 1–256 characters.');
       return { message };
     }
@@ -123,9 +131,9 @@ class CommandBroker {
       return { mode: 'still' };
     }
     if (action === 'set-proxy') {
-      return { url: String(payload.url || '').trim() };
+      return { url: String(safePayload.url || '').trim() };
     }
-    return payload;
+    return safePayload;
   }
 
   async dispatch(workerId, action, payload = {}) {
@@ -167,7 +175,7 @@ class CommandBroker {
           'x-manager-bot-id': String(worker.workerId)
         },
         body: JSON.stringify({ action: command.action, payload: command.payload }),
-        signal: AbortSignal.timeout(30000)
+        signal: AbortSignal.timeout(DEFAULT_RENDER_COMMAND_TIMEOUT_MS)
       });
       body = await readJson(response);
     } catch (fetchErr) {
@@ -1206,3 +1214,4 @@ class CommandBroker {
 }
 
 module.exports = CommandBroker;
+
