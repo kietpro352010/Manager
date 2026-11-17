@@ -100,7 +100,7 @@ class EntitlementService {
               : DEFAULT_GRACE_PERIOD_MS));
   }
 
-  async createCode({ days, permanent = false, botCount = 0, workerIds = [], maxUses = 1, planName = 'Standard', expiresAt = null, actorId }) {
+  async createCode({ days, permanent = false, botCount = 0, workerIds = [], maxUses = 1, planName = 'Standard', expiresAt = null, customCode = '', actorId }) {
     const duration = Number(days);
     const slots = Number(botCount);
     const uses = normalizeMaxUses(maxUses, 1);
@@ -126,10 +126,19 @@ class EntitlementService {
     if (fixedIds.length > 25) throw new Error('A code can include up to 25 fixed workers.');
     if (fixedIds.length && uses > 1) throw new Error('Codes with fixed worker assignments can only be redeemed once.');
 
-    const known = new Set((await this.registry.list()).map((worker) => String(worker.workerId)));
+    const workers = await this.registry.list();
+    const known = new Map(workers.map((worker) => [String(worker.workerId), worker]));
     if (fixedIds.some((id) => !known.has(id))) throw new Error('One or more fixed worker IDs are not registered.');
+    if (fixedIds.some((id) => known.get(id).enabled === false || known.get(id).rentable === false)) {
+      throw new Error('Fixed workers must be enabled and available for rental.');
+    }
 
-    const code = formatCode();
+    if (typeof customCode !== 'string') throw new Error('Custom code must be a string.');
+    const normalizedCustomCode = normalizeCode(customCode);
+    if (customCode && (normalizedCustomCode.length < 10 || normalizedCustomCode.length > 36)) {
+      throw new Error('Custom code must contain 10–36 letters or numbers.');
+    }
+    const code = normalizedCustomCode || formatCode();
     const keyId = `key_${crypto.randomUUID()}`;
 
     const record = {
@@ -144,7 +153,7 @@ class EntitlementService {
       days: permanent ? -1 : duration,
       durationDays: permanent ? -1 : duration,
       isPermanent: Boolean(permanent),
-      botCount: fixedIds.length || slots || 1,
+      botCount: Math.max(1, fixedIds.length, slots),
       botIds: fixedIds,
       workerIds: fixedIds,
       planName: String(planName || 'Standard').slice(0, 64),
@@ -162,7 +171,7 @@ class EntitlementService {
       keyId,
       days: permanent ? -1 : duration,
       isPermanent: Boolean(permanent),
-      botCount: fixedIds.length || slots || 1,
+      botCount: Math.max(1, fixedIds.length, slots),
       maxUses: uses,
       planName: record.planName
     };
@@ -238,9 +247,10 @@ class EntitlementService {
     const currentIds = Array.isArray(member?.workerIds) ? member.workerIds.map(String) : [];
     const desired = [...currentIds];
     const fixedIds = Array.isArray(key.workerIds) ? key.workerIds.map(String) : (Array.isArray(key.botIds) ? key.botIds.map(String) : []);
-    const candidates = await this.registry.list();
+    const candidates = (await this.registry.list()).filter((worker) => worker.enabled !== false && worker.rentable !== false);
     const registeredIds = new Set(candidates.map((w) => String(w.workerId)));
-    const targetCount = Math.max(currentIds.length, Number(key.botCount) || 1);
+    const newFixedCount = fixedIds.filter((workerId) => !currentIds.includes(workerId)).length;
+    const targetCount = Math.max(currentIds.length, Number(key.botCount) || 1, currentIds.length + newFixedCount);
 
     // Gán các bot cố định trong key
     for (const workerId of fixedIds) {

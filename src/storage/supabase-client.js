@@ -18,6 +18,7 @@ const SUPABASE_SCHEMA_SQL = require('./schema-sql');
 
 const SUPABASE_REQUIRED_TABLES = Object.freeze([
   'manager_users', 'manager_keys', 'bot_registry', 'manager_sessions', 'bot_settings',
+  'manager_ip_whitelist',
   'audit_logs', 'bot_chat_logs', 'bot_event_logs', 'bot_position_state', 'bot_position_logs',
   'manager_backups', 'manager_locks', 'manager_key_usage_transactions', 'bot_log_clear_cutoffs',
   'manager_user_state', 'manager_users_write_transactions', 'manager_session_revocations',

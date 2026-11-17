@@ -10,7 +10,7 @@ BEGIN;
 -- KingMC Bot Manager storage contract, aligned with manager.js and bot.js.
 -- Safe to run more than once. Keeps legacy columns/rows and adds the current API schema.
 --
--- SCHEMA VERSION: 2026-11-12-v12.0 (Unified Reconciled Canonical Schema)
+-- SCHEMA VERSION: 2026-11-18-v12.1 (Assignment, rental, and whitelist reconciliation)
 --   - Link4M RPC chỉ chặn user 'disabled'; user 'expired' ĐƯỢC vượt link để hồi sinh.
 --   - claim_manager_link4m_reward revive 'expired' -> 'active' ATOMIC (cùng UPDATE với
 --     expires_at), chỉ chạy sau khi attempt đã được xác minh (token/status/expiry).
@@ -27,6 +27,16 @@ CREATE TABLE IF NOT EXISTS public.manager_schema_migrations (
 ALTER TABLE public.manager_schema_migrations ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.manager_schema_migrations FROM PUBLIC, anon, authenticated;
 GRANT ALL ON TABLE public.manager_schema_migrations TO service_role;
+
+CREATE TABLE IF NOT EXISTS public.manager_ip_whitelist (
+  ip text PRIMARY KEY,
+  reason text NOT NULL DEFAULT '',
+  created_by text NOT NULL DEFAULT '',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE public.manager_ip_whitelist ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.manager_ip_whitelist FROM PUBLIC, anon, authenticated;
+GRANT ALL ON TABLE public.manager_ip_whitelist TO service_role;
 
 CREATE TABLE IF NOT EXISTS public.manager_users (
   id text,
@@ -2198,6 +2208,50 @@ CREATE TABLE IF NOT EXISTS public.manager_workers (
 ALTER TABLE public.manager_workers ADD COLUMN IF NOT EXISTS bot_number integer;
 CREATE INDEX IF NOT EXISTS idx_manager_workers_enabled ON public.manager_workers(enabled);
 CREATE INDEX IF NOT EXISTS idx_manager_workers_bot_number ON public.manager_workers(bot_number);
+-- Recover trial worker IDs from the durable registration field.
+UPDATE public.manager_users
+SET assigned_bot_ids = jsonb_build_array(trial_bot_id),
+    bot_count = GREATEST(COALESCE(bot_count, 1), 1),
+    updated_at = now()
+WHERE is_trial = true
+  AND NULLIF(trial_bot_id, '') IS NOT NULL
+  AND (
+    COALESCE(jsonb_typeof(assigned_bot_ids), 'null') <> 'array'
+    OR COALESCE(assigned_bot_ids, '[]'::jsonb) = '[]'::jsonb
+  )
+  AND EXISTS (SELECT 1 FROM public.manager_workers w WHERE w.worker_id = trial_bot_id);
+
+-- Rebuild assignment rows from user arrays; preserve existing exclusive owners.
+INSERT INTO public.manager_assignments (worker_id, user_id, assigned_by, assigned_at)
+SELECT DISTINCT ON (assigned.worker_id)
+       assigned.worker_id,
+       COALESCE(NULLIF(u.id, ''), 'usr_' || u.username),
+       'migration:20261118',
+       now()
+FROM public.manager_users u
+CROSS JOIN LATERAL jsonb_array_elements_text(
+  CASE WHEN jsonb_typeof(u.assigned_bot_ids) = 'array' THEN u.assigned_bot_ids ELSE '[]'::jsonb END
+) AS assigned(worker_id)
+WHERE EXISTS (SELECT 1 FROM public.manager_workers w WHERE w.worker_id = assigned.worker_id)
+ORDER BY assigned.worker_id, u.created_at ASC NULLS LAST, u.id, u.username
+ON CONFLICT (worker_id) DO NOTHING;
+
+-- Keep manager_users.assigned_bot_ids aligned with the assignment table.
+UPDATE public.manager_users u
+SET assigned_bot_ids = COALESCE((
+      SELECT jsonb_agg(a.worker_id ORDER BY a.assigned_at, a.worker_id)
+      FROM public.manager_assignments a
+      WHERE a.user_id = COALESCE(NULLIF(u.id, ''), 'usr_' || u.username)
+         OR lower(a.user_id) = lower(u.username)
+    ), '[]'::jsonb),
+    updated_at = now()
+WHERE u.assigned_bot_ids IS DISTINCT FROM COALESCE((
+  SELECT jsonb_agg(a.worker_id ORDER BY a.assigned_at, a.worker_id)
+  FROM public.manager_assignments a
+  WHERE a.user_id = COALESCE(NULLIF(u.id, ''), 'usr_' || u.username)
+     OR lower(a.user_id) = lower(u.username)
+), '[]'::jsonb);
+
 CREATE SEQUENCE IF NOT EXISTS public.manager_bot_number_seq;
 DO $$
 DECLARE
@@ -3083,13 +3137,16 @@ BEGIN
         note = COALESCE(p_values->>'note', manager_users.note),
         bot_count = GREATEST(COALESCE((p_values->>'bot_count')::integer, manager_users.bot_count, 1), v_worker_count),
         assigned_bot_ids = v_worker_json,
+        registration_ip = COALESCE(p_values->>'registration_ip', manager_users.registration_ip),
+        device_fingerprint = COALESCE(p_values->>'device_fingerprint', manager_users.device_fingerprint),
+        registration_user_agent = COALESCE(p_values->>'registration_user_agent', manager_users.registration_user_agent),
         updated_at = v_now
     WHERE username = v_user.username;
   ELSE
     INSERT INTO public.manager_users (
       id, username, role, status, is_permanent, expires_at, plan_name,
       bot_aliases, allow_account_change, lock_reason, note, bot_count,
-      assigned_bot_ids, updated_at
+      assigned_bot_ids, registration_ip, device_fingerprint, registration_user_agent, updated_at
     ) VALUES (
       v_target_id,
       v_target_username,
@@ -3104,6 +3161,9 @@ BEGIN
       COALESCE(p_values->>'note', ''),
       GREATEST(COALESCE((p_values->>'bot_count')::integer, 1), v_worker_count),
       v_worker_json,
+      NULLIF(p_values->>'registration_ip', ''),
+      NULLIF(p_values->>'device_fingerprint', ''),
+      NULLIF(p_values->>'registration_user_agent', ''),
       v_now
     )
     ON CONFLICT (username) DO UPDATE SET
@@ -3118,6 +3178,9 @@ BEGIN
       note = COALESCE(EXCLUDED.note, manager_users.note),
       bot_count = GREATEST(COALESCE(EXCLUDED.bot_count, manager_users.bot_count, 1), v_worker_count),
       assigned_bot_ids = v_worker_json,
+      registration_ip = COALESCE(EXCLUDED.registration_ip, manager_users.registration_ip),
+      device_fingerprint = COALESCE(EXCLUDED.device_fingerprint, manager_users.device_fingerprint),
+      registration_user_agent = COALESCE(EXCLUDED.registration_user_agent, manager_users.registration_user_agent),
       updated_at = v_now;
   END IF;
 
@@ -3136,6 +3199,22 @@ BEGIN
     ) ON CONFLICT (user_id) DO UPDATE SET
       role = EXCLUDED.role, status = EXCLUDED.status, is_permanent = EXCLUDED.is_permanent,
       expires_at = EXCLUDED.expires_at, plan_name = EXCLUDED.plan_name, note = EXCLUDED.note, updated_at = v_now;
+  END IF;
+
+  IF p_worker_ids IS NOT NULL AND v_worker_count > 0 THEN
+    UPDATE public.manager_users AS other_user
+    SET assigned_bot_ids = COALESCE((
+          SELECT jsonb_agg(assigned.worker_id)
+          FROM jsonb_array_elements_text(
+            CASE WHEN jsonb_typeof(other_user.assigned_bot_ids) = 'array' THEN other_user.assigned_bot_ids ELSE '[]'::jsonb END
+          ) AS assigned(worker_id)
+          WHERE NOT (assigned.worker_id = ANY(p_worker_ids))
+        ), '[]'::jsonb),
+        updated_at = v_now
+    WHERE other_user.id IS DISTINCT FROM v_target_id
+      AND lower(other_user.username) <> v_target_username
+      AND other_user.role <> 'admin'
+      AND other_user.assigned_bot_ids ?| p_worker_ids;
   END IF;
 
   IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'manager_assignments') THEN
@@ -3590,6 +3669,7 @@ BEGIN
   SELECT w.worker_id, w.bot_number INTO v_worker_id, v_bot_num
   FROM public.manager_workers w
   WHERE w.enabled = true
+    AND COALESCE(w.settings->>'rentable', 'true') <> 'false'
     AND NOT EXISTS (
       SELECT 1 FROM public.manager_assignments a WHERE a.worker_id = w.worker_id
     )
@@ -3739,7 +3819,8 @@ VALUES
   ('20261111000000_worker_reset_data'),
   ('20261111120000_command_two_phase_sync'),
   ('20261112000000_reconcile_full_manager_schema'),
-  ('20261112120000_session_revocation_and_migration_guards')
+  ('20261112120000_session_revocation_and_migration_guards'),
+  ('20261118_manager_data_sync_and_ip_whitelist')
 ON CONFLICT (version) DO NOTHING;
 
 COMMIT;

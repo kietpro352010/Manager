@@ -536,6 +536,13 @@ class WorkerRegistry {
   publicView(record) {
     const { secretCiphertext, _id, ...safe } = record;
     const settings = record.settings || {};
+    safe.alias = String(settings.alias || record.alias || record.name || '');
+    safe.tags = Array.isArray(settings.tags)
+      ? [...new Set(settings.tags.map((tag) => String(tag).trim().toLowerCase()).filter(Boolean))]
+      : (Array.isArray(record.tags) ? record.tags : []);
+    safe.rentable = settings.rentable === undefined
+      ? record.rentable !== false
+      : settings.rentable !== false;
     safe.settings = {
       afkMode: 'still',
       proxyEnabled: settings.proxyManaged ? Boolean(settings.proxyCiphertext) : Boolean(record.status?.proxyEnabled),
@@ -601,21 +608,29 @@ class WorkerRegistry {
 
   async updateSettings(workerId, patch = {}) {
     const worker = await this.find(workerId);
-    if (!worker || !worker.enabled) throw new Error('Worker is not registered or is disabled.');
+    if (!worker) throw new Error('Worker is not registered.');
     const next = {};
+    const recordPatch = {};
     if (Object.hasOwn(patch, 'alias')) {
       const alias = String(patch.alias || '').trim().slice(0, 64);
       next.alias = alias;
-      if (typeof this.store.update === 'function') {
-        await this.store.update(worker.workerId, { alias });
-      }
     }
     if (Object.hasOwn(patch, 'tags')) {
-      const tags = Array.isArray(patch.tags) ? patch.tags.map(t => String(t).slice(0, 32)) : [];
+      const tags = Array.isArray(patch.tags)
+        ? [...new Set(patch.tags.map((tag) => String(tag || '').trim().toLowerCase().replace(/^#/, '').slice(0, 32)).filter(Boolean))].slice(0, 20)
+        : [];
       next.tags = tags;
-      if (typeof this.store.update === 'function') {
-        await this.store.update(worker.workerId, { tags });
+    }
+    if (Object.hasOwn(patch, 'rentable')) next.rentable = patch.rentable !== false;
+    if (Object.hasOwn(patch, 'serviceUrl')) {
+      const serviceUrl = String(patch.serviceUrl || '').trim().replace(/\/+$/, '');
+      if (serviceUrl && !/^https:\/\//i.test(serviceUrl) && !/^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(serviceUrl)) {
+        throw new Error('Worker URL must use HTTPS.');
       }
+      if (!serviceUrl && worker.provider === 'render' && !worker.renderServiceId) {
+        throw new Error('Render workers need a service URL or Render service ID.');
+      }
+      recordPatch.serviceUrl = serviceUrl;
     }
     if (Object.hasOwn(patch, 'afkMode')) {
       next.afkMode = 'still';
@@ -683,12 +698,21 @@ class WorkerRegistry {
         await this.store.update(worker.workerId, { username });
       }
     }
-    const updated = typeof this.store.patchSettings === 'function'
-      ? await this.store.patchSettings(worker.workerId, next)
-      : await this.store.update(worker.workerId, { settings: { ...(worker.settings || {}), ...next } });
+    if (Object.keys(recordPatch).length > 0) {
+      await this.store.update(worker.workerId, recordPatch);
+    }
+    const updated = Object.keys(next).length > 0
+      ? (typeof this.store.patchSettings === 'function'
+          ? await this.store.patchSettings(worker.workerId, next)
+          : await this.store.update(worker.workerId, { settings: { ...(worker.settings || {}), ...next } }))
+      : worker.settings;
     return {
       afkMode: 'still',
-      proxyEnabled: Boolean(updated?.proxyCiphertext || next.proxyCiphertext)
+      proxyEnabled: Boolean(updated?.proxyCiphertext || next.proxyCiphertext),
+      alias: next.alias ?? worker.alias ?? worker.name,
+      tags: next.tags ?? worker.tags ?? [],
+      rentable: next.rentable ?? worker.rentable !== false,
+      serviceUrl: recordPatch.serviceUrl ?? worker.serviceUrl
     };
   }
 

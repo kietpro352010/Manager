@@ -319,6 +319,19 @@ function createUserApi({
       const session = req.managerAuthSession;
       const allBots = await registry.list();
       const assignmentMap = await getUserAssignmentsMap();
+      let globalOrder = [];
+      if (typeof store?.getSetting === 'function') {
+        const configuredOrder = await Promise.resolve(store.getSetting('bot_display_order')).catch(() => null);
+        if (Array.isArray(configuredOrder)) globalOrder = configuredOrder.map(String);
+      }
+      if (globalOrder.length) {
+        const position = new Map(globalOrder.map((workerId, index) => [workerId, index]));
+        allBots.sort((a, b) => {
+          const aPosition = position.has(String(a.workerId)) ? position.get(String(a.workerId)) : Number.MAX_SAFE_INTEGER;
+          const bPosition = position.has(String(b.workerId)) ? position.get(String(b.workerId)) : Number.MAX_SAFE_INTEGER;
+          return aPosition - bPosition || Number(a.botNumber || 0) - Number(b.botNumber || 0);
+        });
+      }
 
       let visibleBots = [];
       if (session.role === 'admin') {
@@ -378,6 +391,19 @@ function createUserApi({
     const updatedOrder = rawOrder.map(String);
 
     try {
+      if (session?.role === 'admin') {
+        const allIds = (await registry.list()).map((worker) => String(worker.workerId));
+        const uniqueOrder = new Set(updatedOrder);
+        if (uniqueOrder.size !== updatedOrder.length || updatedOrder.length !== allIds.length || allIds.some((id) => !uniqueOrder.has(id))) {
+          return res.status(400).json({ ok: false, error: 'Thứ tự mới phải chứa chính xác mỗi bot đã đăng ký một lần.' });
+        }
+        if (typeof store?.setSetting !== 'function') {
+          return res.status(503).json({ ok: false, error: 'Chưa có bộ lưu thứ tự bot dùng chung.' });
+        }
+        await store.setSetting('bot_display_order', updatedOrder);
+        return res.json({ ok: true, message: 'Đã lưu thứ tự bot.', order: updatedOrder });
+      }
+
       const userId = session.userId || session.id || session.username;
       if (store && typeof store.setAccess === 'function') {
         await store.setAccess(userId, { workerIds: updatedOrder }, session.username || 'user');

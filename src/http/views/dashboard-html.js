@@ -7972,8 +7972,8 @@ function botCardHtml(bot) {
   const pos = posObj && Number.isFinite(Number(posObj.x)) && Number.isFinite(Number(posObj.y)) && Number.isFinite(Number(posObj.z))
     ? (Math.round(Number(posObj.x)) + ' ' + Math.round(Number(posObj.y)) + ' ' + Math.round(Number(posObj.z)))
     : '-';
-  const id = Number.isFinite(Number(bot.id)) ? Number(bot.id) : String(bot.id);
-  const idArg = typeof id === 'number' ? String(id) : JSON.stringify(id);
+  const id = String(bot.workerId || bot.id);
+  const idArg = JSON.stringify(id);
   const totems = Number(bot.totemCount || 0);
   const isEco = bot.settings?.ecoMode !== false && bot.ecoMode !== false;
   const hw = bot.hostHardware;
@@ -8032,7 +8032,7 @@ function botCardHtml(bot) {
   const isAFK = bot.status === 'afk';
   const isOnlineWaiting = ['online', 'waking', 'connecting', 'authenticating', 'entering'].includes(String(bot.status || '').toLowerCase());
   const statusGlowClass = !bot.available ? 'status-unreachable' : (isAFK ? 'status-afk' : (isOnlineWaiting ? 'status-waiting' : 'status-offline'));
-  const displayNum = bot.displayIndex !== undefined ? bot.displayIndex : id;
+  const displayNum = bot.displayIndex !== undefined ? bot.displayIndex : (bot.botNumber || id);
   const idStr = String(displayNum).padStart(2, '0');
 
   const botTags = Array.isArray(bot.tags) ? bot.tags : [];
@@ -8236,7 +8236,7 @@ function botCardHtml(bot) {
 }
 
 function startBotDrag(event,id){
-  draggedBotId=Number(id);
+  draggedBotId=String(id);
   try{event.dataTransfer.setData('text/plain',String(id));event.dataTransfer.effectAllowed='move';}catch(_){}
   event.currentTarget.classList.add('dragging');
 }
@@ -8248,15 +8248,16 @@ window.endBotDrag = endBotDrag;
 function allowBotDrop(event){event.preventDefault();}
 async function dropBot(event,targetId){
   event.preventDefault();
-  const sourceId=Number((()=>{try{return event.dataTransfer.getData('text/plain')||draggedBotId}catch(_){return draggedBotId}})());
+  const sourceId=String((()=>{try{return event.dataTransfer.getData('text/plain')||draggedBotId}catch(_){return draggedBotId}})());
+  const destinationId=String(targetId);
   endBotDrag();
-  if(!Number.isInteger(sourceId)||sourceId===Number(targetId))return;
-  const ids=bots.map(x=>Number(x.id));
-  const from=ids.indexOf(sourceId);const to=ids.indexOf(Number(targetId));
+  if(!sourceId||sourceId===destinationId)return;
+  const ids=bots.map(x=>String(x.workerId||x.id));
+  const from=ids.indexOf(sourceId);const to=ids.indexOf(destinationId);
   if(from<0||to<0)return;
   const [item]=ids.splice(from,1);ids.splice(to,0,item);
   try{
-    const result=await requestJson('/api/manager/bots/reorder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids})});
+    const result=await requestJson('/api/manager/bots/reorder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({botIds:ids})});
     const data=result.data||{};
     if(!result.ok)throw new Error(data.error||'Không thể sắp xếp bot.');
     await refreshHome();
@@ -8430,9 +8431,11 @@ window.renderEditBotTagPreviews = renderEditBotTagPreviews;
 
 function editBot(event,id){
   if(event)event.stopPropagation();
-  const bot=bots.find(x=>Number(x.id)===Number(id));
+  const requestedId=String(id);
+  const bot=bots.find(x=>String(x.workerId||x.id)===requestedId);
   if(!bot)return;
-  document.getElementById('editBotId').value=String(id);
+  const workerId=String(bot.workerId||bot.id||id);
+  document.getElementById('editBotId').value=workerId;
   document.getElementById('editBotUrl').value=bot.url||'';
   document.getElementById('editBotLabel').value=bot.label||'';
   const secInput = document.getElementById('editBotSecretKey');
@@ -8460,7 +8463,8 @@ function editBot(event,id){
 }
 function closeEditBotModal(){document.getElementById('editBotModal').classList.add('hidden');}
 async function saveEditBot(){
-  const id=Number(document.getElementById('editBotId').value);
+  const id=String(document.getElementById('editBotId').value||'').trim();
+  if(!id){showToast('Không xác định được bot cần sửa.');return;}
   const url=document.getElementById('editBotUrl').value.trim();
   const label=document.getElementById('editBotLabel').value.trim();
   const secInput = document.getElementById('editBotSecretKey');
@@ -8472,36 +8476,35 @@ async function saveEditBot(){
   try{
     let data;
     if (currentUser?.role === 'user') {
-      const result = await requestJson('/api/manager/bot/' + id + '/alias', {
+      const result = await requestJson('/api/manager/bot/' + encodeURIComponent(id) + '/alias', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ label })
+        body: JSON.stringify({ alias: label })
       });
       data = result.data || {};
       if (!result.ok) throw new Error(data.error || 'Không thể đổi tên bot.');
-      const found = bots.find(b => Number(b.id) === id);
-      if (found) found.label = data.label || label || ('bot' + id);
-      if (detailBot && Number(detailBot.id) === id) {
-        detailBot.label = data.label || label || ('bot' + id);
+      const found = bots.find(b => String(b.workerId||b.id) === id);
+      if (found) found.label = data.alias || label || ('bot' + id);
+      if (detailBot && String(detailBot.workerId||detailBot.id) === id) {
+        detailBot.label = data.alias || label || ('bot' + id);
         const titleEl = document.getElementById('detailTitle');
         if (titleEl) titleEl.textContent = detailBot.label;
       }
     } else {
       const payload = { url, label, tags, rentable };
-      if (secretKey !== undefined) payload.secretKey = secretKey;
-      const result=await requestJson('/api/manager/bot/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      if (secretKey) payload.secretKey = secretKey;
+      const result=await requestJson('/api/manager/bot/'+encodeURIComponent(id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
       data=result.data||{};
       if(!result.ok)throw new Error(data.error||'Không thể sửa bot.');
-      const found = bots.find(b => Number(b.id) === id);
+      const found = bots.find(b => String(b.workerId||b.id) === id);
       if (found && data.bot) {
         if (data.bot.label) found.label = data.bot.label;
         if (data.bot.tags) found.tags = data.bot.tags;
         found.rentable = data.bot.rentable !== false;
-        if (data.bot.secretKey !== undefined) found.secretKey = data.bot.secretKey;
+        if (data.bot.url !== undefined) found.url = data.bot.url;
       }
-      if (detailBot && Number(detailBot.id) === id && data.bot?.label) {
+      if (detailBot && String(detailBot.workerId||detailBot.id) === id && data.bot?.label) {
         detailBot.label = data.bot.label;
-        if (data.bot.secretKey !== undefined) detailBot.secretKey = data.bot.secretKey;
         const titleEl = document.getElementById('detailTitle');
         if (titleEl) titleEl.textContent = detailBot.label;
       }
@@ -10970,9 +10973,9 @@ function renderUserTable() {
     const assignedIds = Array.isArray(u.assignedBotIds) ? u.assignedBotIds : [];
     const botBadges = assignedIds.length
       ? assignedIds.map(id => {
-          const numId = Number(id);
-          const b = userManagementAvailableBots.find(x => Number(x.id) === numId);
-          const name = b ? b.label : ('Bot #' + numId);
+          const workerId = String(id);
+          const b = userManagementAvailableBots.find(x => String(x.workerId||x.id) === workerId);
+          const name = b ? b.label : ('Bot #' + workerId);
           return '<span class="badge-tag" style="background:rgba(56,189,248,0.15);color:#38bdf8;padding:2px 6px;border-radius:4px;margin:2px;display:inline-block;font-size:11px;font-weight:700;">🤖 ' + escapeHtml(name) + '</span>';
         }).join('')
       : '<span style="color:var(--muted);font-style:italic;font-size:11.5px;">Chưa gán bot nào</span>';
@@ -11187,7 +11190,7 @@ function openCreateUserModal() {
   document.getElementById('userFormId').value = '';
   document.getElementById('userFormUsername').value = '';
   document.getElementById('userFormPassword').value = '';
-  document.getElementById('userFormPassword').placeholder = 'Tối thiểu 5 ký tự (chữ hoặc số, phân biệt hoa thường)...';
+  document.getElementById('userFormPassword').placeholder = 'Tối thiểu 6 ký tự (chữ hoặc số, phân biệt hoa thường)...';
   document.getElementById('userFormStatus').value = 'active';
   if (document.getElementById('userFormPlanName')) document.getElementById('userFormPlanName').value = 'Gói thường';
   if (document.getElementById('userFormExpiresAt')) document.getElementById('userFormExpiresAt').value = '';
@@ -11245,19 +11248,19 @@ function renderUserFormBotsCheckboxes(selectedIds, targetUserId) {
     grid.innerHTML = '<div style="color:var(--muted);padding:10px;grid-column:1/-1;">Chưa có bot nào trong Manager. Hãy thêm bot trước.</div>';
     return;
   }
-  const set = new Set((selectedIds || []).map(Number));
+  const set = new Set((selectedIds || []).map(id => String(id)));
 
   grid.innerHTML = userManagementAvailableBots.map(b => {
-    const botId = Number(b.id);
+    const botId = String(b.workerId||b.id);
     const isChecked = set.has(botId);
     const owner = userManagementBotOwnership[botId] || b.currentOwner;
-    const isOccupiedByOther = owner && owner.userId && (!targetUserId || owner.userId !== targetUserId);
+    const isOccupiedByOther = owner && owner.userId && (!targetUserId || String(owner.userId) !== String(targetUserId));
 
-    const displayName = b.label || ('Bot #' + botId);
+    const displayName = b.label || ('Bot #' + (b.botNumber || botId));
     const nonRentableBadge = b.rentable === false ? '<span style="font-size:10px;color:#f87171;margin-left:4px;font-weight:600;">[Không cho thuê]</span>' : '';
     if (isOccupiedByOther) {
       return '<label class="bot-check-item bot-occupied" style="position:relative;">' +
-        '<input type="checkbox" class="user-bot-chk" value="' + botId + '" ' + (isChecked ? 'checked' : '') + ' data-occupied="1" data-bot-id="' + botId + '" data-bot-label="' + escapeHtml(displayName) + '" data-owner="' + escapeHtml(owner.username) + '" onclick="handleOccupiedBotClick(event)">' +
+        '<input type="checkbox" class="user-bot-chk" value="' + escapeHtml(botId) + '" ' + (isChecked ? 'checked' : '') + ' data-occupied="1" data-bot-id="' + escapeHtml(botId) + '" data-bot-label="' + escapeHtml(displayName) + '" data-owner="' + escapeHtml(owner.username) + '" onclick="handleOccupiedBotClick(event)">' +
         '<div>' +
           '<span><strong style="color:#38bdf8;font-size:13px;">[' + escapeHtml(displayName) + ']</strong>' + nonRentableBadge + '</span>' +
           '<span class="badge-occupied">👤 Đang cấp cho: ' + escapeHtml(owner.username) + '</span>' +
@@ -11266,7 +11269,7 @@ function renderUserFormBotsCheckboxes(selectedIds, targetUserId) {
     }
 
     return '<label class="bot-check-item">' +
-      '<input type="checkbox" class="user-bot-chk" value="' + botId + '" ' + (isChecked ? 'checked' : '') + '>' +
+      '<input type="checkbox" class="user-bot-chk" value="' + escapeHtml(botId) + '" ' + (isChecked ? 'checked' : '') + '>' +
       '<span><strong style="color:#38bdf8;font-size:13px;">[' + escapeHtml(displayName) + ']</strong>' + nonRentableBadge + '</span>' +
     '</label>';
   }).join('');
@@ -11276,7 +11279,7 @@ window.renderUserFormBotsCheckboxes = renderUserFormBotsCheckboxes;
 // Bắt sự kiện click bot đã có người dùng khác sở hữu
 function handleOccupiedBotClick(event, directBotId, directBotLabel, directOldOwner) {
   const chk = event.target;
-  const botId = directBotId !== undefined ? directBotId : Number(chk.dataset.botId || chk.value);
+  const botId = directBotId !== undefined ? String(directBotId) : String(chk.dataset.botId || chk.value);
   const botLabel = directBotLabel !== undefined ? directBotLabel : (chk.dataset.botLabel || ('Bot #' + botId));
   const oldOwnerName = directOldOwner !== undefined ? directOldOwner : (chk.dataset.owner || '');
   if (chk.checked) {
@@ -11332,7 +11335,7 @@ async function saveUserForm() {
   const password = document.getElementById('userFormPassword').value.trim();
   const status = document.getElementById('userFormStatus').value;
   const chks = document.querySelectorAll('.user-bot-chk:checked');
-  const assignedBotIds = Array.from(chks).map(el => Number(el.value));
+  const assignedBotIds = Array.from(chks).map(el => String(el.value));
 
   if (!username) { showToast('Vui lòng nhập tên đăng nhập.'); return; }
   const isUpdate = !!id;
@@ -11486,7 +11489,7 @@ async function quickBotAction(event, id, action) {
   }
 
   try {
-    var targetBot = bots.find(function(b) { return String(b.id) === String(id) || String(b.workerId) === String(id) || (Number(b.id) === Number(id) && !isNaN(Number(id))); });
+    var targetBot = bots.find(function(b) { return String(b.workerId||b.id) === String(id); });
     if (action === 'start' && (!targetBot?.username || targetBot.username === 'Chưa đặt')) {
       showToast('⚠️ Bot chưa cài đặt tài khoản Minecraft! Đang mở bảng Chi tiết để cài đặt...', 'warning', 4000);
       openBot(id);
@@ -12499,7 +12502,9 @@ async function getRegistryFallback() {
   return {
     ok:true,
     bots:list.map(bot=>({
-      id:Number(bot.id),
+      id:String(bot.workerId||bot.id),
+      workerId:String(bot.workerId||bot.id),
+      botNumber:bot.botNumber,
       url:bot.url||'',
       source:bot.source||'unknown',
       botId:String(bot.id),
@@ -12689,16 +12694,17 @@ async function addBotFromWeb() {
 
 async function deleteBot(event,id) {
   if(event) event.stopPropagation();
-  const bot=bots.find(x=>Number(x.id)===Number(id));
+  const workerId=String(id);
+  const bot=bots.find(x=>String(x.workerId||x.id)===workerId);
   if(!bot) return;
   if(!confirm('Xóa '+(bot.label||('Bot '+id))+' khỏi Manager?')) return;
   try {
-    const result=await requestJson('/api/manager/bot/'+Number(id),{method:'DELETE'});
+    const result=await requestJson('/api/manager/bot/'+encodeURIComponent(workerId),{method:'DELETE'});
     const data=result.data||{};
     if(!result.ok && !data.partial) throw new Error(data.error||'Không thể xóa bot.');
-    if(Number(selectedBotId)===Number(id)) goHome();
+    if(String(selectedBotId)===workerId) goHome();
     showToast(data.message || (data.partial ? ('Đã xóa ' + (bot.label || ('Bot #' + id)) + ' khỏi Supabase & Manager (bot còn lại offline sẽ tự đồng bộ sau).') : 'Đã xóa bot.'));
-    bots = bots.filter(x => Number(x.id) !== Number(id));
+    bots = bots.filter(x => String(x.workerId||x.id) !== workerId);
     renderHome();
     lastHomeSig = '';
     await refreshHome();
@@ -12765,7 +12771,7 @@ async function executeCleanBots(list) {
   let failCount = 0;
   for (const b of list) {
     try {
-      const res = await requestJson('/api/manager/bot/' + Number(b.id), { method: 'DELETE' });
+      const res = await requestJson('/api/manager/bot/' + encodeURIComponent(String(b.workerId||b.id)), { method: 'DELETE' });
       if (res.ok || res.data?.partial) successCount++;
       else failCount++;
     } catch (_) {
@@ -12800,7 +12806,10 @@ function toggleEditSecretKeyVisibility() {
 }
 
 function openBot(id) {
-  selectedBotId=Number.isFinite(Number(id)) ? Number(id) : String(id);
+  const requestedId=String(id);
+  const selected=bots.find(item=>String(item.workerId||item.id)===requestedId)
+    || bots.find(item=>String(item.botNumber)===requestedId);
+  selectedBotId=String(selected?.workerId||selected?.id||id);
   invalidateDetailReads();
   cancelDetailSlotSelection();
   // Reset all detail UI fields to prevent stale ghost data
@@ -12813,7 +12822,6 @@ function openBot(id) {
   const dStat = document.getElementById('detailStatus'); if (dStat) dStat.innerHTML = '<span class="dot yellow"></span> Đang tải...';
   const dInv = document.getElementById('detailInventory'); if (dInv) dInv.innerHTML = '';
   const dHot = document.getElementById('detailHotbar'); if (dHot) dHot.innerHTML = '';
-  const selected=bots.find(item=>String(item.id)===String(selectedBotId) || String(item.workerId)===String(selectedBotId) || (Number(item.id)===Number(selectedBotId) && !isNaN(Number(selectedBotId))));
   const url=new URL(window.location.href);
   url.searchParams.set('bot',String(selectedBotId));
   url.searchParams.delete('botUrl');
@@ -12859,11 +12867,11 @@ async function resolveRouteFromUrl() {
         const result=await requestJson('/api/manager/registry');
         const list = result.data?.bots || [];
         const match = botIdParam
-          ? list.find(item => String(item.id) === String(botIdParam))
+          ? (list.find(item => String(item.workerId||item.id) === String(botIdParam)) || list.find(item => String(item.botNumber) === String(botIdParam)))
           : (identity ? list.find(item => item.url && normalizeClientBotUrl(item.url) === identity) : null);
         if(match){
-          selectedBotId=Number(match.id);
-          url.searchParams.set('bot',String(match.id));
+          selectedBotId=String(match.workerId||match.id);
+          url.searchParams.set('bot',selectedBotId);
           url.searchParams.delete('botUrl');
           url.searchParams.delete('botId');
           history.replaceState({bot:selectedBotId},'',url);
@@ -12893,8 +12901,8 @@ lastPositionHistoryFetchedAt=0;
       }
     }
 
-    const id=Number(botIdParam);
-    if(Number.isInteger(id)&&id>0){
+    const id=String(botIdParam||'');
+    if(id){
       selectedBotId=id;
       invalidateDetailReads();
       document.getElementById('homePage').classList.add('hidden');
@@ -12951,15 +12959,15 @@ async function runAllAction(action) {
 function detailStatusHtml() {
   if(!detailBot) return;
   const isAdmin = Boolean(currentUser && currentUser.role === 'admin');
-  const numId = selectedBotId || detailBot.id;
-  const numIdArg = Number.isFinite(Number(numId)) ? String(Number(numId)) : JSON.stringify(String(numId));
+  const numId = detailBot.botNumber || selectedBotId || detailBot.id;
+  const workerIdArg = JSON.stringify(String(detailBot.workerId || detailBot.id || selectedBotId || ''));
   const [color,label,errorType]=statusMeta(detailBot.status,detailBot.available,!!detailBot.manuallyStopped,detailBot);
   let statusDetailHtml = '<span class="dot '+color+'"></span>'+escapeHtml(label);
   if (!detailBot.available) {
     if (errorType === 'secret_mismatch') {
       statusDetailHtml += '<div style="font-size:12px;color:#fb923c;margin-top:8px;font-weight:600;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">' +
         '<span>⚠️ Worker từ chối lệnh do lệch Secret Key (409).</span>' +
-        '<button type="button" class="small warning-btn" onclick="openEditSecretModal(' + escapeHtml(numIdArg) + ')" style="padding:2px 8px;font-size:11px;">🔑 Cập nhật Key</button>' +
+        '<button type="button" class="small warning-btn" onclick="openEditSecretModal(' + escapeHtml(workerIdArg) + ')" style="padding:2px 8px;font-size:11px;">🔑 Cập nhật Key</button>' +
       '</div>';
     } else if (errorType === 'render_sleep') {
       statusDetailHtml += '<div style="font-size:12px;color:#c084fc;margin-top:8px;font-weight:600;">' +
@@ -12968,8 +12976,8 @@ function detailStatusHtml() {
     } else if (errorType === 'not_found') {
       statusDetailHtml += '<div style="font-size:12px;color:#f87171;margin-top:8px;font-weight:600;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">' +
         '<span>❌ Địa chỉ bot trả về 404 Not Found (URL sai hoặc app bị xoá).</span>' +
-        '<button type="button" class="small danger" onclick="deleteBot(event,' + escapeHtml(numIdArg) + ')" style="padding:2px 8px;font-size:11px;">🗑 Xoá Bot</button>' +
-        '<button type="button" class="small" onclick="editBot(event,' + escapeHtml(numIdArg) + ')" style="padding:2px 8px;font-size:11px;">✏ Sửa URL</button>' +
+        '<button type="button" class="small danger" onclick="deleteBot(event,' + escapeHtml(workerIdArg) + ')" style="padding:2px 8px;font-size:11px;">🗑 Xoá Bot</button>' +
+        '<button type="button" class="small" onclick="editBot(event,' + escapeHtml(workerIdArg) + ')" style="padding:2px 8px;font-size:11px;">✏ Sửa URL</button>' +
       '</div>';
     }
   }
@@ -13539,7 +13547,7 @@ async function resetCustomerBot() {
     detailStatusHtml();
     renderDetailAutoChatSchedules([]);
     renderDetailBotSchedules([]);
-    const botIdx = bots.findIndex(b => Number(b.id) === Number(selectedBotId));
+    const botIdx = bots.findIndex(b => String(b.workerId||b.id) === String(selectedBotId));
     if (botIdx !== -1) {
       bots[botIdx].username = '';
       bots[botIdx].status = 'offline';
@@ -13979,7 +13987,7 @@ async function refreshDetail(force=false) {
 
       if(!isCurrentRequest()) return;
       if (detailBot) {
-        const bIdx = bots.findIndex(b => Number(b.id) === Number(requestBotId));
+        const bIdx = bots.findIndex(b => String(b.workerId||b.id) === String(requestBotId));
         if (bIdx !== -1) {
           bots[bIdx] = { ...bots[bIdx], ...detailBot };
           if (typeof renderHome === 'function') renderHome();
@@ -14762,7 +14770,7 @@ async function detailAction(action){
   const activeBtn=document.getElementById(action==='start'?'detailStartButton':action==='stop'?'detailStopButton':'detailRestartButton');
   const prevBtnText=activeBtn?activeBtn.textContent:'';
   const prevDetailState = detailBot ? { status: detailBot.status, manuallyStopped: detailBot.manuallyStopped, available: detailBot.available } : null;
-  const bIdx = bots.findIndex(function(b) { return Number(b.id) === Number(selectedBotId); });
+  const bIdx = bots.findIndex(function(b) { return String(b.workerId||b.id) === String(selectedBotId); });
   const prevBotState = bIdx !== -1 ? { status: bots[bIdx].status, manuallyStopped: bots[bIdx].manuallyStopped, available: bots[bIdx].available } : null;
 
   try{
@@ -14967,8 +14975,7 @@ async function quickCardAction(btn, botId, action) {
   btn.textContent = '...';
 
   // Optimistic UI update in bots array and immediate re-render
-  const numId = Number(botId);
-  const targetBot = bots.find(function(b) { return Number(b.id) === numId; });
+  const targetBot = bots.find(function(b) { return String(b.workerId||b.id) === String(botId); });
   if (targetBot) {
     if (action === 'start') {
       targetBot.manuallyStopped = false;

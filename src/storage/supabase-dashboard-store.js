@@ -364,12 +364,25 @@ class SupabaseDashboardStore {
 
   async setAccess(userId, values, actorId) {
     this.invalidateCache();
-    const { workerIds = [], ...fields } = values;
+    const normalizeWorkerIds = (ids) => [...new Set((Array.isArray(ids) ? ids : [])
+      .map((id) => String(id).trim().toLowerCase())
+      .filter(Boolean))];
+    const hasAssignmentInput = Object.prototype.hasOwnProperty.call(values || {}, 'workerIds')
+      || Object.prototype.hasOwnProperty.call(values || {}, 'assignedBotIds');
+    const rawWorkerIds = Object.prototype.hasOwnProperty.call(values || {}, 'workerIds')
+      ? values.workerIds
+      : values?.assignedBotIds;
+    const workerIds = hasAssignmentInput ? normalizeWorkerIds(rawWorkerIds) : [];
+    const fields = { ...(values || {}) };
+    delete fields.workerIds;
+    delete fields.assignedBotIds;
+    let assignedForSync = workerIds;
     let directUsersErr = null;
+    let existingUser = null;
+    let assignmentSyncAttempted = false;
 
     // 1. Thử lưu vào manager_users nếu có bảng
     try {
-      let existingUser = null;
       try {
         existingUser = (await this.resolveUserRow(userId)) || (fields.username ? await this.resolveUserRow(fields.username) : null);
       } catch (_) {}
@@ -377,9 +390,16 @@ class SupabaseDashboardStore {
       const cleanUsername = fields.username
         ? String(fields.username).trim().toLowerCase()
         : (existingUser?.username || String(userId).trim().toLowerCase().replace(/^usr_/, ''));
-      const assigned = (workerIds && workerIds.length > 0)
-        ? [...new Set(workerIds)].map(String)
-        : (Array.isArray(existingUser?.assigned_bot_ids) ? existingUser.assigned_bot_ids.map(String) : []);
+      if (existingUser?.id && String(existingUser.username || '').toLowerCase() !== cleanUsername) {
+        const usernameCollision = await this.resolveUserRow(cleanUsername);
+        if (usernameCollision && String(usernameCollision.id) !== String(existingUser.id)) {
+          throw new Error('Tên đăng nhập này đã có người sử dụng.');
+        }
+      }
+      const assigned = hasAssignmentInput
+        ? workerIds
+        : normalizeWorkerIds(existingUser?.assigned_bot_ids);
+      assignedForSync = assigned;
       const userRow = {
         id: existingUser?.id || userId,
         username: cleanUsername,
@@ -409,7 +429,28 @@ class SupabaseDashboardStore {
       } else if (existingUser?.password) {
         userRow.password = existingUser.password;
       }
-      const { data, error } = await this.client.from(USERS).upsert(userRow, { onConflict: 'username' }).select('*').maybeSingle();
+      if (hasAssignmentInput) {
+        if (typeof this.client?.rpc !== 'function') {
+          throw new Error('Không thể đồng bộ bot được gán: RPC manager_set_user_access chưa khả dụng.');
+        }
+        assignmentSyncAttempted = true;
+        const { error: assignmentError } = await this.client.rpc('manager_set_user_access', {
+          p_user_id: userRow.id || userId,
+          p_values: mapTo(fields, ACCESS_FIELDS, ['userId', 'createdAt', 'updatedAt', 'createdBy', 'updatedBy']),
+          p_worker_ids: assigned,
+          p_actor_id: String(actorId || '')
+        });
+        if (assignmentError) throw assignmentError;
+      }
+      let userWrite = this.client.from(USERS);
+      if (existingUser?.id && String(existingUser.username || '').toLowerCase() !== cleanUsername) {
+        const renamedRow = { ...userRow };
+        delete renamedRow.id;
+        userWrite = userWrite.update(renamedRow).eq('id', existingUser.id);
+      } else {
+        userWrite = userWrite.upsert(userRow, { onConflict: 'username' });
+      }
+      const { data, error } = await userWrite.select('*').maybeSingle();
       if (!error && data) {
         if (String(userRow.status).toLowerCase() === 'disabled' && typeof this.adapter?.revokeUserSessions === 'function') {
           await this.adapter.revokeUserSessions(userId).catch(() => false);
@@ -432,16 +473,37 @@ class SupabaseDashboardStore {
       directUsersErr = err;
     }
 
+    const directOnlyFields = [
+      'password', 'isTrial', 'trialBotId', 'registrationIp',
+      'deviceFingerprint', 'registrationUserAgent', 'botCount'
+    ];
+    const requiresDirectWrite = directOnlyFields.some((field) => fields[field] !== undefined)
+      || Boolean(fields.username && existingUser?.username
+        && String(fields.username).trim().toLowerCase() !== String(existingUser.username).toLowerCase());
+    if (assignmentSyncAttempted || requiresDirectWrite) {
+      throw directUsersErr || new Error('Không thể lưu đầy đủ thông tin người dùng.');
+    }
+
     if (typeof this.client?.rpc !== 'function') {
       if (directUsersErr) throw directUsersErr;
       throw new Error('Không thể lưu quyền truy cập người dùng.');
+    }
+
+    if (!hasAssignmentInput) {
+      try {
+        const existing = await this.resolveUserRow(userId);
+        if (Array.isArray(existing?.assigned_bot_ids)) assignedForSync = normalizeWorkerIds(existing.assigned_bot_ids);
+        else assignedForSync = normalizeWorkerIds(await this.assignedWorkerIds(userId));
+      } catch (_) {
+        assignedForSync = normalizeWorkerIds(await this.assignedWorkerIds(userId).catch(() => []));
+      }
     }
 
     // 2. Fallback gọi RPC manager_set_user_access
     const { data, error } = await this.client.rpc('manager_set_user_access', {
       p_user_id: userId,
       p_values: mapTo(fields, ACCESS_FIELDS, ['userId', 'createdAt', 'updatedAt', 'createdBy', 'updatedBy']),
-      p_worker_ids: [...new Set(workerIds)].map(String),
+      p_worker_ids: assignedForSync,
       p_actor_id: String(actorId || '')
     });
     if (error) throw error;
@@ -900,7 +962,7 @@ class SupabaseDashboardStore {
       try {
         const { data: workers, error: workersErr } = await this.client
           .from('manager_workers')
-          .select('worker_id, bot_number, enabled')
+          .select('worker_id, bot_number, enabled, settings')
           .order('bot_number');
         if (workersErr && !isMissingSchemaError(workersErr)) {
           throw workersErr instanceof Error ? workersErr : new Error(workersErr.message || 'Lỗi đọc danh sách Bot.');
@@ -909,7 +971,8 @@ class SupabaseDashboardStore {
           candidateWorkers = workers.map((w) => ({
             workerId: String(w.worker_id),
             botNumber: w.bot_number || 1,
-            enabled: Boolean(w.enabled)
+            enabled: Boolean(w.enabled),
+            rentable: w.settings?.rentable !== false && w.settings?.rentable !== 'false'
           }));
         }
       } catch (err) {
@@ -923,7 +986,8 @@ class SupabaseDashboardStore {
         candidateWorkers = (workers || []).map((w) => ({
           workerId: String(w.workerId),
           botNumber: w.botNumber || 1,
-          enabled: Boolean(w.enabled)
+          enabled: Boolean(w.enabled),
+          rentable: w.settings?.rentable !== false && w.settings?.rentable !== 'false'
         }));
       }
 
@@ -935,7 +999,7 @@ class SupabaseDashboardStore {
         let botNumber = 1;
 
         for (const w of candidateWorkers) {
-          if (!w.enabled || excludedWorkers.has(w.workerId)) continue;
+          if (!w.enabled || !w.rentable || excludedWorkers.has(w.workerId)) continue;
           const assigned = await this.assignedUser(w.workerId);
           if (!assigned) {
             freeWorkerId = w.workerId;

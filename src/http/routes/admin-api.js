@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const express = require('express');
 const { decryptUserPassword, hashAdminPassword } = require('../../utils/secrets');
 const rawSchema = require('../../storage/schema-sql');
@@ -49,8 +50,47 @@ function createAdminApi({
   // 1. USER MANAGEMENT
   router.get('/users', async (_req, res) => {
     try {
-      const users = await store.listAccess();
-      return res.json({ ok: true, users });
+      const [storedUsers, workers] = await Promise.all([store.listAccess(), registry.list()]);
+      const users = storedUsers.map((user) => ({
+        ...user,
+        id: String(user.userId || user.id || ''),
+        assignedBotIds: Array.isArray(user.workerIds)
+          ? [...new Set(user.workerIds.map((workerId) => String(workerId).trim().toLowerCase()).filter(Boolean))]
+          : []
+      }));
+      const usersById = new Map();
+      for (const user of users) {
+        for (const key of [user.id, user.userId, user.username]) {
+          if (key) usersById.set(String(key).toLowerCase(), user);
+        }
+      }
+      const ownership = await Promise.all(workers.map(async (worker) => {
+        let assignment = typeof store.assignedUser === 'function'
+          ? await store.assignedUser(worker.workerId)
+          : null;
+        if (!assignment?.userId) {
+          const fallbackOwner = users.find((user) => user.assignedBotIds.includes(String(worker.workerId)));
+          if (fallbackOwner) assignment = { userId: fallbackOwner.id, username: fallbackOwner.username };
+        }
+        if (!assignment?.userId) return [worker.workerId, null];
+        const owner = usersById.get(String(assignment.userId).toLowerCase())
+          || usersById.get(String(assignment.username || '').toLowerCase());
+        return [worker.workerId, {
+          userId: owner?.id || assignment.userId,
+          username: owner?.username || assignment.username || String(assignment.userId)
+        }];
+      }));
+      const botOwnership = Object.fromEntries(ownership);
+      const availableBots = workers.map((worker) => ({
+        id: String(worker.workerId),
+        workerId: String(worker.workerId),
+        botNumber: worker.botNumber,
+        label: worker.alias || worker.name || `Bot #${worker.botNumber || worker.workerId}`,
+        enabled: worker.enabled !== false,
+        rentable: worker.rentable !== false,
+        currentOwner: botOwnership[worker.workerId] || null
+      }));
+      return res.json({ ok: true, users, availableBots, botOwnership });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }
@@ -59,7 +99,7 @@ function createAdminApi({
   router.post('/users', async (req, res) => {
     try {
       const { action, userId, values, id, ...rest } = req.body || {};
-      const targetUserId = userId || id;
+      let targetUserId = userId || id;
 
       if (action === 'delete') {
         if (!targetUserId) return res.status(400).json({ ok: false, error: 'Thiếu userId cần xóa.' });
@@ -70,7 +110,32 @@ function createAdminApi({
       }
 
       const updateData = values || rest;
-      if (!targetUserId) return res.status(400).json({ ok: false, error: 'Thiếu userId cần cập nhật.' });
+      if (updateData?.username !== undefined) {
+        const username = String(updateData.username || '').trim().toLowerCase();
+        if (!/^[a-z0-9_]{3,32}$/.test(username)) {
+          return res.status(400).json({ ok: false, error: 'Tên đăng nhập phải từ 3 đến 32 ký tự, chỉ gồm chữ, số và dấu gạch dưới.' });
+        }
+        if (username === 'admin' || username === String(config?.adminUsername || '').trim().toLowerCase()) {
+          return res.status(400).json({ ok: false, error: 'Tên tài khoản này được bảo lưu cho Quản trị viên.' });
+        }
+        updateData.username = username;
+      }
+      if (updateData?.password !== undefined) {
+        const password = updateData.password;
+        if (typeof password !== 'string' || password.length < 6 || password.length > 256) {
+          return res.status(400).json({ ok: false, error: 'Mật khẩu phải dài từ 6 đến 256 ký tự.' });
+        }
+      }
+      if (!targetUserId) {
+        const username = String(updateData?.username || '').trim().toLowerCase();
+        const password = String(updateData?.password || '');
+        if (!username || !password) {
+          return res.status(400).json({ ok: false, error: 'Tạo tài khoản mới cần username và password.' });
+        }
+        targetUserId = `usr_${crypto.randomUUID()}`;
+        updateData.username = username;
+        updateData.role = 'user';
+      }
 
       await store.setAccess(targetUserId, updateData, req.managerAuthSession.username);
       if (String(updateData?.status || '').trim().toLowerCase() === 'disabled') {
@@ -406,6 +471,80 @@ function createAdminApi({
     }
   });
 
+  router.patch('/bot/:id', async (req, res) => {
+    try {
+      const worker = await resolveWorker(req.params.id);
+      if (!worker) return res.status(404).json({ ok: false, error: 'Không tìm thấy bot cần sửa.' });
+
+      const body = req.body || {};
+      const patch = {};
+      const has = (key) => Object.prototype.hasOwnProperty.call(body, key);
+      if (has('label') || has('alias') || has('name')) patch.alias = body.label ?? body.alias ?? body.name;
+      if (has('tags')) {
+        if (!Array.isArray(body.tags)) return res.status(400).json({ ok: false, error: 'Tags phải là một danh sách.' });
+        patch.tags = body.tags;
+      }
+      if (has('rentable')) {
+        if (typeof body.rentable !== 'boolean') return res.status(400).json({ ok: false, error: 'Trạng thái cho thuê không hợp lệ.' });
+        patch.rentable = body.rentable;
+      }
+      if (has('url') || has('serviceUrl')) {
+        const rawServiceUrl = body.url ?? body.serviceUrl;
+        if (typeof rawServiceUrl !== 'string') {
+          return res.status(400).json({ ok: false, error: 'URL bot không hợp lệ.' });
+        }
+        const serviceUrl = rawServiceUrl.trim().replace(/\/+$/, '');
+        if (serviceUrl && !/^https:\/\//i.test(serviceUrl) && !/^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(serviceUrl)) {
+          return res.status(400).json({ ok: false, error: 'Worker URL phải dùng HTTPS.' });
+        }
+        if (!serviceUrl && worker.provider === 'render' && !worker.renderServiceId) {
+          return res.status(400).json({ ok: false, error: 'Render worker cần URL hoặc Render service ID.' });
+        }
+        patch.serviceUrl = serviceUrl;
+      }
+
+      const rawSecret = body.secretKey ?? body.secret;
+      const secret = typeof rawSecret === 'string' ? rawSecret.trim() : '';
+      if (secret && secret.length < 32) {
+        return res.status(400).json({ ok: false, error: 'Worker secret phải có ít nhất 32 ký tự.' });
+      }
+      if (!Object.keys(patch).length && !secret) {
+        return res.status(400).json({ ok: false, error: 'Không có thông tin nào để cập nhật.' });
+      }
+
+      if (Object.keys(patch).length) await registry.updateSettings(worker.workerId, patch);
+      if (secret) await registry.setSecret(worker.workerId, secret);
+      const updated = await registry.find(worker.workerId);
+      await store.addAudit({
+        action: 'ADMIN_UPDATE_BOT',
+        targetId: worker.workerId,
+        actorId: req.managerAuthSession.username,
+        details: {
+          label: updated.alias || updated.name,
+          tags: updated.tags || [],
+          rentable: updated.rentable !== false,
+          serviceUrlChanged: has('url') || has('serviceUrl'),
+          secretChanged: Boolean(secret)
+        }
+      });
+      return res.json({
+        ok: true,
+        message: 'Đã cập nhật bot.',
+        bot: {
+          id: String(updated.workerId),
+          workerId: String(updated.workerId),
+          botNumber: updated.botNumber,
+          label: updated.alias || updated.name,
+          tags: updated.tags || [],
+          rentable: updated.rentable !== false,
+          url: updated.serviceUrl || ''
+        }
+      });
+    } catch (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+  });
+
   router.post('/bot/:id/reset-customer', async (req, res) => {
     try {
       const worker = await resolveWorker(req.params.id);
@@ -562,8 +701,26 @@ function createAdminApi({
 
   router.post('/keys', async (req, res) => {
     try {
-      const { days, permanent, botCount, workerIds, maxUses, planName, count } = req.body || {};
-      const numKeys = Math.min(50, Math.max(1, Number(count) || 1));
+      const { days, permanent, botCount, workerIds, maxUses, planName, count, customKey, validDays } = req.body || {};
+      const requestedCount = count === undefined || count === null || String(count).trim() === '' ? 1 : Number(count);
+      if (!Number.isInteger(requestedCount) || requestedCount < 1 || requestedCount > 50) {
+        return res.status(400).json({ ok: false, error: 'Số lượng mã phải từ 1 đến 50.' });
+      }
+      if (customKey !== undefined && customKey !== null && typeof customKey !== 'string') {
+        return res.status(400).json({ ok: false, error: 'Mã tự đặt phải là chuỗi ký tự.' });
+      }
+      const numKeys = requestedCount;
+      if (customKey && numKeys !== 1) {
+        return res.status(400).json({ ok: false, error: 'Mã tự đặt chỉ tạo được một mã mỗi lần.' });
+      }
+      let expiresAt = null;
+      if (validDays !== undefined && validDays !== null && String(validDays).trim() !== '') {
+        const daysValid = Number(validDays);
+        if (!Number.isInteger(daysValid) || daysValid < 1 || daysValid > 36500) {
+          return res.status(400).json({ ok: false, error: 'Hạn sử dụng mã phải từ 1 đến 36500 ngày.' });
+        }
+        expiresAt = new Date(Date.now() + daysValid * 86400000).toISOString();
+      }
       const generated = [];
 
       for (let i = 0; i < numKeys; i++) {
@@ -574,6 +731,8 @@ function createAdminApi({
           workerIds: Array.isArray(workerIds) ? workerIds : [],
           maxUses: Number.isFinite(Number(maxUses)) ? Number(maxUses) : 1,
           planName: planName || 'Standard',
+          customCode: customKey,
+          expiresAt,
           actorId: req.managerAuthSession.username
         });
         generated.push(key);
