@@ -15,15 +15,15 @@ async function execute() {
     `• \`/login\`: Mở biểu mẫu đăng nhập tài khoản Web Manager bằng Username & Mật khẩu.\n` +
     `• \`/logout\`: Đăng xuất và hủy liên kết tài khoản Discord hiện tại.\n` +
     `• \`/bots\`: Mở bảng điều khiển chính danh sách bot bạn sở hữu.\n` +
-    `• \`/logs\`: Xem nhật ký 10 sự kiện gần nhất của bot với menu chuyển bot nhanh.\n` +
     `• \`/help\`: Hiển thị bảng hướng dẫn này.\n\n` +
-    `### 🎮 THAO TÁC TRÊN PANEL TỪNG BOT\n` +
-    `Khi gọi \`/bots\`, bấm vào nút của từng bot để mở chi tiết:\n` +
+    `### 🎮 THEO DÕI VÀ ĐIỀU KHIỂN BOT\n` +
+    `Gọi \`/bots\`, chọn nút có tên bot để xem Username, Server, Ping, TPS, vị trí, Uptime và số lần kết nối lại:\n` +
     `• **BẬT (START):** Khởi chạy phiên AFK kết nối máy chủ KingMC.\n` +
     `• **TẮT (STOP):** Ngắt kết nối và đóng an toàn phiên bot.\n` +
     `• **KHỞI ĐỘNG LẠI (RESTART):** Tải lại cấu hình và kết nối lại ngay lập tức.\n` +
-    `• **LÀM MỚI (REFRESH):** Cập nhật chỉ số Ping, Uptime, Reconnect mới nhất.\n\n` +
-    `> 💡 *Để đổi mật khẩu Minecraft, thiết lập Proxy SOCKS5, nạp Giftcode hoặc đổi tên hiển thị, vui lòng truy cập nền tảng **Web Manager**.*`;
+    `• **LÀM MỚI:** Cập nhật trạng thái và thông tin mới nhất.\n` +
+    `• **QUAY LẠI DANH SÁCH:** Chọn bot khác.\n\n` +
+    `> 💡 *Để đổi mật khẩu Minecraft, thiết lập Proxy SOCKS5, nạp Giftcode hoặc xem log, vui lòng truy cập nền tảng **Web Manager**.*`;
 
   return {
     embeds: [embed('HƯỚNG DẪN SỬ DỤNG DISCORD MONITORING', desc, 0x0ea5e9)]

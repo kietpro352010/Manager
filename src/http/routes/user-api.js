@@ -32,6 +32,28 @@ function sanitizeBotForSession(botData, session) {
   copy.proxy = null;
   copy.proxyCiphertext = null;
 
+  for (const key of [
+    'cpuPercent', 'rssMb', 'heapUsedMb', 'ramRss', 'ramHeap', 'ramPercent',
+    'netDownKb', 'netUpKb', 'netTotalRxMb', 'memory', 'hostHardware',
+    'provider', 'platform'
+  ]) {
+    delete copy[key];
+  }
+  if (copy.history && typeof copy.history === 'object') {
+    copy.history = { ...copy.history };
+    delete copy.history.ram;
+  }
+  if (copy.summary && typeof copy.summary === 'object') {
+    copy.summary = { ...copy.summary };
+    for (const key of [
+      'cpuPercent', 'rssMb', 'heapUsedMb', 'ramUsedMb', 'ramTotalMb', 'ramPercent',
+      'botRssMb', 'botHeapMb', 'netDownKb', 'netUpKb', 'netTotalRxMb', 'ramHistory',
+      'memory', 'hostHardware', 'hardware'
+    ]) {
+      delete copy.summary[key];
+    }
+  }
+
   if (session && session.allowAccountChange === false) {
     if (copy.settings && typeof copy.settings === 'object') {
       copy.settings = { ...copy.settings };
@@ -224,6 +246,8 @@ function createUserApi({
       state: worker.status?.state || 'offline',
       online: isOnline,
       server: worker.status?.server || worker.serverHost || 'mc.kingmc.vn',
+      dimension: worker.status?.dimension || 'unknown',
+      locationState: worker.status?.locationState || 'unknown',
       health: worker.status?.health ?? 20,
       food: worker.status?.food ?? 20,
       totemCount: worker.status?.totemCount ?? 0,
@@ -236,6 +260,8 @@ function createUserApi({
       serverTps: typeof worker.status?.tps === 'number' ? worker.status.tps : null,
       uptime: worker.status?.uptimeSeconds ?? worker.status?.uptime ?? 0,
       uptimeSeconds: worker.status?.uptimeSeconds ?? worker.status?.uptime ?? 0,
+      reconnectAttempts: worker.status?.reconnectAttempts ?? 0,
+      reconnectCount: worker.status?.reconnectCount ?? 0,
       lastSeen: worker.lastHeartbeat || null,
       manuallyStopped: Boolean(worker.status?.manuallyStopped),
       tags: worker.tags || [],
@@ -608,6 +634,10 @@ function createUserApi({
 
   // 10. CLEAR LOGS
   router.post(['/bot/:id/logs/clear', '/bot/:id/chat-logs/clear'], requireSession, async (req, res) => {
+    if (req.managerAuthSession?.role !== 'admin') {
+      return res.status(403).json({ ok: false, error: 'Chỉ quản trị viên mới được xóa lịch sử bot.' });
+    }
+
     const perm = await checkBotPermissionAsync(req, req.params.id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
 

@@ -109,7 +109,6 @@ Worker chạy trên host riêng cần URL Manager có thể truy cập qua HTTPS
 | `/admin password` | Tạo hoặc đổi mật khẩu Web admin. |
 | `/bots` | Mở bảng điều khiển Worker theo quyền của người dùng. |
 | `/login`, `/logout` | Liên kết hoặc hủy liên kết tài khoản Discord/Web. |
-| `/logs` | Xem log gần đây của Worker. |
 | `/help` | Xem trợ giúp lệnh. |
 
 Slash commands được đăng ký khi bot Discord khởi động. Nếu lệnh chưa hiện, kiểm tra token, quyền bot trong server và `DISCORD_GUILD_ID`.

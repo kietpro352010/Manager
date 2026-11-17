@@ -1,7 +1,7 @@
 'use strict';
 
 const {
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, StringSelectMenuBuilder, TextInputStyle, ModalBuilder, TextInputBuilder
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, TextInputStyle, ModalBuilder, TextInputBuilder
 } = require('discord.js');
 const { escapeMarkdown } = require('discord.js');
 
@@ -51,15 +51,6 @@ function uptimeText(secondsVal) {
   return `${remSec}s`;
 }
 
-function sanitizeLogMessage(message) {
-  if (!message || typeof message !== 'string') return '';
-  return message
-    .replace(/(password|secret|token|key|pwd)\s*[:=]\s*[^\s,]+/gi, '$1: ***')
-    .replace(/socks5:\/\/[^@]+@/gi, 'socks5://***:***@')
-    .replace(/https?:\/\/[^@]+@/gi, 'http://***:***@')
-    .slice(0, 200);
-}
-
 function getWorkerState(worker) {
   const rawState = String(worker?.status?.state || (worker?.status?.online ? 'online' : 'offline')).toLowerCase();
   const isOnline = Boolean(worker?.status?.online || rawState === 'online');
@@ -96,11 +87,11 @@ function renderBotsList({ user, workers = [], page = 0, pageSize = 5, notice = '
   const startIndex = currentPage * pageSize;
   const currentWorkers = workers.slice(startIndex, startIndex + pageSize);
 
-  let desc = `Tài khoản: **${safe(user?.username || 'Khách')}**\nTổng số bot: **${totalBots}**`;
+  let desc = `Tài khoản: **${safe(user?.username || 'Khách')}**\nSố bot được cấp: **${totalBots}**`;
   if (notice) {
     desc += `\n\n${notice}`;
   }
-  desc += '\n\n';
+  desc += '\n\nChọn nút có tên bot bên dưới để xem thông tin hoặc điều khiển bot.\n\n';
 
   if (totalBots === 0) {
     desc += '⚠️ *Bạn chưa sở hữu bot nào. Vui lòng liên hệ Admin hoặc truy cập Web Manager để đăng ký bot.*';
@@ -110,11 +101,8 @@ function renderBotsList({ user, workers = [], page = 0, pageSize = 5, notice = '
       const rawName = safe(worker.name || `BOT ${padId(worker.botNumber || 1)}`);
       const botLabel = rawName.toLowerCase().startsWith('bot #') ? rawName : `Bot #${padId(worker.botNumber || 1)} · ${rawName}`;
       const fullBotId = worker.workerId;
-      const mcUser = safe(worker.status?.username || worker.settings?.account?.username || 'Chưa thiết lập');
-
       desc += `${state.emoji} **${botLabel}**\n` +
               `> **Bot ID:** \`${fullBotId}\`\n` +
-              `> **Minecraft:** \`${mcUser}\`\n` +
               `> **Trạng thái:** \`${state.label}\`\n\n`;
     }
   }
@@ -158,7 +146,7 @@ function renderBotsList({ user, workers = [], page = 0, pageSize = 5, notice = '
 // ----------------------------------------------------------------------------
 // 2. PER-BOT DETAIL PANEL (bot:view:{workerId})
 // ----------------------------------------------------------------------------
-function renderBotDetail({ user, worker, logs = [], notice = '', isExecuting = false }) {
+function renderBotDetail({ user, worker, notice = '', isExecuting = false }) {
   if (!worker) {
     return {
       embeds: [embed('❌ LỖI', 'Không tìm thấy thông tin bot này hoặc bot đã bị xóa.', COLOR_OFFLINE)],
@@ -168,51 +156,51 @@ function renderBotDetail({ user, worker, logs = [], notice = '', isExecuting = f
 
   const state = getWorkerState(worker);
   const botName = safe(worker.name || `BOT ${padId(worker.botNumber || 1)}`);
-  const fullBotId = worker.workerId;
+  const fullBotId = safe(worker.workerId || worker.id);
   const mcUsername = safe(worker.status?.username || worker.settings?.account?.username || 'Chưa thiết lập');
-  const ping = worker.status?.online && worker.status?.pingMs !== null ? `${worker.status.pingMs} ms` : '—';
-  const uptime = worker.status?.online ? uptimeText(worker.status?.uptimeSeconds) : '—';
-  const reconnects = worker.status?.reconnectCount ?? worker.status?.reconnectAttempts ?? 0;
+  const pingMs = Number(worker.status?.pingMs);
+  const ping = state.isOnline && Number.isFinite(pingMs) ? `${pingMs} ms` : '—';
+  const tpsValue = worker.status?.tps;
+  const tps = tpsValue !== null && tpsValue !== undefined && Number.isFinite(Number(tpsValue))
+    ? `${Number(tpsValue).toFixed(1)}`
+    : '—';
+  const uptime = state.isOnline ? uptimeText(worker.status?.uptimeSeconds) : '—';
+  const reconnects = worker.status?.reconnectCount || worker.status?.reconnectAttempts || 0;
+  const server = safe(worker.status?.server || worker.serverHost || 'mc.kingmc.vn');
   const provider = safe(worker.provider || 'wispbyte').toUpperCase();
-  const lastActiveSec = worker.lastHeartbeat ? Math.floor(new Date(worker.lastHeartbeat).getTime() / 1000) : null;
-  const lastActiveText = lastActiveSec ? `<t:${lastActiveSec}:R>` : '—';
+  const position = worker.status?.position;
+  const hasPosition = position &&
+    [position.x, position.y, position.z].every((value) => value !== null && value !== undefined && Number.isFinite(Number(value)));
+  const coordinates = hasPosition
+    ? `X: ${Math.round(Number(position.x))}, Y: ${Math.round(Number(position.y))}, Z: ${Math.round(Number(position.z))}`
+    : '';
+  const rawDimension = String(worker.status?.dimension || '').replace(/^minecraft:/i, '').trim();
+  const locationStates = { login: 'Đang đăng nhập', lobby: 'Sảnh', other: 'Trong game' };
+  const rawLocationState = String(worker.status?.locationState || '').trim().toLowerCase();
+  const locationState = locationStates[rawLocationState] || '';
+  const location = [coordinates, rawDimension, locationState].filter(Boolean).join(' · ') || 'Chưa có dữ liệu vị trí';
 
-  let desc = '';
-  if (notice) {
-    desc += `${notice}\n\n`;
+  const detailEmbed = embed(
+    `${state.emoji} ${botName.toUpperCase()} — CHI TIẾT BOT`,
+    notice
+      ? `${notice}\n\nThông tin nhanh và thao tác bot ở các nút bên dưới.`
+      : 'Thông tin nhanh và thao tác bot ở các nút bên dưới.',
+    state.color
+  );
+  detailEmbed.addFields(
+    { name: '🆔 Bot ID', value: '`' + fullBotId + '`', inline: true },
+    { name: '👤 Username', value: '`' + mcUsername + '`', inline: true },
+    { name: '🌐 Server', value: '`' + server + '`', inline: true },
+    { name: '📡 Trạng thái', value: `${state.emoji} **${state.label}**`, inline: true },
+    { name: '🏓 Ping', value: '`' + ping + '`', inline: true },
+    { name: '⚡ TPS', value: '`' + tps + '`', inline: true },
+    { name: '📍 Location', value: '`' + safe(location, 180) + '`', inline: false },
+    { name: '⏱ Uptime', value: '`' + uptime + '`', inline: true },
+    { name: '🔄 Reconnect', value: '`' + reconnects + '`', inline: true }
+  );
+  if (user?.role === 'admin') {
+    detailEmbed.addFields({ name: '🖥️ Host / Nền tảng', value: '`' + provider + '`', inline: true });
   }
-
-  desc += `### 📋 THÔNG TIN CƠ BẢN\n` +
-          `• **Bot ID:** \`${fullBotId}\`\n` +
-          `• **Tên Minecraft:** \`${mcUsername}\`\n` +
-          `• **Trạng thái:** ${state.emoji} **${state.label}**\n` +
-          `• **Máy chủ / Host:** \`${provider}\`\n` +
-          `• **Hoạt động lần cuối:** ${lastActiveText}\n\n`;
-
-  desc += `### ⚡ HIỆU NĂNG & KẾT NỐI\n` +
-          `• **Độ trễ Ping:** \`${ping}\`\n` +
-          `• **Thời gian chạy (Uptime):** \`${uptime}\`\n` +
-          `• **Số lần kết nối lại:** \`${reconnects}\`\n` +
-          `• **Trạng thái Engine:** \`${state.rawState}\`\n`;
-
-  if (worker.status?.lastError) {
-    desc += `• **Lỗi gần nhất:** \`${safe(worker.status.lastError, 120)}\`\n`;
-  }
-
-  desc += `\n### 📜 NHẬT KÝ GẦN NHẤT (10 sự kiện)\n`;
-  const recentLogs = Array.isArray(logs) ? logs.slice(-10).reverse() : [];
-  if (recentLogs.length === 0) {
-    desc += `*Chưa có bản ghi hoạt động nào.*\n`;
-  } else {
-    for (const item of recentLogs) {
-      const timeStr = item.time ? new Date(item.time).toLocaleTimeString('vi-VN', { hour12: false }) : '--:--:--';
-      const type = (item.type || item.event || 'info').toUpperCase();
-      const msg = sanitizeLogMessage(item.message || item.text || item.error || '');
-      desc += `\`[${timeStr}]\` **[${type}]** ${safe(msg, 90)}\n`;
-    }
-  }
-
-  const detailEmbed = embed(`${state.emoji} ${botName.toUpperCase()} — CHI TIẾT ĐIỀU KHIỂN`, desc, state.color);
 
   // Buttons
   // ONLINE: Disable START, Enable STOP & RESTART
@@ -234,79 +222,10 @@ function renderBotDetail({ user, worker, logs = [], notice = '', isExecuting = f
 
   const navRow = new ActionRowBuilder().addComponents(
     button('Làm mới', `bot:refresh:${fullBotId}`, ButtonStyle.Secondary, isExecuting, '🔄'),
-    button('Xem toàn bộ Log', `logs:open:${fullBotId}`, ButtonStyle.Secondary, false, '📜'),
     button('Quay lại danh sách', 'bots:list', ButtonStyle.Secondary, false, '◀')
   );
 
   return { embeds: [detailEmbed], components: [controlRow, navRow] };
-}
-
-// ----------------------------------------------------------------------------
-// 3. LOGS PANEL (/logs)
-// ----------------------------------------------------------------------------
-function renderBotLogs({ user, worker, logs = [], userBots = [], notice = '' }) {
-  if (!worker) {
-    return {
-      embeds: [embed('📜 NHẬT KÝ HOẠT ĐỘNG', 'Không tìm thấy bot được chỉ định.', COLOR_OFFLINE)],
-      components: [new ActionRowBuilder().addComponents(button('Quay lại danh sách', 'bots:list', ButtonStyle.Secondary))]
-    };
-  }
-
-  const state = getWorkerState(worker);
-  const botName = safe(worker.name || `BOT ${padId(worker.botNumber || 1)}`);
-  const fullBotId = worker.workerId;
-  const mcUsername = safe(worker.status?.username || worker.settings?.account?.username || 'Chưa thiết lập');
-
-  let desc = `### ${state.emoji} ${botName.toUpperCase()} (\`${fullBotId}\`)\n` +
-             `Minecraft: \`${mcUsername}\` | Trạng thái: **${state.label}**\n\n`;
-
-  if (notice) {
-    desc += `${notice}\n\n`;
-  }
-
-  const recentLogs = Array.isArray(logs) ? logs.slice(-10).reverse() : [];
-  if (recentLogs.length === 0) {
-    desc += `*Chưa có nhật ký hoạt động nào được ghi nhận cho bot này.*\n`;
-  } else {
-    for (const item of recentLogs) {
-      const timeStr = item.time ? new Date(item.time).toLocaleTimeString('vi-VN', { hour12: false }) : '--:--:--';
-      const type = (item.type || item.event || 'info').toUpperCase();
-      const msg = sanitizeLogMessage(item.message || item.text || item.error || '');
-      desc += `\`[${timeStr}]\` **[${type}]** ${safe(msg, 110)}\n`;
-    }
-  }
-
-  const logsEmbed = embed(`📜 NHẬT KÝ HOẠT ĐỘNG — ${botName.toUpperCase()}`, desc, COLOR_BRAND);
-
-  const components = [];
-
-  // If user has multiple bots, allow selecting bot via Select Menu
-  if (userBots && userBots.length > 1) {
-    const select = new StringSelectMenuBuilder()
-      .setCustomId('logs:select')
-      .setPlaceholder('Chọn bot khác để xem nhật ký...');
-
-    for (const b of userBots.slice(0, 25)) {
-      const bState = getWorkerState(b);
-      const bName = safe(b.name || `Bot ${padId(b.botNumber || 1)}`, 25);
-      select.addOptions({
-        label: `${bName} (${b.workerId})`,
-        value: b.workerId,
-        description: `Minecraft: ${b.status?.username || '—'} | ${bState.label}`,
-        default: b.workerId === worker.workerId
-      });
-    }
-    components.push(new ActionRowBuilder().addComponents(select));
-  }
-
-  const btnRow = new ActionRowBuilder().addComponents(
-    button('Làm mới Log', `logs:refresh:${fullBotId}`, ButtonStyle.Success, false, '🔄'),
-    button('Chi tiết & Điều khiển', `bot:view:${fullBotId}`, ButtonStyle.Primary, false, '🎮'),
-    button('Quay lại danh sách', 'bots:list', ButtonStyle.Secondary, false, '◀')
-  );
-  components.push(btnRow);
-
-  return { embeds: [logsEmbed], components };
 }
 
 // ----------------------------------------------------------------------------
@@ -444,13 +363,11 @@ async function botDashboard(services, userId, role, notice = '') {
 module.exports = {
   renderBotsList,
   renderBotDetail,
-  renderBotLogs,
   renderAdminStatus,
   renderAdminBots,
   buildLoginModal,
   getWorkerState,
   uptimeText,
-  sanitizeLogMessage,
   padId,
   safe,
   embed,

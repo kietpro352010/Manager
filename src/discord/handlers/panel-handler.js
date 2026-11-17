@@ -4,7 +4,6 @@ const { MessageFlags } = require('discord.js');
 const {
   renderBotsList,
   renderBotDetail,
-  renderBotLogs,
   renderAdminStatus,
   renderAdminBots,
   embed
@@ -352,8 +351,7 @@ async function handlePanelInteraction(interaction, services) {
       });
     }
 
-    const logs = services.registry.getLogs(workerId);
-    const view = renderBotDetail({ user, worker, logs });
+    const view = renderBotDetail({ user, worker });
     return safeUpdate(interaction, view);
   }
 
@@ -405,43 +403,29 @@ async function handlePanelInteraction(interaction, services) {
     }
 
     const updatedWorker = (await services.registry.find(workerId)) || worker;
-    const logs = services.registry.getLogs(workerId);
-    const view = renderBotDetail({ user, worker: updatedWorker, logs, notice });
+    const view = renderBotDetail({ user, worker: updatedWorker, notice });
     return safeUpdate(interaction, view);
   }
 
-  // 4. View Bot Logs: logs:open:{workerId}, logs:refresh:{workerId}
-  if (customId.startsWith('logs:open:') || customId.startsWith('logs:refresh:')) {
-    const workerId = customId.split(':')[2];
-    const worker = await services.registry.find(workerId);
+  // Old log buttons in existing Discord messages now open the concise detail panel.
+  if (customId.startsWith('logs:')) {
+    const workerId = customId === 'logs:select'
+      ? interaction.values?.[0]
+      : customId.split(':')[2];
+    const worker = workerId ? await services.registry.find(workerId) : null;
 
     if (!worker || !checkBotOwnership(user, workerId, worker)) {
       return safeUpdate(interaction, {
-        embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Bạn không có quyền xem nhật ký bot này.', 0xef4444)]
+        embeds: [embed('⛔ BOT KHÔNG KHẢ DỤNG', 'Bot không tồn tại hoặc bạn không có quyền xem bot này.', 0xef4444)],
+        components: [renderBotsList({ user, workers: await getUserBots(user, services) }).components[0]]
       });
     }
 
-    const logs = services.registry.getLogs(workerId);
-    const userBots = await getUserBots(user, services);
-    const view = renderBotLogs({ user, worker, logs, userBots });
-    return safeUpdate(interaction, view);
-  }
-
-  // 5. Select Menu change for /logs: logs:select
-  if (customId === 'logs:select' && interaction.isStringSelectMenu()) {
-    const selectedWorkerId = interaction.values?.[0];
-    const worker = await services.registry.find(selectedWorkerId);
-
-    if (!worker || !checkBotOwnership(user, selectedWorkerId, worker)) {
-      return safeUpdate(interaction, {
-        embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Bạn không có quyền xem nhật ký bot này.', 0xef4444)]
-      });
-    }
-
-    const logs = services.registry.getLogs(selectedWorkerId);
-    const userBots = await getUserBots(user, services);
-    const view = renderBotLogs({ user, worker, logs, userBots });
-    return safeUpdate(interaction, view);
+    return safeUpdate(interaction, renderBotDetail({
+      user,
+      worker,
+      notice: 'Nhật ký bot không hiển thị trên Discord. Hãy dùng Web Manager nếu cần xem log.'
+    }));
   }
 
   // 6. Admin Panel Interactions

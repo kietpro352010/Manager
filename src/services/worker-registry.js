@@ -91,6 +91,7 @@ function validateWorkerStatus(rawStatus, source = 'worker') {
     maintenanceTimeZone: String(status.maintenanceTimeZone || '').slice(0, 40),
     maintenanceStart: String(status.maintenanceStart || '').slice(0, 5),
     maintenanceEnd: String(status.maintenanceEnd || '').slice(0, 5),
+    locationState: String(status.locationState || '').slice(0, 32) || 'unknown',
     tps: typeof status.tps === 'number' && Number.isFinite(status.tps) ? Math.max(0, Math.min(20, status.tps)) : null,
     cpuPercent: asNumber(status.cpuPercent, 0, 100),
     rssMb: asNumber(status.rssMb, 0, 65536),

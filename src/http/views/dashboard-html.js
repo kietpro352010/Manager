@@ -2371,6 +2371,38 @@ select option {
 .grid > * {
   min-width: 0;
 }
+.detail-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-areas:
+    "status gui"
+    "chat events"
+    "inventory inventory"
+    "settings account"
+    "autochat schedule"
+    "proxy proxy";
+}
+.detail-grid > .panel {
+  min-width: 0;
+}
+#detailStatusPanel { grid-area: status; }
+#detailRemoteGuiCard { grid-area: gui; }
+#detailChatPanel { grid-area: chat; }
+#detailEventPanel { grid-area: events; }
+#detailInventoryPanel { grid-area: inventory; }
+#detailSettingsPanel { grid-area: settings; }
+#detailAccountPanel { grid-area: account; }
+#detailAutoChatPanel { grid-area: autochat; }
+#detailBotSchedulePanel { grid-area: schedule; }
+#detailProxyPanel { grid-area: proxy; }
+.location-info .location-value {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.location-separator {
+  color: var(--text-muted);
+}
 
 .panel h3 {
   margin-bottom: 12px;
@@ -4181,6 +4213,19 @@ body.cosmic-mode-login .app-cosmic-canvas { opacity: 0.95; }
   .grid {
     grid-template-columns: 1fr;
   }
+  .detail-grid {
+    grid-template-areas:
+      "status"
+      "gui"
+      "chat"
+      "events"
+      "inventory"
+      "settings"
+      "account"
+      "autochat"
+      "schedule"
+      "proxy";
+  }
 }
 
 @media (max-width: 768px) {
@@ -5692,7 +5737,7 @@ button.primary:hover:not(:disabled),
     <div class="global-header-right">
       <button type="button" id="cosmicModeToggleBtn" class="cosmic-toggle-pill" onclick="cycleDashboardCosmicMode()" title="Chuyển nhanh 4 giao diện: Deep Galaxy / Ocean Abyss / Violet Dusk / Moonlight">🌌 Deep Galaxy</button>
       <span id="globalUserRoleBadge" class="vip-pill" style="background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.3);">🔒 CHƯA ĐĂNG NHẬP</span>
-      <span class="ram-pill">📊 <strong id="globalManagerRam">-- MB</strong></span>
+      <span class="ram-pill admin-only">📊 <strong id="globalManagerRam">-- MB</strong></span>
 
       <!-- ACCOUNT MENU BUTTON - PINNED SAT GOC PHAI -->
       <div class="user-profile-menu-wrap" style="position:relative;">
@@ -5797,8 +5842,8 @@ button.primary:hover:not(:disabled),
           <h1 class="fleet-welcome-title">👋 Bảng Điều Khiển Hạm Đội Bot</h1>
           <span class="vip-pill">👑 KBOT V11.8 PRO</span>
           <span id="userRoleBadge" class="vip-pill" style="background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.3);">🔒 CHƯA ĐĂNG NHẬP</span>
-          <span class="platform-pill">⚡ RENDER CLOUD</span>
-          <span class="ram-pill">📊 RAM: <strong id="managerRamUsage">-- MB</strong></span>
+          <span class="platform-pill admin-only">⚡ RENDER CLOUD</span>
+          <span class="ram-pill admin-only">📊 RAM: <strong id="managerRamUsage">-- MB</strong></span>
         </div>
         <div id="homeSubtitle" class="fleet-welcome-subtitle">Hệ Thống Cho Thuê Bot AFK KingMC Tự Động • Giám Sát Đa Máy Chủ Real-Time • Uptime 99.9%</div>
       </div>
@@ -5837,7 +5882,7 @@ button.primary:hover:not(:disabled),
     </div>
 
     <!-- Fleet Resource Bar (Eco & RAM Watchdog) -->
-    <div class="fleet-resource-bar" id="fleetResourceBar">
+    <div class="fleet-resource-bar admin-only" id="fleetResourceBar">
       <div class="fleet-res-item">
         <span class="fleet-res-icon">🌱</span>
         <div>
@@ -5985,29 +6030,29 @@ button.primary:hover:not(:disabled),
       <div class="detail-hud" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
         <span class="vip-pill">👑 KBOT V11.8 PRO</span>
         <span id="detailUserRoleBadge" class="vip-pill" style="background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.3);">🔒 CHƯA ĐĂNG NHẬP</span>
-        <span class="platform-pill">⚡ RENDER CLOUD</span>
-        <span class="ram-pill">📊 RAM: <strong id="detailManagerRamUsage">-- MB</strong></span>
+        <span class="platform-pill admin-only">⚡ RENDER CLOUD</span>
+        <span class="ram-pill admin-only">📊 RAM: <strong id="detailManagerRamUsage">-- MB</strong></span>
       </div>
     </div>
 
-    <div class="grid">
+    <div class="grid detail-grid">
 
       <!-- PANEL 1: BẢNG TRẠNG THÁI / THEO DÕI -->
-      <div class="panel">
+      <div class="panel" id="detailStatusPanel">
         <h3>Trạng thái</h3>
         <div id="detailStatus" class="big-status"></div>
         <div class="info">
+          <div class="info-item"><div class="info-label">BOT ID</div><div id="detailBotId" class="info-value">-</div></div>
           <div class="info-item copyable" onclick="copyToClipboard(document.getElementById('detailUsername')?.innerText, 'Username')" title="Click để copy Username"><div class="info-label">USERNAME 📋</div><div id="detailUsername" class="info-value">-</div></div>
-          <div class="info-item"><div class="info-label">SERVER</div><div id="detailHost" class="info-value">-</div></div>
+          <div class="info-item"><div class="info-label">SERVER</div><div id="detailServer" class="info-value">-</div></div>
           <div class="info-item"><div class="info-label">PING</div><div id="detailPing" class="info-value">-</div></div>
           <div class="info-item"><div class="info-label">SERVER TPS ⚡</div><div id="detailTps" class="info-value" style="color:var(--green);font-weight:700;">--</div></div>
-          <div class="info-item"><div class="info-label">RAM MÁY HOST 🧠</div><div id="detailHostRam" class="info-value" style="color:var(--green);font-weight:700;">-</div></div>
-          <div class="info-item"><div class="info-label">CPU MÁY HOST ⚡</div><div id="detailHostCpu" class="info-value" style="color:#38bdf8;font-weight:700;">-</div></div>
-          <div class="info-item"><div class="info-label">LƯU LƯỢNG MẠNG 📶</div><div id="detailHostNet" class="info-value" style="color:var(--yellow);font-weight:700;">-</div></div>
-          <div class="info-item copyable" onclick="copyToClipboard(document.getElementById('detailPosition')?.innerText, 'Tọa độ')" title="Click để copy Tọa độ"><div class="info-label">COORDINATES 📋</div><div id="detailPosition" class="info-value position-value">-</div></div>
-          <div class="info-item"><div class="info-label">DIMENSION / LOCATION</div><div id="detailDimension" class="info-value">-</div></div>
+          <div class="info-item location-info copyable" onclick="copyToClipboard(document.getElementById('detailPosition')?.innerText, 'Tọa độ')" title="Click để copy Tọa độ"><div class="info-label">LOCATION 📋</div><div class="info-value location-value"><span id="detailPosition" class="position-value">-</span><span class="location-separator">•</span><span id="detailDimension">-</span></div></div>
+          <div class="info-item admin-only"><div class="info-label">RAM MÁY HOST 🧠</div><div id="detailHostRam" class="info-value" style="color:var(--green);font-weight:700;">-</div></div>
+          <div class="info-item admin-only"><div class="info-label">CPU MÁY HOST ⚡</div><div id="detailHostCpu" class="info-value" style="color:#38bdf8;font-weight:700;">-</div></div>
+          <div class="info-item admin-only"><div class="info-label">LƯU LƯỢNG MẠNG 📶</div><div id="detailHostNet" class="info-value" style="color:var(--yellow);font-weight:700;">-</div></div>
           <div id="detailIpItem" class="info-item copyable admin-only" onclick="copyToClipboard(document.getElementById('detailIp')?.innerText, 'IP')" title="Click để copy IP"><div class="info-label">BOT IP 📋</div><div id="detailIp" class="info-value">-</div></div>
-          <div class="info-item"><div class="info-label">RAM BOT CON 🤖</div><div id="detailRam" class="info-value" style="color:#38bdf8;font-weight:700;">-</div></div>
+          <div class="info-item admin-only"><div class="info-label">RAM BOT CON 🤖</div><div id="detailRam" class="info-value" style="color:#38bdf8;font-weight:700;">-</div></div>
           <div class="info-item"><div class="info-label">UPTIME ⏱</div><div id="detailUptime" class="info-value" style="color:#38bdf8;font-weight:700;">-</div></div>
           <div class="info-item"><div class="info-label">RECONNECTS 🔄</div><div id="detailReconnects" class="info-value">-</div></div>
         </div>
@@ -6042,8 +6087,8 @@ button.primary:hover:not(:disabled),
       </div>
 
       <!-- PANEL 3: BẢNG CHAT (BÊN CẠNH EVENT LOG) -->
-      <div class="panel">
-        <div class="chat-title-row"><h3>Chat</h3><button type="button" class="small danger" onclick="clearDetailChat()">Xóa lịch sử</button></div>
+      <div class="panel" id="detailChatPanel">
+        <div class="chat-title-row"><h3>Chat</h3><button type="button" class="small danger admin-only" onclick="clearDetailChat()">Xóa lịch sử</button></div>
         <div id="detailChatLogs" class="log"></div>
         <form class="chat-row chat-form" onsubmit="sendDetailMessage(event)">
           <input id="detailMessageInput" autocomplete="off" aria-label="Nhập chat hoặc lệnh điều khiển bot" placeholder="Nhập chat hoặc command... (↑↓ lịch sử)">
@@ -6065,13 +6110,13 @@ button.primary:hover:not(:disabled),
       </div>
 
       <!-- PANEL 4: BẢNG EVENT LOG (BÊN CẠNH CHAT) -->
-      <div class="panel">
-        <div class="chat-title-row"><h3>Event Log</h3><button type="button" class="small" onclick="exportBotLogs(event,selectedBotId)" style="margin-left:auto;margin-right:8px;">📥 Tải Log</button><button type="button" class="small danger" onclick="clearDetailLogs()">Xóa lịch sử</button></div>
+      <div class="panel" id="detailEventPanel">
+        <div class="chat-title-row"><h3>Event Log</h3><button type="button" class="small" onclick="exportBotLogs(event,selectedBotId)" style="margin-left:auto;margin-right:8px;">📥 Tải Log</button><button type="button" class="small danger admin-only" onclick="clearDetailLogs()">Xóa lịch sử</button></div>
         <div id="detailEventLogs" class="log"></div>
       </div>
 
       <!-- PANEL 5: INVENTORY MANAGER -->
-      <div class="panel" style="grid-column: 1 / -1;">
+      <div class="panel" id="detailInventoryPanel">
         <div class="chat-title-row">
           <h3>Inventory Manager</h3>
           <span id="detailInventoryCapacity" class="capacity-badge">0/36 ô (0%)</span>
@@ -6104,7 +6149,7 @@ button.primary:hover:not(:disabled),
       </div>
 
       <!-- PANEL 6: SETTINGS -->
-      <div class="panel">
+      <div class="panel" id="detailSettingsPanel">
         <div class="chat-title-row"><h3>Settings</h3><div class="revision">đồng bộ từ bot con</div></div>
         <div class="setting-list">
           <label class="check-row"><input id="detailSettingEcoMode" type="checkbox" checked> <span>🌱 Eco Mode Siêu Tiết Kiệm (Giảm 80% CPU & giữ RAM &lt; 220MB)</span></label>
@@ -6117,6 +6162,26 @@ button.primary:hover:not(:disabled),
           <div class="note" style="margin-top:4px;">Nếu hiển thị ******** nghĩa là tài khoản của bạn không có quyền đổi tài khoản Minecraft — giữ nguyên để không thay đổi cấu hình.</div>
         </div>
         <button type="button" id="saveDetailSettingsButton" class="primary" onclick="saveDetailSettings()">Lưu setting</button>
+      </div>
+
+      <div class="panel" id="detailAccountPanel">
+        <h3>Tài khoản Minecraft Bot</h3>
+        <div class="form-row">
+          <label for="detailUsernameInput">Username Ingame</label>
+          <input id="detailUsernameInput" autocomplete="off" placeholder="Username Minecraft bot...">
+        </div>
+        <div class="form-row">
+          <label for="detailPasswordInput">Mật khẩu /login</label>
+          <div class="password-input-wrap">
+            <input id="detailPasswordInput" type="password" autocomplete="new-password" placeholder="Mật khẩu /login bot...">
+            <button type="button" class="password-toggle-btn" aria-label="Hiện mật khẩu" aria-pressed="false" onclick="togglePasswordVisibility('detailPasswordInput', this)">👁</button>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:10px;">
+          <button type="button" class="primary" onclick="saveDetailAccount()">Lưu thay đổi</button>
+          <button type="button" class="small" onclick="saveAndRestartBot()" style="font-weight:700;">💾 Lưu & Chạy lại ngay</button>
+        </div>
+        <div class="note">Áp dụng ngay cho bot. Bấm "Lưu & Chạy lại ngay" để bot đăng nhập tài khoản mới lập tức.</div>
       </div>
 
       <div id="detailAutoChatPanel" class="panel">
@@ -6141,26 +6206,6 @@ button.primary:hover:not(:disabled),
         <div id="detailBotSchedules" class="schedule-list"></div>
         <div class="note">Chỉ có một chế độ tại một thời điểm. Ở Chu kỳ, thời gian mỗi dòng tính từ dòng kề trên; kéo đổi thứ tự thì cách tính cũng đổi theo.</div>
         <button type="button" id="saveDetailBotSchedulesButton" class="primary compact-save" onclick="saveDetailBotSchedules()">Lưu hẹn giờ Bot</button>
-      </div>
-
-      <div class="panel" id="detailAccountPanel">
-        <h3>Tài khoản Minecraft Bot</h3>
-        <div class="form-row">
-          <label for="detailUsernameInput">Username Ingame</label>
-          <input id="detailUsernameInput" autocomplete="off" placeholder="Username Minecraft bot...">
-        </div>
-        <div class="form-row">
-          <label for="detailPasswordInput">Mật khẩu /login</label>
-          <div class="password-input-wrap">
-            <input id="detailPasswordInput" type="password" autocomplete="new-password" placeholder="Mật khẩu /login bot...">
-            <button type="button" class="password-toggle-btn" aria-label="Hiện mật khẩu" aria-pressed="false" onclick="togglePasswordVisibility('detailPasswordInput', this)">👁</button>
-          </div>
-        </div>
-        <div style="display:flex;gap:8px;align-items:center;margin-top:10px;">
-          <button type="button" class="primary" onclick="saveDetailAccount()">Lưu thay đổi</button>
-          <button type="button" class="small" onclick="saveAndRestartBot()" style="font-weight:700;">💾 Lưu & Chạy lại ngay</button>
-        </div>
-        <div class="note">Áp dụng ngay cho bot. Bấm "Lưu & Chạy lại ngay" để bot đăng nhập tài khoản mới lập tức.</div>
       </div>
 
       <!-- PANEL CẤU HÌNH PROXY RIÊNG CỦA TỪNG BOT (BUG-19) -->
@@ -8156,7 +8201,7 @@ function botCardHtml(bot) {
       '</div>' +
     '</div>' +
 
-    (hostRamTotalMb > 0 ?
+    (isAdmin && hostRamTotalMb > 0 ?
       '<div class="bot-ram-meter-box">' +
         '<div class="bot-ram-meter-labels" style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;font-size:11px;">' +
           '<span>🧠 RAM: <strong style="color:' + ramColor + ';">' + botRamMb + ' MB</strong>' + (botHeapMb > 0 ? ' <small style="color:var(--muted);">(Heap: ' + botHeapMb + 'MB)</small>' : '') + '</span>' +
@@ -11490,6 +11535,11 @@ window._inFlightQuickActions = _inFlightQuickActions;
 window.quickBotAction = quickBotAction;
 
 let activeStatusFilter = 'all';
+function isMinecraftOfflineOrKicked(bot) {
+  const status = String(bot?.status || '').toLowerCase();
+  return bot?.available === true && (status === 'offline' || status === 'kicked');
+}
+
 function setStatusFilter(filter) {
   activeStatusFilter = filter;
   ['all','afk','online','offline','unreachable'].forEach(k => {
@@ -11665,8 +11715,8 @@ function updateKpis() {
   const total = bots.length;
   const afk = bots.filter(b => b.available && b.status === 'afk').length;
   const online = bots.filter(b => b.available && ['online','waking','connecting','authenticating','entering'].includes(b.status)).length;
-  const offline = bots.filter(b => !b.available || b.status === 'offline' || b.status === 'kicked').length;
-  const unreachable = bots.filter(b => !b.available).length;
+  const offline = bots.filter(isMinecraftOfflineOrKicked).length;
+  const unreachable = bots.filter(b => b.available !== true).length;
 
   const tEl = document.getElementById('kpiTotal'); if(tEl) tEl.textContent = String(total);
   const aEl = document.getElementById('kpiAfk'); if(aEl) aEl.textContent = String(afk);
@@ -11848,10 +11898,11 @@ function filterBots() {
   const isAdmin = Boolean(currentUser && currentUser.role === 'admin');
   const filtered = bots.filter(b => {
     // 1. Lọc theo Tab trạng thái
-    if (activeStatusFilter === 'afk' && b.status !== 'afk') return false;
-    if (activeStatusFilter === 'online' && !['online','waking','connecting','authenticating','entering'].includes(b.status)) return false;
-    if (activeStatusFilter === 'offline' && b.available && b.status !== 'offline' && b.status !== 'kicked') return false;
-    if (activeStatusFilter === 'unreachable' && b.available) return false;
+    const status = String(b.status || '').toLowerCase();
+    if (activeStatusFilter === 'afk' && status !== 'afk') return false;
+    if (activeStatusFilter === 'online' && !['online','waking','connecting','authenticating','entering'].includes(status)) return false;
+    if (activeStatusFilter === 'offline' && !isMinecraftOfflineOrKicked(b)) return false;
+    if (activeStatusFilter === 'unreachable' && b.available === true) return false;
 
     // 2. Lọc theo Tag phân loại & Trạng thái thuê
     if (activeTagFilter) {
@@ -11874,12 +11925,6 @@ function filterBots() {
       (isAdmin && b.ipAddress && b.ipAddress.toLowerCase().includes(query)) ||
       (b.status && b.status.toLowerCase().includes(query));
   });
-
-  // Tự động hồi phục tab Tất cả cho khách thuê nếu tab hiện tại không khớp bot nào nhưng hạm đội có bot
-  if (currentUser && currentUser.role === 'user' && bots.length > 0 && filtered.length === 0 && !query && !activeTagFilter && activeStatusFilter !== 'all') {
-    setStatusFilter('all');
-    return;
-  }
 
   // 3. Sắp xếp theo chế độ được chọn
   if (currentSortMode === 'status') {
@@ -12921,8 +12966,9 @@ function detailStatusHtml() {
   const hasCustom = rawLbl && rawLbl !== ('Bot ' + numId) && rawLbl !== ('bot' + numId) && rawLbl !== ('Bot #' + numId);
   const detailTitle = hasCustom ? ('Bot #' + numId + ' (' + rawLbl + ')') : ('Bot #' + numId);
   document.getElementById('detailTitle').textContent = detailTitle;
+  document.getElementById('detailBotId').textContent = detailBot.workerId || detailBot.id || selectedBotId || '-';
   document.getElementById('detailUsername').textContent=detailBot.username||'Chưa đặt';
-  document.getElementById('detailHost').textContent=detailBot.host?detailBot.host+':'+detailBot.port:'-';
+  document.getElementById('detailServer').textContent=detailBot.server||'mc.kingmc.vn';
   const pingEl = document.getElementById('detailPing');
   const pingRaw = detailBot.ping;
 
