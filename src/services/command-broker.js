@@ -145,7 +145,12 @@ class CommandBroker {
   }
 
   async dispatch(workerId, action, payload = {}) {
-    if (!ACTIONS.has(action)) throw new Error(`Unsupported worker action: ${action}`);
+    if (!ACTIONS.has(action)) {
+      const err = new Error(`Unsupported worker action: ${action}`);
+      err.code = 'UNSUPPORTED_ACTION';
+      err.status = 400;
+      throw err;
+    }
     const safePayload = this.normalizePayload(action, payload);
     const worker = await this.registry.find(workerId);
     if (!worker) {

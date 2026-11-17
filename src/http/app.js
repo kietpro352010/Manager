@@ -72,31 +72,53 @@ function createApp({
 
   // 1. Lightweight Zero-Dependency Gzip Compression Middleware (saves ~85% outbound bandwidth)
   app.use((req, res, next) => {
-    const acceptEncoding = req.headers['accept-encoding'] || '';
-    if (!acceptEncoding.includes('gzip')) return next();
+    const acceptEncoding = String(req.headers['accept-encoding'] || '');
+    let wildcardQuality = null;
+    let gzipQuality = null;
+    for (const entry of acceptEncoding.split(',')) {
+      const [name, ...params] = entry.trim().toLowerCase().split(';');
+      const qParam = params.find((param) => /^\s*q\s*=/.test(param));
+      const quality = qParam ? Number(qParam.split('=')[1]) : 1;
+      if (!Number.isFinite(quality) || quality < 0 || quality > 1) continue;
+      if (name === 'gzip') gzipQuality = quality;
+      else if (name === '*') wildcardQuality = quality;
+    }
+    const acceptsGzip = gzipQuality !== null ? gzipQuality > 0 : wildcardQuality > 0;
     const originalSend = res.send;
     res.send = function (body) {
-      if (res.headersSent || !body) return originalSend.call(this, body);
-      const contentType = String(res.getHeader('Content-Type') || '');
+      if (res.headersSent || !body || req.method === 'HEAD' || [204, 304].includes(res.statusCode)) {
+        return originalSend.call(this, body);
+      }
+      let contentType = String(res.getHeader('Content-Type') || '').toLowerCase();
+      if (!contentType && typeof body === 'string') {
+        contentType = 'text/html; charset=utf-8';
+        res.setHeader('Content-Type', contentType);
+      }
       const isCompressible = contentType.includes('json') ||
                              contentType.includes('html') ||
                              contentType.includes('text') ||
                              contentType.includes('javascript') ||
                              contentType.includes('css');
       if (!isCompressible) return originalSend.call(this, body);
-      const buffer = Buffer.isBuffer(body)
-        ? body
-        : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
-      if (buffer.length < 512) return originalSend.call(this, body);
+      res.vary('Accept-Encoding');
+      if (!acceptsGzip || res.getHeader('Content-Encoding')) return originalSend.call(this, body);
+      let buffer;
       try {
-        const compressed = zlib.gzipSync(buffer, { level: 5 });
-        res.setHeader('Content-Encoding', 'gzip');
-        res.removeHeader('Content-Length');
-        return originalSend.call(this, compressed);
+        buffer = Buffer.isBuffer(body)
+          ? body
+          : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
       } catch (_) {
-        res.removeHeader('Content-Encoding');
         return originalSend.call(this, body);
       }
+      if (buffer.length < 512) return originalSend.call(this, body);
+      zlib.gzip(buffer, { level: 5 }, (error, compressed) => {
+        if (res.headersSent || res.destroyed) return;
+        if (error) return originalSend.call(res, body);
+        res.setHeader('Content-Encoding', 'gzip');
+        res.removeHeader('Content-Length');
+        originalSend.call(res, compressed);
+      });
+      return this;
     };
     next();
   });

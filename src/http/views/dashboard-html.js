@@ -7674,12 +7674,6 @@ async function requestJson(url, options = {}) {
     : 15000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const headers = { ...(options.headers || {}) };
-  try {
-    const localToken = localStorage.getItem('kingmc_session');
-    if (localToken && !headers['Authorization'] && !headers['authorization']) {
-      headers['Authorization'] = 'Bearer ' + localToken;
-    }
-  } catch (_) {}
   const requestOptions = { ...options, headers, cache: 'no-store', credentials: 'same-origin', signal: controller.signal };
   delete requestOptions.timeoutMs;
   if (options.body && typeof options.body === 'object' && !(options.body instanceof FormData) && !(options.body instanceof URLSearchParams) && !(typeof Blob !== 'undefined' && options.body instanceof Blob)) {
@@ -9400,10 +9394,6 @@ async function handleLoginSubmit(event) {
 
     const data = res.data || {};
     currentUser = data.user || null;
-    if (data.token) {
-      try { localStorage.setItem('kingmc_session', data.token); } catch (_) {}
-    }
-
     if (alertEl) {
       alertEl.textContent = (data.partial ? '⚠️ ' : '✅ ') + (data.warning || data.message || 'Đăng nhập thành công!');
       alertEl.className = 'login-alert ' + (data.partial ? 'error' : 'success');
@@ -9911,14 +9901,8 @@ async function exportAuditLogs(format) {
   const reqFormat = String(format).toLowerCase() === 'jsonl' ? 'jsonl' : 'csv';
   showToast('Đang tải file xuất nhật ký (' + reqFormat.toUpperCase() + ')...');
   try {
-    const headers = {};
-    try {
-      const localToken = localStorage.getItem('kingmc_session');
-      if (localToken) headers['Authorization'] = 'Bearer ' + localToken;
-    } catch (_) {}
     const res = await fetch('/api/manager/audit-logs/export?format=' + encodeURIComponent(reqFormat), {
       method: 'GET',
-      headers,
       cache: 'no-store',
       credentials: 'same-origin'
     });
@@ -10467,9 +10451,6 @@ async function handleInAppRegisterSubmit(event) {
 
     const data = res.data || {};
     currentUser = data.user || null;
-    if (data.token) {
-      try { localStorage.setItem('kingmc_session', data.token); } catch (_) {}
-    }
 
     if (alertEl) {
       alertEl.textContent = '🎉 ' + (data.message || 'Đăng ký thành công! Đang vào hệ thống...');
@@ -16168,16 +16149,11 @@ window.addEventListener('unhandledrejection',event=>{
   }
 
   try {
-    let res = await requestJson('/api/auth/me');
-    if (!res.ok && res.status === 401) {
-      // Nếu có stale Bearer token trong localStorage khiến bị 401 dù cookie hợp lệ,
-      // xóa bỏ stale token và thử lại lần 2 bằng session cookie:
-      const staleToken = localStorage.getItem('kingmc_session');
-      if (staleToken) {
-        try { localStorage.removeItem('kingmc_session'); } catch (_) {}
-        res = await requestJson('/api/auth/me');
-      }
-    }
+    try {
+      localStorage.removeItem('kingmc_session');
+      sessionStorage.removeItem('kingmc_session');
+    } catch (_) {}
+    const res = await requestJson('/api/auth/me');
 
     if (res.ok && res.data?.user) {
       currentUser = res.data.user;

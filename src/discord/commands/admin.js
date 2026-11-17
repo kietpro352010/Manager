@@ -29,7 +29,7 @@ const definition = new SlashCommandBuilder()
   )
   .addSubcommand((cmd) =>
     cmd.setName('password').setDescription('Thiết lập hoặc đổi mật khẩu Web cho tài khoản Quản trị viên (admin)')
-      .addStringOption((opt) => opt.setName('new_password').setDescription('Mật khẩu quản trị mới (ít nhất 6 ký tự)').setRequired(true))
+      .addStringOption((opt) => opt.setName('new_password').setDescription('Mật khẩu quản trị mới (6–256 ký tự)').setMaxLength(256).setRequired(true))
   );
 
 async function execute(interaction, services) {
@@ -121,22 +121,22 @@ async function execute(interaction, services) {
     }
 
     const newPassword = interaction.options.getString('new_password');
-    if (!newPassword || newPassword.length < 6) {
+    if (!newPassword || newPassword.length < 6 || newPassword.length > 256) {
       return {
-        embeds: [embed('❌ LỖI', 'Mật khẩu quản trị viên phải có ít nhất 6 ký tự.', 0xef4444)]
+        embeds: [embed('❌ LỖI', 'Mật khẩu quản trị viên phải dài từ 6 đến 256 ký tự.', 0xef4444)]
       };
     }
 
     const { hashAdminPassword } = require('../../utils/secrets');
     const hashed = hashAdminPassword(newPassword);
-    if (typeof services.registry?.setAdminPassword === 'function') {
-      services.registry.setAdminPassword(hashed);
-    }
     if (services.accessStore && typeof services.accessStore.setSetting === 'function') {
       await services.accessStore.setSetting('admin_credentials', {
         passwordHash: hashed,
         updatedAt: new Date().toISOString()
       });
+    }
+    if (typeof services.registry?.setAdminPassword === 'function') {
+      services.registry.setAdminPassword(hashed);
     }
 
     return {

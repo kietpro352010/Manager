@@ -130,13 +130,13 @@ async function main() {
   const userLock = new AsyncKeyLock();
   const renderApi = new RenderApi({ apiKey: integrationSettings.renderApiKey, baseUrl: config.renderApiBaseUrl });
   const registry = new WorkerRegistry({ store, accessStore, encryptionKey: config.encryptionKey, renderApi, adminNotifier });
-  await registry.load().catch(() => {});
+  await registry.load();
 
-  const savedAdminCreds = await accessStore.getSetting('admin_credentials').catch(() => null);
+  const savedAdminCreds = await accessStore.getSetting('admin_credentials');
   if (savedAdminCreds?.passwordHash && typeof registry.setAdminPassword === 'function') {
     registry.setAdminPassword(savedAdminCreds.passwordHash);
   }
-  const savedAnnouncement = await accessStore.getSetting('system_announcement').catch(() => null);
+  const savedAnnouncement = await accessStore.getSetting('system_announcement');
   if (savedAnnouncement?.message) {
     accessStore.cachedAnnouncement = savedAnnouncement.message;
   }
@@ -276,36 +276,67 @@ async function main() {
     }
   }
 
-  // Process safety handlers
+  // Graceful shutdown and fatal process handlers.
+  let shutdownPromise = null;
+  const shutdown = (signal, exitCode = 0) => {
+    if (shutdownPromise) {
+      if (exitCode !== 0) process.exitCode = exitCode;
+      return shutdownPromise;
+    }
+    process.exitCode = exitCode;
+    shutdownPromise = (async () => {
+      logger.info('manager_shutdown', { signal, exitCode });
+      clearInterval(expiredCheckInterval);
+      clearInterval(memorySweepInterval);
+      broker.stopOutboxProcessor();
+      wispbyteKeepAlive.stop();
+      if (client && typeof client.isReady === 'function' && client.isReady()) client.destroy();
+
+      let forceCloseTimer = null;
+      try {
+        await Promise.race([
+          new Promise((resolve) => server.close(resolve)),
+          new Promise((resolve) => {
+            forceCloseTimer = setTimeout(() => {
+              server.closeAllConnections?.();
+              resolve();
+            }, 10000);
+            forceCloseTimer.unref?.();
+          })
+        ]);
+      } catch (error) {
+        logger.error('manager_http_shutdown_failed', { error: error?.message || String(error) });
+        process.exitCode = 1;
+      } finally {
+        if (forceCloseTimer) clearTimeout(forceCloseTimer);
+      }
+
+      try { await store.close?.(); }
+      catch (error) {
+        logger.error('manager_storage_shutdown_failed', { error: error?.message || String(error) });
+        process.exitCode = 1;
+      }
+    })();
+    return shutdownPromise;
+  };
+
   process.on('uncaughtException', (err) => {
     logger.error('uncaught_exception', { message: err.message, stack: err.stack });
-    void adminNotifier.sendAlert({
-      source: 'Manager Process',
-      event: 'uncaught_exception',
-      message: `Sự cố nghiêm trọng không được bắt: ${err.message}`,
-      error: err,
-      level: 'error'
-    });
+    void Promise.resolve().then(() => adminNotifier.sendAlert({
+        source: 'Manager Process',
+        event: 'uncaught_exception',
+        message: `Sự cố nghiêm trọng không được bắt: ${err.message}`,
+        error: err,
+        level: 'error'
+      })).catch(() => {});
+    void shutdown('uncaughtException', 1);
   });
 
   process.on('unhandledRejection', (reason) => {
     const msg = reason instanceof Error ? reason.message : String(reason);
     logger.error('unhandled_rejection', { message: msg });
+    void shutdown('unhandledRejection', 1);
   });
-
-  // Graceful shutdown
-  let shuttingDown = false;
-  const shutdown = async (signal) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    logger.info('manager_shutdown', { signal });
-    broker.stopOutboxProcessor();
-    wispbyteKeepAlive.stop();
-    if (client && typeof client.isReady === 'function' && client.isReady()) client.destroy();
-    await new Promise((resolve) => server.close(resolve));
-    await store.close?.();
-    process.exitCode = 0;
-  };
 
   process.once('SIGTERM', () => void shutdown('SIGTERM'));
   process.once('SIGINT', () => void shutdown('SIGINT'));

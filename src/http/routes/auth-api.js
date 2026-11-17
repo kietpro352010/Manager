@@ -100,14 +100,13 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
           if (oldestKey) loginAttempts.delete(oldestKey);
         }
       }
-      loginAttempts.set(key, { count: 1, windowStart: now });
+      loginAttempts.set(key, { count: 0, windowStart: now });
       return { allowed: true };
     }
     if (record.count >= MAX_LOGIN_ATTEMPTS) {
       const waitMinutes = Math.ceil((RATE_LIMIT_WINDOW_MS - (now - record.windowStart)) / 60000);
       return { allowed: false, error: `Quá nhiều lần đăng nhập sai. Vui lòng thử lại sau ${waitMinutes} phút.` };
     }
-    record.count++;
     return { allowed: true };
   }
 
@@ -165,6 +164,9 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       const cleanConfirm = String(confirmPassword || '');
       const providedKey = String(rawKey || rawLicenseKey || '').trim();
       const deviceFingerprint = String(rawFingerprint || '').trim();
+      if (deviceFingerprint.length > 256) {
+        return res.status(400).json({ ok: false, error: 'Thông tin thiết bị không hợp lệ.' });
+      }
 
       // Validate Captcha
       const cleanCaptchaToken = String(captchaToken || '').trim();
@@ -187,6 +189,9 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       }
       if (cleanPassword.length < 6) {
         return res.status(400).json({ ok: false, error: 'Mật khẩu phải có ít nhất 6 ký tự.' });
+      }
+      if (cleanPassword.length > 256) {
+        return res.status(400).json({ ok: false, error: 'Mật khẩu không được dài quá 256 ký tự.' });
       }
       if (cleanPassword !== cleanConfirm) {
         return res.status(400).json({ ok: false, error: 'Mật khẩu xác nhận không khớp.' });
@@ -226,7 +231,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       if (!isExempt) {
         // Enforce max 2 accounts per IP
         if (typeof store.countUsersByIp === 'function') {
-          const ipCount = await store.countUsersByIp(clientIp).catch(() => 0);
+          const ipCount = await store.countUsersByIp(clientIp);
           if (ipCount >= 2) {
             logger?.warn?.('MULTI_ACCOUNT_BLOCKED_BY_IP', { ip: clientIp, username: cleanUsername });
             return res.status(403).json({
@@ -238,7 +243,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
 
         // Enforce max 2 accounts per device fingerprint
         if (deviceFingerprint && deviceFingerprint !== 'dfp_unknown' && typeof store.countUsersByFingerprint === 'function') {
-          const fpCount = await store.countUsersByFingerprint(deviceFingerprint).catch(() => 0);
+          const fpCount = await store.countUsersByFingerprint(deviceFingerprint);
           if (fpCount >= 2) {
             logger?.warn?.('MULTI_ACCOUNT_BLOCKED_BY_FINGERPRINT', { fingerprint: deviceFingerprint, ip: clientIp, username: cleanUsername });
             return res.status(403).json({
@@ -281,7 +286,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
             planName: 'FREE TRIAL',
             registrationIp: clientIp,
             deviceFingerprint,
-            registrationUserAgent: req.headers['user-agent']
+            registrationUserAgent: String(req.headers['user-agent'] || '').slice(0, 512)
           });
         } catch (regErr) {
           if (regErr.message && regErr.message.includes('NO_WORKERS_AVAILABLE')) {
@@ -314,7 +319,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
           note: 'Đăng ký tài khoản Web',
           registrationIp: clientIp,
           deviceFingerprint,
-          registrationUserAgent: req.headers['user-agent'],
+          registrationUserAgent: String(req.headers['user-agent'] || '').slice(0, 512),
           createdAt: new Date().toISOString()
         };
         await store.setAccess(userId, newUser, 'system-register');
@@ -435,7 +440,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       return res.status(201).json(responsePayload);
     } catch (error) {
       logger.error('Registration failed', { error: error.message });
-      return res.status(500).json({ ok: false, error: 'Đăng ký thất bại: ' + error.message });
+      return res.status(500).json({ ok: false, error: 'Đăng ký thất bại. Vui lòng thử lại sau.' });
     }
   });
 
@@ -448,6 +453,10 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       const providedKey = String(rawKey || '').trim();
       const clientIp = req.ip || req.socket?.remoteAddress || '127.0.0.1';
 
+      if (!cleanUsername || cleanUsername.length > 32 || !cleanPassword || cleanPassword.length > 256) {
+        return res.status(400).json({ ok: false, error: 'Tên đăng nhập hoặc mật khẩu không hợp lệ.' });
+      }
+
       const rateCheck = checkRateLimit(clientIp, cleanUsername);
       if (!rateCheck.allowed) {
         return res.status(429).json({ ok: false, error: rateCheck.error });
@@ -456,25 +465,22 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       // A. Check Admin Login
       const adminUsername = String(config.adminUsername || 'admin').trim();
       if (cleanUsername.toLowerCase() === adminUsername.toLowerCase()) {
-        const storedAdminPass = registry.getAdminPassword() || config.adminPassword;
+        const cachedAdminPass = registry.getAdminPassword();
+        const storedAdminPass = cachedAdminPass || config.adminPassword;
         if (!storedAdminPass) {
-          // Khởi tạo mật khẩu admin lần đầu tiên nếu chưa cấu hình trên Render/DB
-          if (cleanPassword.length < 6) {
-            return res.status(400).json({ ok: false, error: 'Mật khẩu khởi tạo Quản trị viên phải có ít nhất 6 ký tự.' });
-          }
-          const hashed = hashAdminPassword(cleanPassword);
-          if (typeof registry.setAdminPassword === 'function') {
-            registry.setAdminPassword(hashed);
-          }
-          if (store && typeof store.setSetting === 'function') {
-            await store.setSetting('admin_credentials', { passwordHash: hashed, updatedAt: new Date().toISOString() });
-          }
-        } else {
-          const isMatch = verifyAdminPassword(cleanPassword, storedAdminPass);
-          if (!isMatch) {
-            recordFailedAttempt(clientIp, cleanUsername);
-            return res.status(401).json({ ok: false, error: 'Tên đăng nhập hoặc mật khẩu quản trị viên không chính xác.' });
-          }
+          return res.status(503).json({
+            ok: false,
+            error: 'Quản trị viên chưa được khởi tạo. Đặt ADMIN_PASSWORD hoặc dùng lệnh Discord /admin password.'
+          });
+        }
+        if (!verifyAdminPassword(cleanPassword, storedAdminPass)) {
+          recordFailedAttempt(clientIp, cleanUsername);
+          return res.status(401).json({ ok: false, error: 'Tên đăng nhập hoặc mật khẩu quản trị viên không chính xác.' });
+        }
+        if (!cachedAdminPass && config.adminPassword && typeof store?.setSetting === 'function') {
+          const passwordHash = hashAdminPassword(cleanPassword);
+          await store.setSetting('admin_credentials', { passwordHash, updatedAt: new Date().toISOString() });
+          registry.setAdminPassword(passwordHash);
         }
         if (true) {
           resetRateLimit(clientIp, cleanUsername);
@@ -546,11 +552,13 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       // B. Check Regular User Login
       const user = await store.getUser(cleanUsername, { bypassCache: true });
       if (!user) {
+        recordFailedAttempt(clientIp, cleanUsername);
         return res.status(401).json({ ok: false, error: 'Tên đăng nhập hoặc mật khẩu không chính xác.' });
       }
 
       const passMatch = verifyUserPassword(cleanPassword, user.password);
       if (!passMatch) {
+        recordFailedAttempt(clientIp, cleanUsername);
         return res.status(401).json({ ok: false, error: 'Tên đăng nhập hoặc mật khẩu không chính xác.' });
       }
 
@@ -680,7 +688,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       return res.json(responsePayload);
     } catch (error) {
       logger.error('Login error', { error: error.message });
-      return res.status(500).json({ ok: false, error: 'Đăng nhập thất bại: ' + error.message });
+      return res.status(500).json({ ok: false, error: 'Đăng nhập thất bại. Vui lòng thử lại sau.' });
     }
   });
 
@@ -707,7 +715,8 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       res.setHeader('Set-Cookie', clearCookieHeader('kingmc_mgr_session', isHttps(req)));
       return res.json({ ok: true, message: 'Đăng xuất thành công.' });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      logger.error('Logout failed', { error: error.message });
+      return res.status(500).json({ ok: false, error: 'Đăng xuất thất bại. Vui lòng thử lại sau.' });
     }
   });
 
@@ -765,6 +774,9 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       if (String(newPassword).length < 6) {
         return res.status(400).json({ ok: false, error: 'Mật khẩu mới phải có ít nhất 6 ký tự.' });
       }
+      if (String(currentPassword).length > 256 || String(newPassword).length > 256) {
+        return res.status(400).json({ ok: false, error: 'Mật khẩu không được dài quá 256 ký tự.' });
+      }
 
       if (session.role === 'admin') {
         const storedAdminPass = registry.getAdminPassword() || config.adminPassword;
@@ -772,6 +784,9 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
           return res.status(401).json({ ok: false, error: 'Mật khẩu hiện tại của Quản trị viên không chính xác.' });
         }
         const hashed = hashAdminPassword(newPassword);
+        if (typeof store.setSetting === 'function') {
+          await store.setSetting('admin_credentials', { passwordHash: hashed, updatedAt: new Date().toISOString() });
+        }
         registry.setAdminPassword(hashed);
         await registry.save();
 
@@ -808,7 +823,8 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
 
       return res.json({ ok: true, message: 'Đổi mật khẩu thành công. Vui lòng đăng nhập lại.' });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      logger.error('Password change failed', { error: error.message });
+      return res.status(500).json({ ok: false, error: 'Không thể đổi mật khẩu lúc này. Vui lòng thử lại sau.' });
     }
   });
 
@@ -851,7 +867,8 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         assignedUser: assigned || null
       });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      logger?.error?.('Worker access verification failed', { error: error.message });
+      return res.status(500).json({ ok: false, error: 'Không thể xác minh Worker lúc này.' });
     }
   });
 

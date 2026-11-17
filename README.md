@@ -17,7 +17,7 @@ Hệ thống được thiết kế tối ưu để bạn **chỉ cần nhập đ
 > 💡 **Tất cả các cài đặt khác được cấu hình trực tiếp qua Discord & Web Dashboard (KHÔNG cần thêm vào Render)**:
 > - **`DISCORD_CLIENT_ID`**: Hệ thống tự động trích xuất từ `DISCORD_TOKEN`.
 > - **`DISCORD_GUILD_ID` & Phân quyền Role**: Thiết lập trực tiếp trên Discord qua lệnh `/admin setup`.
-> - **Mật khẩu Quản trị viên (`admin`)**: Tự động đặt ở lần đầu đăng nhập trên Web Dashboard, hoặc đặt/đổi bất kỳ lúc nào qua lệnh `/admin password <mật_khẩu>` trên Discord.
+> - **Mật khẩu Quản trị viên (`admin`)**: Đặt `ADMIN_PASSWORD` trước lần đăng nhập Web đầu tiên, hoặc khởi tạo/đổi qua lệnh Discord `/admin password <mật_khẩu>`. Web không cho phép người chưa xác thực tự chọn mật khẩu Admin ban đầu.
 > - **Khóa mã hóa (`MANAGER_MASTER_KEY`)**: Tự động dẫn xuất an toàn từ `SUPABASE_SECRET_KEY`.
 > - **Vượt link Link4M (`LINK4M_*`)**: Bật/tắt và cấu hình API Token trực tiếp trong popup **⚡ Cài đặt Link4M** trên Web Dashboard.
 > - **Tài khoản Wispbyte (`WISPBYTE_*`)**: Quản lý và lưu trữ trực tiếp trong Cài đặt hệ thống trên Web Dashboard.
@@ -67,7 +67,7 @@ Hệ thống sẽ tự động lưu ID Server, kích hoạt phân quyền và đ
 ### Bước B: Đặt mật khẩu Quản trị viên Web
 Bạn có 2 cách cực kỳ tiện lợi:
 - **Cách 1 (Ngay trên Discord)**: Gõ `/admin password new_password:MatKhauCuaBan123`.
-- **Cách 2 (Trên Web Dashboard)**: Truy cập URL Render của bạn, đăng nhập tài khoản `admin` với mật khẩu bạn muốn khởi tạo (hệ thống sẽ tự động lưu mật khẩu này cho các lần sau).
+- **Cách 2 (Qua biến môi trường)**: Thêm `ADMIN_PASSWORD` vào Render trước lần đăng nhập Web đầu tiên. Manager sẽ lưu hash vào Supabase sau khi mật khẩu cấu hình được xác minh.
 
 ---
 
