@@ -101,8 +101,10 @@ function renderBotsList({ user, workers = [], page = 0, pageSize = 5, notice = '
       const rawName = safe(worker.name || `BOT ${padId(worker.botNumber || 1)}`);
       const botLabel = rawName.toLowerCase().startsWith('bot #') ? rawName : `Bot #${padId(worker.botNumber || 1)} · ${rawName}`;
       const fullBotId = worker.workerId;
+      const mcUsername = safe(worker.status?.username || worker.settings?.account?.username || '');
       desc += `${state.emoji} **${botLabel}**\n` +
               `> **Bot ID:** \`${fullBotId}\`\n` +
+              (mcUsername ? `> **Username:** \`${mcUsername}\`\n` : '') +
               `> **Trạng thái:** \`${state.label}\`\n\n`;
     }
   }
@@ -180,11 +182,21 @@ function renderBotDetail({ user, worker, notice = '', isExecuting = false }) {
   const locationState = locationStates[rawLocationState] || '';
   const location = [coordinates, rawDimension, locationState].filter(Boolean).join(' · ') || 'Chưa có dữ liệu vị trí';
 
+  let descText = notice ? `${notice}\n\n` : '';
+  descText += `> **Bot ID:** \`${fullBotId}\`\n` +
+              `> **Username:** \`${mcUsername}\`\n` +
+              `> **Server:** \`${server}\`\n` +
+              `> **Trạng thái:** ${state.emoji} **${state.label}**\n` +
+              `> **Ping:** \`${ping}\`\n` +
+              `> **TPS:** \`${tps}\`\n` +
+              `> **Location:** \`${safe(location, 180)}\`\n` +
+              `> **Uptime:** \`${uptime}\`\n` +
+              `> **Reconnects:** \`${reconnects}\`\n\n` +
+              'Thông tin nhanh và thao tác bot ở các nút bên dưới.';
+
   const detailEmbed = embed(
     `${state.emoji} ${botName.toUpperCase()} — CHI TIẾT BOT`,
-    notice
-      ? `${notice}\n\nThông tin nhanh và thao tác bot ở các nút bên dưới.`
-      : 'Thông tin nhanh và thao tác bot ở các nút bên dưới.',
+    descText,
     state.color
   );
   detailEmbed.addFields(
@@ -360,11 +372,70 @@ async function botDashboard(services, userId, role, notice = '') {
   return renderBotsList({ user, workers, notice });
 }
 
+function renderBotLogs({ user, worker, logs = [] }) {
+  const safeLogs = Array.isArray(logs) ? logs : [];
+  const fullBotId = safe(worker?.workerId || worker?.id || 'Toàn hệ thống');
+  const botName = safe(worker?.name || (worker?.botNumber ? `BOT ${padId(worker.botNumber)}` : fullBotId));
+
+  const sanitize = (text) => {
+    if (!text || typeof text !== 'string') return '';
+    return text
+      // 1. Private keys block
+      .replace(/-----BEGIN[ A-Z0-9_-]*PRIVATE KEY-----[\s\S]*?(?:-----END[ A-Z0-9_-]*PRIVATE KEY-----|$)/gi, '[REDACTED PRIVATE KEY]')
+      // 2. Database connection strings: postgres://user:password@host
+      .replace(/([a-zA-Z0-9+.-]+:\/\/[^:]+:)[^@]+(@)/gi, '$1[REDACTED]$2')
+      // 3. Authorization header with Bearer or Basic or token
+      .replace(/(authorization\s*[:=]\s*)(Bearer\s+[A-Za-z0-9_\-\.]+|Basic\s+[A-Za-z0-9+/=]+|[^\s,;]+)/gi, '$1[REDACTED]')
+      // 4. Standalone Bearer token
+      .replace(/(Bearer\s+)[A-Za-z0-9_\-\.]+/gi, '$1[REDACTED]')
+      // 5. Standard key-value secret fields
+      .replace(/(password|token|secret|apikey|access_token|refresh_token)\s*[:=]\s*[^\s,;]+/gi, '$1: [REDACTED]')
+      // 6. Word boundary key: / key=
+      .replace(/\b(key)\s*[:=]\s*[^\s,;]+/gi, '$1: [REDACTED]');
+  };
+
+  const formattedLogs = safeLogs.map((l) => {
+    if (!l) return '';
+    if (typeof l === 'string') return sanitize(l);
+    const timeStr = l.time ? `[${String(l.time).slice(11, 19)}] ` : '';
+    const levelStr = (l.type || l.level) ? `[${String(l.type || l.level).toUpperCase()}] ` : '';
+    const msg = l.message || l.text || JSON.stringify(l);
+    return sanitize(`${timeStr}${levelStr}${msg}`);
+  }).filter(Boolean);
+
+  const logContent = formattedLogs.length > 0
+    ? formattedLogs.join('\n')
+    : 'Không có nhật ký nào được ghi nhận.';
+
+  const logEmbed = embed(
+    `📜 NHẬT KÝ HOẠT ĐỘNG: ${String(botName).toUpperCase()}`,
+    `Bot ID: \`${fullBotId}\`\n\`\`\`text\n${logContent.slice(-3500)}\n\`\`\``,
+    COLOR_BRAND
+  );
+
+  const components = [];
+  if (worker?.workerId || worker?.id) {
+    components.push(
+      new ActionRowBuilder().addComponents(
+        button('Làm mới log', `bot:logs:${fullBotId}`, ButtonStyle.Secondary, false, '🔄'),
+        button('Chi tiết bot', `bot:detail:${fullBotId}`, ButtonStyle.Primary, false, 'ℹ️'),
+        button('Quay lại danh sách', 'bots:list', ButtonStyle.Secondary, false, '◀')
+      )
+    );
+  }
+
+  return {
+    embeds: [logEmbed],
+    components
+  };
+}
+
 module.exports = {
   renderBotsList,
   renderBotDetail,
   renderAdminStatus,
   renderAdminBots,
+  renderBotLogs,
   buildLoginModal,
   getWorkerState,
   uptimeText,

@@ -10,18 +10,25 @@ class ManagerRuntimeSettings {
     this.store = store;
     this.encryptionKey = encryptionKey;
     this.initial = initial;
+    this.secretsDecryptionFailed = false;
+    this.rawSecretsCiphertext = null;
     this.values = { publicBaseUrl: '', renderApiKey: '', link4mApiToken: '', link4mSecretKey: '' };
   }
 
   async initialize() {
     const stored = await this.store.getSetting(SETTING_KEY);
     let storedSecrets = null;
+    this.secretsDecryptionFailed = false;
+    this.rawSecretsCiphertext = null;
     if (stored?.secretsCiphertext) {
       try {
         const decrypted = decryptSecret(stored.secretsCiphertext, this.encryptionKey);
         if (decrypted) storedSecrets = JSON.parse(decrypted);
       } catch (_) {
+        this.secretsDecryptionFailed = true;
+        this.rawSecretsCiphertext = stored.secretsCiphertext;
         storedSecrets = null;
+        console.warn('[SECURITY WARNING] Không thể giải mã runtime secretsCiphertext. Giữ nguyên ciphertext thô để tránh ghi đè làm mất Render API key / Link4M token.');
       }
     }
     this.values = {
@@ -50,6 +57,10 @@ class ManagerRuntimeSettings {
   }
 
   async update(patch = {}) {
+    const hasSecretPatch = ['renderApiKey', 'link4mApiToken', 'link4mSecretKey'].some((key) => Object.hasOwn(patch, key));
+    if (this.secretsDecryptionFailed && hasSecretPatch) {
+      throw new Error('Không thể cập nhật cấu hình bí mật khi chưa giải mã được dữ liệu hiện tại.');
+    }
     const next = { ...this.values };
     if (Object.hasOwn(patch, 'publicBaseUrl')) {
       const raw = String(patch.publicBaseUrl || '').trim();
@@ -69,14 +80,20 @@ class ManagerRuntimeSettings {
   }
 
   async persist(values = this.values) {
-    const secrets = {
-      renderApiKey: values.renderApiKey,
-      link4mApiToken: values.link4mApiToken,
-      link4mSecretKey: values.link4mSecretKey
-    };
+    let ciphertext;
+    if (this.secretsDecryptionFailed && this.rawSecretsCiphertext && !values.renderApiKey && !values.link4mApiToken && !values.link4mSecretKey) {
+      ciphertext = this.rawSecretsCiphertext;
+    } else {
+      const secrets = {
+        renderApiKey: values.renderApiKey,
+        link4mApiToken: values.link4mApiToken,
+        link4mSecretKey: values.link4mSecretKey
+      };
+      ciphertext = encryptSecret(JSON.stringify(secrets), this.encryptionKey);
+    }
     await this.store.setSetting(SETTING_KEY, {
       publicBaseUrl: values.publicBaseUrl,
-      secretsCiphertext: encryptSecret(JSON.stringify(secrets), this.encryptionKey)
+      secretsCiphertext: ciphertext
     });
   }
 

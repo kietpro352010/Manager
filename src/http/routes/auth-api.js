@@ -516,9 +516,9 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         const cachedAdminPass = registry.getAdminPassword();
         const storedAdminPass = cachedAdminPass || config.adminPassword;
         if (!storedAdminPass) {
-          return res.status(503).json({
+          return res.status(400).json({
             ok: false,
-            error: 'Quản trị viên chưa được khởi tạo. Đặt ADMIN_PASSWORD hoặc dùng lệnh Discord /admin password.'
+            error: 'Mật khẩu khởi tạo Quản trị viên chưa được thiết lập. Vui lòng đặt ADMIN_PASSWORD hoặc dùng lệnh Discord /admin password.'
           });
         }
         if (!verifyAdminPassword(cleanPassword, storedAdminPass)) {

@@ -401,8 +401,15 @@ class Link4mService {
           member.username || attempt.userId,
           attempt.rewardHours || 12
         );
-        if (rpcRes && rpcRes.ok) {
-          return { replayed: false, rewardHours: rpcRes.rewardHours || attempt.rewardHours, expiresAt: rpcRes.expiresAt };
+        if (rpcRes) {
+          if (rpcRes.ok) {
+            return {
+              replayed: Boolean(rpcRes.replayed),
+              rewardHours: rpcRes.addedHours || rpcRes.rewardHours || attempt.rewardHours || 12,
+              expiresAt: rpcRes.expiresAt
+            };
+          }
+          throw new Error(rpcRes.message || rpcRes.error || 'Xác nhận vượt link thất bại.');
         }
       }
 

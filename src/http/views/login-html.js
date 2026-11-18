@@ -1920,6 +1920,11 @@ async function handlePublicLoginSubmit(e) {
     if (!res.ok || !data.ok) {
       throw new Error(data.error || 'Tên đăng nhập hoặc mật khẩu không đúng.');
     }
+    if (data && data.token) {
+      try {
+        localStorage.setItem('kingmc_session', data.token);
+      } catch (_) {}
+    }
     setLoginAlert('success', 'Đăng nhập thành công! Đang chuyển hướng...', 'tplIconSuccess');
     setSubmitButtonState(btn, 'success', 'ĐĂNG NHẬP THÀNH CÔNG!', 'tplIconLogin');
     setTimeout(() => { window.location.replace('/'); }, 300);
@@ -1975,6 +1980,11 @@ async function handlePublicRegisterSubmit(e) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.ok) {
       throw new Error(data.error || 'Không thể đăng ký tài khoản.');
+    }
+    if (data && data.token) {
+      try {
+        localStorage.setItem('kingmc_session', data.token);
+      } catch (_) {}
     }
     setLoginAlert('success', data.message || 'Đăng ký thành công! Đang chuyển hướng...', 'tplIconSuccess');
     setSubmitButtonState(btn, 'success', 'ĐĂNG KÝ THÀNH CÔNG!', 'tplIconRegister');

@@ -1,9 +1,17 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const net = require('node:net');
 
-const DEFAULT_CAPTCHA_SECRET = 'kbot_master_captcha_key_32bytes!';
 const DEFAULT_TTL_SEC = 180; // 3 minutes
+
+function resolveCaptchaSecret(secret) {
+  const s = String(secret || process.env.CAPTCHA_SECRET || process.env.MANAGER_SESSION_SECRET || '').trim();
+  if (!s || s.length < 16) {
+    throw new Error('CAPTCHA secret must be configured with at least 16 characters.');
+  }
+  return s;
+}
 
 // In-memory set for replay protection
 const usedNonces = new Set();
@@ -14,34 +22,56 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref();
 
-function resolveClientIp(req) {
-  let ip = req?.headers?.['cf-connecting-ip'] ||
-    req?.headers?.['x-real-ip'] ||
-    (req?.headers?.['x-forwarded-for'] ? String(req.headers['x-forwarded-for']).split(',')[0].trim() : '') ||
-    req?.socket?.remoteAddress ||
-    '127.0.0.1';
-  if (typeof ip === 'string') {
-    ip = ip.replace(/^::ffff:/, '').trim();
-  }
-  return ip || '127.0.0.1';
+function isPrivateOrLoopbackIp(ip) {
+  if (!ip || typeof ip !== 'string') return false;
+  const clean = ip.replace(/^::ffff:/, '').trim();
+  if (clean === '127.0.0.1' || clean === '::1') return true;
+  if (clean.startsWith('10.') || clean.startsWith('192.168.')) return true;
+  if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(clean)) return true;
+  return false;
 }
 
-function createCaptchaToken(answer, secret = DEFAULT_CAPTCHA_SECRET, ttlSec = DEFAULT_TTL_SEC) {
+function resolveClientIp(req) {
+  if (req?.ip && typeof req.ip === 'string') {
+    const clean = req.ip.replace(/^::ffff:/, '').trim();
+    if (net.isIP(clean)) return clean;
+  }
+  const socketIpRaw = req?.socket?.remoteAddress;
+  const socketIp = typeof socketIpRaw === 'string' ? socketIpRaw.replace(/^::ffff:/, '').trim() : '';
+  const isTrustedProxy = isPrivateOrLoopbackIp(socketIp);
+
+  if (isTrustedProxy) {
+    const rawHeader = req?.headers?.['cf-connecting-ip'] ||
+      req?.headers?.['x-real-ip'] ||
+      (req?.headers?.['x-forwarded-for'] ? String(req.headers['x-forwarded-for']).split(',')[0].trim() : '');
+    if (rawHeader) {
+      const cleanHeaderIp = String(rawHeader).replace(/^::ffff:/, '').trim();
+      if (net.isIP(cleanHeaderIp)) return cleanHeaderIp;
+    }
+  }
+
+  if (socketIp && net.isIP(socketIp)) return socketIp;
+  return '127.0.0.1';
+}
+
+function createCaptchaToken(answer, secret, ttlSec = DEFAULT_TTL_SEC) {
+  const activeSecret = resolveCaptchaSecret(secret);
   const ts = Date.now();
   const nonce = crypto.randomBytes(8).toString('hex');
   const normalizedAnswer = String(answer).trim().toLowerCase();
-  const sig = crypto.createHmac('sha256', secret).update(`${normalizedAnswer}:${ts}:${nonce}`).digest('hex');
+  const sig = crypto.createHmac('sha256', activeSecret).update(`${normalizedAnswer}:${ts}:${nonce}`).digest('hex');
   const payload = JSON.stringify({ ts, nonce, sig });
   return Buffer.from(payload).toString('base64url');
 }
 
-function verifyCaptchaToken(token, answer, secret = DEFAULT_CAPTCHA_SECRET, nonceSet = usedNonces) {
+function verifyCaptchaToken(token, answer, secret, nonceSet = usedNonces) {
   if (!token || typeof token !== 'string') {
     return { valid: false, error: 'Token Captcha không được để trống' };
   }
   if (!answer || typeof answer !== 'string') {
     return { valid: false, error: 'Câu trả lời Captcha không được để trống' };
   }
+  const activeSecret = resolveCaptchaSecret(secret);
   try {
     const raw = Buffer.from(token, 'base64url').toString('utf8');
     const { ts, nonce, sig } = JSON.parse(raw);
@@ -55,18 +85,22 @@ function verifyCaptchaToken(token, answer, secret = DEFAULT_CAPTCHA_SECRET, nonc
       return { valid: false, error: 'Mã Captcha đã được sử dụng' };
     }
     const normalizedAnswer = String(answer).trim().toLowerCase();
-    const expectedSig = crypto.createHmac('sha256', secret).update(`${normalizedAnswer}:${ts}:${nonce}`).digest('hex');
+    const expectedSig = crypto.createHmac('sha256', activeSecret).update(`${normalizedAnswer}:${ts}:${nonce}`).digest('hex');
     if (sig !== expectedSig) {
       return { valid: false, error: 'Mã Captcha không chính xác' };
     }
     nonceSet.add(nonce);
     return { valid: true };
-  } catch (_) {
+  } catch (err) {
+    if (err.message && err.message.includes('CAPTCHA secret must be configured')) {
+      throw err;
+    }
     return { valid: false, error: 'Token Captcha không hợp lệ' };
   }
 }
 
-function generateCaptcha(secret = DEFAULT_CAPTCHA_SECRET, ttlSec = DEFAULT_TTL_SEC) {
+function generateCaptcha(secret, ttlSec = DEFAULT_TTL_SEC) {
+  const activeSecret = resolveCaptchaSecret(secret);
   // Math challenge
   const isPlus = Math.random() < 0.65;
   let text = '';
@@ -84,7 +118,7 @@ function generateCaptcha(secret = DEFAULT_CAPTCHA_SECRET, ttlSec = DEFAULT_TTL_S
     answer = String(n1 - n2);
   }
 
-  const token = createCaptchaToken(answer, secret, ttlSec);
+  const token = createCaptchaToken(answer, activeSecret, ttlSec);
 
   // Generate lightweight SVG
   const width = 140;
@@ -129,6 +163,5 @@ module.exports = {
   createCaptchaToken,
   verifyCaptchaToken,
   generateCaptcha,
-  DEFAULT_CAPTCHA_SECRET,
   DEFAULT_TTL_SEC
 };

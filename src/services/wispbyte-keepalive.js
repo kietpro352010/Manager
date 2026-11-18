@@ -1,8 +1,45 @@
 'use strict';
 
+const { encryptUserPassword, decryptUserPassword, isStoredCredentialCiphertext } = require('../utils/secrets');
+
 const DEFAULT_PANEL_URL = 'https://wispbyte.com/client';
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+
+function validatePanelUrl(urlStr) {
+  const raw = String(urlStr || '').trim();
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error('Panel URL không đúng định dạng URL.');
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error('Panel URL chỉ chấp nhận giao thức HTTP/HTTPS.');
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  if (
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    hostname === '::1' ||
+    hostname === '169.254.169.254' ||
+    hostname.endsWith('.internal') ||
+    hostname.endsWith('.local')
+  ) {
+    throw new Error('Panel URL không được trỏ tới máy chủ nội bộ hoặc địa chỉ metadata.');
+  }
+  // Check private IP ranges
+  if (/^10\./.test(hostname) || /^192\.168\./.test(hostname) || /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname)) {
+    throw new Error('Panel URL không được trỏ tới dải IP mạng nội bộ.');
+  }
+  return raw;
+}
+
+function maskCookie(cookie) {
+  if (!cookie || typeof cookie !== 'string') return '';
+  if (cookie.length <= 8) return '********';
+  return cookie.slice(0, 4) + '****' + cookie.slice(-4);
+}
 
 class WispbyteKeepAliveManager {
   constructor({ store, config = {}, logger = console, fetchImpl = global.fetch, adminNotifier } = {}) {
@@ -10,6 +47,7 @@ class WispbyteKeepAliveManager {
     this.logger = logger;
     this.fetch = fetchImpl;
     this.adminNotifier = adminNotifier;
+    this.encryptionKey = config.encryptionKey;
     this.intervalMs = Number(config.wispbyteIntervalMs) || TWENTY_FOUR_HOURS_MS;
     this.defaultCookie = String(config.wispbyteCookie || '').trim();
     this.defaultPanelUrl = String(config.wispbytePanelUrl || DEFAULT_PANEL_URL).trim();
@@ -30,7 +68,15 @@ class WispbyteKeepAliveManager {
       try {
         const saved = await this.store.getSetting('wispbyte_accounts');
         if (Array.isArray(saved) && saved.length > 0) {
-          accounts = saved;
+          accounts = saved.map((a) => {
+            const copy = { ...a };
+            if (copy.cookie && isStoredCredentialCiphertext(copy.cookie)) {
+              try {
+                copy.cookie = decryptUserPassword(copy.cookie, this.encryptionKey);
+              } catch (_) {}
+            }
+            return copy;
+          });
         }
       } catch (err) {
         this.logger.warn?.('wispbyte_get_accounts_store_failed', { error: err.message });
@@ -63,9 +109,25 @@ class WispbyteKeepAliveManager {
     return accounts;
   }
 
+  async getPublicAccounts() {
+    const accounts = await this.getAccounts();
+    return accounts.map((a) => ({
+      ...a,
+      cookie: maskCookie(a.cookie),
+      cookieMasked: true
+    }));
+  }
+
   async saveAccounts(accounts) {
     if (this.store && typeof this.store.setSetting === 'function') {
-      await this.store.setSetting('wispbyte_accounts', accounts);
+      const encryptedAccounts = accounts.map((a) => {
+        const copy = { ...a };
+        if (copy.cookie && !isStoredCredentialCiphertext(copy.cookie)) {
+          copy.cookie = encryptUserPassword(copy.cookie, this.encryptionKey);
+        }
+        return copy;
+      });
+      await this.store.setSetting('wispbyte_accounts', encryptedAccounts);
     }
   }
 
@@ -78,6 +140,12 @@ class WispbyteKeepAliveManager {
     if (!cleanCookie || cleanCookie.length < 10) {
       throw new Error('Cookie must be a valid cookie string.');
     }
+    if (/[\r\n]/.test(cleanCookie)) {
+      throw new Error('Cookie must not contain CRLF control characters.');
+    }
+
+    const rawPanelUrl = String(panelUrl || this.defaultPanelUrl || DEFAULT_PANEL_URL).trim();
+    const cleanPanelUrl = validatePanelUrl(rawPanelUrl);
 
     const accounts = await this.getAccounts();
     const existingIndex = accounts.findIndex((a) => a.id === accId);
@@ -85,7 +153,7 @@ class WispbyteKeepAliveManager {
       id: accId,
       name: String(name || accId).trim().slice(0, 48),
       cookie: cleanCookie,
-      panelUrl: String(panelUrl || this.defaultPanelUrl || DEFAULT_PANEL_URL).trim(),
+      panelUrl: cleanPanelUrl,
       renewCount: existingIndex >= 0 ? (accounts[existingIndex].renewCount || 0) : 0,
       lastStatus: existingIndex >= 0 ? accounts[existingIndex].lastStatus : 'idle',
       lastPingAt: existingIndex >= 0 ? accounts[existingIndex].lastPingAt : null,
@@ -99,7 +167,11 @@ class WispbyteKeepAliveManager {
     }
 
     await this.saveAccounts(accounts);
-    return updated;
+    return {
+      ...updated,
+      cookie: maskCookie(cleanCookie),
+      cookieMasked: true
+    };
   }
 
   async deleteAccount(id) {
@@ -112,7 +184,8 @@ class WispbyteKeepAliveManager {
   }
 
   async pingAccount(account) {
-    const targetUrl = (account.panelUrl || this.defaultPanelUrl || DEFAULT_PANEL_URL).trim();
+    const rawUrl = (account.panelUrl || this.defaultPanelUrl || DEFAULT_PANEL_URL).trim();
+    const targetUrl = validatePanelUrl(rawUrl);
     const cookieHeader = (account.cookie || '').trim();
 
     if (!cookieHeader) {
@@ -122,6 +195,15 @@ class WispbyteKeepAliveManager {
         success: false,
         status: 'error',
         message: 'No cookie configured'
+      };
+    }
+    if (/[\r\n]/.test(cookieHeader)) {
+      return {
+        id: account.id,
+        name: account.name || account.id,
+        success: false,
+        status: 'error',
+        message: 'Cookie contains CRLF control characters'
       };
     }
 
@@ -317,3 +399,5 @@ class WispbyteKeepAliveManager {
 }
 
 module.exports = WispbyteKeepAliveManager;
+module.exports.validatePanelUrl = validatePanelUrl;
+module.exports.maskCookie = maskCookie;

@@ -144,7 +144,9 @@ function createAdminApi({
           await store.adapter.revokeUserSessions(targetUserId).catch(() => null);
         }
       }
-      await store.addAudit({ action: 'ADMIN_UPDATE_USER', targetId: targetUserId, actorId: req.managerAuthSession.username, details: updateData });
+      const auditDetails = { ...updateData };
+      if (auditDetails.password) auditDetails.password = '[REDACTED]';
+      await store.addAudit({ action: 'ADMIN_UPDATE_USER', targetId: targetUserId, actorId: req.managerAuthSession.username, details: auditDetails });
       return res.json({ ok: true, message: 'Đã cập nhật thông tin người dùng.' });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
@@ -166,7 +168,35 @@ function createAdminApi({
 
     if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
       try {
-        const values = req.body?.values || req.body || {};
+        const rawBody = req.body?.values || req.body || {};
+        const allowedKeys = [
+          'role', 'status', 'expiresAt', 'planName', 'note', 'workerIds',
+          'botCount', 'username', 'password', 'isPermanent', 'botAliases',
+          'allowAccountChange', 'lockReason'
+        ];
+        const values = {};
+        for (const k of allowedKeys) {
+          if (rawBody[k] !== undefined) values[k] = rawBody[k];
+        }
+
+        if (values.username !== undefined) {
+          const username = String(values.username || '').trim().toLowerCase();
+          if (!/^[a-z0-9_]{3,32}$/.test(username)) {
+            return res.status(400).json({ ok: false, error: 'Tên đăng nhập phải từ 3 đến 32 ký tự, chỉ gồm chữ, số và dấu gạch dưới.' });
+          }
+          if (username === 'admin' || username === String(config?.adminUsername || '').trim().toLowerCase()) {
+            return res.status(400).json({ ok: false, error: 'Tên tài khoản này được bảo lưu cho Quản trị viên.' });
+          }
+          values.username = username;
+        }
+
+        if (values.password !== undefined) {
+          const password = values.password;
+          if (typeof password !== 'string' || password.length < 6 || password.length > 256) {
+            return res.status(400).json({ ok: false, error: 'Mật khẩu phải dài từ 6 đến 256 ký tự.' });
+          }
+        }
+
         await store.setAccess(id, values, req.managerAuthSession.username);
         if (String(values?.status || '').trim().toLowerCase() === 'disabled') {
           if (typeof invalidateUserSessions === 'function') invalidateUserSessions(id);
@@ -174,7 +204,9 @@ function createAdminApi({
             await store.adapter.revokeUserSessions(id).catch(() => null);
           }
         }
-        await store.addAudit({ action: 'ADMIN_UPDATE_USER', targetId: id, actorId: req.managerAuthSession.username, details: values });
+        const auditDetails = { ...values };
+        if (auditDetails.password) auditDetails.password = '[REDACTED]';
+        await store.addAudit({ action: 'ADMIN_UPDATE_USER', targetId: id, actorId: req.managerAuthSession.username, details: auditDetails });
         return res.json({ ok: true, message: 'Đã cập nhật thông tin người dùng.' });
       } catch (error) {
         return res.status(500).json({ ok: false, error: error.message });

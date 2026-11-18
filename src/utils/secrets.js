@@ -55,12 +55,15 @@ function getLegacyCredentialKeys(primaryKey, previousKey) {
     process.env.MANAGER_MASTER_KEY_PREVIOUS,
     process.env.ENCRYPTION_KEY,
     process.env.BOT_SECRET_KEY,
+    process.env.SUPABASE_SECRET_KEY,
     process.env.SUPABASE_SERVICE_ROLE_KEY,
     process.env.SUPABASE_KEY,
+    (process.env.SUPABASE_SECRET_KEY ? 'kbot-cred-v1:' + String(process.env.SUPABASE_SECRET_KEY).trim() : ''),
     (process.env.SUPABASE_SERVICE_ROLE_KEY ? 'kbot-cred-v1:' + String(process.env.SUPABASE_SERVICE_ROLE_KEY).trim() : ''),
     (process.env.SUPABASE_KEY ? 'kbot-cred-v1:' + String(process.env.SUPABASE_KEY).trim() : ''),
-    'kbot_enterprise_stable_encryption_key_v11',
     ...(allowLegacyStaticKeys ? [
+      'kbot_enterprise_stable_encryption_key_v11',
+      'kbot_dev_test_nonprod_key',
       'kbot_default_key',
       'KingMC_Master_Secret_Key_32Byte!'
     ] : [])
@@ -129,10 +132,19 @@ function encryptUserPassword(value, key = null) {
   let activeKey = key ? toKeyBuffer(key) : null;
   if (!activeKey) {
     const primary = String(process.env.MANAGER_MASTER_KEY || process.env.MANAGER_ENCRYPTION_KEY || '').trim();
-    if (primary) {
+    if (primary && !/replace-with|example|changeme/i.test(primary)) {
       activeKey = toKeyBuffer(primary);
     } else {
-      activeKey = toKeyBuffer('kbot_enterprise_stable_encryption_key_v11');
+      const fallback = String(process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || '').trim();
+      if (fallback && !/replace-with|example|changeme/i.test(fallback)) {
+        activeKey = toKeyBuffer('kbot-cred-v1:' + fallback);
+      } else {
+        const isStrictProd = process.env.NODE_ENV === 'production' || Boolean(process.env.KBOT_STRICT_PRODUCTION);
+        if (isStrictProd) {
+          throw new Error('Khóa mã hóa chưa được cấu hình, từ chối mã hóa bằng khóa mặc định trong môi trường chạy thật.');
+        }
+        activeKey = toKeyBuffer('kbot_dev_test_nonprod_key');
+      }
     }
   }
 
@@ -260,6 +272,7 @@ module.exports = {
   generateWorkerSecret,
   generateToken,
   toKeyBuffer,
+  getLegacyCredentialKeys,
   encryptSecret,
   decryptSecret,
   encryptUserPassword,

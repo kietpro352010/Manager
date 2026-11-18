@@ -91,6 +91,7 @@ class EntitlementService {
     this.accessControl = accessControl;
     this.logger = logger;
     this.userLock = userLock;
+    this.isSweepRunning = false;
     this.gracePeriodMs = Number.isFinite(gracePeriodMs) && gracePeriodMs >= 0
       ? gracePeriodMs
       : (config?.botExpirationGraceHours !== undefined
@@ -421,6 +422,11 @@ class EntitlementService {
   }
 
   async checkExpiredUsersAndGracefulStop({ broker, fleetOperations, gracePeriodMs } = {}) {
+    if (this.isSweepRunning) {
+      this.logger?.info?.('check_expired_users_sweep_already_running_skipping');
+      return { checked: 0, expired: 0, skipped: true };
+    }
+    this.isSweepRunning = true;
     try {
       const users = await this.store.listAccess();
       if (!Array.isArray(users) || users.length === 0) return { checked: 0, expired: 0 };
@@ -431,124 +437,157 @@ class EntitlementService {
       let expiredCount = 0;
 
       for (const u of users) {
-        if (u.isPermanent) continue;
-        if (!u.expiresAt) continue;
-        const expiryTime = Date.parse(u.expiresAt);
-        if (!Number.isFinite(expiryTime) || expiryTime > now) continue;
+        const processUser = async () => {
+          // Re-fetch fresh user from DB to avoid acting on stale snapshot
+          const freshUser = (typeof this.store.getAccess === 'function'
+            ? await this.store.getAccess(u.userId, { bypassCache: true }).catch(() => null)
+            : null) || u;
 
-        // Skip permanently disabled accounts
-        if (u.status === 'disabled') continue;
+          if (freshUser.isPermanent) return;
+          if (!freshUser.expiresAt) return;
+          const expiryTime = Date.parse(freshUser.expiresAt);
+          if (!Number.isFinite(expiryTime) || expiryTime > now) return;
 
-        // Distinguish isInGracePeriod: if expiryTime < now <= expiryTime + gracePeriodMs
-        if (now <= expiryTime + effectiveGracePeriodMs) {
-          // DO NOT stop worker. Keep bot running in game.
-          if (u.status !== 'grace_period' || !u.inGracePeriod) {
-            await this.store.setAccess(u.userId, {
-              ...u,
-              status: 'grace_period',
-              inGracePeriod: true
-            }, 'system:grace_period');
-          }
-          const remainingGraceMs = Math.max(0, (expiryTime + effectiveGracePeriodMs) - now);
-          this.logger?.info('user_in_grace_period_bot_kept_running', {
-            userId: u.userId,
-            username: u.username,
-            expiresAt: u.expiresAt,
-            remainingGraceMs,
-            remainingMinutes: Math.round(remainingGraceMs / 60000)
-          });
-          continue;
-        }
+          // Skip permanently disabled accounts
+          if (freshUser.status === 'disabled') return;
 
-        // If here: isGracePeriodExpired (now > expiryTime + gracePeriodMs)
-        // If already fully expired and has no pending unstopped bots, skip
-        if (u.status === 'expired' && (!u.stopPendingWorkers || u.stopPendingWorkers.length === 0)) {
-          continue;
-        }
-
-        const workerIds = (Array.isArray(u.workerIds) && u.workerIds.length)
-          ? u.workerIds
-          : ((Array.isArray(u.assignedBotIds) && u.assignedBotIds.length) ? u.assignedBotIds : []);
-
-        // Determine which bots still need to be stopped
-        const botsToStop = Array.isArray(u.stopPendingWorkers) && u.stopPendingWorkers.length
-          ? u.stopPendingWorkers
-          : workerIds;
-
-        if (botsToStop.length === 0) {
-          if (u.status !== 'expired') {
-            await this.store.setAccess(u.userId, { ...u, status: 'expired', inGracePeriod: false, stopPendingWorkers: [] }, 'system:expiration');
-            expiredCount++;
-          }
-          continue;
-        }
-
-        this.logger?.info('user_expiring_process_stops', {
-          userId: u.userId,
-          username: u.username,
-          status: u.status,
-          botsToStop
-        });
-
-        // Mark as expiring while waiting for STOP results
-        if (u.status === 'active' || u.status === 'grace_period') {
-          await this.store.setAccess(u.userId, {
-            ...u,
-            status: 'expiring',
-            inGracePeriod: false,
-            stopPendingWorkers: botsToStop
-          }, 'system:expiring');
-        }
-
-        const remainingFailed = [];
-        for (const workerId of botsToStop) {
-          let stopped = false;
-          try {
-            const currentWorker = await this.registry?.find(workerId);
-            if (isCachedWorkerStopped(currentWorker)) {
-              stopped = true;
-            } else if (fleetOperations && typeof fleetOperations.stopWorker === 'function') {
-              const res = await fleetOperations.stopWorker(workerId, 'Gói thuê đã hết hạn ân hạn 6 giờ');
-              stopped = isWorkerStopConfirmed(res);
-            } else if (broker && typeof broker.dispatch === 'function') {
-              const res = await broker.dispatch(workerId, 'stop', { reason: 'Gói thuê đã hết hạn ân hạn 6 giờ' });
-              stopped = isWorkerStopConfirmed(res);
+          // Distinguish isInGracePeriod: if expiryTime < now <= expiryTime + gracePeriodMs
+          if (now <= expiryTime + effectiveGracePeriodMs) {
+            // DO NOT stop worker. Keep bot running in game.
+            if (freshUser.status !== 'grace_period' || !freshUser.inGracePeriod) {
+              await this.store.setAccess(freshUser.userId, {
+                ...freshUser,
+                status: 'grace_period',
+                inGracePeriod: true
+              }, 'system:grace_period');
             }
-          } catch (stopErr) {
-            this.logger?.warn('failed_to_stop_expired_bot', { workerId, error: stopErr.message });
+            const remainingGraceMs = Math.max(0, (expiryTime + effectiveGracePeriodMs) - now);
+            this.logger?.info('user_in_grace_period_bot_kept_running', {
+              userId: freshUser.userId,
+              username: freshUser.username,
+              expiresAt: freshUser.expiresAt,
+              remainingGraceMs,
+              remainingMinutes: Math.round(remainingGraceMs / 60000)
+            });
+            return;
           }
 
-          if (!stopped) {
-            remainingFailed.push(workerId);
+          // If here: isGracePeriodExpired (now > expiryTime + gracePeriodMs)
+          // If already fully expired and has no pending unstopped bots, skip
+          if (freshUser.status === 'expired' && (!freshUser.stopPendingWorkers || freshUser.stopPendingWorkers.length === 0)) {
+            return;
           }
-        }
 
-        if (remainingFailed.length === 0) {
-          // All bots confirmed stopped: transition to terminal 'expired' state
-          await this.store.setAccess(u.userId, {
-            ...u,
-            status: 'expired',
-            inGracePeriod: false,
-            stopPendingWorkers: []
-          }, 'system:expiration');
-          expiredCount++;
-          this.logger?.info('user_grace_period_expired_bots_stopped', {
-            userId: u.userId,
-            username: u.username,
-            stoppedWorkers: botsToStop
+          const workerIds = (Array.isArray(freshUser.workerIds) && freshUser.workerIds.length)
+            ? freshUser.workerIds
+            : ((Array.isArray(freshUser.assignedBotIds) && freshUser.assignedBotIds.length) ? freshUser.assignedBotIds : []);
+
+          // Determine which bots still need to be stopped
+          const botsToStop = Array.isArray(freshUser.stopPendingWorkers) && freshUser.stopPendingWorkers.length
+            ? freshUser.stopPendingWorkers
+            : workerIds;
+
+          if (botsToStop.length === 0) {
+            if (freshUser.status !== 'expired') {
+              await this.store.setAccess(freshUser.userId, {
+                ...freshUser,
+                status: 'expired',
+                inGracePeriod: false,
+                stopPendingWorkers: []
+              }, 'system:expiration');
+              expiredCount++;
+            }
+            return;
+          }
+
+          this.logger?.info('user_expiring_process_stops', {
+            userId: freshUser.userId,
+            username: freshUser.username,
+            status: freshUser.status,
+            botsToStop
           });
+
+          // Mark as expiring while waiting for STOP results
+          if (freshUser.status === 'active' || freshUser.status === 'grace_period') {
+            await this.store.setAccess(freshUser.userId, {
+              ...freshUser,
+              status: 'expiring',
+              inGracePeriod: false,
+              stopPendingWorkers: botsToStop
+            }, 'system:expiring');
+          }
+
+          const remainingFailed = [];
+          for (const workerId of botsToStop) {
+            let stopped = false;
+            try {
+              const currentWorker = await this.registry?.find(workerId);
+              if (isCachedWorkerStopped(currentWorker)) {
+                stopped = true;
+              } else if (fleetOperations && typeof fleetOperations.stopWorker === 'function') {
+                const res = await fleetOperations.stopWorker(workerId, 'Gói thuê đã hết hạn ân hạn 6 giờ');
+                stopped = isWorkerStopConfirmed(res);
+              } else if (broker && typeof broker.dispatch === 'function') {
+                const res = await broker.dispatch(workerId, 'stop', { reason: 'Gói thuê đã hết hạn ân hạn 6 giờ' });
+                stopped = isWorkerStopConfirmed(res);
+              }
+            } catch (stopErr) {
+              this.logger?.warn('failed_to_stop_expired_bot', { workerId, error: stopErr.message });
+            }
+
+            if (!stopped) {
+              remainingFailed.push(workerId);
+            }
+          }
+
+          // Before updating terminal status, re-read fresh user to check if renewed while stopping bots
+          const latestUser = (typeof this.store.getAccess === 'function'
+            ? await this.store.getAccess(freshUser.userId, { bypassCache: true }).catch(() => null)
+            : null) || freshUser;
+
+          const latestExpiry = latestUser.expiresAt ? Date.parse(latestUser.expiresAt) : NaN;
+          if (latestUser.isPermanent || (Number.isFinite(latestExpiry) && latestExpiry > Date.now()) || latestUser.status === 'active') {
+            this.logger?.info('user_renewed_during_graceful_stop_cancelling_expiration', {
+              userId: latestUser.userId,
+              status: latestUser.status,
+              expiresAt: latestUser.expiresAt
+            });
+            return;
+          }
+
+          if (remainingFailed.length === 0) {
+            // All bots confirmed stopped: transition to terminal 'expired' state
+            await this.store.setAccess(latestUser.userId, {
+              ...latestUser,
+              status: 'expired',
+              inGracePeriod: false,
+              stopPendingWorkers: []
+            }, 'system:expiration');
+            expiredCount++;
+            this.logger?.info('user_grace_period_expired_bots_stopped', {
+              userId: latestUser.userId,
+              username: latestUser.username,
+              stoppedWorkers: botsToStop
+            });
+          } else {
+            // Some stops unconfirmed: retain in 'expiring' for automatic retry on next cycle
+            await this.store.setAccess(latestUser.userId, {
+              ...latestUser,
+              status: 'expiring',
+              inGracePeriod: false,
+              stopPendingWorkers: remainingFailed
+            }, 'system:expiration_retry');
+            this.logger?.warn('user_expiration_partially_failed_will_retry', {
+              userId: latestUser.userId,
+              remainingFailed
+            });
+          }
+        };
+
+        if (this.userLock && typeof this.userLock.run === 'function') {
+          await this.userLock.run(u.userId, processUser);
         } else {
-          // Some stops unconfirmed: retain in 'expiring' for automatic retry on next cycle
-          await this.store.setAccess(u.userId, {
-            ...u,
-            status: 'expiring',
-            inGracePeriod: false,
-            stopPendingWorkers: remainingFailed
-          }, 'system:expiration_retry');
-          this.logger?.warn('user_expiration_partially_failed_will_retry', {
-            userId: u.userId,
-            remainingFailed
-          });
+          await processUser();
         }
       }
 
@@ -556,6 +595,8 @@ class EntitlementService {
     } catch (err) {
       this.logger?.warn('check_expired_users_error', { error: err.message });
       return { error: err.message };
+    } finally {
+      this.isSweepRunning = false;
     }
   }
 

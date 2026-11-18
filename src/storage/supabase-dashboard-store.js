@@ -429,18 +429,45 @@ class SupabaseDashboardStore {
       } else if (existingUser?.password) {
         userRow.password = existingUser.password;
       }
+      const directOnlyFields = [
+        'password', 'isTrial', 'trialBotId', 'registrationIp',
+        'deviceFingerprint', 'registrationUserAgent', 'botCount'
+      ];
+      const requiresDirectWrite = directOnlyFields.some((field) => fields[field] !== undefined)
+        || Boolean(fields.username && existingUser?.username
+          && String(fields.username).trim().toLowerCase() !== String(existingUser.username).toLowerCase());
+
       if (hasAssignmentInput) {
         if (typeof this.client?.rpc !== 'function') {
           throw new Error('Không thể đồng bộ bot được gán: RPC manager_set_user_access chưa khả dụng.');
         }
         assignmentSyncAttempted = true;
-        const { error: assignmentError } = await this.client.rpc('manager_set_user_access', {
+        const { data: rpcData, error: assignmentError } = await this.client.rpc('manager_set_user_access', {
           p_user_id: userRow.id || userId,
           p_values: mapTo(fields, ACCESS_FIELDS, ['userId', 'createdAt', 'updatedAt', 'createdBy', 'updatedBy']),
           p_worker_ids: assigned,
           p_actor_id: String(actorId || '')
         });
         if (assignmentError) throw assignmentError;
+
+        if (!requiresDirectWrite) {
+          if (String(userRow.status).toLowerCase() === 'disabled' && typeof this.adapter?.revokeUserSessions === 'function') {
+            await this.adapter.revokeUserSessions(userId).catch(() => false);
+          }
+          this.invalidateCache();
+          const rpcRow = unwrapRpc(rpcData);
+          return {
+            userId: rpcRow?.id || rpcRow?.user_id || userRow.id || userId,
+            username: rpcRow?.username || userRow.username,
+            role: rpcRow?.role || userRow.role,
+            status: rpcRow?.status || userRow.status,
+            isPermanent: rpcRow?.is_permanent !== undefined ? Boolean(rpcRow.is_permanent) : Boolean(userRow.is_permanent),
+            expiresAt: rpcRow?.expires_at !== undefined ? rpcRow.expires_at : userRow.expires_at,
+            planName: rpcRow?.plan_name || userRow.plan_name,
+            workerIds: assigned,
+            updatedAt: rpcRow?.updated_at || userRow.updated_at
+          };
+        }
       }
       let userWrite = this.client.from(USERS);
       if (existingUser?.id && String(existingUser.username || '').toLowerCase() !== cleanUsername) {
@@ -815,13 +842,13 @@ class SupabaseDashboardStore {
             .from(USERS)
             .update({ assigned_bot_ids: filtered, updated_at: new Date().toISOString() })
             .eq('id', u.id);
-          if (updateRes?.error && !isMissingSchemaError(updateRes.error) && String(updateRes.error?.code || '') !== '42501') {
+          if (updateRes?.error && !isMissingSchemaError(updateRes.error)) {
             throw updateRes.error instanceof Error ? updateRes.error : new Error(updateRes.error.message || 'Lỗi cập nhật assigned_bot_ids.');
           }
         }
       }
     } catch (err) {
-      if (!isMissingSchemaError(err) && String(err?.code || '') !== '42501') {
+      if (!isMissingSchemaError(err)) {
         throw err instanceof Error ? err : new Error(err.message || 'Lỗi khi đồng bộ danh sách bot người dùng.');
       }
     }
@@ -916,12 +943,21 @@ class SupabaseDashboardStore {
           const res = unwrapRpc(data);
           if (registrationIp || deviceFingerprint) {
             try {
-              await this.client.from(USERS).update({
+              const { error: regError } = await this.client.from(USERS).update({
                 registration_ip: registrationIp,
                 device_fingerprint: deviceFingerprint,
                 registration_user_agent: registrationUserAgent
               }).eq('username', cleanUsername);
-            } catch (_) {}
+              if (regError && !isMissingSchemaError(regError)) {
+                if (typeof this.logger?.warn === 'function') {
+                  this.logger.warn('Failed to update trial user registration anti-fraud telemetry', { error: regError.message || regError });
+                }
+              }
+            } catch (regEx) {
+              if (typeof this.logger?.warn === 'function') {
+                this.logger.warn('Exception updating trial user registration anti-fraud telemetry', { error: regEx.message || regEx });
+              }
+            }
           }
           return res;
         }

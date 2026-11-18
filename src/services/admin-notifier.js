@@ -10,6 +10,38 @@ function escapeTelegramHtml(str) {
     .replace(/>/g, '&gt;');
 }
 
+const SENSITIVE_KEY_REGEX = /((?:token|secret|password|key|apiKey|authorization|cookie|session)\s*[:=]\s*)([^\s&"']+)/gi;
+
+function redactSensitiveText(text) {
+  if (text === undefined || text === null) return '';
+  return String(text).replace(SENSITIVE_KEY_REGEX, '$1[REDACTED]');
+}
+
+function redactSensitiveValue(key, val) {
+  if (val === null || val === undefined) return val;
+  const k = String(key).toLowerCase();
+  if (/password|secret|token|key|cookie|session|credential|auth/i.test(k)) {
+    return '[REDACTED]';
+  }
+  if (typeof val === 'string') {
+    return redactSensitiveText(val);
+  }
+  if (typeof val === 'object') {
+    return redactSensitiveObject(val);
+  }
+  return val;
+}
+
+function redactSensitiveObject(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  if (Array.isArray(obj)) return obj.map((item) => redactSensitiveValue('', item));
+  const redacted = {};
+  for (const [k, v] of Object.entries(obj)) {
+    redacted[k] = redactSensitiveValue(k, v);
+  }
+  return redacted;
+}
+
 class AdminNotifier {
   constructor({ client, adminUserId = '', telegramBotToken = '', telegramChatId = '', logger } = {}) {
     this.client = client;
@@ -350,7 +382,7 @@ class AdminNotifier {
 
       const lines = items.slice(0, 10).map((it, idx) => {
         const itemIcon = it.level === 'error' ? '🚨' : it.level === 'warn' ? '⚠️' : 'ℹ️';
-        return `${idx + 1}. ${itemIcon} **[${it.source}]** \`${it.event}\`: ${String(it.message).slice(0, 80)}`;
+        return `${idx + 1}. ${itemIcon} **[${it.source}]** \`${it.event}\`: ${redactSensitiveText(String(it.message)).slice(0, 80)}`;
       });
       if (items.length > 10) lines.push(`*...và ${items.length - 10} cảnh báo khác.*`);
 
@@ -366,7 +398,7 @@ class AdminNotifier {
     const embed = new EmbedBuilder()
       .setColor(color)
       .setTitle(`${icon} [BÁO ĐỘNG: ${source.toUpperCase()}] ${event}`)
-      .setDescription(message ? `**Nội dung:** ${message.slice(0, 1000)}` : 'Đã phát hiện sự cố hệ thống.')
+      .setDescription(message ? `**Nội dung:** ${redactSensitiveText(message).slice(0, 1000)}` : 'Đã phát hiện sự cố hệ thống.')
       .setTimestamp();
 
     const fields = [
@@ -375,9 +407,10 @@ class AdminNotifier {
       { name: '🏷️ Phân loại', value: `\`${event}\``, inline: true }
     ];
 
-    if (details && typeof details === 'object' && Object.keys(details).length > 0) {
+    const safeDetails = redactSensitiveObject(details);
+    if (safeDetails && typeof safeDetails === 'object' && Object.keys(safeDetails).length > 0) {
       const detailLines = [];
-      for (const [k, v] of Object.entries(details)) {
+      for (const [k, v] of Object.entries(safeDetails)) {
         if (v !== undefined && v !== null && v !== '') {
           detailLines.push(`• **${k}:** \`${String(v).slice(0, 120)}\``);
         }
@@ -399,7 +432,7 @@ class AdminNotifier {
     }
 
     if (stackText) {
-      const safeStack = stackText.replace(/(?:token|secret|password|key)=([^\s&]+)/gi, '$1=[REDACTED]');
+      const safeStack = redactSensitiveText(stackText);
       fields.push({
         name: '📄 Chi tiết lỗi kỹ thuật',
         value: `\`\`\`js\n${safeStack.slice(0, 950)}\n\`\`\``,
@@ -425,17 +458,18 @@ class AdminNotifier {
       text += `Tổng hợp <b>${batchCount}</b> sự cố dồn dập trong 3.5 giây:\n\n`;
       items.slice(0, 10).forEach((it, idx) => {
         const itemIcon = it.level === 'error' ? '🚨' : it.level === 'warn' ? '⚠️' : 'ℹ️';
-        text += `${idx + 1}. ${itemIcon} [${escapeTelegramHtml(it.source)}] <code>${escapeTelegramHtml(it.event)}</code>: ${escapeTelegramHtml(String(it.message).slice(0, 70))}\n`;
+        text += `${idx + 1}. ${itemIcon} [${escapeTelegramHtml(it.source)}] <code>${escapeTelegramHtml(it.event)}</code>: ${escapeTelegramHtml(redactSensitiveText(String(it.message)).slice(0, 70))}\n`;
       });
       if (items.length > 10) text += `<i>...và ${items.length - 10} cảnh báo khác.</i>\n`;
     } else {
       text = `${icon} <b>[KINGMC AFK ALERT: ${escapeTelegramHtml(String(source || '').toUpperCase())}]</b>\n\n`;
       text += `<b>Sự kiện:</b> <code>${escapeTelegramHtml(event)}</code>\n`;
-      if (message) text += `<b>Chi tiết:</b> ${escapeTelegramHtml(message)}\n`;
+      if (message) text += `<b>Chi tiết:</b> ${escapeTelegramHtml(redactSensitiveText(message))}\n`;
 
-      if (details && typeof details === 'object') {
+      const safeDetails = redactSensitiveObject(details);
+      if (safeDetails && typeof safeDetails === 'object') {
         text += `\n<b>Thông số:</b>\n`;
-        for (const [k, v] of Object.entries(details)) {
+        for (const [k, v] of Object.entries(safeDetails)) {
           if (v !== undefined && v !== null && v !== '') {
             text += `• <i>${escapeTelegramHtml(k)}:</i> <code>${escapeTelegramHtml(String(v).slice(0, 80))}</code>\n`;
           }
@@ -548,4 +582,4 @@ class AdminNotifier {
   }
 }
 
-module.exports = { AdminNotifier, escapeTelegramHtml };
+module.exports = { AdminNotifier, escapeTelegramHtml, redactSensitiveText, redactSensitiveObject };

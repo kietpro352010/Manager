@@ -979,31 +979,44 @@ function createUserApi({
   router.get(['/rewards/link4m/return', '/return'], async (req, res) => {
     try {
       const { token, attempt } = req.query;
-      const safeToken = encodeURIComponent(String(token || ''));
-      const safeAttempt = encodeURIComponent(String(attempt || ''));
+      const rawToken = String(token || '');
+      const rawAttempt = String(attempt || '');
+      const encodedToken = encodeURIComponent(rawToken);
+      const encodedAttempt = encodeURIComponent(rawAttempt);
+      const safeDataJson = JSON.stringify({ token: rawToken, attemptId: rawAttempt })
+        .replace(/</g, '\\u003c')
+        .replace(/>/g, '\\u003e')
+        .replace(/&/g, '\\u0026');
       return res.send(`
         <!DOCTYPE html>
         <html>
-        <head><title>KingMC - Đang xác nhận phần thưởng...</title></head>
+        <head>
+          <title>KingMC - Đang xác nhận phần thưởng...</title>
+          <!-- metadata: token: '${encodedToken}', attempt: '${encodedAttempt}' -->
+        </head>
         <body style="font-family:sans-serif;text-align:center;padding:50px;background:#0d1117;color:#fff;">
           <h2>Đang xác thực vượt link hoàn tất...</h2>
           <p>Hệ thống đang cộng giờ sử dụng bot cho tài khoản của bạn. Vui lòng chờ...</p>
+          <script id="link4m-init" type="application/json">${safeDataJson}</script>
           <script>
-            fetch('/api/rewards/link4m/verify', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ token: '${safeToken}', attemptId: '${safeAttempt}' })
-            }).then(r => r.json()).then(data => {
-              if (data.ok) {
-                alert('Chúc mừng! Bạn đã nhận thêm ' + (data.addedHours || data.rewardHours || 12) + ' giờ sử dụng Bot thành công.');
+            (function() {
+              const payload = JSON.parse(document.getElementById('link4m-init').textContent || '{}');
+              fetch('/api/rewards/link4m/verify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+              }).then(r => r.json()).then(data => {
+                if (data.ok) {
+                  alert('Chúc mừng! Bạn đã nhận thêm ' + (data.addedHours || data.rewardHours || 12) + ' giờ sử dụng Bot thành công.');
+                  window.location.href = '/';
+                } else {
+                  alert('Xác thực thất bại: ' + (data.error || 'Token không hợp lệ.'));
+                  window.location.href = '/';
+                }
+              }).catch(() => {
                 window.location.href = '/';
-              } else {
-                alert('Xác thực thất bại: ' + (data.error || 'Token không hợp lệ.'));
-                window.location.href = '/';
-              }
-            }).catch(() => {
-              window.location.href = '/';
-            });
+              });
+            })();
           </script>
         </body>
         </html>

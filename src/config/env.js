@@ -44,6 +44,9 @@ function isServerSupabaseKey(value) {
 function parseEncryptionKey(env) {
   const primary = String(env.MANAGER_MASTER_KEY || env.MANAGER_ENCRYPTION_KEY || '').trim();
   if (primary && !/replace-with|example|changeme/i.test(primary)) {
+    if (primary.length === 64 && /^[a-fA-F0-9]+$/.test(primary)) {
+      return Buffer.from(primary, 'hex');
+    }
     if (primary.length === 44 && /^[A-Za-z0-9+/=]+$/.test(primary)) {
       try {
         const decoded = Buffer.from(primary, 'base64');
@@ -65,6 +68,9 @@ function parseEncryptionKey(env) {
 function parsePreviousEncryptionKey(env) {
   const prev = String(env.MANAGER_MASTER_KEY_PREVIOUS || '').trim();
   if (!prev) return null;
+  if (prev.length === 64 && /^[a-fA-F0-9]+$/.test(prev)) {
+    return Buffer.from(prev, 'hex');
+  }
   if (prev.length === 44 && /^[A-Za-z0-9+/=]+$/.test(prev)) {
     try {
       const decoded = Buffer.from(prev, 'base64');
@@ -178,4 +184,4 @@ function loadConfig(env = process.env) {
   });
 }
 
-module.exports = { loadConfig };
+module.exports = { loadConfig, parseEncryptionKey, parsePreviousEncryptionKey };
