@@ -72,14 +72,15 @@ class SupabaseWorkerStore {
     // Managed fetch connection pooling in Node.js
   }
 
-  async get(workerId) {
-    const { data, error } = await this.client.from(TABLE).select('*').eq('worker_id', workerId).maybeSingle();
+  async get(workerId, { includeEvents = false } = {}) {
+    const columns = includeEvents ? '*' : WORKER_LIST_COLUMNS;
+    const { data, error } = await this.client.from(TABLE).select(columns).eq('worker_id', workerId).maybeSingle();
     if (error && error.code !== 'PGRST116') throw error;
     return fromRow(data);
   }
 
   async getByNumber(botNumber) {
-    const { data, error } = await this.client.from(TABLE).select('*').eq('bot_number', Number(botNumber)).maybeSingle();
+    const { data, error } = await this.client.from(TABLE).select(WORKER_LIST_COLUMNS).eq('bot_number', Number(botNumber)).maybeSingle();
     if (error && error.code !== 'PGRST116') throw error;
     return fromRow(data);
   }
@@ -136,7 +137,7 @@ class SupabaseWorkerStore {
       if (error) throw error;
       return null;
     }
-    const { data, error } = await query.select('*').maybeSingle();
+    const { data, error } = await query.select(WORKER_LIST_COLUMNS).maybeSingle();
     if (error) throw error;
     return fromRow(data);
   }
@@ -218,7 +219,7 @@ class SupabaseWorkerStore {
     // SYNC-16-02: Fallback đáng tin cậy khi RPC manager_append_worker_event chưa khả dụng:
     // Đọc worker hiện tại, kiểm tra idempotency key/nội dung để tránh duplicate,
     // duy trì mảng events bounded 100 phần tử (tương đồng logic SQL) và cập nhật lastEvent
-    const current = await this.get(workerId);
+    const current = await this.get(workerId, { includeEvents: true });
     if (!current) throw new Error(`Worker ${workerId} không tồn tại.`);
 
     const eventId = String(event?.id || event?.eventId || '').trim() ||

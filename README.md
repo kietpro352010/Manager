@@ -131,4 +131,4 @@ npm ci
 npm start
 ```
 
-Entry point là `src/index.js`; API, Discord commands, Supabase storage và Worker registry được chia trong `src/`.
+Entry point là `src/index.js`; API, giao diện Dashboard chia module (`src/http/views/dashboard/`), Discord commands, Supabase storage và Worker registry được chia trong `src/`.

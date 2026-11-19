@@ -167,19 +167,33 @@ async function main() {
   expiredCheckInterval.unref();
 
   // 5. Adaptive Memory Sweeper (Trụ cột 1.1)
+  const ramThresholdMb = config.ramWarningMb || config.rssWarningThresholdMb || 280;
   const memorySweepInterval = setInterval(() => {
     const memory = process.memoryUsage();
     const rssMb = Math.round(memory.rss / (1024 * 1024));
     const heapUsedMb = Math.round(memory.heapUsed / (1024 * 1024));
     const heapTotalMb = Math.round(memory.heapTotal / (1024 * 1024));
 
-    if (rssMb > (config.rssWarningThresholdMb || 280) || heapUsedMb > 0.75 * heapTotalMb) {
+    if (rssMb > ramThresholdMb || heapUsedMb > 0.75 * heapTotalMb) {
       registry.pruneStaleMemory();
       const collected = runGarbageCollection();
       logger.info('adaptive_memory_sweep', { rssMb, heapUsedMb, heapTotalMb, collected });
     }
-  }, 30000);
+  }, config.gcIntervalMs || 30000);
   memorySweepInterval.unref();
+
+  // Định kỳ 12h dọn bản ghi cũ trên Supabase để giữ dung lượng nhẹ
+  const maintenanceCleanupInterval = setInterval(async () => {
+    try {
+      await Promise.allSettled([
+        accessStore.runMaintenanceCleanup?.(),
+        commandStore.runMaintenanceCleanup?.()
+      ]);
+    } catch (err) {
+      logger.warn('maintenance_cleanup_failed', { error: err.message });
+    }
+  }, 12 * 60 * 60 * 1000);
+  maintenanceCleanupInterval.unref();
 
   const services = {
     config: runtimeConfig,
@@ -288,6 +302,7 @@ async function main() {
       logger.info('manager_shutdown', { signal, exitCode });
       clearInterval(expiredCheckInterval);
       clearInterval(memorySweepInterval);
+      clearInterval(maintenanceCleanupInterval);
       broker.stopOutboxProcessor();
       wispbyteKeepAlive.stop();
       if (client && typeof client.isReady === 'function' && client.isReady()) client.destroy();

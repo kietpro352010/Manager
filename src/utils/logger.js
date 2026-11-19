@@ -1,12 +1,27 @@
 'use strict';
 
-const SECRET_KEY = /token|password|secret|authorization|cookie|api.?key/i;
+const SECRET_KEY = /password|secret|token|cookie|authorization|api.?key|credential|proxy.?url/i;
 
-function redact(value, key = '') {
+function redact(value, key = '', visited = new WeakSet(), depth = 0) {
   if (SECRET_KEY.test(key)) return '[REDACTED]';
-  if (Array.isArray(value)) return value.map((item) => redact(item));
+  if (depth > 8) return '[MAX_DEPTH]';
+  if (value instanceof Error) {
+    return { name: value.name, message: value.message, stack: value.stack, code: value.code };
+  }
+  if (Array.isArray(value)) {
+    if (visited.has(value)) return '[CIRCULAR]';
+    visited.add(value);
+    return value.map((item) => redact(item, key, visited, depth + 1));
+  }
   if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [childKey, redact(childValue, childKey)]));
+    if (visited.has(value)) return '[CIRCULAR]';
+    visited.add(value);
+    return Object.fromEntries(
+      Object.entries(value).map(([childKey, childValue]) => [childKey, redact(childValue, childKey, visited, depth + 1)])
+    );
+  }
+  if (typeof value === 'string' && value.includes('://') && value.includes('@')) {
+    return value.replace(/(:\/\/[^:]+:)[^@]+(@)/, '$1***$2');
   }
   return value;
 }
@@ -16,9 +31,29 @@ function createLogger(level = 'info') {
   const threshold = priorities[level] || priorities.info;
   return Object.fromEntries(Object.entries(priorities).map(([name, priority]) => [name, (event, fields = {}) => {
     if (priority < threshold) return;
-    const line = { time: new Date().toISOString(), level: name, event, ...redact(fields) };
+    const safeFields = fields && typeof fields === 'object' && !Array.isArray(fields)
+      ? redact(fields)
+      : { data: redact(fields) };
+    const record = {
+      ...safeFields,
+      time: new Date().toISOString(),
+      level: name,
+      event: String(event)
+    };
+    let line;
+    try {
+      line = JSON.stringify(record);
+    } catch (err) {
+      line = JSON.stringify({
+        time: new Date().toISOString(),
+        level: 'error',
+        event: 'logger_serialization_failed',
+        originalEvent: String(event),
+        error: String(err?.message || err)
+      });
+    }
     const writer = name === 'error' ? console.error : name === 'warn' ? console.warn : console.log;
-    writer(JSON.stringify(line));
+    writer(line);
   }]));
 }
 

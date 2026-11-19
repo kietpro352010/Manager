@@ -72,7 +72,78 @@ function validateWorkerStatus(rawStatus, source = 'worker') {
     }
   }
 
-  return {
+  const sanitizeItemEntry = (item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+    const out = {};
+    if (item.id !== undefined) out.id = item.id;
+    const slotNum = asInteger(item.slot, 0, 100);
+    if (slotNum !== null) out.slot = slotNum;
+    if (item.name !== undefined) out.name = String(item.name || '').slice(0, 64);
+    if (item.displayName !== undefined) out.displayName = String(item.displayName || '').slice(0, 128);
+    if (item.count !== undefined) out.count = asInteger(item.count, 0, 6400) ?? 1;
+    return out;
+  };
+
+  let sanitizedInventory;
+  if (status.inventory === null) {
+    sanitizedInventory = null;
+  } else if (status.inventory && typeof status.inventory === 'object' && !Array.isArray(status.inventory)) {
+    const rawInv = status.inventory;
+    const items = Array.isArray(rawInv.items)
+      ? rawInv.items.slice(0, 54).map(sanitizeItemEntry).filter(Boolean)
+      : [];
+    const slots = {};
+    if (rawInv.slots && typeof rawInv.slots === 'object' && !Array.isArray(rawInv.slots)) {
+      let slotCount = 0;
+      for (const [k, v] of Object.entries(rawInv.slots)) {
+        if (slotCount >= 60) break;
+        const cleanItem = sanitizeItemEntry(v);
+        if (cleanItem) {
+          slots[String(k).slice(0, 8)] = cleanItem;
+          slotCount += 1;
+        }
+      }
+    }
+    sanitizedInventory = {
+      slots,
+      items,
+      revision: asInteger(rawInv.revision, 0) ?? 0
+    };
+    if (rawInv.armor && typeof rawInv.armor === 'object' && !Array.isArray(rawInv.armor)) {
+      sanitizedInventory.armor = {
+        head: sanitizeItemEntry(rawInv.armor.head),
+        torso: sanitizeItemEntry(rawInv.armor.torso),
+        legs: sanitizeItemEntry(rawInv.armor.legs),
+        feet: sanitizeItemEntry(rawInv.armor.feet)
+      };
+    }
+    if (rawInv.offhand !== undefined) sanitizedInventory.offhand = rawInv.offhand ? String(rawInv.offhand).slice(0, 64) : null;
+    const selHotbar = asInteger(rawInv.selectedHotbar, 0, 8);
+    if (selHotbar !== null) sanitizedInventory.selectedHotbar = selHotbar;
+    for (const metricKey of ['health', 'food', 'totemCount', 'goldenAppleCount', 'foodCount']) {
+      if (rawInv[metricKey] !== undefined) {
+        const val = asInteger(rawInv[metricKey], 0, 6400);
+        if (val !== null) sanitizedInventory[metricKey] = val;
+      }
+    }
+  }
+
+  let sanitizedWindow;
+  if (status.currentWindow === null) {
+    sanitizedWindow = null;
+  } else if (status.currentWindow && typeof status.currentWindow === 'object' && !Array.isArray(status.currentWindow)) {
+    const rawWin = status.currentWindow;
+    sanitizedWindow = {
+      title: String(rawWin.title || '').slice(0, 160),
+      type: String(rawWin.type || '').slice(0, 64),
+      revision: asInteger(rawWin.revision, 0) ?? 0,
+      slots: Array.isArray(rawWin.slots)
+        ? rawWin.slots.slice(0, 90).map(sanitizeItemEntry)
+        : []
+    };
+  }
+
+  const normalized = {
     state,
     online: Boolean(status.online ?? status.connected),
     username: String(status.username || '').slice(0, 64),
@@ -109,6 +180,9 @@ function validateWorkerStatus(rawStatus, source = 'worker') {
     updatedAt: new Date(),
     source
   };
+  if (sanitizedInventory !== undefined) normalized.inventory = sanitizedInventory;
+  if (sanitizedWindow !== undefined) normalized.currentWindow = sanitizedWindow;
+  return normalized;
 }
 
 class WorkerRegistry {
@@ -579,7 +653,11 @@ class WorkerRegistry {
         Boolean(safeStatus.proxyEnabled),
         safeStatus.reconnectAttempts || 0,
         safeStatus.health ?? '',
-        safeStatus.totemCount ?? 0
+        safeStatus.totemCount ?? 0,
+        safeStatus.inventory?.revision ?? '',
+        safeStatus.currentWindow
+          ? `${safeStatus.currentWindow.title || ''}:${Array.isArray(safeStatus.currentWindow.slots) ? safeStatus.currentWindow.slots.length : 0}:${safeStatus.currentWindow.revision ?? 0}`
+          : (safeStatus.currentWindow === null ? 'closed' : '')
       ].join('|');
 
       const prevFingerprint = this.lastDbStatusFingerprint.get(id);
@@ -590,7 +668,7 @@ class WorkerRegistry {
       const isHeartbeatSource = source === 'worker-heartbeat' || source === 'wispbyte-poll';
       const isLightweight = Boolean(status?.isLightweight === true || status?.digestUnchanged === true);
       const lastPersistAt = this.lastDbStatusPersistAt.get(id) || 0;
-      const canCoalesceDbWrite = isHeartbeatSource && isLightweight && prevFingerprint === fingerprint && (Date.now() - lastPersistAt < 60000);
+      const canCoalesceDbWrite = isHeartbeatSource && isLightweight && prevFingerprint === fingerprint && (Date.now() - lastPersistAt < 90000);
 
       if (canCoalesceDbWrite) {
         return { ...existing, status: safeStatus, lastHeartbeat: managerNow };

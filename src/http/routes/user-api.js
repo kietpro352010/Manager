@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const express = require('express');
 const { validateProxyUrl } = require('../../services/proxy-validation');
 const { decryptSecret } = require('../../utils/secrets');
@@ -222,12 +223,18 @@ function createUserApi({
   }
 
   // Helper: Build standardized safe bot payload for API responses
-  function buildBotPayload(worker, session, summary = null, assignment = null) {
+  function buildBotPayload(worker, session, summary = null, assignment = null, { compact = false } = {}) {
     const username = getBotUsername(worker);
     const configured = Boolean(worker.settings?.mcCredentialsCiphertext || (username && username !== 'Chưa đặt'));
     const isOnline = worker.status?.state === 'online';
     const isReachable = Boolean(worker.reachable || isOnline);
     const botNum = Number(worker.botNumber || worker.workerId || 1);
+    let summaryData = summary?.data || null;
+    if (compact && summaryData && typeof summaryData === 'object') {
+      summaryData = { ...summaryData };
+      delete summaryData.inventory;
+      delete summaryData.currentWindow;
+    }
 
     const safeBot = sanitizeBotForSession({
       id: worker.workerId,
@@ -245,6 +252,8 @@ function createUserApi({
       status: worker.status?.state || 'offline',
       state: worker.status?.state || 'offline',
       online: isOnline,
+      lastKickReason: worker.status?.lastKickReason || '',
+      lastError: worker.status?.lastError || '',
       server: worker.status?.server || worker.serverHost || 'mc.kingmc.vn',
       dimension: worker.status?.dimension || 'unknown',
       locationState: worker.status?.locationState || 'unknown',
@@ -252,7 +261,7 @@ function createUserApi({
       food: worker.status?.food ?? 20,
       totemCount: worker.status?.totemCount ?? 0,
       goldenAppleCount: worker.status?.goldenAppleCount ?? 0,
-      inventory: worker.status?.inventory || [],
+      inventory: compact ? [] : (worker.status?.inventory || []),
       pos: worker.status?.position || { x: 0, y: 0, z: 0 },
       position: worker.status?.position || { x: 0, y: 0, z: 0 },
       ping: worker.status?.pingMs ?? worker.status?.ping ?? 0,
@@ -268,10 +277,10 @@ function createUserApi({
       rentable: worker.rentable !== false,
       assignedUsername: assignment?.username || null,
       assignedPlan: assignment?.planName || null,
-      summary: summary?.data || null,
+      summary: summaryData,
       url: worker.serviceUrl || '',
       proxy: worker.proxy || null,
-      currentWindow: worker.status?.currentWindow || null,
+      currentWindow: compact ? null : (worker.status?.currentWindow || null),
       history: {
         ping: worker.status?.pingHistory || [],
         ram: worker.status?.ramHistory || []
@@ -318,7 +327,8 @@ function createUserApi({
     try {
       const session = req.managerAuthSession;
       const allBots = await registry.list();
-      const assignmentMap = await getUserAssignmentsMap();
+      const assignmentMap = session.role === 'admin' ? await getUserAssignmentsMap() : null;
+      const selfAssignment = session.role === 'admin' ? null : { username: session.username || null, planName: session.planName || null };
       let globalOrder = [];
       if (typeof store?.getSetting === 'function') {
         const configuredOrder = await Promise.resolve(store.getSetting('bot_display_order')).catch(() => null);
@@ -343,11 +353,45 @@ function createUserApi({
 
       const payload = visibleBots.map((bot) => {
         const summary = registry.summary(bot.workerId) || {};
-        const assignment = assignmentMap.get(String(bot.workerId)) || assignmentMap.get(String(bot.botNumber)) || null;
-        return buildBotPayload(bot, session, summary, assignment);
+        const assignment = assignmentMap
+          ? (assignmentMap.get(String(bot.workerId)) || assignmentMap.get(String(bot.botNumber)) || null)
+          : selfAssignment;
+        return buildBotPayload(bot, session, summary, assignment, { compact: true });
       });
 
-      return res.json({ ok: true, bots: payload });
+      const managerRamMb = session.role === 'admin'
+        ? Math.round(process.memoryUsage().rss / (1024 * 1024))
+        : undefined;
+      const currentUserSnapshot = {
+        status: session.status || 'active',
+        expiresAt: session.expiresAtRental || null,
+        isPermanent: Boolean(session.isPermanent),
+        planName: session.planName || '',
+        assignedBotIds: Array.isArray(session.assignedBotIds) ? session.assignedBotIds : [],
+        inGracePeriod: Boolean(session.inGracePeriod)
+      };
+      const sig = crypto
+        .createHash('sha1')
+        .update(JSON.stringify({ bots: payload, currentUser: currentUserSnapshot }))
+        .digest('hex')
+        .slice(0, 16);
+
+      if (req.query?.sig && String(req.query.sig) === sig) {
+        return res.json({
+          ok: true,
+          unchanged: true,
+          sig,
+          ...(managerRamMb !== undefined ? { managerRamMb } : {})
+        });
+      }
+
+      return res.json({
+        ok: true,
+        sig,
+        bots: payload,
+        currentUser: currentUserSnapshot,
+        ...(managerRamMb !== undefined ? { managerRamMb } : {})
+      });
     } catch (error) {
       logger.error('Failed to get bots', { error: error.message });
       return res.status(500).json({ ok: false, error: error.message });
@@ -451,8 +495,10 @@ function createUserApi({
       return res.json({ ok: true, unchanged: true, rev });
     }
 
-    const assignmentMap = await getUserAssignmentsMap();
-    const assignment = assignmentMap.get(String(worker.workerId)) || assignmentMap.get(String(worker.botNumber)) || null;
+    const assignmentMap = session.role === 'admin' ? await getUserAssignmentsMap() : null;
+    const assignment = assignmentMap
+      ? (assignmentMap.get(String(worker.workerId)) || assignmentMap.get(String(worker.botNumber)) || null)
+      : { username: session.username || null, planName: session.planName || null };
     const safeBot = buildBotPayload(worker, session, summary, assignment);
     const canRevealMcAccount = session.role === 'admin' || session.allowAccountChange !== false;
     const decryptedCreds = canRevealMcAccount && worker.settings?.mcCredentialsCiphertext && registry.encryptionKey
@@ -497,8 +543,10 @@ function createUserApi({
     const worker = perm.worker;
     const session = req.managerAuthSession;
     const summary = registry.summary(worker.workerId);
-    const assignmentMap = await getUserAssignmentsMap();
-    const assignment = assignmentMap.get(String(worker.workerId)) || assignmentMap.get(String(worker.botNumber)) || null;
+    const assignmentMap = session.role === 'admin' ? await getUserAssignmentsMap() : null;
+    const assignment = assignmentMap
+      ? (assignmentMap.get(String(worker.workerId)) || assignmentMap.get(String(worker.botNumber)) || null)
+      : { username: session.username || null, planName: session.planName || null };
     const safeBot = buildBotPayload(worker, session, summary, assignment);
 
     return res.json({

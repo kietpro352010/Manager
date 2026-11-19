@@ -233,15 +233,8 @@ class SupabaseCommandStore {
     };
   }
 
-  async initialize() {
-    try {
-      const { error: checkError } = await this.client.from(TABLE).select('command_id').limit(0);
-      if (checkError && checkError.code !== 'PGRST116') {
-        console.warn(`[COMMAND_STORE] Table ${TABLE} notice: ${checkError.message}`);
-      }
-    } catch (_) {}
-
-    // Dọn dẹp lệnh cũ hết hạn và rác > 300s
+  async runMaintenanceCleanup() {
+    if (!this.client || typeof this.client.from !== 'function') return;
     try {
       const now = new Date().toISOString();
       const cutoff300s = new Date(Date.now() - 300 * 1000).toISOString();
@@ -252,6 +245,18 @@ class SupabaseCommandStore {
         this.client.from(TABLE).delete().lt('created_at', cutoff7d)
       ]);
     } catch (_) {}
+  }
+
+  async initialize() {
+    try {
+      const { error: checkError } = await this.client.from(TABLE).select('command_id').limit(0);
+      if (checkError && checkError.code !== 'PGRST116') {
+        console.warn(`[COMMAND_STORE] Table ${TABLE} notice: ${checkError.message}`);
+      }
+    } catch (_) {}
+
+    // Dọn dẹp lệnh cũ hết hạn và rác > 300s
+    await this.runMaintenanceCleanup();
 
     await this.probeStateSyncRpcs();
     if (this.stateSyncRpcState.missingRpcs.length > 0 && !this.allowUnsafeSingleInstanceFallback) {

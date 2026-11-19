@@ -22,6 +22,13 @@ const LINK_ATTEMPTS = 'manager_link4m_attempts';
 const OUTBOX = 'manager_outbox_queue';
 const PENDING_ALLOCATIONS = 'manager_pending_allocations';
 const BACKUPS = 'manager_backups';
+const SESSIONS = 'manager_sessions';
+
+const USER_ACCESS_COLUMNS = [
+  'id', 'username', 'role', 'status', 'is_permanent', 'expires_at',
+  'plan_name', 'note', 'allow_account_change', 'lock_reason',
+  'bot_count', 'bot_aliases', 'assigned_bot_ids', 'created_at', 'updated_at'
+].join(',');
 
 const ACCESS_FIELDS = {
   userId: 'user_id', role: 'role', status: 'status', isPermanent: 'is_permanent', expiresAt: 'expires_at',
@@ -169,51 +176,61 @@ class SupabaseDashboardStore {
     this.cache.clear();
   }
 
-  async initialize() {
-    // 1. Kiểm tra kết nối nhanh qua OpenAPI spec / adapter nếu có
-    if (this.adapter && typeof this.adapter.testConnection === 'function') {
-      try {
-        const testRes = await this.adapter.testConnection();
-        if (testRes.ok) {
-          return;
-        }
-      } catch (_) {}
-    }
-
-    // 2. Fallback kiểm tra các bảng cơ bản
-    const candidateTables = [USERS, KEYS, SETTINGS, LINK_ATTEMPTS, OUTBOX, PENDING_ALLOCATIONS];
-    for (const table of candidateTables) {
-      try {
-        const { error } = await this.client.from(table).select('*').limit(0);
-        if (error && error.code !== 'PGRST116') {
-          // Bảng có thể chưa tạo nếu dùng migration cũ
-        }
-      } catch (_) {}
-    }
-
-    // 3. Dọn dẹp bản ghi cũ nếu bảng tồn tại (giảm DB size & Log Ingestion)
+  async runMaintenanceCleanup() {
+    if (!this.client || typeof this.client.from !== 'function') return;
     try {
       const now = new Date().toISOString();
-      const auditCutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-      const posCutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+      const nowMs = Date.now();
+      const auditCutoff = new Date(nowMs - 30 * 24 * 60 * 60 * 1000).toISOString();
+      const posCutoff = new Date(nowMs - 14 * 24 * 60 * 60 * 1000).toISOString();
       await Promise.allSettled([
         this.client.from(AUDIT_LOGS).delete().lt('timestamp', auditCutoff),
         this.client.from('bot_position_logs').delete().lt('changed_at', posCutoff),
-        this.client.from(LINK_ATTEMPTS).delete().lt('purge_at', now)
+        this.client.from(LINK_ATTEMPTS).delete().lt('purge_at', now),
+        this.client.from(SESSIONS).delete().lt('expires_at', nowMs)
       ]);
     } catch (_) {}
+  }
+
+  async initialize() {
+    // 1. Kiểm tra kết nối nhanh qua OpenAPI spec / adapter nếu có
+    let adapterConnected = false;
+    if (this.adapter && typeof this.adapter.testConnection === 'function') {
+      try {
+        const testRes = await this.adapter.testConnection();
+        if (testRes?.ok) {
+          adapterConnected = true;
+        }
+      } catch (_) {}
+    }
+
+    if (!adapterConnected) {
+      // 2. Fallback kiểm tra các bảng cơ bản
+      const candidateTables = [USERS, KEYS, SETTINGS, LINK_ATTEMPTS, OUTBOX, PENDING_ALLOCATIONS];
+      for (const table of candidateTables) {
+        try {
+          const { error } = await this.client.from(table).select('*').limit(0);
+          if (error && error.code !== 'PGRST116') {
+            // Bảng có thể chưa tạo nếu dùng migration cũ
+          }
+        } catch (_) {}
+      }
+    }
+
+    // 3. Luôn dọn dẹp bản ghi cũ nếu bảng tồn tại (giảm DB size & Log Ingestion)
+    await this.runMaintenanceCleanup();
   }
 
   // --------------------------------------------------------------------------
   // USER ENTITLEMENT & ACCESS
   // --------------------------------------------------------------------------
-  async resolveUserRow(userId) {
+  async resolveUserRow(userId, columns = '*') {
     const clean = String(userId || '').trim();
     if (!clean) return null;
     const lower = clean.toLowerCase();
     const bare = lower.startsWith('usr_') ? lower.slice(4) : lower;
     try {
-      const q = this.client.from(USERS).select('*');
+      const q = this.client.from(USERS).select(columns);
       if (typeof q.or === 'function') {
         const filters = [`id.eq.${clean}`, `username.eq.${lower}`];
         if (bare && bare !== lower) filters.push(`username.eq.${bare}`);
@@ -226,7 +243,7 @@ class SupabaseDashboardStore {
     if (bare && bare !== lower) lookups.push(['username', bare]);
     for (const [col, val] of lookups) {
       try {
-        const { data, error } = await this.client.from(USERS).select('*').eq(col, val).maybeSingle();
+        const { data, error } = await this.client.from(USERS).select(columns).eq(col, val).maybeSingle();
         if (!error && data) return data;
       } catch (_) {}
     }
@@ -279,7 +296,7 @@ class SupabaseDashboardStore {
     }
 
     // 1. Thử đọc từ manager_users (id hoặc username)
-    const userData = await this.resolveUserRow(userId);
+    const userData = await this.resolveUserRow(userId, USER_ACCESS_COLUMNS);
     if (userData) {
       const rawAssigned = Array.isArray(userData.assigned_bot_ids) ? userData.assigned_bot_ids.map(String) : [];
       const assigned = rawAssigned.length > 0 ? rawAssigned : await this.assignedWorkerIds(userData.id || userId);
@@ -323,7 +340,7 @@ class SupabaseDashboardStore {
 
     // 1. Thử đọc từ manager_users
     try {
-      const { data: users, error } = await this.client.from(USERS).select('*').order('created_at', { ascending: false });
+      const { data: users, error } = await this.client.from(USERS).select(USER_ACCESS_COLUMNS).order('created_at', { ascending: false });
       if (!error && Array.isArray(users) && users.length > 0) {
         const result = users.map((u) => ({
           userId: u.id || ('usr_' + u.username),

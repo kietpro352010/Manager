@@ -69,6 +69,26 @@ function createApp({
   // Shared active sessions map in memory (TTL synced with DB)
   const activeSessions = new Map();
 
+  function pruneExpiredSessions(maxEntries = 500) {
+    if (activeSessions.size <= maxEntries) return;
+    const now = Date.now();
+    for (const [key, entry] of activeSessions.entries()) {
+      if (!entry || (entry.expiresAt && Number(entry.expiresAt) <= now)) {
+        activeSessions.delete(key);
+      }
+    }
+    while (activeSessions.size >= 1000) {
+      const oldestKey = activeSessions.keys().next().value;
+      if (oldestKey === undefined) break;
+      activeSessions.delete(oldestKey);
+    }
+  }
+
+  function cacheSession(tokenHash, sessionData) {
+    pruneExpiredSessions();
+    activeSessions.set(tokenHash, sessionData);
+  }
+
   // Helper to check worker bot secret
   function isBotSecretRequest(req) {
     const incoming = String(req?.headers?.['x-bot-secret'] || req?.headers?.['x-worker-secret'] || '').trim();
@@ -98,18 +118,7 @@ function createApp({
 
   // 1. Lightweight Zero-Dependency Gzip Compression Middleware (saves ~85% outbound bandwidth)
   app.use((req, res, next) => {
-    const acceptEncoding = String(req.headers['accept-encoding'] || '');
-    let wildcardQuality = null;
-    let gzipQuality = null;
-    for (const entry of acceptEncoding.split(',')) {
-      const [name, ...params] = entry.trim().toLowerCase().split(';');
-      const qParam = params.find((param) => /^\s*q\s*=/.test(param));
-      const quality = qParam ? Number(qParam.split('=')[1]) : 1;
-      if (!Number.isFinite(quality) || quality < 0 || quality > 1) continue;
-      if (name === 'gzip') gzipQuality = quality;
-      else if (name === '*') wildcardQuality = quality;
-    }
-    const acceptsGzip = gzipQuality !== null ? gzipQuality > 0 : wildcardQuality > 0;
+    const acceptsGzip = acceptsGzipEncoding(req);
     const originalSend = res.send;
     res.send = function (body) {
       if (res.headersSent || !body || req.method === 'HEAD' || [204, 304].includes(res.statusCode)) {
@@ -328,7 +337,7 @@ function createApp({
         if (dbSession && Number(dbSession.expiresAt) > Date.now()) {
           if (dbSession.role === 'admin') {
             session = dbSession;
-            activeSessions.set(tokenHash, session);
+            cacheSession(tokenHash, session);
           } else if (
             dbUser &&
             String(dbUser.status || '').toLowerCase() !== 'disabled' &&
@@ -367,7 +376,7 @@ function createApp({
       }
 
       if (session) {
-        activeSessions.set(tokenHash, session);
+        cacheSession(tokenHash, session);
       } else {
         activeSessions.delete(tokenHash);
         if (typeof store.invalidateCache === 'function') store.invalidateCache();
@@ -580,11 +589,7 @@ function createApp({
   // Static GUI Textures Route
   const texturesCandidates = [
     process.env.TEXTURES_DIR,
-    'D:/CheckStatsKingMC-main/CheckStatsKingMC-main/public/textures',
-    path.resolve(__dirname, '../../../../CheckStatsKingMC-main/CheckStatsKingMC-main/public/textures'),
-    path.resolve(__dirname, '../../../CheckStatsKingMC-main/CheckStatsKingMC-main/public/textures'),
     path.resolve(__dirname, '../../public/textures'),
-    path.resolve(process.cwd(), '../CheckStatsKingMC-main/CheckStatsKingMC-main/public/textures'),
     path.resolve(process.cwd(), 'public/textures')
   ].filter(Boolean);
 
@@ -600,9 +605,9 @@ function createApp({
     app.use(
       '/textures',
       express.static(texturesPath, {
-        maxAge: 86400000,
+        maxAge: 2592000000,
         setHeaders: (res) => {
-          res.setHeader('Cache-Control', 'public, max-age=86400');
+          res.setHeader('Cache-Control', 'public, max-age=2592000, immutable');
         }
       })
     );

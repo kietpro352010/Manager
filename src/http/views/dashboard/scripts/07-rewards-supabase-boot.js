@@ -957,7 +957,8 @@ function scheduleNextManagerPoll() {
   const delay = document.hidden ? 30000 : (isIdle ? 15000 : 5000); // 5s active poll, 15s idle, 30s hidden tab
   managerPollTimerId = setTimeout(async () => {
     try {
-      if (!routeResolving && currentUser) {
+      const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+      if (isOnline && !routeResolving && currentUser) {
         if (selectedBotId === null) await refreshHome();
         else await refreshDetail(false);
       }
@@ -1018,6 +1019,6 @@ document.addEventListener('change', (e) => {
   }
 }, { passive: true });
 
-setInterval(updateDetailUptime, 1000);
-setInterval(updateUserHeaderCountdown, 5000);
-setInterval(updateCardGraceCountdowns, 1000);
+setInterval(() => { if (!document.hidden) updateDetailUptime(); }, 1000);
+setInterval(() => { if (!document.hidden) updateUserHeaderCountdown(); }, 5000);
+setInterval(() => { if (!document.hidden) updateCardGraceCountdowns(); }, 1000);
