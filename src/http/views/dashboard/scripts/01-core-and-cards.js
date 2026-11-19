@@ -56,6 +56,11 @@ async function requestJson(url, options = {}) {
       headers['Content-Type'] = 'application/json';
     }
     requestOptions.body = JSON.stringify(options.body);
+  } else if (typeof options.body === 'string' && !headers['Content-Type'] && !headers['content-type']) {
+    const trimmedBody = options.body.trim();
+    if ((trimmedBody.startsWith('{') && trimmedBody.endsWith('}')) || (trimmedBody.startsWith('[') && trimmedBody.endsWith(']'))) {
+      headers['Content-Type'] = 'application/json';
+    }
   }
   try {
     const response = await fetch(url, requestOptions);
@@ -92,8 +97,15 @@ function normalizeClientBotUrl(value) {
   }
 }
 
+function isDetailSettingsRestrictedUser() {
+  return Boolean(typeof currentUser !== 'undefined' && currentUser && currentUser.role !== 'admin' && currentUser.allowAccountChange === false);
+}
+
 function setDetailSettingsDisabled(disabled) {
-  document.querySelectorAll('#detailSettingEcoMode, #detailSettingAutoTotem, #detailSettingAntiHungry, #detailSettingAutoReconnect, #detailSettingAntiAfkKick, #detailSettingUserNotifyEnabled, #detailSettingNotifyOnAfkKick, #detailSettingNotifyOnAfkRecover, #detailSettingNotifyOnReconnectExhausted, #detailSpawnCommands, #saveDetailSettingsButton')
+  const restricted = isDetailSettingsRestrictedUser();
+  document.querySelectorAll('#detailSettingEcoMode, #detailSettingAutoTotem, #detailSettingAntiHungry, #detailSettingAutoReconnect, #detailSettingAntiAfkKick, #detailSpawnCommands')
+    .forEach(el => { el.disabled = Boolean(disabled) || restricted; });
+  document.querySelectorAll('#detailSettingUserNotifyEnabled, #detailSettingNotifyOnAfkKick, #detailSettingNotifyOnAfkRecover, #detailSettingNotifyOnReconnectExhausted, #saveDetailSettingsButton')
     .forEach(el => { el.disabled = !!disabled; });
 }
 

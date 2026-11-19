@@ -6,6 +6,15 @@ const { timingSafeStringEquals } = require('../../utils/secrets');
 
 function createWorkerApi({ registry, broker, workerStore, adminNotifier, config, logger }) {
   const router = express.Router({ mergeParams: true });
+  for (const method of ['get', 'post', 'put', 'patch', 'delete', 'all']) {
+    const orig = router[method].bind(router);
+    router[method] = (path, ...handlers) => orig(
+      path,
+      ...handlers.map((fn) => (typeof fn === 'function' && fn.length < 4
+        ? (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
+        : fn))
+    );
+  }
   const auth = createWorkerAuth(registry);
 
   // 1. Scoped routes: /api/v1/workers/:workerId/*

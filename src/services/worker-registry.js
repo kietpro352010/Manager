@@ -296,7 +296,8 @@ class WorkerRegistry {
       }
     }
     for (const [botId, entry] of this.secretCache.entries()) {
-      if (entry?.cachedAt && now - entry.cachedAt > SECRET_CACHE_TTL_MS) {
+      const withinGrace = Boolean(entry?.graceUntil && now < entry.graceUntil);
+      if (!withinGrace && entry?.cachedAt && now - entry.cachedAt > SECRET_CACHE_TTL_MS) {
         this.secretCache.delete(botId);
       }
     }
@@ -384,9 +385,8 @@ class WorkerRegistry {
       this.lastDbStatusFingerprint.delete(id);
       this.workerStateRev.delete(id);
       this.workerSettingsRev.delete(id);
-      if (existing && Number.isInteger(existing.botNumber)) {
-        await this.reindexAfterRemoval(existing.botNumber);
-      }
+      // Do NOT shift remaining workers' botNumber on deletion (botNumber is a stable identity
+      // backed by manager_bot_number_seq; shifting it causes cross-tenant IDOR & UNIQUE collisions).
     }
     return removed;
   }

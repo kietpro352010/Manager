@@ -9,7 +9,7 @@ function detailStatusHtml() {
     if (errorType === 'secret_mismatch') {
       statusDetailHtml += '<div style="font-size:12px;color:#fb923c;margin-top:8px;font-weight:600;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">' +
         '<span>⚠️ Worker từ chối lệnh do lệch Secret Key (409).</span>' +
-        '<button type="button" class="small warning-btn" onclick="openEditSecretModal(' + escapeHtml(workerIdArg) + ')" style="padding:2px 8px;font-size:11px;">🔑 Cập nhật Key</button>' +
+        (isAdmin ? '<button type="button" class="small warning-btn" onclick="openEditSecretModal(' + escapeHtml(workerIdArg) + ')" style="padding:2px 8px;font-size:11px;">🔑 Cập nhật Key</button>' : '') +
       '</div>';
     } else if (errorType === 'render_sleep') {
       statusDetailHtml += '<div style="font-size:12px;color:#c084fc;margin-top:8px;font-weight:600;">' +
@@ -18,8 +18,8 @@ function detailStatusHtml() {
     } else if (errorType === 'not_found') {
       statusDetailHtml += '<div style="font-size:12px;color:#f87171;margin-top:8px;font-weight:600;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">' +
         '<span>❌ Địa chỉ bot trả về 404 Not Found (URL sai hoặc app bị xoá).</span>' +
-        '<button type="button" class="small danger" onclick="deleteBot(event,' + escapeHtml(workerIdArg) + ')" style="padding:2px 8px;font-size:11px;">🗑 Xoá Bot</button>' +
-        '<button type="button" class="small" onclick="editBot(event,' + escapeHtml(workerIdArg) + ')" style="padding:2px 8px;font-size:11px;">✏ Sửa URL</button>' +
+        (isAdmin ? '<button type="button" class="small danger" onclick="deleteBot(event,' + escapeHtml(workerIdArg) + ')" style="padding:2px 8px;font-size:11px;">🗑 Xoá Bot</button>' +
+        '<button type="button" class="small" onclick="editBot(event,' + escapeHtml(workerIdArg) + ')" style="padding:2px 8px;font-size:11px;">✏ Sửa URL</button>' : '') +
       '</div>';
     }
   }
@@ -643,8 +643,9 @@ function resolveItemTexture(item) {
     mappedBase = 'sunflower';
   }
 
-  var upperName = mappedBase.toUpperCase();
-  var lowerName = mappedBase.toLowerCase();
+  var safeMappedBase = String(mappedBase || 'stone').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 64) || 'stone';
+  var upperName = safeMappedBase.toUpperCase();
+  var lowerName = safeMappedBase.toLowerCase();
 
   var isBlock = /stone|dirt|cobblestone|wood|log|plank|ore|sand|gravel|glass|brick|obsidian|bedrock/i.test(cleanName);
 
@@ -735,7 +736,7 @@ function renderDetailRemoteGui(win) {
     const initials = (typeof getItemInitials === 'function') ? getItemInitials(tex.label) : (tex.label ? tex.label.slice(0, 2).toUpperCase() : 'IT');
     const ariaLabel = 'Ô GUI #' + idx + ': ' + safeName + (tex.count > 1 ? ' x' + tex.count : '');
     return '<div role="button" tabindex="0" onclick="clickDetailGuiSlot(' + idx + ')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();clickDetailGuiSlot(' + idx + ');}" aria-label="' + escapeHtml(ariaLabel) + '" style="aspect-ratio:1;background:var(--accent-soft);border:1px solid var(--border-strong);border-radius:8px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;padding:3px;text-align:center;box-shadow:var(--shadow-sm);transition:transform 0.15s ease,border-color 0.15s ease;" onmouseenter="this.style.transform=\'scale(1.04)\'" onmouseleave="this.style.transform=\'none\'" title="Ô #' + idx + ': ' + safeName + ' (Click để chọn)">' +
-      '<img src="' + tex.primary + '" data-fallback-stage="primary" data-secondary-src="' + tex.secondary + '" data-tertiary-src="' + (tex.tertiary || tex.secondary) + '" data-initials="' + escapeHtml(initials) + '" onerror="handleItemTextureError(this)" style="width:28px;height:28px;object-fit:contain;image-rendering:pixelated;" alt="' + safeName + '">' +
+      '<img src="' + escapeHtml(tex.primary) + '" data-fallback-stage="primary" data-secondary-src="' + escapeHtml(tex.secondary) + '" data-tertiary-src="' + escapeHtml(tex.tertiary || tex.secondary) + '" data-initials="' + escapeHtml(initials) + '" onerror="handleItemTextureError(this)" style="width:28px;height:28px;object-fit:contain;image-rendering:pixelated;" alt="' + safeName + '">' +
       '<span class="slot-text-name" style="font-size:9.5px;font-weight:700;color:var(--text);overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;line-height:1.1;max-width:100%;word-break:break-word;margin-top:1px;">' + safeName + '</span>' +
       (tex.count > 1 ? '<span style="position:absolute;bottom:2px;right:2px;font-size:9.5px;font-weight:800;background:var(--bg-elevated);border:1px solid var(--border-strong);padding:0 4px;border-radius:4px;color:var(--accent-text);">x' + tex.count + '</span>' : '') +
       '</div>';
@@ -1059,7 +1060,7 @@ async function refreshDetail(force=false) {
         const scheduleData=await detailGet('/botSchedules');
         if(!isCurrentRequest()) return;
         detailBot=fallbackBot;
-        detailInventory=fallbackInventory;
+        detailInventory=fallbackInventory?.inventory||fallbackInventory;
         if(!detailSettingsDirty) renderDetailSettings(settingsData);
         if(!detailAutoChatDirty) renderDetailAutoChatSchedules(autoChatData.autoChatSchedules||[]);
         if(!detailBotScheduleDirty) renderDetailBotSchedules(scheduleData.botSchedules||[]);

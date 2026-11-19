@@ -23,7 +23,7 @@ function csvEscapeCell(val) {
   let str = val === null || val === undefined
     ? ''
     : (typeof val === 'object' ? JSON.stringify(val) : String(val));
-  if (/^[=+\-@\t\r]/.test(str)) {
+  if (/^[\s\r\n]*[=+\-@\t\r]/.test(str)) {
     str = `'${str}`;
   }
   return `"${str.replace(/"/g, '""')}"`;
@@ -92,15 +92,26 @@ function safeDecryptBotJson(ciphertext, key) {
 function createAdminApi({
   store,
   entitlementService,
+  link4mService,
   registry,
   broker,
   fleetOperations,
   adminNotifier,
   config,
   logger,
-  invalidateUserSessions
+  invalidateUserSessions,
+  invalidateAdminSessions
 }) {
   const router = express.Router();
+  for (const method of ['get', 'post', 'put', 'patch', 'delete', 'all']) {
+    const orig = router[method].bind(router);
+    router[method] = (path, ...handlers) => orig(
+      path,
+      ...handlers.map((fn) => (typeof fn === 'function' && fn.length < 4
+        ? (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
+        : fn))
+    );
+  }
 
   // Helper: Resolve worker by workerId (string) or botNumber (number/string)
   async function resolveWorker(targetId) {
@@ -471,9 +482,9 @@ function createAdminApi({
   router.post(['/bots', '/bot'], async (req, res) => {
     try {
       const body = req.body || {};
-      const rawUrls = Array.isArray(body.urls) && body.urls.length
+      const rawUrls = (Array.isArray(body.urls) && body.urls.length
         ? body.urls
-        : (body.url || body.serviceUrl ? [body.url || body.serviceUrl] : []);
+        : (body.url || body.serviceUrl ? [body.url || body.serviceUrl] : [])).slice(0, 50);
 
       const baseLabel = String(body.label || body.name || '').trim();
       const explicitWorkerId = body.workerId ? String(body.workerId).trim().toLowerCase() : undefined;
@@ -549,6 +560,7 @@ function createAdminApi({
               if (fetchFn) {
                 const probe = await fetchFn(`${rawUrl}/health`, {
                   signal: controller.signal,
+                  redirect: 'manual',
                   headers: { 'Accept': 'application/json' }
                 });
                 if (probe && probe.ok) {
@@ -1592,10 +1604,17 @@ function createAdminApi({
   // 10. SYSTEM RUNTIME SETTINGS & ADMIN CREDENTIALS (M-09: never mutate frozen config!)
   router.get('/settings/system', async (_req, res) => {
     try {
+      const l4mCfg = link4mService?.publicConfig?.() || {};
       const defaultSettings = {
         publicBaseUrl: config.publicBaseUrl || '',
         renderApiKey: config.renderApiKey ? '********' : '',
-        link4mApiToken: config.link4mApiToken ? '********' : '',
+        link4mRewardEnabled: l4mCfg.configuredEnabled ?? Boolean(config.link4mRewardEnabled),
+        link4mMode: 'api',
+        link4mUrl: '',
+        link4mApiToken: (config.link4mApiToken || l4mCfg.providerConfigured) ? '********' : '',
+        link4mRewardHours: Number(l4mCfg.rewardHours || config.link4mRewardHours || 12),
+        link4mDailyLimit: Number(l4mCfg.dailyLimit || config.link4mDailyLimit || 2),
+        link4mSecretKey: (config.link4mSecretKey || l4mCfg.webhookConfigured) ? '********' : '',
         wispbyteEnabled: true,
         trialGiftEnabled: Boolean(config.trialGiftEnabled ?? false),
         trialDays: Number(config.trialDays || 3)
@@ -1615,6 +1634,18 @@ function createAdminApi({
       };
       mergedSettings.trialGiftEnabled = Boolean(mergedSettings.trialGiftEnabled);
       mergedSettings.trialDays = Number.isFinite(Number(mergedSettings.trialDays)) ? Number(mergedSettings.trialDays) : 3;
+      mergedSettings.link4mRewardEnabled = Boolean(mergedSettings.link4mRewardEnabled);
+      mergedSettings.link4mRewardHours = Number.isFinite(Number(mergedSettings.link4mRewardHours)) ? Number(mergedSettings.link4mRewardHours) : 12;
+      mergedSettings.link4mDailyLimit = Number.isFinite(Number(mergedSettings.link4mDailyLimit)) ? Number(mergedSettings.link4mDailyLimit) : 2;
+      // Never return raw secret ciphertexts or plaintext secrets from system_settings
+      if (mergedSettings.link4mApiTokenCiphertext || mergedSettings.link4mApiToken) {
+        mergedSettings.link4mApiToken = '********';
+      }
+      if (mergedSettings.link4mSecretKeyCiphertext || mergedSettings.link4mSecretKey) {
+        mergedSettings.link4mSecretKey = '********';
+      }
+      delete mergedSettings.link4mApiTokenCiphertext;
+      delete mergedSettings.link4mSecretKeyCiphertext;
 
       return res.json({
         ok: true,
@@ -1641,6 +1672,47 @@ function createAdminApi({
       }
       if (rawPatch.wispbyteEnabled !== undefined) patch.wispbyteEnabled = Boolean(rawPatch.wispbyteEnabled);
 
+      // Link4M settings fields
+      if (rawPatch.link4mRewardEnabled !== undefined) patch.link4mRewardEnabled = Boolean(rawPatch.link4mRewardEnabled);
+      if (rawPatch.link4mMode !== undefined) {
+        const modeVal = String(rawPatch.link4mMode || 'api').trim().toLowerCase();
+        patch.link4mMode = ['api', 'custom_url'].includes(modeVal) ? modeVal : 'api';
+      }
+      if (rawPatch.link4mUrl !== undefined) patch.link4mUrl = String(rawPatch.link4mUrl || '').trim().slice(0, 512);
+      if (rawPatch.link4mRewardHours !== undefined) {
+        const hrs = Number(rawPatch.link4mRewardHours);
+        if (!Number.isInteger(hrs) || hrs < 1 || hrs > 48) {
+          return res.status(400).json({ ok: false, error: 'Số giờ thưởng Link4M phải từ 1 đến 48.' });
+        }
+        patch.link4mRewardHours = hrs;
+      }
+      if (rawPatch.link4mDailyLimit !== undefined) {
+        const lim = Number(rawPatch.link4mDailyLimit);
+        if (!Number.isInteger(lim) || lim < 1 || lim > 10) {
+          return res.status(400).json({ ok: false, error: 'Giới hạn lượt Link4M/ngày phải từ 1 đến 10.' });
+        }
+        patch.link4mDailyLimit = lim;
+      }
+      const encKey = registry?.encryptionKey || config?.encryptionKey;
+      let newApiToken = null;
+      if (rawPatch.link4mApiToken !== undefined) {
+        const rawTok = String(rawPatch.link4mApiToken || '').trim();
+        if (rawTok !== '********') {
+          newApiToken = rawTok;
+          patch.link4mApiToken = rawTok ? '********' : '';
+          patch.link4mApiTokenCiphertext = rawTok && encKey ? encryptSecret(rawTok, encKey) : null;
+        }
+      }
+      let newSecretKey = null;
+      if (rawPatch.link4mSecretKey !== undefined) {
+        const rawSec = String(rawPatch.link4mSecretKey || '').trim();
+        if (rawSec !== '********') {
+          newSecretKey = rawSec;
+          patch.link4mSecretKey = rawSec ? '********' : '';
+          patch.link4mSecretKeyCiphertext = rawSec && encKey ? encryptSecret(rawSec, encKey) : null;
+        }
+      }
+
       let currentSettings = {};
       if (typeof store.getSetting === 'function') {
         const persisted = await store.getSetting('system_settings').catch(() => null);
@@ -1657,7 +1729,13 @@ function createAdminApi({
       const mergedSettings = {
         publicBaseUrl: config.publicBaseUrl || '',
         renderApiKey: config.renderApiKey ? '********' : '',
+        link4mRewardEnabled: Boolean(config.link4mRewardEnabled),
+        link4mMode: 'api',
+        link4mUrl: '',
         link4mApiToken: config.link4mApiToken ? '********' : '',
+        link4mRewardHours: Number(config.link4mRewardHours || 12),
+        link4mDailyLimit: Number(config.link4mDailyLimit || 2),
+        link4mSecretKey: config.link4mSecretKey ? '********' : '',
         wispbyteEnabled: true,
         trialGiftEnabled: Boolean(config.trialGiftEnabled ?? false),
         trialDays: Number(config.trialDays || 3),
@@ -1675,10 +1753,34 @@ function createAdminApi({
         }, { onConflict: 'key' });
       }
 
+      // Synchronize live Link4mService runtime config immediately
+      if (link4mService) {
+        if (typeof link4mService.configure === 'function' && (
+          patch.link4mRewardEnabled !== undefined ||
+          patch.link4mRewardHours !== undefined ||
+          patch.link4mDailyLimit !== undefined
+        )) {
+          await link4mService.configure({
+            enabled: mergedSettings.link4mRewardEnabled,
+            rewardHours: mergedSettings.link4mRewardHours,
+            dailyLimit: mergedSettings.link4mDailyLimit
+          }).catch(() => {});
+        }
+        if (link4mService.config) {
+          if (patch.publicBaseUrl !== undefined) link4mService.config.publicBaseUrl = mergedSettings.publicBaseUrl;
+          if (newApiToken !== null) link4mService.config.link4mApiToken = newApiToken;
+          if (newSecretKey !== null) link4mService.config.link4mSecretKey = newSecretKey;
+        }
+      }
+
+      const publicResponse = { ...mergedSettings };
+      delete publicResponse.link4mApiTokenCiphertext;
+      delete publicResponse.link4mSecretKeyCiphertext;
+
       return res.json({
         ok: true,
         message: 'Đã cập nhật cấu hình hệ thống.',
-        settings: mergedSettings
+        settings: publicResponse
       });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
@@ -1766,6 +1868,14 @@ function createAdminApi({
       }
       if (typeof registry.setAdminPassword === 'function') {
         registry.setAdminPassword(hashed);
+      }
+      // Immediately revoke other active admin sessions on password change
+      const currentTokenHash = req.managerAuthSession?.tokenHash || null;
+      if (typeof invalidateAdminSessions === 'function') {
+        invalidateAdminSessions(currentTokenHash);
+      }
+      if (typeof store?.adapter?.revokeAdminSessions === 'function') {
+        await store.adapter.revokeAdminSessions(currentTokenHash).catch(() => null);
       }
       return res.json({ ok: true, message: 'Đã cập nhật mật khẩu quản trị viên.' });
     } catch (error) {

@@ -81,7 +81,7 @@ class ManagerRuntimeSettings {
 
   async persist(values = this.values) {
     let ciphertext;
-    if (this.secretsDecryptionFailed && this.rawSecretsCiphertext && !values.renderApiKey && !values.link4mApiToken && !values.link4mSecretKey) {
+    if (this.secretsDecryptionFailed && this.rawSecretsCiphertext) {
       ciphertext = this.rawSecretsCiphertext;
     } else {
       const secrets = {

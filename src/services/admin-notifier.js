@@ -1,5 +1,6 @@
 'use strict';
 
+const { AsyncLocalStorage } = require('node:async_hooks');
 const { EmbedBuilder } = require('discord.js');
 const { decryptSecret } = require('../utils/secrets');
 
@@ -18,7 +19,7 @@ function redactSensitiveText(text) {
   return String(text).replace(SENSITIVE_KEY_REGEX, '$1[REDACTED]');
 }
 
-function redactSensitiveValue(key, val) {
+function redactSensitiveValue(key, val, depth = 0, seen = new WeakSet()) {
   if (val === null || val === undefined) return val;
   const k = String(key).toLowerCase();
   if (/password|secret|token|key|cookie|session|credential|auth/i.test(k)) {
@@ -27,20 +28,35 @@ function redactSensitiveValue(key, val) {
   if (typeof val === 'string') {
     return redactSensitiveText(val);
   }
+  if (val instanceof Error) {
+    return redactSensitiveText(val.message || String(val));
+  }
   if (typeof val === 'object') {
-    return redactSensitiveObject(val);
+    return redactSensitiveObject(val, depth + 1, seen);
   }
   return val;
 }
 
-function redactSensitiveObject(obj) {
+function redactSensitiveObject(obj, depth = 0, seen = new WeakSet()) {
   if (!obj || typeof obj !== 'object') return obj;
-  if (Array.isArray(obj)) return obj.map((item) => redactSensitiveValue('', item));
-  const redacted = {};
-  for (const [k, v] of Object.entries(obj)) {
-    redacted[k] = redactSensitiveValue(k, v);
+  if (obj instanceof Error) {
+    return { name: obj.name, message: redactSensitiveText(obj.message || '') };
   }
-  return redacted;
+  if (depth >= 5) return '[Truncated]';
+  if (seen.has(obj)) return '[Circular]';
+  seen.add(obj);
+  try {
+    if (Array.isArray(obj)) {
+      return obj.slice(0, 50).map((item) => redactSensitiveValue('', item, depth + 1, seen));
+    }
+    const redacted = {};
+    for (const [k, v] of Object.entries(obj)) {
+      redacted[k] = redactSensitiveValue(k, v, depth + 1, seen);
+    }
+    return redacted;
+  } finally {
+    seen.delete(obj);
+  }
 }
 
 class AdminNotifier {
@@ -51,7 +67,7 @@ class AdminNotifier {
     this.encryptionKey = String(encryptionKey || '').trim();
     this.userAlertCache = new Map();
     this.sentUserAlerts = [];
-    this._persistingAudit = false;
+    this._auditPersistContext = new AsyncLocalStorage();
     this.telegramBotToken = String(telegramBotToken || process.env.TELEGRAM_BOT_TOKEN || '').trim();
     this.telegramChatId = String(telegramChatId || process.env.TELEGRAM_CHAT_ID || '').trim();
     this.discordWebhookUrl = String(process.env.DISCORD_WEBHOOK_URL || '').trim();
@@ -205,12 +221,18 @@ class AdminNotifier {
       for (const [k, v] of this.alertCache.entries()) {
         if (now - v.lastSent > this.cooldownMs * 3) this.alertCache.delete(k);
       }
+      while (this.alertCache.size > 500) {
+        const oldest = this.alertCache.keys().next().value;
+        if (oldest === undefined) break;
+        this.alertCache.delete(oldest);
+      }
     }
 
     // Persist system/database/discord/manager alert to Web Dashboard Audit Trail (Nhật Ký Hệ Thống)
-    if (this.store && typeof this.store.addAudit === 'function') {
+    // Use AsyncLocalStorage so concurrent distinct alerts all persist, while recursive re-entry from addAudit() is blocked.
+    if (!this._auditPersistContext.getStore() && this.store && typeof this.store.addAudit === 'function') {
       const safeSourceKey = String(source || 'MANAGER').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '') || 'MANAGER';
-      void Promise.resolve().then(() => this.store.addAudit({
+      void this._auditPersistContext.run(true, () => Promise.resolve().then(() => this.store.addAudit({
         action: `SYSTEM_ALERT_${safeSourceKey}`,
         actionLabel: `[${source}] ${event}`,
         category: 'SYSTEM',
@@ -228,7 +250,7 @@ class AdminNotifier {
           ...(details && typeof details === 'object' ? details : {}),
           ...(error ? { error: typeof error === 'string' ? error : (error.message || String(error)) } : {})
         })
-      })).catch(() => null);
+      }))).catch(() => null);
     }
 
     // Sliding window rate limit check to prevent alert flooding during mass worker failures or cluster outages
@@ -236,7 +258,7 @@ class AdminNotifier {
 
     if (this.alertTimestamps.length >= this.maxAlertsPerWindow) {
       if (this.throttledBuffer.length >= 200) this.throttledBuffer.shift();
-      this.throttledBuffer.push({ source, event, message: `${message}${repeatNote}`, error, details, level, timestamp: now });
+      this.throttledBuffer.push({ source, event, message: `${message}${repeatNote}`, error, details, level, skipDm: Boolean(skipDm), timestamp: now });
 
       if (!this.rateLimitNoticeEmitted) {
         this.rateLimitNoticeEmitted = true;
@@ -303,6 +325,7 @@ class AdminNotifier {
         level: 'info',
         isBatch: true,
         batchCount: buffered.length,
+        skipDm: buffered.every((i) => i.skipDm === true),
         items: buffered,
         details: { suppressedAlerts: buffered.length }
       };
@@ -814,6 +837,11 @@ class AdminNotifier {
       for (const [k, ts] of this.userAlertCache.entries()) {
         if (now - ts > 60000) this.userAlertCache.delete(k);
       }
+      while (this.userAlertCache.size > 500) {
+        const oldest = this.userAlertCache.keys().next().value;
+        if (oldest === undefined) break;
+        this.userAlertCache.delete(oldest);
+      }
     }
 
     const targetStore = store || this.store;
@@ -1027,7 +1055,8 @@ class AdminNotifier {
   }
 
   hookLogger(logger) {
-    if (!logger || typeof logger !== 'object') return;
+    if (!logger || typeof logger !== 'object' || logger._adminNotifierHooked) return;
+    logger._adminNotifierHooked = true;
     const isInternalAlertEvent = (strEvent) => (
       strEvent.startsWith('admin_alert_') ||
       strEvent.startsWith('admin_dm_') ||

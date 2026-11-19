@@ -26,11 +26,16 @@ async function loadLink4mStatus() {
       link4mCooldownTimer = null;
     }
 
-    const countText = (data.todayCount || 0) + '/' + (data.dailyLimit || 2) + ' lượt';
+    const usedTodayCount = Number(data.todayCount ?? data.usedToday ?? 0) || 0;
+    const dailyLimitVal = Number(data.dailyLimit || 2) || 2;
+    const remainingVal = data.remainingAttempts !== undefined
+      ? Number(data.remainingAttempts)
+      : (data.remainingToday !== undefined ? Number(data.remainingToday) : Math.max(0, dailyLimitVal - usedTodayCount));
+    const countText = usedTodayCount + '/' + dailyLimitVal + ' lượt';
 
     // 1. Trường hợp đã vượt đủ 2/2 lần hôm nay
-    if ((data.todayCount || 0) >= (data.dailyLimit || 2) || (data.remainingAttempts !== undefined && data.remainingAttempts <= 0)) {
-      var maxLabel = '<span>✅</span> Đã đạt giới hạn (' + (data.todayCount || 2) + '/' + (data.dailyLimit || 2) + ')';
+    if (usedTodayCount >= dailyLimitVal || (Number.isFinite(remainingVal) && remainingVal <= 0)) {
+      var maxLabel = '<span>✅</span> Đã đạt giới hạn (' + (usedTodayCount || dailyLimitVal) + '/' + dailyLimitVal + ')';
       if (btn) {
         btn.disabled = true;
         btn.style.opacity = '0.55';
@@ -140,7 +145,8 @@ async function startLink4mReward(btn) {
 
   try {
     const res = await requestJson('/api/rewards/link4m/start', { method: 'POST', body: {} });
-    if (!res.ok || !res.data?.redirectUrl) {
+    const targetRedirectUrl = res.data?.redirectUrl || res.data?.providerUrl || '';
+    if (!res.ok || !targetRedirectUrl) {
       showToast(res.data?.error || res.data?.message || 'Không thể tạo liên kết vượt link.');
       void loadLink4mStatus();
       return;
@@ -148,7 +154,7 @@ async function startLink4mReward(btn) {
 
     showToast('Đang chuyển hướng tới trang vượt link...');
     setTimeout(function() {
-      window.location.href = res.data.redirectUrl;
+      window.location.href = targetRedirectUrl;
     }, 400);
   } catch (err) {
     showToast('Lỗi: ' + err.message);

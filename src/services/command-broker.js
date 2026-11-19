@@ -117,6 +117,10 @@ class CommandBroker {
         const action = item.task_type || item.type || 'status';
 
         try {
+          if (action === 'pending_allocation_compensation') {
+            await store.completeOutboxItem(item.id, this.instanceId);
+            continue;
+          }
           const worker = await this.registry.find(workerId);
           if (!worker || !worker.enabled) {
             await store.failOutboxItem(item.id, this.instanceId, 'WORKER_DISABLED_OR_NOT_FOUND');
@@ -127,10 +131,11 @@ class CommandBroker {
             await this.dispatchRender(worker, { commandId: item.id, action, payload });
             await store.completeOutboxItem(item.id, this.instanceId);
           } else {
-            // WispByte pull mode
+            // WispByte pull mode: command already queued in manager_commands; wake poller & mark outbox done
             if (this.hasActivePoller(workerId)) {
               this.wakePoller(workerId);
             }
+            await store.completeOutboxItem(item.id, this.instanceId);
           }
         } catch (err) {
           const attempts = Number(item.attempts || 1);
@@ -242,8 +247,14 @@ class CommandBroker {
           'x-manager-bot-id': String(worker.workerId)
         },
         body: JSON.stringify({ action: command.action, payload: command.payload }),
+        redirect: 'manual',
         signal: AbortSignal.timeout(DEFAULT_RENDER_COMMAND_TIMEOUT_MS)
       });
+      if (response && response.status >= 300 && response.status < 400) {
+        const redirErr = new Error(`Worker command endpoint returned unexpected redirect (HTTP ${response.status}).`);
+        redirErr.status = 502;
+        throw redirErr;
+      }
       body = await readJson(response);
     } catch (fetchErr) {
       if (fetchErr.name === 'TimeoutError' || fetchErr.code === 'ETIMEDOUT' || /timed out/i.test(fetchErr.message)) {
@@ -357,35 +368,54 @@ class CommandBroker {
 
     const existing = this.pendingResults.get(actualCommandId);
     if (existing) {
-      const origFinish = existing.finish;
-      existing.finish = (res) => {
-        try { origFinish(res); } catch (_) {}
-        try { pending.finish(res); } catch (_) {}
-      };
-    } else {
-      this.pendingResults.set(actualCommandId, pending);
-    }
-
-    if (!pending.done) {
-      pending.timer = setTimeout(() => {
+      if (existing.timer) {
+        clearTimeout(existing.timer);
+        existing.timer = null;
+      }
+      existing.waiters.push(resolveCompletion);
+      existing.timer = setTimeout(() => {
         void this.commandStore.expire(actualCommandId).catch((error) => {
           this.logger.warn('worker_command_expire_failed', { commandId: actualCommandId, message: error.message });
         });
-        if (pending.done) return;
-        pending.done = true;
+        if (existing.done) return;
+        existing.done = true;
         this.pendingResults.delete(actualCommandId);
         const timeoutPayload = {
           ok: false,
           delivered: false,
           timedOut: true,
           commandId: actualCommandId,
-          action: command.action,
+          action: existing.action,
           result: null
         };
-        pending.settleWaiters(timeoutPayload);
-        resolveCompletion(timeoutPayload);
+        existing.settleWaiters(timeoutPayload);
+        existing.resolvePrimary?.(timeoutPayload);
       }, this.config.commandResultTimeoutMs);
-      pending.timer.unref?.();
+      existing.timer.unref?.();
+    } else {
+      pending.resolvePrimary = resolveCompletion;
+      this.pendingResults.set(actualCommandId, pending);
+      if (!pending.done) {
+        pending.timer = setTimeout(() => {
+          void this.commandStore.expire(actualCommandId).catch((error) => {
+            this.logger.warn('worker_command_expire_failed', { commandId: actualCommandId, message: error.message });
+          });
+          if (pending.done) return;
+          pending.done = true;
+          this.pendingResults.delete(actualCommandId);
+          const timeoutPayload = {
+            ok: false,
+            delivered: false,
+            timedOut: true,
+            commandId: actualCommandId,
+            action: command.action,
+            result: null
+          };
+          pending.settleWaiters(timeoutPayload);
+          resolveCompletion(timeoutPayload);
+        }, this.config.commandResultTimeoutMs);
+        pending.timer.unref?.();
+      }
     }
 
     this.wakePoller(worker.workerId);
@@ -550,7 +580,7 @@ class CommandBroker {
               result: stored.result
             };
           }
-          if (stored.status === 'failed') {
+          if (stored.status === 'failed' || stored.status === 'state_sync_failed') {
             return {
               ok: false,
               delivered: true,
@@ -558,7 +588,7 @@ class CommandBroker {
               commandId: cid,
               action: stored.action,
               result: stored.result,
-              error: 'command_failed'
+              error: stored.status === 'state_sync_failed' ? 'RESET_STATE_SYNC_FAILED' : 'command_failed'
             };
           }
           if (stored.status === 'expired') {
@@ -633,7 +663,7 @@ class CommandBroker {
           if (typeof this.commandStore?.get === 'function') {
             try {
               const stored = await this.commandStore.get(cid);
-              if (stored && (stored.status === 'completed' || stored.status === 'failed' || stored.status === 'expired')) {
+              if (stored && (stored.status === 'completed' || stored.status === 'failed' || stored.status === 'state_sync_failed' || stored.status === 'expired')) {
                 const isCompleted = stored.status === 'completed';
                 return finish({
                   ok: isCompleted,
@@ -698,7 +728,7 @@ class CommandBroker {
   } = {}) {
     const partialResetFailures = [];
     const remainingSteps = [];
-    const stepSet = (Array.isArray(steps) && steps.length > 0)
+    const stepSet = Array.isArray(steps)
       ? new Set(steps)
       : new Set(ALL_RESET_SYNC_STEPS);
     const excluded = Array.isArray(excludeCommandIds)
@@ -789,7 +819,7 @@ class CommandBroker {
       fencingToken: fencingToken ?? existingSyncState?.fencingToken ?? 0,
       candidateStatus: candidateStatus ?? existingSyncState?.candidateStatus ?? null,
       statusSource: statusSource || existingSyncState?.statusSource || 'manager-command-poll',
-      pendingSteps: remainingSteps.length > 0 ? remainingSteps : [...ALL_RESET_SYNC_STEPS],
+      pendingSteps: Array.isArray(remainingSteps) ? [...remainingSteps] : [...ALL_RESET_SYNC_STEPS],
       partialResetFailures,
       lastError: detail,
       updatedAt: new Date().toISOString()
@@ -1145,7 +1175,7 @@ class CommandBroker {
           cmd.result?.status ||
           null;
         const statusSource = syncMeta.statusSource || 'manager-command-poll';
-        const steps = Array.isArray(syncMeta.pendingSteps) && syncMeta.pendingSteps.length > 0
+        const steps = Array.isArray(syncMeta.pendingSteps)
           ? syncMeta.pendingSteps
           : ALL_RESET_SYNC_STEPS;
 
@@ -1171,6 +1201,16 @@ class CommandBroker {
       return summary;
     } finally {
       this.stateSyncRunning = false;
+    }
+  }
+
+  _notifyResultWaiters(commandId, result, action = null) {
+    const waiters = this.resultWaiters.get(commandId);
+    if (waiters && waiters.size > 0) {
+      for (const notify of [...waiters]) {
+        try { notify(result, action || null); } catch (_) {}
+      }
+      this.resultWaiters.delete(commandId);
     }
   }
 
@@ -1237,6 +1277,7 @@ class CommandBroker {
       if (pending && pending.workerId === wid && typeof pending.finish === 'function') {
         pending.finish(result);
       }
+      this._notifyResultWaiters(cid, result, action);
       return { ok: true, lateResult: true, status: 'completed' };
     }
 
@@ -1334,6 +1375,7 @@ class CommandBroker {
         if (pending && pending.workerId === wid && typeof pending.finish === 'function') {
           pending.finish(result);
         }
+        this._notifyResultWaiters(cid, result, action);
         return { ok: Boolean(outcome.completed || pending) };
       }
 
@@ -1350,6 +1392,7 @@ class CommandBroker {
       if (pending && pending.workerId === wid && typeof pending.finish === 'function') {
         pending.finish(failedResult);
       }
+      this._notifyResultWaiters(cid, failedResult, action);
       return {
         ...failedResult,
         completed: false

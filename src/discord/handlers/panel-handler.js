@@ -125,11 +125,7 @@ async function resolveLinkedUser(interaction, services) {
   const discordUserId = interaction.user?.id;
   if (!discordUserId) return null;
 
-  // 1. Check if user is linked to a Web Manager account
-  const linked = await services.accessStore.getUserByDiscordId(discordUserId);
-  if (linked) return linked;
-
-  // 2. Check if user qualifies as server admin / configured admin
+  // 1. Check if user qualifies as server admin / configured admin
   const isConfiguredAdmin = Boolean(
     (services.config?.adminUserId && services.config.adminUserId === discordUserId) ||
     (services.accessControl?.adminUserId && services.accessControl.adminUserId === discordUserId)
@@ -142,8 +138,17 @@ async function resolveLinkedUser(interaction, services) {
     interaction.member?.permissions?.has?.(8n)
   );
   const hasAdminRole = services.accessControl?.roleFor?.(interaction.member, interaction) === 'admin';
+  const qualifiesAsDiscordAdmin = isConfiguredAdmin || isOwner || hasAdminPerm || hasAdminRole;
 
-  if (isConfiguredAdmin || isOwner || hasAdminPerm || hasAdminRole) {
+  // 2. Check if user is linked to a Web Manager account
+  const linked = await services.accessStore.getUserByDiscordId(discordUserId);
+  if (linked) {
+    return qualifiesAsDiscordAdmin && linked.role !== 'admin'
+      ? { ...linked, role: 'admin', isPermanent: true }
+      : linked;
+  }
+
+  if (qualifiesAsDiscordAdmin) {
     return {
       userId: 'admin',
       username: 'Enterprise Admin',
@@ -157,7 +162,7 @@ async function resolveLinkedUser(interaction, services) {
 }
 
 // Strict ownership check (Backend Authorization Guard)
-function checkBotOwnership(user, workerId, worker = null) {
+function checkBotOwnership(user, workerId, worker = null, allWorkers = null) {
   if (!user || !workerId) return false;
   if (user.role === 'admin') return true;
 
@@ -167,7 +172,17 @@ function checkBotOwnership(user, workerId, worker = null) {
     : [];
 
   if (assigned.includes(targetId)) return true;
-  if (worker?.botNumber && assigned.includes(String(worker.botNumber).trim().toLowerCase())) return true;
+  const botNum = Number(worker?.botNumber);
+  if (Number.isInteger(botNum) && botNum > 0) {
+    const botNumStr = String(botNum);
+    if (assigned.includes(botNumStr)) {
+      if (/^\d+$/.test(targetId) && Number(targetId) !== botNum) return false;
+      if (Array.isArray(allWorkers) && allWorkers.some((w) => w && String(w.workerId || '').trim().toLowerCase() === botNumStr && String(w.workerId || '').trim().toLowerCase() !== targetId)) {
+        return false;
+      }
+      return true;
+    }
+  }
 
   return false;
 }
@@ -185,14 +200,7 @@ async function getUserBots(user, services) {
     }
   }
 
-  const assigned = Array.isArray(user.assignedBotIds)
-    ? user.assignedBotIds.map((id) => String(id).trim().toLowerCase()).filter(Boolean)
-    : [];
-
-  return allWorkers.filter((w) =>
-    assigned.includes(String(w.workerId).trim().toLowerCase()) ||
-    (w.botNumber && assigned.includes(String(w.botNumber).trim().toLowerCase()))
-  );
+  return allWorkers.filter((w) => checkBotOwnership(user, w.workerId, w, allWorkers));
 }
 
 async function handlePanelInteraction(interaction, services) {

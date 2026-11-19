@@ -514,7 +514,8 @@ async function submitAddIpWhitelist() {
   try {
     const res = await requestJson('/api/admin/ip-whitelist', {
       method: 'POST',
-      body: JSON.stringify({ ip, reason })
+      headers: { 'Content-Type': 'application/json' },
+      body: { ip, reason }
     });
     if (!res.ok) throw new Error(res.data?.error || 'Thêm IP thất bại.');
     showToast(res.data?.message || 'Đã thêm IP vào Whitelist thành công!', 'success');

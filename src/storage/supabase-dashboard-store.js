@@ -48,7 +48,8 @@ const ACCESS_FIELDS = {
 
 const KEY_FIELDS = {
   keyId: 'key_id', codeHash: 'code_hash', codeSuffix: 'code_suffix', status: 'status', days: 'days',
-  isPermanent: 'is_permanent', botCount: 'bot_count', workerIds: 'worker_ids', planName: 'plan_name',
+  isPermanent: 'is_permanent', botCount: 'bot_count', workerIds: 'worker_ids', botIds: 'bot_ids',
+  allowAccountChange: 'allow_account_change', note: 'note', planName: 'plan_name',
   maxUses: 'max_uses', usedCount: 'used_count', usedUsers: 'used_users', expiresAt: 'expires_at',
   createdBy: 'created_by', createdAt: 'created_at', lastUsedAt: 'last_used_at', lastUsedBy: 'last_used_by',
   id: 'id', code: 'code', key: 'key'
@@ -206,15 +207,22 @@ class SupabaseDashboardStore {
   invalidateUserCache(userId, username = '') {
     this.cache.delete('access:all');
     const cleanId = String(userId || '').trim();
+    const cleanIdLower = cleanId.toLowerCase();
     const cleanUser = String(username || '').trim().toLowerCase();
     if (cleanId) {
       this.cache.delete(`access:${cleanId}`);
-      this.cache.delete(`user:${cleanId.toLowerCase()}`);
+      this.cache.delete(`access:${cleanIdLower}`);
+      this.cache.delete(`user:${cleanIdLower}`);
     }
     if (cleanUser) {
       this.cache.delete(`access:${cleanUser}`);
       this.cache.delete(`access:usr_${cleanUser}`);
       this.cache.delete(`user:${cleanUser}`);
+    }
+    for (const key of this.cache.keys()) {
+      if (key.startsWith('discord_user:') || (cleanIdLower && key.toLowerCase() === `access:${cleanIdLower}`)) {
+        this.cache.delete(key);
+      }
     }
   }
 
@@ -815,10 +823,12 @@ class SupabaseDashboardStore {
     if (cleanIp === '127.0.0.1' || cleanIp === '::1' || cleanIp === 'localhost') return true;
     try {
       if (this.client) {
+        const recentSince = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
         let res = await this.client
           .from('audit_logs')
-          .select('id, actor_username, actor_role, actor_ip')
+          .select('id, actor_username, actor_role, actor_ip, timestamp')
           .eq('actor_ip', cleanIp)
+          .gte('timestamp', recentSince)
           .limit(10);
         if (res?.error && isMissingSchemaError(res.error)) {
           res = await this.client
@@ -1592,11 +1602,15 @@ class SupabaseDashboardStore {
     if (!row.id && row.key_id) row.id = row.key_id;
     if (!row.key_id && row.id) row.key_id = row.id;
     if (this.adapter && typeof this.adapter.insertKeys === 'function') {
-      return await this.adapter.insertKeys([{
+      const ok = await this.adapter.insertKeys([{
         ...(record || {}),
         id: record?.id || row.id,
         keyId: record?.keyId || row.key_id
       }]);
+      if (ok === false) {
+        throw new Error('Không thể lưu mã kích hoạt mới vào Supabase (trùng mã hoặc lỗi ghi dữ liệu).');
+      }
+      return ok;
     }
     const { error } = await this.client.from(KEYS).insert(row);
     if (error) throw error;
@@ -1719,9 +1733,14 @@ class SupabaseDashboardStore {
     if (this.adapter && typeof this.adapter.saveOutboxItem === 'function') {
       return await this.adapter.saveOutboxItem(item);
     }
+    const rawBid = Number(item.botId ?? item.bot_id);
+    const botIdInt = Number.isFinite(rawBid) ? Math.trunc(rawBid) : 0;
+    const typeVal = String(item.type || item.taskType || 'auth_sync');
     const { data, error } = await this.client.from(OUTBOX).insert({
       id: item.id || crypto.randomUUID(),
-      task_type: item.taskType || item.type,
+      bot_id: botIdInt,
+      type: typeVal,
+      event_type: String(item.eventType || typeVal),
       payload: item.payload || {},
       status: 'pending',
       next_retry_at: item.nextRetryAt || new Date().toISOString(),

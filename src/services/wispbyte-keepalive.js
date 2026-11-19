@@ -58,7 +58,10 @@ async function assertPublicPanelHost(urlStr) {
     }
     return;
   }
-  const records = await dns.lookup(hostname, { all: true }).catch(() => []);
+  const records = await dns.lookup(hostname, { all: true }).catch(() => null);
+  if (!Array.isArray(records) || records.length === 0) {
+    throw new Error('Không thể phân giải DNS cho Panel URL.');
+  }
   for (const rec of records) {
     if (rec?.address && isPrivateOrBlockedIpAddress(rec.address)) {
       throw new Error('Panel URL phân giải sang địa chỉ IP nội bộ (SSRF blocked).');
@@ -97,14 +100,26 @@ class WispbyteKeepAliveManager {
     // 1. Check Supabase manager_settings first
     if (this.store && typeof this.store.getSetting === 'function') {
       try {
-        const saved = await this.store.getSetting('wispbyte_accounts');
+        const saved = await this.store.getSetting('wispbyte_accounts', { bypassCache: true });
         if (Array.isArray(saved) && saved.length > 0) {
           accounts = saved.map((a) => {
             const copy = { ...a };
             if (copy.cookie && isStoredCredentialCiphertext(copy.cookie)) {
+              const rawCipher = copy.cookie;
               try {
-                copy.cookie = decryptUserPassword(copy.cookie, this.encryptionKey);
-              } catch (_) {}
+                const decrypted = decryptUserPassword(rawCipher, this.encryptionKey);
+                if (typeof decrypted === 'string' && decrypted.length > 0) {
+                  copy.cookie = decrypted;
+                } else {
+                  copy._rawCookieCiphertext = rawCipher;
+                  copy._decryptFailed = true;
+                  copy.cookie = '';
+                }
+              } catch (_) {
+                copy._rawCookieCiphertext = rawCipher;
+                copy._decryptFailed = true;
+                copy.cookie = '';
+              }
             }
             return copy;
           });
@@ -153,7 +168,13 @@ class WispbyteKeepAliveManager {
     if (this.store && typeof this.store.setSetting === 'function') {
       const encryptedAccounts = accounts.map((a) => {
         const copy = { ...a };
-        if (copy.cookie && !isStoredCredentialCiphertext(copy.cookie)) {
+        const rawCipher = copy._rawCookieCiphertext;
+        const decryptFailed = copy._decryptFailed === true;
+        delete copy._rawCookieCiphertext;
+        delete copy._decryptFailed;
+        if (decryptFailed && rawCipher) {
+          copy.cookie = rawCipher;
+        } else if (copy.cookie && !isStoredCredentialCiphertext(copy.cookie)) {
           copy.cookie = encryptUserPassword(copy.cookie, this.encryptionKey);
         }
         return copy;
@@ -215,8 +236,28 @@ class WispbyteKeepAliveManager {
   }
 
   async pingAccount(account) {
-    const rawUrl = (account.panelUrl || this.defaultPanelUrl || DEFAULT_PANEL_URL).trim();
-    const targetUrl = validatePanelUrl(rawUrl);
+    let targetUrl;
+    try {
+      const rawUrl = (account.panelUrl || this.defaultPanelUrl || DEFAULT_PANEL_URL).trim();
+      targetUrl = validatePanelUrl(rawUrl);
+    } catch (urlErr) {
+      return {
+        id: account.id,
+        name: account.name || account.id,
+        success: false,
+        status: 'error',
+        message: urlErr?.message || 'Invalid panel URL'
+      };
+    }
+    if (account._decryptFailed) {
+      return {
+        id: account.id,
+        name: account.name || account.id,
+        success: false,
+        status: 'error',
+        message: 'Cookie decryption failed (check encryption key)'
+      };
+    }
     const cookieHeader = (account.cookie || '').trim();
 
     if (!cookieHeader) {
@@ -344,6 +385,7 @@ class WispbyteKeepAliveManager {
       const results = [];
       const now = new Date().toISOString();
 
+      const statusById = new Map();
       for (const acc of accounts) {
         const res = await this.pingAccount(acc);
         acc.lastPingAt = now;
@@ -352,11 +394,22 @@ class WispbyteKeepAliveManager {
         if (res.success) {
           acc.renewCount = (acc.renewCount || 0) + 1;
         }
+        statusById.set(acc.id, {
+          lastPingAt: acc.lastPingAt,
+          lastStatus: acc.lastStatus,
+          lastMessage: acc.lastMessage,
+          renewCount: acc.renewCount
+        });
         results.push({ ...res, lastPingAt: now, renewCount: acc.renewCount });
         await new Promise((resolve) => setTimeout(resolve, 2000));
       }
 
-      await this.saveAccounts(accounts);
+      // Re-read fresh accounts before saving so concurrent admin add/update/delete isn't overwritten
+      const latestAccounts = await this.getAccounts();
+      const mergedAccounts = latestAccounts.length > 0
+        ? latestAccounts.map((acc) => (statusById.has(acc.id) ? { ...acc, ...statusById.get(acc.id) } : acc))
+        : accounts;
+      await this.saveAccounts(mergedAccounts);
 
       const okCount = results.filter((r) => r.success).length;
       const expiredList = results.filter((r) => r.status === 'expired');

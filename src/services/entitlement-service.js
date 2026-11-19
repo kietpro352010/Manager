@@ -93,12 +93,15 @@ class EntitlementService {
     this.userLock = userLock;
     this.isSweepRunning = false;
     this.stopPendingByUser = new Map();
+    const cfgHours = config?.botExpirationGraceHours;
+    const envHoursRaw = process.env.BOT_EXPIRATION_GRACE_HOURS;
+    const envHours = (envHoursRaw !== undefined && String(envHoursRaw).trim() !== '') ? Number(envHoursRaw) : NaN;
     this.gracePeriodMs = Number.isFinite(gracePeriodMs) && gracePeriodMs >= 0
       ? gracePeriodMs
-      : (config?.botExpirationGraceHours !== undefined
-          ? config.botExpirationGraceHours * 3600 * 1000
-          : (process.env.BOT_EXPIRATION_GRACE_HOURS !== undefined && !Number.isNaN(Number(process.env.BOT_EXPIRATION_GRACE_HOURS))
-              ? Number(process.env.BOT_EXPIRATION_GRACE_HOURS) * 3600 * 1000
+      : (cfgHours !== undefined && cfgHours !== null && String(cfgHours).trim() !== '' && Number.isFinite(Number(cfgHours)) && Number(cfgHours) >= 0
+          ? Number(cfgHours) * 3600 * 1000
+          : (Number.isFinite(envHours) && envHours >= 0
+              ? envHours * 3600 * 1000
               : DEFAULT_GRACE_PERIOD_MS));
   }
 
@@ -126,7 +129,7 @@ class EntitlementService {
       }
     }
     if (fixedIds.length > 25) throw new Error('A code can include up to 25 fixed workers.');
-    if (fixedIds.length && uses > 1) throw new Error('Codes with fixed worker assignments can only be redeemed once.');
+    if (fixedIds.length && uses !== 1) throw new Error('Codes with fixed worker assignments can only be redeemed once.');
 
     const workers = await this.registry.list();
     const known = new Map(workers.map((worker) => [String(worker.workerId), worker]));
@@ -316,6 +319,7 @@ class EntitlementService {
       planName: String(key.planName || member?.planName || 'Standard').slice(0, 64),
       note: member?.note || '',
       username: member?.username || cleanUserId,
+      allowAccountChange: key.allowAccountChange !== undefined ? Boolean(key.allowAccountChange) : (member?.allowAccountChange !== false),
       botCount: targetCount,
       stopPendingWorkers: []
     }, `code:${key.keyId || key.id}`);
@@ -418,14 +422,20 @@ class EntitlementService {
         if (!this.pendingCompensations) {
           this.pendingCompensations = new Map();
         }
+        while (this.pendingCompensations.size >= 500) {
+          const oldestKey = this.pendingCompensations.keys().next().value;
+          if (oldestKey === undefined) break;
+          this.pendingCompensations.delete(oldestKey);
+        }
         this.pendingCompensations.set(allocId, compensationRecord);
         compensationState = compensationRecord;
       }
     }
 
+    const rawCodeForMask = String(key.code || normalized || '');
     this.logger?.info('key_redeemed_success', {
       userId: cleanUserId,
-      code: key.code || normalized,
+      codeSuffix: rawCodeForMask ? `***${rawCodeForMask.slice(-4)}` : '***',
       addedDays,
       isPermanent,
       expiresAt,
@@ -606,9 +616,14 @@ class EntitlementService {
             : null) || freshUser;
 
           const latestExpiry = latestUser.expiresAt ? Date.parse(latestUser.expiresAt) : NaN;
-          if (latestUser.isPermanent || (Number.isFinite(latestExpiry) && latestExpiry > Date.now()) || latestUser.status === 'active') {
+          if (
+            latestUser.isPermanent ||
+            (Number.isFinite(latestExpiry) && latestExpiry > Date.now()) ||
+            latestUser.status === 'active' ||
+            latestUser.status === 'disabled'
+          ) {
             this.stopPendingByUser.delete(latestUser.userId);
-            this.logger?.info('user_renewed_during_graceful_stop_cancelling_expiration', {
+            this.logger?.info('user_status_changed_during_graceful_stop_cancelling_expiration', {
               userId: latestUser.userId,
               status: latestUser.status,
               expiresAt: latestUser.expiresAt

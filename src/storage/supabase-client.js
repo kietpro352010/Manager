@@ -857,17 +857,38 @@ class SupabaseAdapter {
             return false;
         }
         const rows = keys.map(k => {
-            const code = String(k.key || k.code || '').trim().toUpperCase();
+            const code = String(k.key || k.code || k.keyCode || '').trim().toUpperCase();
+            const normalizedForHash = code.replace(/[^A-Z0-9]/g, '');
+            const codeHash = k.codeHash || k.code_hash || (normalizedForHash
+                ? crypto.createHash('sha256').update(normalizedForHash).digest('hex')
+                : null);
+            const id = String(k.id || k.keyId || k.key_id || ('key_' + code));
+            const fixedIds = Array.isArray(k.workerIds) && k.workerIds.length
+                ? k.workerIds
+                : (Array.isArray(k.botIds) ? k.botIds : []);
+            const daysVal = Number(k.days ?? k.durationDays ?? 1);
             return {
-                id: String(k.id || ('key_' + code)), code, key_code: code,
-                days: Number(k.days || 1), plan_name: String(k.planName || 'Gói mặc định'),
-                is_permanent: Boolean(k.isPermanent === true || k.days === -1),
-                bot_ids: Array.isArray(k.botIds) ? k.botIds : [],
-                bot_count: Number(k.botCount !== undefined ? k.botCount : (Array.isArray(k.botIds) && k.botIds.length ? k.botIds.length : 1)),
+                id,
+                key_id: String(k.keyId || k.key_id || id),
+                code,
+                key: code,
+                key_code: code,
+                code_hash: codeHash,
+                code_suffix: String(k.codeSuffix || k.code_suffix || code.slice(-4)),
+                status: String(k.status || (k.used ? 'used' : 'unused')),
+                days: daysVal,
+                duration_days: Number(k.durationDays ?? daysVal),
+                plan_name: String(k.planName || 'Gói mặc định'),
+                is_permanent: Boolean(k.isPermanent === true || daysVal === -1),
+                allow_account_change: k.allowAccountChange !== false,
+                bot_ids: fixedIds,
+                worker_ids: fixedIds,
+                bot_count: Number(k.botCount !== undefined ? k.botCount : (fixedIds.length ? fixedIds.length : 1)),
                 used: Boolean(k.used), used_by: k.usedBy ? String(k.usedBy) : null,
                 used_at: k.usedAt ? String(k.usedAt) : null, max_uses: normalizeMaxUses(k.maxUses),
                 used_count: Number(k.usedCount || 0), used_users: Array.isArray(k.usedUsers) ? k.usedUsers : [],
                 expires_at: k.expiresAt || null, note: k.note ? String(k.note) : null,
+                created_by: k.createdBy ? String(k.createdBy) : null,
                 ...(k.createdAt ? { created_at: k.createdAt } : {})
             };
         });
@@ -1310,10 +1331,16 @@ class SupabaseAdapter {
                     method: 'POST',
                     headers: this.getHeaders({ 'Prefer': 'resolution=merge-duplicates,return=representation' }),
                     body: JSON.stringify(row)
-                }, 12000);
+                }, { timeoutMs: 12000, maxRetries: 2 });
                 if (res && res.ok) {
                     return { ok: true, revision: rev };
                 }
+                const errText = res ? await res.text().catch(() => '') : '';
+                return {
+                    ok: false,
+                    status: res?.status || 503,
+                    error: errText || `Không lưu được session admin trên Supabase (HTTP ${res?.status || 'network'}).`
+                };
             } catch (err) {
                 return { ok: false, status: err.status || 503, error: err.message || 'Không lưu được session admin trên Supabase.' };
             }
@@ -1383,6 +1410,28 @@ class SupabaseAdapter {
             return (result && typeof result === 'object') ? result : { ok: Boolean(result), revokedCount: 0 };
         } catch (err) {
             console.error('[SUPABASE] Lỗi thu hồi toàn bộ session của user trên Cloud:', err.message);
+            return { ok: false, error: err.message || String(err), revokedCount: 0 };
+        }
+    }
+
+    async revokeAdminSessions(excludeTokenHash = null) {
+        if (!this.isEnabled()) return { ok: false, revokedCount: 0 };
+        try {
+            let query = 'role=eq.admin';
+            if (excludeTokenHash) {
+                query += `&token_hash=neq.${encodeURIComponent(String(excludeTokenHash))}`;
+            }
+            const res = await this.fetchWithRetry(`${this.url}/rest/v1/manager_sessions?${query}`, {
+                method: 'DELETE',
+                headers: this.getHeaders({ Prefer: 'return=representation' })
+            }, { timeoutMs: 8000, maxRetries: 1 });
+            if (!res || !res.ok) {
+                return { ok: false, revokedCount: 0, error: `HTTP ${res?.status || 'network'}` };
+            }
+            const rows = await res.json().catch(() => []);
+            return { ok: true, revokedCount: Array.isArray(rows) ? rows.length : 0 };
+        } catch (err) {
+            console.error('[SUPABASE] Lỗi thu hồi session admin trên Cloud:', err.message);
             return { ok: false, error: err.message || String(err), revokedCount: 0 };
         }
     }
@@ -2032,7 +2081,7 @@ class SupabaseAdapter {
     }
 
     async fetchBackupPayload(filename) {
-        if (!this.isEnabled() || !/^backup-[A-Za-z0-9._-]+\.json$/.test(String(filename || ''))) throw new Error('Tên bản sao lưu không hợp lệ hoặc Supabase chưa cấu hình.');
+        if (!this.isEnabled() || !/^(?:backup|pre-restore)-[A-Za-z0-9._-]+\.json$/.test(String(filename || ''))) throw new Error('Tên bản sao lưu không hợp lệ hoặc Supabase chưa cấu hình.');
         const res = await fetch(`${this.url}/rest/v1/manager_backups?name=eq.${encodeURIComponent(filename)}&select=payload`, {
             headers: this.getHeaders(), signal: AbortSignal.timeout(8000)
         });
@@ -2088,13 +2137,14 @@ class SupabaseAdapter {
     async saveOutboxItem(item) {
         if (!this.isEnabled()) return false;
         try {
-            const bId = Number(item.botId || item.bot_id);
+            const rawBid = Number(item.botId ?? item.bot_id);
+            const bId = Number.isFinite(rawBid) ? Math.trunc(rawBid) : 0;
             const rawStatus = String(item.status || 'pending');
             const safeStatus = rawStatus === 'dispatched_to_sql' ? 'pending' : rawStatus;
             const row = {
                 id: String(item.id || ('outbox_' + bId + '_' + Date.now().toString(36))),
                 bot_id: bId,
-                type: String(item.type || 'auth_sync'),
+                type: String(item.type || item.taskType || 'auth_sync'),
                 status: safeStatus,
                 attempts: Number(item.attempts || 0),
                 max_attempts: Number(item.maxAttempts || item.max_attempts || 8),
@@ -2316,9 +2366,8 @@ class SupabaseAdapter {
         try {
             const query = status ? `?status=eq.${encodeURIComponent(status)}&order=created_at.asc` : '?order=created_at.asc';
             const res = await this.fetchWithRetry(`${this.url}/rest/v1/manager_pending_allocations${query}`, {
-                headers: this.getHeaders(),
-                signal: AbortSignal.timeout(8000)
-            });
+                headers: this.getHeaders()
+            }, { timeoutMs: 8000, maxRetries: 2 });
             if (!res.ok) return [];
             return await res.json();
         } catch (err) {

@@ -11,6 +11,7 @@
   --bg: #06080e;
   --bg-base: #06080e;
   --bg-surface: rgba(12, 13, 20, 0.94);
+  --surface-soft: rgba(148, 163, 184, 0.08);
   --bg-elevated: rgba(18, 19, 28, 0.96);
   --bg-input: rgba(8, 9, 14, 0.94);
   --bg-gradient:
@@ -192,6 +193,7 @@
   --bg: #e6eaf2;
   --bg-base: #e6eaf2;
   --bg-surface: #f1f5fb;
+  --surface-soft: rgba(15, 23, 42, 0.05);
   --bg-elevated: #ffffff;
   --bg-input: #ffffff;
   --bg-gradient:

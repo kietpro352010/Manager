@@ -541,7 +541,7 @@ function reconcileBotCards(filtered) {
     if (id) currentMap.set(id, c);
   });
 
-  const nextIds = new Set(filtered.map(b => String(b.id)));
+  const nextIds = new Set(filtered.map(b => String(b.workerId || b.id)));
 
   // Remove cards that no longer exist
   for (const [id, card] of currentMap.entries()) {
@@ -550,7 +550,7 @@ function reconcileBotCards(filtered) {
 
   // Update existing cards or insert new cards in exact sorted order
   filtered.forEach((b, idx) => {
-    const id = String(b.id);
+    const id = String(b.workerId || b.id);
     const existing = currentMap.get(id);
     const cardSig = computeBotCardSig(b);
 

@@ -142,12 +142,18 @@ function createApp({
     activeSessions.set(tokenHash, sessionData);
   }
 
+  function safeScalar(val) {
+    if (val === null || val === undefined) return '';
+    if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+    return '';
+  }
+
   // Helper to check worker bot secret
   function isBotSecretRequest(req) {
-    const incoming = String(req?.headers?.['x-bot-secret'] || req?.headers?.['x-worker-secret'] || '').trim();
+    const incoming = safeScalar(req?.headers?.['x-bot-secret'] || req?.headers?.['x-worker-secret']).trim();
     if (!incoming) return false;
 
-    const path = String(req?.originalUrl || req?.path || '');
+    const path = safeScalar(req?.originalUrl || req?.path);
     const isWorkerRoute = path.startsWith('/api/worker') ||
                           path.startsWith('/api/v1/workers') ||
                           path.startsWith('/api/auth/verify-bot-access');
@@ -162,7 +168,13 @@ function createApp({
       return true;
     }
 
-    const botId = String(req?.headers?.['x-manager-bot-id'] || req?.body?.workerId || req?.body?.botId || req?.query?.botId || req?.params?.workerId || '').trim();
+    const botId = safeScalar(
+      req?.headers?.['x-manager-bot-id'] ??
+      req?.body?.workerId ??
+      req?.body?.botId ??
+      req?.query?.botId ??
+      req?.params?.workerId
+    ).trim();
     if (botId && typeof registry.verifyBotSecretSync === 'function') {
       return registry.verifyBotSecretSync(botId, incoming);
     }
@@ -429,7 +441,8 @@ function createApp({
   }
 
   // 5. Dynamic Session Authentication Middleware
-  app.use(async (req, _res, next) => {
+  app.use((req, _res, next) => {
+    Promise.resolve((async () => {
     req.managerAuthChecked = true;
     req.managerAuthSession = null;
 
@@ -445,7 +458,8 @@ function createApp({
     const isEnvAdminCached = Boolean(
       cachedSession &&
       cachedSession.role === 'admin' &&
-      !String(cachedSession.userId || '').toLowerCase().startsWith('usr_')
+      !String(cachedSession.userId || '').toLowerCase().startsWith('usr_') &&
+      (!useDbAuth || (cachedSession._authVerifiedAt && Date.now() - cachedSession._authVerifiedAt < READ_POLL_AUTH_CACHE_TTL_MS))
     );
     let session = null;
 
@@ -537,6 +551,7 @@ function createApp({
       req.managerAuthSession = session;
     }
     next();
+    })()).catch(next);
   });
 
   // 6. Root SPA Route (Login view if unauthenticated, Dashboard shell if authenticated)
@@ -676,16 +691,29 @@ function createApp({
   app.use('/api/user', userRouter);
   app.use('/api', userRouter);
 
+  function invalidateAdminSessions(excludeTokenHash = null) {
+    let removed = 0;
+    for (const [hash, cached] of activeSessions.entries()) {
+      if (cached && cached.role === 'admin' && (!excludeTokenHash || hash !== excludeTokenHash)) {
+        activeSessions.delete(hash);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
   const adminRouter = createAdminApi({
     store,
     entitlementService,
+    link4mService,
     registry,
     broker,
     fleetOperations,
     adminNotifier,
     config,
     logger,
-    invalidateUserSessions
+    invalidateUserSessions,
+    invalidateAdminSessions
   });
   app.use('/api/admin', adminRouter);
   app.use('/api/manager', adminRouter);
@@ -711,20 +739,13 @@ function createApp({
     if (err && (err.type === 'entity.parse.failed' || err instanceof SyntaxError)) {
       return res.status(400).json({ ok: false, error: 'JSON request không hợp lệ.' });
     }
-    logger?.error('HTTP Server Error', { error: err.message, stack: err.stack });
+    if (err instanceof TypeError && /Cannot convert object to primitive value/i.test(err.message || '')) {
+      return res.status(400).json({ ok: false, error: 'Tham số yêu cầu không hợp lệ.' });
+    }
+    logger?.error('HTTP Server Error', { error: err?.message, stack: err?.stack });
     return res.status(500).json({ ok: false, error: 'internal_server_error' });
   });
 
-  function invalidateAdminSessions() {
-    let removed = 0;
-    for (const [hash, cached] of activeSessions.entries()) {
-      if (cached && cached.role === 'admin') {
-        activeSessions.delete(hash);
-        removed += 1;
-      }
-    }
-    return removed;
-  }
   app.invalidateAdminSessions = invalidateAdminSessions;
   app.invalidateUserSessions = invalidateUserSessions;
 

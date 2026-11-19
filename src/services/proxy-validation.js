@@ -7,63 +7,95 @@ function normalizeHostToken(rawHost) {
   return String(rawHost || '').trim().replace(/^\[|\]$/g, '').replace(/\.+$/, '').toLowerCase();
 }
 
+function expandIpv6Groups(rawIp) {
+  let ip = String(rawIp || '').trim().replace(/^\[|\]$/g, '').toLowerCase();
+  const zoneIdx = ip.indexOf('%');
+  if (zoneIdx !== -1) ip = ip.slice(0, zoneIdx);
+  if (!ip.includes(':')) return null;
+
+  const lastColon = ip.lastIndexOf(':');
+  const tail = ip.slice(lastColon + 1);
+  if (tail.includes('.')) {
+    if (net.isIP(tail) !== 4) return null;
+    const octets = tail.split('.').map(Number);
+    if (octets.length !== 4 || octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return null;
+    const hi = ((octets[0] << 8) | octets[1]).toString(16);
+    const lo = ((octets[2] << 8) | octets[3]).toString(16);
+    ip = `${ip.slice(0, lastColon + 1)}${hi}:${lo}`;
+  }
+
+  const parts = ip.split('::');
+  if (parts.length > 2) return null;
+  const left = parts[0] ? parts[0].split(':') : [];
+  const right = parts.length === 2 && parts[1] ? parts[1].split(':') : [];
+  if (parts.length === 1 && left.length !== 8) return null;
+  const missing = 8 - (left.length + right.length);
+  if (missing < 0) return null;
+  const full = parts.length === 2
+    ? [...left, ...Array(missing).fill('0'), ...right]
+    : left;
+  if (full.length !== 8) return null;
+  const groups = full.map((g) => (/^[0-9a-f]{1,4}$/.test(g) ? parseInt(g, 16) : NaN));
+  if (groups.some((n) => !Number.isInteger(n) || n < 0 || n > 0xffff)) return null;
+  return groups;
+}
+
+function isPrivateIpv4Parts(parts) {
+  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return true;
+  const [b0, b1] = parts;
+  if (b0 === 0) return true; // 0.0.0.0/8
+  if (b0 === 10) return true; // 10.0.0.0/8
+  if (b0 === 100 && (b1 >= 64 && b1 <= 127)) return true; // 100.64.0.0/10 Carrier NAT
+  if (b0 === 127) return true; // 127.0.0.0/8 Loopback
+  if (b0 === 169 && b1 === 254) return true; // 169.254.0.0/16 Link-local / Cloud metadata
+  if (b0 === 172 && (b1 >= 16 && b1 <= 31)) return true; // 172.16.0.0/12 Private
+  if (b0 === 192 && b1 === 0) return true; // 192.0.0.0/24
+  if (b0 === 192 && b1 === 168) return true; // 192.168.0.0/16 Private
+  if (b0 === 198 && (b1 === 18 || b1 === 19)) return true; // 198.18.0.0/15
+  if (b0 === 198 && b1 === 51) return true; // 198.51.100.0/24 TEST-NET-2
+  if (b0 === 203 && b1 === 0) return true; // 203.0.113.0/24 TEST-NET-3
+  if (b0 >= 224) return true; // Multicast & Reserved
+  if (parts.every((p) => p === 255)) return true; // Broadcast
+  return false;
+}
+
 function isPrivateOrBlockedIp(ipStr) {
   if (!ipStr || typeof ipStr !== 'string') return true;
-  let ip = normalizeHostToken(ipStr);
+  const ip = normalizeHostToken(ipStr);
 
   if (!ip || ip === 'localhost' || ip.endsWith('.localhost') || ip === 'metadata.google.internal' || ip.endsWith('.metadata.google.internal')) return true;
 
-  // Handle IPv4-mapped IPv6 ::ffff:192.168.1.1
-  if (ip.startsWith('::ffff:')) {
-    const rest = ip.substring(7);
-    if (rest.includes('.')) {
-      ip = rest;
-    } else if (rest.includes(':')) {
-      const parts = rest.split(':');
-      if (parts.length === 2) {
-        const w1 = parseInt(parts[0], 16);
-        const w2 = parseInt(parts[1], 16);
-        if (!isNaN(w1) && !isNaN(w2)) {
-          ip = [(w1 >> 8) & 0xff, w1 & 0xff, (w2 >> 8) & 0xff, w2 & 0xff].join('.');
-        }
-      }
-    }
-  }
-
   const ipType = net.isIP(ip);
-  if (ipType === 0) return false;
+  if (ipType === 0 && !ip.includes(':')) return false;
 
   // IPv4 Checks
   if (ipType === 4) {
     const parts = ip.split('.').map((p) => parseInt(p, 10));
-    if (parts.length !== 4 || parts.some((p) => isNaN(p) || p < 0 || p > 255)) return true;
-
-    const [b0, b1] = parts;
-    if (b0 === 0) return true; // 0.0.0.0/8
-    if (b0 === 10) return true; // 10.0.0.0/8
-    if (b0 === 100 && (b1 >= 64 && b1 <= 127)) return true; // 100.64.0.0/10 Carrier NAT
-    if (b0 === 127) return true; // 127.0.0.0/8 Loopback
-    if (b0 === 169 && b1 === 254) return true; // 169.254.0.0/16 Link-local / Cloud metadata
-    if (b0 === 172 && (b1 >= 16 && b1 <= 31)) return true; // 172.16.0.0/12 Private
-    if (b0 === 192 && b1 === 0) return true; // 192.0.0.0/24
-    if (b0 === 192 && b1 === 168) return true; // 192.168.0.0/16 Private
-    if (b0 === 198 && (b1 === 18 || b1 === 19)) return true; // 198.18.0.0/15
-    if (b0 === 198 && b1 === 51) return true; // 198.51.100.0/24 TEST-NET-2
-    if (b0 === 203 && b1 === 0) return true; // 203.0.113.0/24 TEST-NET-3
-    if (b0 >= 224) return true; // Multicast & Reserved
-    if (parts.every((p) => p === 255)) return true; // Broadcast
-    return false;
+    return isPrivateIpv4Parts(parts);
   }
 
-  // IPv6 Checks
-  if (ipType === 6) {
-    if (ip === '::' || ip === '::1' || ip === '0:0:0:0:0:0:0:1' || ip === '0:0:0:0:0:0:0:0') return true;
-    if (ip.startsWith('fc') || ip.startsWith('fd')) return true; // Unique local
-    if (ip.startsWith('fe8') || ip.startsWith('fe9') || ip.startsWith('fea') || ip.startsWith('feb')) return true; // Link-local
-    if (ip.startsWith('ff')) return true; // Multicast
-    return false;
+  // Canonical 128-bit IPv6 Checks (covers ::1, expanded ::ffff:*, ::/96, NAT64 64:ff9b::/96, 6to4 2002::/16, Teredo, ULA, link-local, site-local, multicast)
+  const groups = expandIpv6Groups(ip);
+  if (!groups) return true;
+  const [g0, g1, g2, g3, g4, g5, g6, g7] = groups;
+  const allZeroPrefix5 = g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0;
+  if (allZeroPrefix5 && g5 === 0 && g6 === 0 && (g7 === 0 || g7 === 1)) return true;
+  if ((allZeroPrefix5 && (g5 === 0xffff || g5 === 0)) || (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0xffff && g5 === 0)) {
+    return isPrivateIpv4Parts([(g6 >> 8) & 0xff, g6 & 0xff, (g7 >> 8) & 0xff, g7 & 0xff]);
   }
-
+  if (g0 === 0x0064 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) {
+    return isPrivateIpv4Parts([(g6 >> 8) & 0xff, g6 & 0xff, (g7 >> 8) & 0xff, g7 & 0xff]);
+  }
+  if (g0 === 0x0064 && g1 === 0xff9b && g2 === 0x0001) return true;
+  if (g0 === 0x2002) {
+    return isPrivateIpv4Parts([(g1 >> 8) & 0xff, g1 & 0xff, (g2 >> 8) & 0xff, g2 & 0xff]);
+  }
+  if (g0 === 0x2001 && (g1 === 0x0000 || g1 === 0x0db8 || (g1 === 0x0002 && g2 === 0))) return true;
+  if (g0 === 0x0100 && g1 === 0 && g2 === 0 && g3 === 0) return true;
+  if ((g0 & 0xfe00) === 0xfc00) return true;
+  if ((g0 & 0xffc0) === 0xfe80) return true;
+  if ((g0 & 0xffc0) === 0xfec0) return true;
+  if ((g0 & 0xff00) === 0xff00) return true;
   return false;
 }
 
@@ -140,7 +172,12 @@ async function validateSafeBotUrl(rawUrl) {
   } else {
     try {
       const records = await dns.promises.lookup(hostname, { all: true });
-      for (const rec of records) {
+      if (!Array.isArray(records) || records.length === 0) {
+        if (isProduction) {
+          throw new Error(`Không thể phân giải DNS cho '${hostname}' (SSRF blocked).`);
+        }
+      }
+      for (const rec of (records || [])) {
         if (rec.address === '169.254.169.254' || rec.address.startsWith('169.254.')) {
           throw new Error(`Hostname '${hostname}' trỏ về Cloud Metadata IP '${rec.address}' bị chặn.`);
         }

@@ -378,11 +378,11 @@ class SupabaseCommandStore {
     // 1. Thử gọi RPC manager_take_worker_command (thực thi FOR UPDATE SKIP LOCKED trong SQL)
     try {
       const { data, error } = await this.client.rpc('manager_take_worker_command', { p_worker_id: String(workerId) });
-      if (!error && data) {
+      if (!error) {
         const row = unwrap(data);
-        if (row) return fromRow(row);
+        return row ? fromRow(row) : null;
       }
-      if (error && !isRpcUnavailableError(error)) {
+      if (!isRpcUnavailableError(error)) {
         const err = new Error(error.message || 'manager_take_worker_command failed');
         if (error.code) err.code = error.code;
         throw err;
@@ -435,8 +435,8 @@ class SupabaseCommandStore {
         p_command_id: String(commandId),
         p_result: result ?? null
       });
-      if (!error && data === true) return true;
-      if (error && !isRpcUnavailableError(error)) {
+      if (!error) return Boolean(data);
+      if (!isRpcUnavailableError(error)) {
         const err = new Error(error.message || 'manager_complete_worker_command failed');
         if (error.code) err.code = error.code;
         throw err;

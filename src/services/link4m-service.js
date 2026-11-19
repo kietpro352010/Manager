@@ -173,7 +173,9 @@ class Link4mService {
       ...config,
       eligible: config.enabled && config.providerConfigured && config.callbackConfigured && usedToday < config.dailyLimit && cooldownRemainingMs === 0,
       usedToday,
+      todayCount: usedToday,
       remainingToday: Math.max(0, config.dailyLimit - usedToday),
+      remainingAttempts: Math.max(0, config.dailyLimit - usedToday),
       cooldownRemainingMs,
       latestAttempt: attempt ? { status: attempt.status, expiresAt: attempt.expiresAt, rewardedAt: attempt.rewardedAt || null } : null,
       accessActive: this.accessControl.isEntitled(member)
@@ -193,7 +195,7 @@ class Link4mService {
   // Backward-compatible alias
   async createLinkAttempt(userId, clientIp) {
     const res = await this.startAttempt(userId, clientIp);
-    return { ok: true, ...res };
+    return { ok: true, ...res, redirectUrl: res.redirectUrl || res.providerUrl || '' };
   }
 
   async startAttemptLocked(userId, clientIp) {
@@ -328,12 +330,16 @@ class Link4mService {
       throw new Error('Mã token xác minh vượt link không hợp lệ.');
     }
     if (attempt.status === 'rewarded' || attempt.status === 'completed') {
-      return { replayed: true, rewardHours: attempt.rewardHours };
+      return { replayed: true, isRewarded: true, rewardHours: attempt.rewardHours };
+    }
+    if (attempt.expiresAt && Date.parse(attempt.expiresAt) <= Date.now()) {
+      throw new Error('Phiên vượt link đã hết hạn. Vui lòng tạo liên kết mới.');
     }
     if (Date.now() - new Date(attempt.createdAt).getTime() < MIN_SOLVE_MS) {
       throw new Error('Thời gian vượt link quá nhanh. Vui lòng hoàn thành lại liên kết.');
     }
-    return this.completeVerifiedAttempt(attempt, attempt.tokenHash);
+    const res = await this.completeVerifiedAttempt(attempt, attempt.tokenHash);
+    return { ...res, isRewarded: !res?.processing };
   }
 
   // Unified claim verification method called by Web API
@@ -379,11 +385,17 @@ class Link4mService {
     if (!validToken && (!signature || !safeEqual(signature, expectedSignature))) {
       throw new Error('Chữ ký hoàn thành Link4M không hợp lệ.');
     }
-    if (attempt.status === 'rewarded') return { replayed: true, rewardHours: attempt.rewardHours };
+    if (attempt.status === 'rewarded' || attempt.status === 'completed') {
+      return { replayed: true, isRewarded: true, rewardHours: attempt.rewardHours };
+    }
+    if (attempt.expiresAt && Date.parse(attempt.expiresAt) <= Date.now()) {
+      throw new Error('Phiên vượt link đã hết hạn.');
+    }
     if (Date.now() - new Date(attempt.createdAt).getTime() < MIN_SOLVE_MS) {
       throw new Error('Hoàn thành vượt link quá nhanh.');
     }
-    return this.completeVerifiedAttempt(attempt, attempt.tokenHash);
+    const res = await this.completeVerifiedAttempt(attempt, attempt.tokenHash);
+    return { ...res, isRewarded: !res?.processing };
   }
 
   async completeVerifiedAttempt(attempt, tokenHash) {
@@ -440,6 +452,8 @@ class Link4mService {
           isPermanent: false,
           expiresAt,
           planName: member.planName || 'Standard',
+          allowAccountChange: member.allowAccountChange !== false,
+          botCount: member.botCount,
           note: member.note || '',
           username: member.username || attempt.userId
         }, `link4m:${attempt.attemptId}`);

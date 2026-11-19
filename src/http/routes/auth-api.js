@@ -67,6 +67,15 @@ function clearCookieHeader(name, secure = false) {
 
 function createAuthApi({ store, entitlementService, registry, config, logger, activeSessions }) {
   const router = express.Router();
+  for (const method of ['get', 'post', 'put', 'patch', 'delete', 'all']) {
+    const orig = router[method].bind(router);
+    router[method] = (path, ...handlers) => orig(
+      path,
+      ...handlers.map((fn) => (typeof fn === 'function' && fn.length < 4
+        ? (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
+        : fn))
+    );
+  }
   const sessionDurationMs = (Number.isSafeInteger(Number(config?.webSessionTtlHours)) && Number(config.webSessionTtlHours) > 0)
     ? Number(config.webSessionTtlHours) * 3600 * 1000
     : (Number.isSafeInteger(Number(config?.sessionTtlDays)) && Number(config.sessionTtlDays) > 0
@@ -109,11 +118,19 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
   const MAX_LOGIN_ATTEMPTS = (config && Number.isSafeInteger(Number(config.maxLoginAttempts)) && Number(config.maxLoginAttempts) > 0)
     ? Number(config.maxLoginAttempts)
     : 10;
+  const MAX_IP_LOGIN_ATTEMPTS = Math.max(MAX_LOGIN_ATTEMPTS * 5, 50);
   const loginAttempts = new Map();
+  const ipLoginAttempts = new Map();
 
   function checkRateLimit(ip, username) {
     const now = Date.now();
-    const key = `${ip}:${String(username).toLowerCase()}`;
+    const ipKey = String(ip || 'unknown');
+    const ipRecord = ipLoginAttempts.get(ipKey);
+    if (ipRecord && now - ipRecord.windowStart <= RATE_LIMIT_WINDOW_MS && ipRecord.count >= MAX_IP_LOGIN_ATTEMPTS) {
+      const waitMinutes = Math.ceil((RATE_LIMIT_WINDOW_MS - (now - ipRecord.windowStart)) / 60000);
+      return { allowed: false, error: `Quá nhiều lần đăng nhập sai từ địa chỉ IP này. Vui lòng thử lại sau ${waitMinutes} phút.` };
+    }
+    const key = `${ipKey}:${String(username).toLowerCase()}`;
     const record = loginAttempts.get(key);
     if (!record || now - record.windowStart > RATE_LIMIT_WINDOW_MS) {
       if (loginAttempts.size >= MAX_RATE_LIMIT_ENTRIES) {
@@ -143,13 +160,29 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
   }
 
   function recordFailedAttempt(ip, username) {
-    const key = `${ip}:${String(username).toLowerCase()}`;
+    const ipKey = String(ip || 'unknown');
+    const key = `${ipKey}:${String(username).toLowerCase()}`;
     const now = Date.now();
     const record = loginAttempts.get(key);
     if (!record || now - record.windowStart > RATE_LIMIT_WINDOW_MS) {
       loginAttempts.set(key, { count: 1, windowStart: now });
     } else {
       record.count++;
+    }
+    const ipRec = ipLoginAttempts.get(ipKey);
+    if (!ipRec || now - ipRec.windowStart > RATE_LIMIT_WINDOW_MS) {
+      if (ipLoginAttempts.size >= MAX_RATE_LIMIT_ENTRIES) {
+        for (const [k, v] of ipLoginAttempts.entries()) {
+          if (now - v.windowStart > RATE_LIMIT_WINDOW_MS) ipLoginAttempts.delete(k);
+        }
+        if (ipLoginAttempts.size >= MAX_RATE_LIMIT_ENTRIES) {
+          const oldestIp = ipLoginAttempts.keys().next().value;
+          if (oldestIp) ipLoginAttempts.delete(oldestIp);
+        }
+      }
+      ipLoginAttempts.set(ipKey, { count: 1, windowStart: now });
+    } else {
+      ipRec.count++;
     }
   }
 
@@ -158,6 +191,9 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
     const now = Date.now();
     for (const [key, val] of loginAttempts.entries()) {
       if (now - val.windowStart > RATE_LIMIT_WINDOW_MS) loginAttempts.delete(key);
+    }
+    for (const [key, val] of ipLoginAttempts.entries()) {
+      if (now - val.windowStart > RATE_LIMIT_WINDOW_MS) ipLoginAttempts.delete(key);
     }
   }, 5 * 60 * 1000).unref();
 
@@ -224,8 +260,13 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         return res.status(400).json({ ok: false, error: 'Mật khẩu xác nhận không khớp.' });
       }
 
-      if (cleanUsername.toLowerCase() === 'admin' || cleanUsername.toLowerCase() === String(config.adminUsername || '').toLowerCase()) {
-        return res.status(400).json({ ok: false, error: 'Tên tài khoản này được bảo lưu cho Quản trị viên.' });
+      if (
+        cleanUsername.toLowerCase() === 'admin' ||
+        cleanUsername.toLowerCase() === String(config.adminUsername || '').toLowerCase() ||
+        /^usr_/i.test(cleanUsername) ||
+        /^\d{17,20}$/.test(cleanUsername)
+      ) {
+        return res.status(400).json({ ok: false, error: 'Tên tài khoản này được bảo lưu hoặc không hợp lệ (không được bắt đầu bằng usr_ hoặc trùng định dạng Discord ID).' });
       }
 
       const existing = await store.getUser(cleanUsername);

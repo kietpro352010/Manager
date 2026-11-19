@@ -186,6 +186,15 @@ function createUserApi({
   invalidateUserSessions
 }) {
   const router = express.Router();
+  for (const method of ['get', 'post', 'put', 'patch', 'delete', 'all']) {
+    const orig = router[method].bind(router);
+    router[method] = (path, ...handlers) => orig(
+      path,
+      ...handlers.map((fn) => (typeof fn === 'function' && fn.length < 4
+        ? (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
+        : fn))
+    );
+  }
   const verifyRateLimiter = new Map();
   let publicBootstrapCache = null;
 
@@ -354,6 +363,27 @@ function createUserApi({
     return next();
   }
 
+  // Helper: Safe worker ownership matching (prevents cross-tenant botNumber collision / IDOR)
+  function isWorkerAssignedToSession(worker, assignedList, allWorkers = null) {
+    if (!worker || !Array.isArray(assignedList) || assignedList.length === 0) return false;
+    const assignedLower = assignedList.map((id) => String(id).trim().toLowerCase()).filter(Boolean);
+    const workerIdLower = String(worker.workerId || '').trim().toLowerCase();
+    if (workerIdLower && assignedLower.includes(workerIdLower)) return true;
+
+    const botNum = Number(worker.botNumber);
+    if (!Number.isInteger(botNum) || botNum <= 0) return false;
+    const botNumStr = String(botNum);
+    if (!assignedLower.includes(botNumStr)) return false;
+
+    // Never match numeric botNumber if this worker has a DIFFERENT numeric workerId (e.g. workerId '11' vs botNumber 10)
+    if (/^\d+$/.test(workerIdLower) && Number(workerIdLower) !== botNum) return false;
+    // Never match botNumber if another worker literally owns workerId === botNumStr
+    if (Array.isArray(allWorkers) && allWorkers.some((w) => w && String(w.workerId || '').trim().toLowerCase() === botNumStr && String(w.workerId || '').trim().toLowerCase() !== workerIdLower)) {
+      return false;
+    }
+    return true;
+  }
+
   // Helper: Verify User Access to Target Bot
   async function checkBotPermissionAsync(req, targetId) {
     const session = req.managerAuthSession;
@@ -365,7 +395,7 @@ function createUserApi({
     if (session.role === 'admin') return { allowed: true, user: session, worker };
 
     const assigned = Array.isArray(session.assignedBotIds) ? session.assignedBotIds.map(String) : [];
-    if (!assigned.includes(String(worker.workerId)) && !assigned.includes(String(worker.botNumber))) {
+    if (!isWorkerAssignedToSession(worker, assigned)) {
       return { allowed: false, status: 403, error: 'Bạn không có quyền quản lý bot này.' };
     }
 
@@ -376,9 +406,12 @@ function createUserApi({
 
     if (isExpired) {
       const method = String(req.method || 'GET').toUpperCase();
-      const path = String(req.originalUrl || req.path || '');
+      const routePath = String(req.path || '').split('?')[0].toLowerCase();
       const isReadRequest = method === 'GET' || method === 'HEAD';
-      const isRenewRequest = path.includes('/renew') || path.includes('/redeem');
+      const isRenewRequest = routePath === '/renew' ||
+        routePath === '/redeem' ||
+        routePath === '/manager/renew' ||
+        routePath === '/keys/redeem';
 
       if (!isReadRequest && !isRenewRequest) {
         return {
@@ -521,7 +554,7 @@ function createUserApi({
         visibleBots = allBots;
       } else {
         const assigned = Array.isArray(session.assignedBotIds) ? session.assignedBotIds.map(String) : [];
-        visibleBots = allBots.filter((b) => assigned.includes(String(b.workerId)) || assigned.includes(String(b.botNumber)));
+        visibleBots = allBots.filter((b) => isWorkerAssignedToSession(b, assigned, allBots));
       }
 
       const payload = visibleBots.map((bot) => {
@@ -1249,10 +1282,21 @@ function createUserApi({
         }
       });
 
+      const responseSettings = savedSettings && typeof savedSettings === 'object' ? { ...savedSettings } : {};
+      if (!isAdmin) {
+        delete responseSettings.serviceUrl;
+        delete responseSettings.proxyUrl;
+        delete responseSettings.proxyCiphertext;
+        delete responseSettings.mcCredentialsCiphertext;
+      }
+      if (isRestrictedUser && responseSettings.spawnCommands) {
+        responseSettings.spawnCommands = '********';
+      }
+
       return res.json({
         ok: true,
         message: 'Đã cập nhật cài đặt bot thành công.',
-        settings: savedSettings,
+        settings: responseSettings,
         bot: buildBotPayload(updatedWorker || worker, req.managerAuthSession)
       });
     } catch (error) {
@@ -1300,6 +1344,9 @@ function createUserApi({
     const allowedActions = ['start', 'stop', 'restart', 'reconnect', 'respawn', 'inventory', 'look', 'toss', 'status', 'reset'];
     if (!allowedActions.includes(action)) {
       return res.status(400).json({ ok: false, error: `Hành động "${action}" không được hỗ trợ.` });
+    }
+    if (action === 'reset' && req.managerAuthSession.role !== 'admin') {
+      return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên (ADMIN) mới được phép đặt lại (reset) bot.' });
     }
 
     try {
@@ -1497,11 +1544,31 @@ function createUserApi({
         return res.status(400).json({ ok: false, error: 'Thiếu token hoặc mã phiên xác nhận.' });
       }
 
+      // Allow authenticated status polling by attemptId when waiting on background Link4M postback
+      if (!token && attemptId) {
+        const session = req.managerAuthSession;
+        if (!session) {
+          return res.status(401).json({ ok: false, error: 'Vui lòng đăng nhập để kiểm tra trạng thái phiên vượt link.' });
+        }
+        const attempt = typeof store.getLinkAttempt === 'function' ? await store.getLinkAttempt(attemptId) : null;
+        if (!attempt) {
+          return res.status(404).json({ ok: false, error: 'Phiên vượt link không tồn tại hoặc đã hết hạn.' });
+        }
+        const isOwner = session.role === 'admin' ||
+          String(attempt.userId || '').toLowerCase() === String(session.userId || '').toLowerCase() ||
+          String(attempt.username || '').toLowerCase() === String(session.username || '').toLowerCase();
+        if (!isOwner) {
+          return res.status(403).json({ ok: false, error: 'Không có quyền kiểm tra phiên vượt link này.' });
+        }
+        const isRewarded = attempt.status === 'rewarded' || attempt.status === 'completed';
+        return res.json({ ok: true, isRewarded, status: attempt.status, rewardHours: attempt.rewardHours || 12 });
+      }
+
       const result = await link4mService.verifyAndClaimReward(token, attemptId);
       if (req.managerAuthSession?.userId && typeof invalidateUserSessions === 'function') {
         req.managerAuthSession._authVerifiedAt = 0;
       }
-      return res.json(result);
+      return res.json({ ...result, isRewarded: result?.isRewarded !== undefined ? Boolean(result.isRewarded) : !result?.processing });
     } catch (error) {
       return res.status(400).json({ ok: false, error: error.message });
     }
@@ -1602,14 +1669,23 @@ function createUserApi({
   router.post(['/user/discord-unlink', '/discord-unlink'], requireSession, async (req, res) => {
     try {
       const user = req.managerAuthSession;
-      const primaryId = user.userId || user.username;
-      await store.unlinkDiscord(primaryId);
-      if (user.username && user.userId && user.username.toLowerCase() !== String(user.userId).toLowerCase()) {
+      const primaryId = String(user.userId || user.username || '').trim();
+      const ownUserIdLower = primaryId.toLowerCase();
+      const ownUsernameLower = String(user.username || '').trim().toLowerCase();
+      // Guard against username resembling another user's Discord snowflake ID
+      if (!/^\d{17,20}$/.test(primaryId)) {
+        await store.unlinkDiscord(primaryId);
+      }
+      if (ownUsernameLower && ownUsernameLower !== ownUserIdLower && !/^\d{17,20}$/.test(ownUsernameLower)) {
         const remainingLink = typeof store.getDiscordLink === 'function'
           ? await store.getDiscordLink(user.username).catch(() => null)
           : null;
         if (remainingLink) {
-          await store.unlinkDiscord(user.username);
+          const linkOwnerId = String(remainingLink.manager_user_id || remainingLink.managerUserId || '').trim().toLowerCase();
+          const linkUsername = String(remainingLink.username || '').trim().toLowerCase();
+          if (linkOwnerId === ownUserIdLower || linkUsername === ownUsernameLower) {
+            await store.unlinkDiscord(user.username);
+          }
         }
       }
       return res.json({ ok: true, message: 'Đã hủy liên kết tài khoản Discord thành công.' });

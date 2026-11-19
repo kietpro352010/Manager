@@ -1149,7 +1149,13 @@ body.sidebar-collapsed .sidebar-nav-btn {
 body.sidebar-collapsed .sidebar-nav-btn[data-tooltip]:hover::after {
   content: attr(data-tooltip);
   position: fixed;
+  top: auto;
+  right: auto;
+  bottom: auto;
   left: 82px;
+  width: auto;
+  height: auto;
+  transform: none;
   z-index: 200;
   background: var(--bg-elevated);
   color: var(--text);

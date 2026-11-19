@@ -53,7 +53,8 @@ function uptimeText(secondsVal) {
 
 function getWorkerState(worker) {
   const rawState = String(worker?.status?.state || (worker?.status?.online ? 'online' : 'offline')).toLowerCase();
-  const isOnline = Boolean(worker?.status?.online || rawState === 'online');
+  const isAfkState = rawState === 'afk' || rawState === 'afk_locked';
+  const isOnline = Boolean(worker?.status?.online || rawState === 'online' || isAfkState);
   const isBusy = ['connecting', 'reconnecting', 'starting', 'stopping'].includes(rawState);
 
   let label = 'OFFLINE';
@@ -61,7 +62,7 @@ function getWorkerState(worker) {
   let color = COLOR_OFFLINE;
 
   if (isOnline) {
-    label = 'ONLINE';
+    label = isAfkState ? 'ONLINE (AFK)' : 'ONLINE';
     emoji = '🟢';
     color = COLOR_ONLINE;
   } else if (rawState === 'connecting' || rawState === 'reconnecting') {

@@ -190,6 +190,9 @@ function renderDetailSettings(data){
   // renderer/save bỏ qua. Với user không đủ quyền, worker trả '********' (masked);
   // giữ nguyên khi lưu để không ghi đè cấu hình cũ.
   if(sp&&!detailSettingsDirty)sp.value=typeof settings.spawnCommands==='string'?settings.spawnCommands:'';
+  if(typeof setDetailSettingsDisabled==='function'&&!detailSettingsSaveInFlight){
+    setDetailSettingsDisabled(false);
+  }
 }
 
 function renderDetailAutoChatSchedules(schedules){
@@ -314,17 +317,23 @@ function dropDetailBotSchedule(event,targetIndex){event.preventDefault();const f
 async function saveDetailSettings(){
   if(detailSettingsSaveInFlight)return;
   invalidateDetailReads();
+  const isRestricted=(typeof isDetailSettingsRestrictedUser==='function')
+    ? isDetailSettingsRestrictedUser()
+    : Boolean(typeof currentUser!=='undefined'&&currentUser&&currentUser.role!=='admin'&&currentUser.allowAccountChange===false);
   const spawnElement=document.getElementById('detailSpawnCommands');
-  const body={settings:{
+  const notifySettings={
+    userNotifyEnabled:!!document.getElementById('detailSettingUserNotifyEnabled')?.checked,
+    notifyOnAfkKick:!!document.getElementById('detailSettingNotifyOnAfkKick')?.checked,
+    notifyOnAfkRecover:!!document.getElementById('detailSettingNotifyOnAfkRecover')?.checked,
+    notifyOnReconnectExhausted:!!document.getElementById('detailSettingNotifyOnReconnectExhausted')?.checked
+  };
+  const body={settings:isRestricted?notifySettings:{
     ecoMode:!!document.getElementById('detailSettingEcoMode')?.checked,
     autoTotem:!!document.getElementById('detailSettingAutoTotem')?.checked,
     antiHungry:!!document.getElementById('detailSettingAntiHungry')?.checked,
     autoReconnect:!!document.getElementById('detailSettingAutoReconnect')?.checked,
     antiAfkKick:!!document.getElementById('detailSettingAntiAfkKick')?.checked,
-    userNotifyEnabled:!!document.getElementById('detailSettingUserNotifyEnabled')?.checked,
-    notifyOnAfkKick:!!document.getElementById('detailSettingNotifyOnAfkKick')?.checked,
-    notifyOnAfkRecover:!!document.getElementById('detailSettingNotifyOnAfkRecover')?.checked,
-    notifyOnReconnectExhausted:!!document.getElementById('detailSettingNotifyOnReconnectExhausted')?.checked,
+    ...notifySettings,
     // BUG-24: đồng bộ Spawn Commands từ trang Detail (worker sanitizer cắt 5000 ký tự).
     // Giá trị '********' (masked) được worker phía sau hiểu là "giữ nguyên".
     ...(spawnElement?{spawnCommands:String(spawnElement.value||'')}:{})
