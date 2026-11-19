@@ -324,7 +324,7 @@ class SupabaseWorkerStore {
   }
 
   // --------------------------------------------------------------------------
-  // IN-GAME TELEMETRY & POSITION TRACKING (V11.8 Enterprise)
+  // IN-GAME TELEMETRY & POSITION TRACKING (V12.1 Enterprise)
   // --------------------------------------------------------------------------
   async recordPositionChange(telemetry) {
     if (this.adapter && typeof this.adapter.recordBotPositionChange === 'function') {
@@ -346,7 +346,7 @@ class SupabaseWorkerStore {
   }
 
   // --------------------------------------------------------------------------
-  // DIFFERENTIAL REGISTRY PATCHING (V11.8 Enterprise)
+  // DIFFERENTIAL REGISTRY PATCHING (V12.1 Enterprise)
   // --------------------------------------------------------------------------
   async patchRegistry(patch = {}, pendingResets = {}, pendingResetDeletes = []) {
     if (this.adapter && typeof this.adapter.patchManagerRegistry === 'function') {

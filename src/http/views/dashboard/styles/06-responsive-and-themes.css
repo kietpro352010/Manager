@@ -676,7 +676,7 @@
     -webkit-backdrop-filter: none !important;
   }
   .global-header {
-    background: #070c1a;
+    background: var(--bg-surface);
   }
   .fleet-welcome-header,
   .fleet-resource-bar,
@@ -691,7 +691,7 @@
   .kbot-portal-wrapper,
   .user-profile-dropdown,
   .app-footer {
-    background: rgba(9, 15, 28, 0.96);
+    background: var(--card);
   }
   .app-cosmic-video,
   .app-cosmic-nebula {
@@ -1373,7 +1373,8 @@ button.primary:hover:not(:disabled),
 }
 
 /* Moonlight Light-Theme Contrast & Region Separation Safeguards */
-:root[data-theme="moonlight"] .sidebar {
+:root[data-theme="moonlight"] .sidebar,
+:root[data-theme="moonlight"] .app-sidebar {
   background: #f8fafc !important;
   border-right: 1px solid #cbd5e1 !important;
 }
@@ -1384,11 +1385,16 @@ button.primary:hover:not(:disabled),
 }
 :root[data-theme="moonlight"] .panel,
 :root[data-theme="moonlight"] .card,
+:root[data-theme="moonlight"] .bot-card,
 :root[data-theme="moonlight"] .stat-card,
 :root[data-theme="moonlight"] .kpi-card,
 :root[data-theme="moonlight"] .quick-action-card,
 :root[data-theme="moonlight"] .table-card,
+:root[data-theme="moonlight"] .user-table-wrap,
 :root[data-theme="moonlight"] .modal-card,
+:root[data-theme="moonlight"] .login-card,
+:root[data-theme="moonlight"] .kbot-portal-wrapper,
+:root[data-theme="moonlight"] .app-footer,
 :root[data-theme="moonlight"] .user-detail-panel,
 :root[data-theme="moonlight"] .fleet-welcome-header,
 :root[data-theme="moonlight"] .fleet-resource-bar,
@@ -1509,15 +1515,10 @@ button.primary:hover:not(:disabled),
   color: #475569 !important;
 }
 :root[data-theme="moonlight"] .tab-btn.active {
-  background: #ffffff !important;
-  color: #0f172a !important;
-  border: 1px solid #cbd5e1 !important;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08) !important;
-}
-:root[data-theme="moonlight"] .tab-btn.active {
   background: rgba(124, 58, 237, 0.14) !important;
   color: #5b21b6 !important;
-  border-color: rgba(124, 58, 237, 0.38) !important;
+  border: 1px solid rgba(124, 58, 237, 0.38) !important;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08) !important;
 }
 :root[data-theme="moonlight"] .bot-mini-btn {
   background: #f4f1fc !important;
