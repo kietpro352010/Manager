@@ -111,8 +111,9 @@ function applyDashboardCosmicMode(mode) {
     'cosmic-mode-vivid', 'cosmic-mode-subtle'
   );
   document.body.classList.add('theme-' + theme);
-  const bgOff = isDashboardBgEffectsDisabled();
-  document.body.classList.toggle('cosmic-mode-off', bgOff);
+  const bgOff = typeof isDashboardBgEffectsDisabled === 'function' ? isDashboardBgEffectsDisabled() : false;
+  if (bgOff) document.body.classList.add('cosmic-mode-off');
+  else document.body.classList.remove('cosmic-mode-off');
   const bgBtn = document.getElementById('bgEffectsToggleBtn');
   if (bgBtn) {
     bgBtn.textContent = bgOff ? '✨ Bật hiệu ứng nền' : '💤 Tắt hiệu ứng nền';

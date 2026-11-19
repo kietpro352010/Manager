@@ -615,7 +615,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         return res.status(401).json({ ok: false, error: 'Tên đăng nhập hoặc mật khẩu không chính xác.' });
       }
 
-      const passMatch = verifyUserPassword(cleanPassword, user.password);
+      const passMatch = verifyUserPassword(cleanPassword, user.password || user._rawEncryptedPassword);
       if (!passMatch) {
         recordFailedAttempt(clientIp, cleanUsername);
         return res.status(401).json({ ok: false, error: 'Tên đăng nhập hoặc mật khẩu không chính xác.' });
@@ -867,7 +867,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       }
 
       const user = await store.getUser(session.username);
-      if (!user || !verifyUserPassword(currentPassword, user.password)) {
+      if (!user || !verifyUserPassword(currentPassword, user.password || user._rawEncryptedPassword)) {
         return res.status(401).json({ ok: false, error: 'Mật khẩu hiện tại không chính xác.' });
       }
 

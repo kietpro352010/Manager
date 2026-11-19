@@ -965,12 +965,12 @@ function scheduleNextManagerPoll() {
     clearTimeout(managerPollTimerId);
     managerPollTimerId = null;
   }
-  if (!currentUser || document.hidden) return; // BW-02: pause polling completely while tab is hidden
+  if (!currentUser) return;
   const isIdle = Date.now() - lastUserActivityAt > 90 * 1000;
-  const delay = isIdle ? 20000 : 8000; // 8s active poll, 20s idle (>90s), 0 while hidden
+  const delay = document.hidden ? 30000 : (isIdle ? 20000 : 5000); // 5s active poll, 20s idle (>90s), 30s guard while hidden
   managerPollTimerId = setTimeout(async () => {
     managerPollTimerId = null;
-    if (document.hidden || !currentUser) return;
+    if (!currentUser || document.hidden) return; // BW-02: pause polling completely while tab is hidden
     try {
       const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
       if (isOnline && !routeResolving && currentUser) {

@@ -27,6 +27,12 @@ const SESSIONS = 'manager_sessions';
 const USER_ACCESS_COLUMNS = [
   'id', 'username', 'role', 'status', 'is_permanent', 'expires_at',
   'plan_name', 'note', 'allow_account_change', 'lock_reason',
+  'bot_count', 'bot_aliases', 'assigned_bot_ids', 'created_at', 'updated_at'
+].join(',');
+
+const USER_LIST_ACCESS_COLUMNS = [
+  'id', 'username', 'role', 'status', 'is_permanent', 'expires_at',
+  'plan_name', 'note', 'allow_account_change', 'lock_reason',
   'bot_count', 'bot_aliases', 'assigned_bot_ids',
   'registration_ip', 'device_fingerprint', 'created_at', 'updated_at'
 ].join(',');
@@ -349,8 +355,6 @@ class SupabaseDashboardStore {
         lockReason: userData.lock_reason || '',
         botCount: userData.bot_count || 1,
         botAliases: userData.bot_aliases || {},
-        registrationIp: userData.registration_ip || '',
-        deviceFingerprint: userData.device_fingerprint || '',
         workerIds: assigned,
         createdAt: userData.created_at,
         updatedAt: userData.updated_at
@@ -378,7 +382,7 @@ class SupabaseDashboardStore {
 
     // 1. Thử đọc từ manager_users
     try {
-      const { data: users, error } = await this.client.from(USERS).select(USER_ACCESS_COLUMNS).order('created_at', { ascending: false });
+      const { data: users, error } = await this.client.from(USERS).select(USER_LIST_ACCESS_COLUMNS).order('created_at', { ascending: false });
       if (!error && Array.isArray(users) && users.length > 0) {
         const result = users.map((u) => ({
           userId: u.id || ('usr_' + u.username),

@@ -1,5 +1,5 @@
 // ============================================================================
-// V11.7 COMMERCIAL ENTERPRISE EDITION — ROUTER & USER MANAGEMENT CONTROLLER
+// V12.1 COMMERCIAL ENTERPRISE EDITION — ROUTER & USER MANAGEMENT CONTROLLER
 // ============================================================================
 
 let currentEditingUserId = null;
@@ -88,7 +88,7 @@ function fitGlobalProfileDropdownHeight() {
   const btnBottom = btn && typeof btn.getBoundingClientRect === 'function'
     ? btn.getBoundingClientRect().bottom
     : 60;
-  const maxHeightPx = Math.max(120, Math.floor(viewportH - btnBottom - 16));
+  const maxHeightPx = Math.max(200, Math.floor(viewportH - btnBottom - 16));
   dropdown.style.maxHeight = maxHeightPx + 'px';
   dropdown.style.overflowY = 'auto';
   dropdown.style.overflowX = 'hidden';

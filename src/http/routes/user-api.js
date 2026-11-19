@@ -546,6 +546,9 @@ function createUserApi({
         const copy = { ...b };
         delete copy.lastSeen;
         delete copy.connectedAt;
+        copy._rev = registry.workerStateRev
+          ? (registry.workerStateRev.get(String(b.workerId || b.id || '').toLowerCase()) || 0)
+          : 0;
         copy.uptime = Math.floor(Number(copy.uptime || 0) / 60);
         copy.uptimeSeconds = copy.uptime;
         copy.ping = Math.round(Number(copy.ping || 0) / 25) * 25;
@@ -1538,7 +1541,7 @@ function createUserApi({
     return {
       ok: true,
       service: 'KingMC AFK Bot Cloud 24/7',
-      version: '11.8-Modular-Enterprise',
+      version: '12.1-Modular-Enterprise',
       uptime: Math.floor(process.uptime()),
       totalBots: bots.length,
       onlineBots: onlineCount,

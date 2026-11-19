@@ -238,17 +238,30 @@
    UNIFIED RESPONSIVE BREAKPOINTS & COARSE POINTER TARGETS
    ========================================================================== */
 @media (max-width: 920px) {
+  .login-gate {
+    align-items: flex-start;
+    overflow-y: auto;
+    padding: 14px 10px max(24px, env(safe-area-inset-bottom, 24px));
+  }
   .kbot-portal-wrapper {
     flex-direction: column;
     max-width: 560px;
+    margin: 0 auto;
+  }
+  .kbot-login-col {
+    order: -1;
+    padding: 22px 18px;
+    border-bottom: 1px solid rgba(56, 189, 248, 0.14);
+  }
+  .kbot-login-col .login-card {
+    max-width: 100% !important;
+    width: 100% !important;
+    padding: 8px 4px !important;
   }
   .kbot-landing-col {
     border-right: none;
-    border-bottom: 1px solid rgba(56, 189, 248, 0.12);
-    padding: 24px 20px;
-  }
-  .kbot-login-col {
-    padding: 24px 20px;
+    border-bottom: none;
+    padding: 22px 18px;
   }
 }
 
@@ -279,12 +292,16 @@
     padding: 12px 12px 44px;
   }
   .global-header {
-    padding: 10px 12px;
+    padding: 8px 12px !important;
     gap: 8px;
+    flex-wrap: nowrap;
+    justify-content: space-between;
   }
   .global-header-left {
-    width: 100%;
-    justify-content: space-between;
+    width: auto;
+    flex: 0 1 auto;
+    min-width: 0;
+    justify-content: flex-start;
     gap: 8px;
   }
   .global-nav-pills {
@@ -306,20 +323,25 @@
     font-size: 12px !important;
   }
   .global-header-right {
-    width: 100%;
+    width: auto;
+    flex: 0 0 auto;
     justify-content: flex-end;
-    gap: 8px;
+    gap: 6px;
   }
   .user-profile-dropdown {
     right: 0;
     max-width: calc(100dvw - 24px);
   }
   .fleet-welcome-header {
-    padding: 16px;
+    padding: 14px;
     border-radius: 16px;
+    gap: 12px;
+  }
+  .fleet-welcome-title-wrap {
+    gap: 6px;
   }
   .fleet-welcome-title {
-    font-size: 17px;
+    font-size: 16.5px;
   }
   .fleet-welcome-actions {
     width: 100%;
@@ -343,6 +365,7 @@
   }
   .fleet-toolbar {
     padding: 10px 12px;
+    gap: 8px;
   }
   .fleet-toolbar-primary,
   .fleet-toolbar-tools {
@@ -351,6 +374,24 @@
   .fleet-search-filter-row {
     flex-direction: column;
     align-items: stretch;
+    gap: 8px;
+  }
+  .filter-tabs {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    width: 100%;
+    gap: 6px;
+    padding: 5px;
+  }
+  .filter-tabs::-webkit-scrollbar {
+    display: none;
+  }
+  .filter-tabs .tab-btn {
+    flex: 0 0 auto;
+    white-space: nowrap;
   }
   .fleet-search-sort-wrap {
     width: 100%;
@@ -376,7 +417,7 @@
   .chip,
   .cosmic-toggle-pill,
   .user-profile-btn {
-    min-height: 44px;
+    min-height: 42px;
   }
   .controls button {
     flex: 1 1 calc(50% - 8px);
@@ -384,8 +425,25 @@
     font-size: 13px;
   }
   .bot-card-topbar {
+    flex-wrap: nowrap;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .bot-ingame-row {
     flex-wrap: wrap;
     gap: 6px;
+  }
+  .bot-ip-pill {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .detail-header {
+    gap: 10px;
+  }
+  .detail-hud {
+    width: 100%;
+    gap: 6px !important;
   }
   .schedule-row-top {
     grid-template-columns: 32px minmax(0, 1fr);
@@ -395,17 +453,30 @@
   }
   .schedule-inline .action-select,
   .schedule-inline .time-input,
-  .schedule-inline .minutes-input {
+  .schedule-inline .minutes-input,
+  .schedule-inline input[data-field="times"] {
     flex: 1 1 90px;
-    width: auto;
+    width: auto !important;
+    min-width: 0;
+  }
+  #detailRemoteGuiContent {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
   }
   #detailRemoteGuiSlots {
-    min-width: 340px;
+    min-width: 0 !important;
+    width: 100%;
+    max-width: 100% !important;
+    padding: 8px !important;
+    gap: 4px !important;
+    grid-template-columns: repeat(9, minmax(28px, 1fr)) !important;
   }
   .slot-grid {
-    grid-template-columns: repeat(9, minmax(34px, 1fr));
+    grid-template-columns: repeat(9, minmax(28px, 1fr));
+    gap: 4px;
     overflow-x: auto;
-    padding-bottom: 6px;
+    padding-bottom: 4px;
   }
   .user-table th,
   .user-table td {
@@ -413,7 +484,7 @@
     font-size: 12px;
   }
   .modal {
-    padding: 10px;
+    padding: 8px;
     align-items: flex-end;
   }
   .modal-card {
@@ -421,10 +492,10 @@
     max-width: 100% !important;
     max-height: 92dvh;
     border-radius: 20px 20px 14px 14px;
-    padding: 18px 16px;
+    padding: 18px 14px max(18px, env(safe-area-inset-bottom, 18px));
   }
   .log, .chat-log {
-    height: 300px;
+    height: 280px;
     font-size: 11.5px;
   }
   .panel {
@@ -432,7 +503,12 @@
   }
   .info,
   .inventory-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .info-item.location-info,
+  #detailStatusPanel .info-item:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
   }
   .summary-grid {
     grid-template-columns: 1fr;
@@ -460,6 +536,94 @@
   .kbot-commitments-box {
     grid-template-columns: 1fr;
     gap: 8px;
+  }
+  .fleet-welcome-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    width: 100%;
+  }
+  .fleet-welcome-actions > button {
+    width: 100%;
+    justify-content: center;
+  }
+  .fleet-welcome-actions > button:first-child {
+    grid-column: 1 / -1;
+  }
+  .fleet-toolbar-primary,
+  .fleet-toolbar-tools {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 7px !important;
+    width: 100%;
+  }
+  .fleet-toolbar-primary > button,
+  .fleet-toolbar-tools > button {
+    width: 100%;
+    justify-content: center;
+    margin: 0 !important;
+  }
+  .fleet-toolbar-primary > button:first-child,
+  .fleet-toolbar-tools > button:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+  }
+  #detailChatPanel .inline {
+    flex-wrap: wrap;
+  }
+  #detailChatPanel #detailMessageInput {
+    flex: 1 1 100% !important;
+    width: 100% !important;
+  }
+  #detailChatPanel .inline > button {
+    flex: 1 1 calc(50% - 6px);
+    justify-content: center;
+  }
+  #detailAccountPanel form > div[style*="display:flex"],
+  #accountExpiredOverlay div[style*="display:flex"],
+  #link4mSettingsModal div[style*="display:flex"] {
+    flex-wrap: wrap !important;
+  }
+  #detailAccountPanel form > div[style*="display:flex"] > button {
+    flex: 1 1 calc(50% - 6px);
+    justify-content: center;
+  }
+  #userEditModal div[style*="grid-template-columns:1fr 1fr"],
+  #announcementAdminModal div[style*="grid-template-columns:1fr 1fr"],
+  #detailProxyPanel div[style*="grid-template-columns:2fr 1fr"],
+  #detailProxyPanel div[style*="grid-template-columns:1fr 1fr"] {
+    grid-template-columns: 1fr !important;
+  }
+  #subPanelKeys .create-key-card > div[style*="display:flex"] {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px !important;
+    align-items: stretch !important;
+  }
+  #subPanelKeys .create-key-card > div[style*="display:flex"] > div > input,
+  #subPanelKeys .create-key-card > div[style*="display:flex"] > div > select {
+    width: 100% !important;
+  }
+  #subPanelKeys .create-key-card > div[style*="display:flex"] > button {
+    grid-column: 1 / -1;
+    width: 100%;
+    justify-content: center;
+  }
+  #userManagementPage .full-page-header {
+    flex-direction: column;
+    align-items: stretch !important;
+    gap: 10px;
+  }
+  #userManagementPage .full-page-header > div:last-child {
+    width: 100%;
+  }
+  #userManagementPage .full-page-header > div:last-child > div[style*="display:inline-flex"] {
+    flex: 1 1 100%;
+    justify-content: space-between;
+    flex-wrap: wrap;
+  }
+  #userManagementPage .full-page-header > div:last-child > button {
+    flex: 1 1 calc(50% - 6px);
+    justify-content: center;
   }
 }
 
@@ -541,28 +705,50 @@
     font-size: 11px;
   }
   .card-quick-actions {
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 6px;
   }
   .card-quick-actions button {
-    flex: 1 1 calc(50% - 6px);
-    min-height: 44px;
-    font-size: 12px;
+    width: 100%;
+    min-width: 0;
+    min-height: 40px;
+    padding: 8px 6px;
+    font-size: 11.5px;
+    justify-content: center;
   }
   .controls button {
-    flex: 1 1 100%;
-    min-height: 44px;
+    flex: 1 1 calc(50% - 6px);
+    min-height: 42px;
     font-size: 12.5px;
   }
   .nav-pill-btn {
-    min-height: 44px;
+    min-height: 42px;
     padding: 8px 12px !important;
     font-size: 12px !important;
   }
   .bot-mini-btn {
-    min-height: 44px;
-    min-width: 44px;
-    padding: 6px 10px;
+    min-height: 36px;
+    min-width: 36px;
+    padding: 5px 9px;
+    font-size: 11px;
+  }
+  .equipment-row {
+    grid-template-columns: repeat(5, minmax(42px, 1fr));
+    gap: 5px;
+  }
+  .inventory-slot {
+    padding: 2px;
+    border-radius: 7px;
+  }
+  .inventory-slot .slot-icon-img ~ .slot-name {
+    display: none;
+  }
+  .inventory-slot .slot-count {
+    font-size: 9.5px;
+    padding: 0 3px;
+    bottom: 2px;
+    right: 2px;
   }
   .kpi-grid {
     gap: 8px;
@@ -610,13 +796,25 @@
   }
   .kbot-landing-col,
   .kbot-login-col {
-    padding: 20px 14px;
+    padding: 18px 14px;
   }
   .toast {
     left: 12px;
     right: 12px;
     bottom: 12px;
     max-width: none;
+  }
+}
+
+@media (max-width: 350px) {
+  .info,
+  .inventory-grid,
+  .kpi-grid,
+  .fleet-resource-bar {
+    grid-template-columns: 1fr;
+  }
+  .card-quick-actions {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1360,10 +1558,34 @@ button.primary:hover:not(:disabled),
 
 @media (max-width: 640px) {
   .global-header {
-    padding: 10px 12px !important;
+    padding: 8px 12px !important;
+    flex-wrap: nowrap !important;
   }
-  #cosmicModeToggleBtn {
-    display: none;
+  #cosmicModeToggleBtn,
+  #globalUserRoleBadge,
+  .global-header-right .ram-pill {
+    display: none !important;
+  }
+  .user-profile-btn {
+    padding: 5px 10px !important;
+    max-width: 170px;
+  }
+  #globalUserProfileName {
+    display: inline-block;
+    max-width: 98px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: bottom;
+  }
+  .app-footer {
+    padding: 14px 12px 20px !important;
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .footer-recent-wrap {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }
 

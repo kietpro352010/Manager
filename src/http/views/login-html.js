@@ -1128,12 +1128,12 @@ html, body {
    ========================================================= */
 @media (max-width: 960px) {
   .page-shell {
-    padding: 16px 16px 28px;
-    gap: 18px;
+    padding: 14px 14px max(28px, env(safe-area-inset-bottom, 28px));
+    gap: 16px;
   }
   .split-grid {
     grid-template-columns: 1fr;
-    gap: 20px;
+    gap: 18px;
     align-items: stretch;
   }
   .auth-column {
@@ -1143,24 +1143,58 @@ html, body {
     order: 2;
   }
   .hero-diorama {
-    min-height: 170px;
+    min-height: 160px;
   }
   .feature-grid {
     grid-template-columns: 1fr;
+  }
+  .field-input {
+    font-size: 16px;
   }
 }
 
 @media (max-width: 520px) {
   .topbar {
+    flex-direction: column;
+    align-items: stretch;
     gap: 10px;
+    padding: 12px;
+  }
+  .topbar-controls {
+    width: 100%;
+    justify-content: stretch;
+  }
+  .theme-switcher {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+    gap: 4px;
   }
   .theme-pill-btn {
-    padding: 7px 9px;
+    padding: 7px 8px;
     min-height: 36px;
     font-size: 11.5px;
+    text-align: center;
+    justify-content: center;
   }
   .auth-card {
-    padding: 20px 16px 18px;
+    padding: 18px 14px 16px;
+    border-radius: 16px;
+  }
+  .field-label {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+  .hero-panel {
+    padding: 18px 14px;
+    border-radius: 16px;
+  }
+  .hero-heading {
+    font-size: clamp(1.35rem, 6vw, 1.75rem);
+  }
+  .hero-metrics {
+    grid-template-columns: 1fr;
+    gap: 8px;
   }
   .primary-cta,
   .field-input,
@@ -1201,7 +1235,7 @@ html, body {
       <div class="brand-meta">
         <div class="brand-title-row">
           <span class="brand-name">KBOT Manager</span>
-          <span class="brand-version">V11.8</span>
+          <span class="brand-version">V12.1</span>
         </div>
         <span class="brand-sub">Nền Tảng Điều Khiển Minecraft Bot Thương Mại</span>
       </div>
@@ -1492,11 +1526,11 @@ html, body {
                 <span>Mã xác thực chống Bot (Captcha)</span>
                 <span class="field-hint-inline">Bắt buộc</span>
               </label>
-              <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
-                <div id="regCaptchaImgContainer" style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:4px 8px;min-width:140px;min-height:48px;display:flex;align-items:center;justify-content:center;box-shadow:var(--shadow-sm);cursor:pointer;" title="Nhấn để đổi mã khác">
-                  <span style="font-size:12px;color:var(--muted);">Đang tải Captcha...</span>
+              <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
+                <div id="regCaptchaImgContainer" style="background:var(--surface-input);border:1px solid var(--border-subtle);border-radius:8px;padding:4px 8px;min-width:136px;min-height:46px;flex:1 1 140px;display:flex;align-items:center;justify-content:center;cursor:pointer;" title="Nhấn để đổi mã khác">
+                  <span style="font-size:12px;color:var(--text-muted);">Đang tải Captcha...</span>
                 </div>
-                <button type="button" id="regCaptchaRefreshBtn" class="btn-secondary" style="padding:8px 12px;font-size:12px;border-radius:6px;display:flex;align-items:center;gap:4px;cursor:pointer;background:var(--surface-soft);border:1px solid var(--border);color:var(--text);" title="Đổi mã xác thực khác">
+                <button type="button" id="regCaptchaRefreshBtn" class="btn-secondary" style="padding:10px 14px;min-height:46px;font-size:12px;font-weight:600;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;gap:4px;cursor:pointer;background:var(--surface-input);border:1px solid var(--border-subtle);color:var(--text-primary);flex:0 0 auto;" title="Đổi mã xác thực khác">
                   Đổi mã
                 </button>
               </div>
