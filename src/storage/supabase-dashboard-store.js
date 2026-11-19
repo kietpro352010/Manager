@@ -706,7 +706,7 @@ class SupabaseDashboardStore {
       if (this.client) {
         const { data, error } = await this.client
           .from('manager_ip_whitelist')
-          .select('*')
+          .select('ip, reason, created_by, created_at')
           .order('created_at', { ascending: false });
         if (!error && Array.isArray(data)) return data;
       }
@@ -1413,11 +1413,12 @@ class SupabaseDashboardStore {
 
     // 2. Fallback to manager_users.discord_user_id
     try {
-      const { data, error } = await this.client.from(USERS)
-        .select('*')
-        .eq('discord_user_id', dId)
-        .maybeSingle();
-      if (!error && data) {
+      let res = await this.client.from(USERS).select(USER_ACCESS_COLUMNS).eq('discord_user_id', dId).maybeSingle();
+      if (res?.error && isMissingSchemaError(res.error)) {
+        res = await this.client.from(USERS).select('*').eq('discord_user_id', dId).maybeSingle();
+      }
+      const data = res?.data;
+      if (!res?.error && data) {
         const assignedIds = Array.isArray(data.assigned_bot_ids)
           ? data.assigned_bot_ids
           : (typeof data.assigned_bot_ids === 'string' ? JSON.parse(data.assigned_bot_ids || '[]') : []);
@@ -1673,6 +1674,11 @@ class SupabaseDashboardStore {
   }
 
   async listAudit(limit = 100) {
+    const parseAuditDetails = (val) => {
+      if (!val) return null;
+      if (typeof val === 'object') return val;
+      try { return JSON.parse(val); } catch (_) { return val; }
+    };
     if (this.adapter && typeof this.adapter.fetchAuditLogs === 'function') {
       const res = await this.adapter.fetchAuditLogs({ limit });
       const rows = Array.isArray(res?.logs) ? res.logs : (Array.isArray(res?.entries) ? res.entries : null);
@@ -1682,7 +1688,7 @@ class SupabaseDashboardStore {
           actorId: e.actor?.username || e.actor_username || 'system',
           action: e.action,
           target: typeof e.target === 'string' ? e.target : JSON.stringify(e.target || ''),
-          details: e.details,
+          details: parseAuditDetails(e.details),
           createdAt: e.timestamp || e.created_at
         }));
       }
@@ -1694,7 +1700,7 @@ class SupabaseDashboardStore {
       actorId: row.actor_username ?? row.actor_id,
       action: row.action,
       target: typeof row.target === 'string' ? row.target : JSON.stringify(row.target || ''),
-      details: row.details,
+      details: parseAuditDetails(row.details),
       createdAt: row.timestamp ?? row.created_at
     }));
   }

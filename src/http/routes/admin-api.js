@@ -924,6 +924,11 @@ function createAdminApi({
         timestamp: new Date().toISOString()
       };
       await store.saveBackup(name, payload);
+      await store.addAudit({
+        action: 'ADMIN_CREATE_BACKUP',
+        actorId: req.managerAuthSession.username,
+        details: { filename: name }
+      });
       return res.json({ ok: true, message: 'Đã tạo bản sao lưu thành công.', filename: name, backup: { filename: name } });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
@@ -974,6 +979,11 @@ function createAdminApi({
         }
       }
 
+      await store.addAudit({
+        action: 'ADMIN_RESTORE_BACKUP',
+        actorId: req.managerAuthSession.username,
+        details: { filename }
+      });
       return res.json({ ok: true, message: 'Đã khôi phục dữ liệu từ bản sao lưu.' });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
@@ -998,6 +1008,11 @@ function createAdminApi({
         }
       }
 
+      await store.addAudit({
+        action: 'ADMIN_DELETE_BACKUP',
+        actorId: req.managerAuthSession.username,
+        details: { filename }
+      });
       return res.json({ ok: true, message: 'Đã xóa bản sao lưu.' });
     } catch (error) {
       if (error.status === 404 || error.statusCode === 404 || /not found|không tìm thấy/i.test(error.message)) {
