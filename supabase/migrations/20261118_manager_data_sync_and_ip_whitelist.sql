@@ -10,6 +10,8 @@ ALTER TABLE public.manager_ip_whitelist ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.manager_ip_whitelist FROM PUBLIC, anon, authenticated;
 GRANT ALL ON TABLE public.manager_ip_whitelist TO service_role;
 
+CREATE INDEX IF NOT EXISTS idx_users_fingerprint ON public.manager_users(device_fingerprint);
+
 -- Recover trial worker IDs from the durable registration field.
 UPDATE public.manager_users
 SET assigned_bot_ids = jsonb_build_array(trial_bot_id),

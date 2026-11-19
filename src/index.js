@@ -137,13 +137,26 @@ async function main() {
     registry.setAdminPassword(savedAdminCreds.passwordHash);
   }
   const savedAnnouncement = await accessStore.getSetting('system_announcement');
-  if (savedAnnouncement?.message) {
-    accessStore.cachedAnnouncement = savedAnnouncement.message;
+  if (savedAnnouncement) {
+    accessStore.cachedAnnouncement = (typeof savedAnnouncement === 'object')
+      ? savedAnnouncement
+      : { enabled: Boolean(savedAnnouncement), content: String(savedAnnouncement), title: '', mode: 'banner' };
+  }
+  const savedWebhook = await accessStore.getSetting('webhook_settings').catch(() => null);
+  if (savedWebhook && typeof savedWebhook === 'object' && typeof adminNotifier.configureWebhook === 'function') {
+    adminNotifier.configureWebhook(savedWebhook);
   }
 
   const broker = new CommandBroker({ registry, commandStore, config: runtimeConfig, logger });
   const fleetOperations = new FleetOperations({ registry, broker, renderApi, logger });
-  const entitlementService = new EntitlementService({ store: accessStore, registry, accessControl, userLock });
+  const entitlementService = new EntitlementService({
+    store: accessStore,
+    registry,
+    accessControl,
+    userLock,
+    logger,
+    config: runtimeConfig
+  });
   const link4mService = new Link4mService({ store: accessStore, accessControl, userLock, config: runtimeConfig, logger });
   await link4mService.initialize().catch((err) => {
     logger?.error?.('link4m_initialization_failed', {
@@ -187,7 +200,9 @@ async function main() {
     try {
       await Promise.allSettled([
         accessStore.runMaintenanceCleanup?.(),
-        commandStore.runMaintenanceCleanup?.()
+        commandStore.runMaintenanceCleanup?.(),
+        accessStore.adapter?.pruneHistoricalData?.(),
+        accessStore.adapter?.pruneBackups?.(20)
       ]);
     } catch (err) {
       logger.warn('maintenance_cleanup_failed', { error: err.message });
@@ -238,6 +253,9 @@ async function main() {
     port: runtimeConfig.port,
     publicUrlConfigured: Boolean(integrationSettings.publicBaseUrl)
   });
+
+  // Start Wispbyte keepalive independently of Discord gateway so web-only / Discord outages still keep panels alive
+  wispbyteKeepAlive.start({ discordClient: client, adminRoleId: accessControl.adminRoleId });
 
   // 7. Discord Gateway & Slash Commands
   if (config.discordToken) {

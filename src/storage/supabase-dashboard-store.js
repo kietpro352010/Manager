@@ -27,13 +27,16 @@ const SESSIONS = 'manager_sessions';
 const USER_ACCESS_COLUMNS = [
   'id', 'username', 'role', 'status', 'is_permanent', 'expires_at',
   'plan_name', 'note', 'allow_account_change', 'lock_reason',
-  'bot_count', 'bot_aliases', 'assigned_bot_ids', 'created_at', 'updated_at'
+  'bot_count', 'bot_aliases', 'assigned_bot_ids',
+  'registration_ip', 'device_fingerprint', 'created_at', 'updated_at'
 ].join(',');
 
 const ACCESS_FIELDS = {
   userId: 'user_id', role: 'role', status: 'status', isPermanent: 'is_permanent', expiresAt: 'expires_at',
   planName: 'plan_name', note: 'note', username: 'username', createdAt: 'created_at', updatedAt: 'updated_at',
   createdBy: 'created_by', updatedBy: 'updated_by',
+  allowAccountChange: 'allow_account_change', lockReason: 'lock_reason',
+  botAliases: 'bot_aliases', botCount: 'bot_count',
   registrationIp: 'registration_ip', deviceFingerprint: 'device_fingerprint', registrationUserAgent: 'registration_user_agent'
 };
 
@@ -117,14 +120,20 @@ function mapLinkFrom(row) {
   };
 }
 
+function quotePostgrestValue(val) {
+  const s = String(val ?? '').replace(/[\u0000-\u001f\u007f]/g, '');
+  if (/^[a-zA-Z0-9_:-]+$/.test(s)) return s;
+  return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
 function applyLinkUserFilter(query, userId) {
   const clean = String(userId || '').trim();
   const lower = clean.toLowerCase();
   const bare = lower.replace(/^usr_/, '');
-  const filters = [`user_id.eq.${clean}`];
-  if (lower && lower !== clean) filters.push(`user_id.eq.${lower}`);
-  if (lower) filters.push(`username.eq.${lower}`);
-  if (bare && bare !== lower) filters.push(`username.eq.${bare}`);
+  const filters = [`user_id.eq.${quotePostgrestValue(clean)}`];
+  if (lower && lower !== clean) filters.push(`user_id.eq.${quotePostgrestValue(lower)}`);
+  if (lower) filters.push(`username.eq.${quotePostgrestValue(lower)}`);
+  if (bare && bare !== lower) filters.push(`username.eq.${quotePostgrestValue(bare)}`);
   if (typeof query?.or === 'function' && filters.length > 1) {
     return query.or(filters.join(','));
   }
@@ -169,7 +178,33 @@ class SupabaseDashboardStore {
   }
 
   setCached(key, data, ttlMs = 15000) {
+    if (this.cache.size >= 1000 && !this.cache.has(key)) {
+      const now = Date.now();
+      for (const [k, v] of this.cache.entries()) {
+        if (!v || now > v.expiresAt) this.cache.delete(k);
+      }
+      while (this.cache.size >= 1000) {
+        const oldest = this.cache.keys().next().value;
+        if (oldest === undefined) break;
+        this.cache.delete(oldest);
+      }
+    }
     this.cache.set(key, { data, expiresAt: Date.now() + ttlMs });
+  }
+
+  invalidateUserCache(userId, username = '') {
+    this.cache.delete('access:all');
+    const cleanId = String(userId || '').trim();
+    const cleanUser = String(username || '').trim().toLowerCase();
+    if (cleanId) {
+      this.cache.delete(`access:${cleanId}`);
+      this.cache.delete(`user:${cleanId.toLowerCase()}`);
+    }
+    if (cleanUser) {
+      this.cache.delete(`access:${cleanUser}`);
+      this.cache.delete(`access:usr_${cleanUser}`);
+      this.cache.delete(`user:${cleanUser}`);
+    }
   }
 
   invalidateCache() {
@@ -232,8 +267,8 @@ class SupabaseDashboardStore {
     try {
       const q = this.client.from(USERS).select(columns);
       if (typeof q.or === 'function') {
-        const filters = [`id.eq.${clean}`, `username.eq.${lower}`];
-        if (bare && bare !== lower) filters.push(`username.eq.${bare}`);
+        const filters = [`id.eq.${quotePostgrestValue(clean)}`, `username.eq.${quotePostgrestValue(lower)}`];
+        if (bare && bare !== lower) filters.push(`username.eq.${quotePostgrestValue(bare)}`);
         const { data, error } = await q.or(filters.join(',')).maybeSingle();
         if (!error && data) return data;
       }
@@ -250,12 +285,12 @@ class SupabaseDashboardStore {
     return null;
   }
 
-  async assignedWorkerIds(userId) {
+  async assignedWorkerIds(userId, knownUserRow = null) {
     const clean = String(userId || '').trim();
     if (!clean) return [];
     const lower = clean.toLowerCase();
     const bare = lower.startsWith('usr_') ? lower.slice(4) : lower;
-    const userRow = await this.resolveUserRow(clean);
+    const userRow = knownUserRow || await this.resolveUserRow(clean, 'id,username,assigned_bot_ids');
     const candidates = [...new Set([clean, userRow?.id, userRow?.username, lower, bare].filter(Boolean))];
 
     try {
@@ -298,8 +333,9 @@ class SupabaseDashboardStore {
     // 1. Thử đọc từ manager_users (id hoặc username)
     const userData = await this.resolveUserRow(userId, USER_ACCESS_COLUMNS);
     if (userData) {
-      const rawAssigned = Array.isArray(userData.assigned_bot_ids) ? userData.assigned_bot_ids.map(String) : [];
-      const assigned = rawAssigned.length > 0 ? rawAssigned : await this.assignedWorkerIds(userData.id || userId);
+      const hasAssignedArray = Array.isArray(userData.assigned_bot_ids);
+      const rawAssigned = hasAssignedArray ? userData.assigned_bot_ids.map(String) : [];
+      const assigned = hasAssignedArray ? rawAssigned : await this.assignedWorkerIds(userData.id || userId, userData);
       const result = {
         userId: userData.id || ('usr_' + userData.username),
         username: userData.username,
@@ -313,6 +349,8 @@ class SupabaseDashboardStore {
         lockReason: userData.lock_reason || '',
         botCount: userData.bot_count || 1,
         botAliases: userData.bot_aliases || {},
+        registrationIp: userData.registration_ip || '',
+        deviceFingerprint: userData.device_fingerprint || '',
         workerIds: assigned,
         createdAt: userData.created_at,
         updatedAt: userData.updated_at
@@ -355,6 +393,8 @@ class SupabaseDashboardStore {
           lockReason: u.lock_reason || '',
           botCount: u.bot_count || 1,
           botAliases: u.bot_aliases || {},
+          registrationIp: u.registration_ip || '',
+          deviceFingerprint: u.device_fingerprint || '',
           workerIds: Array.isArray(u.assigned_bot_ids) ? u.assigned_bot_ids.map(String) : [],
           createdAt: u.created_at,
           updatedAt: u.updated_at
@@ -429,11 +469,23 @@ class SupabaseDashboardStore {
         plan_name: String(fields.planName || existingUser?.plan_name || 'Gói mặc định'),
         assigned_bot_ids: assigned,
         bot_count: Math.max(1, Number(fields.botCount || existingUser?.bot_count || assigned.length || 1)),
+        bot_aliases: (fields.botAliases && typeof fields.botAliases === 'object')
+          ? fields.botAliases
+          : ((existingUser?.bot_aliases && typeof existingUser.bot_aliases === 'object') ? existingUser.bot_aliases : {}),
         allow_account_change: fields.allowAccountChange !== undefined ? (fields.allowAccountChange !== false) : (existingUser?.allow_account_change !== false),
         lock_reason: String(fields.lockReason !== undefined ? fields.lockReason : (existingUser?.lock_reason || '')),
         note: String(fields.note !== undefined ? fields.note : (existingUser?.note || '')),
         updated_at: new Date().toISOString()
       };
+      if (fields.registrationIp !== undefined || existingUser?.registration_ip !== undefined) {
+        userRow.registration_ip = fields.registrationIp !== undefined ? (fields.registrationIp || null) : (existingUser?.registration_ip || null);
+      }
+      if (fields.deviceFingerprint !== undefined || existingUser?.device_fingerprint !== undefined) {
+        userRow.device_fingerprint = fields.deviceFingerprint !== undefined ? (fields.deviceFingerprint || null) : (existingUser?.device_fingerprint || null);
+      }
+      if (fields.registrationUserAgent !== undefined || existingUser?.registration_user_agent !== undefined) {
+        userRow.registration_user_agent = fields.registrationUserAgent !== undefined ? (fields.registrationUserAgent || null) : (existingUser?.registration_user_agent || null);
+      }
       if (fields.isTrial !== undefined || existingUser?.is_trial !== undefined) {
         userRow.is_trial = fields.isTrial !== undefined ? Boolean(fields.isTrial) : Boolean(existingUser?.is_trial);
       }
@@ -483,6 +535,10 @@ class SupabaseDashboardStore {
             isPermanent: rpcRow?.is_permanent !== undefined ? Boolean(rpcRow.is_permanent) : Boolean(userRow.is_permanent),
             expiresAt: rpcRow?.expires_at !== undefined ? rpcRow.expires_at : userRow.expires_at,
             planName: rpcRow?.plan_name || userRow.plan_name,
+            allowAccountChange: rpcRow?.allow_account_change !== undefined ? (rpcRow.allow_account_change !== false) : userRow.allow_account_change,
+            lockReason: rpcRow?.lock_reason !== undefined ? String(rpcRow.lock_reason || '') : userRow.lock_reason,
+            botAliases: (rpcRow?.bot_aliases && typeof rpcRow.bot_aliases === 'object') ? rpcRow.bot_aliases : userRow.bot_aliases,
+            botCount: rpcRow?.bot_count !== undefined ? Number(rpcRow.bot_count) : userRow.bot_count,
             workerIds: assigned,
             updatedAt: rpcRow?.updated_at || userRow.updated_at
           };
@@ -630,7 +686,7 @@ class SupabaseDashboardStore {
       try {
         const userQ = this.client.from(USERS).delete();
         const userRes = typeof userQ.or === 'function'
-          ? await userQ.or(`id.eq.${clean},username.eq.${lower},username.eq.${bare}`).select('username')
+          ? await userQ.or(`id.eq.${quotePostgrestValue(clean)},username.eq.${quotePostgrestValue(lower)},username.eq.${quotePostgrestValue(bare)}`).select('username')
           : await userQ.eq('id', clean).select('username');
         if (userRes?.error && !isMissingSchemaError(userRes.error) && String(userRes.error.code || '') !== '42501') {
           throw userRes.error;
@@ -750,13 +806,24 @@ class SupabaseDashboardStore {
     if (cleanIp === '127.0.0.1' || cleanIp === '::1' || cleanIp === 'localhost') return true;
     try {
       if (this.client) {
-        const { data, error } = await this.client
+        let res = await this.client
           .from('audit_logs')
-          .select('id, actor_id')
-          .eq('ip', cleanIp)
-          .limit(5);
-        if (!error && Array.isArray(data) && data.length > 0) {
-          const hasAdminLog = data.some(d => String(d.actor_id || '').toLowerCase() === 'admin');
+          .select('id, actor_username, actor_role, actor_ip')
+          .eq('actor_ip', cleanIp)
+          .limit(10);
+        if (res?.error && isMissingSchemaError(res.error)) {
+          res = await this.client
+            .from('audit_logs')
+            .select('id, actor_username, actor_role')
+            .eq('ip', cleanIp)
+            .limit(10);
+        }
+        const data = res?.data;
+        if (!res?.error && Array.isArray(data) && data.length > 0) {
+          const hasAdminLog = data.some((d) =>
+            String(d.actor_username || d.actor_id || '').toLowerCase() === 'admin' ||
+            String(d.actor_role || '').toLowerCase() === 'admin'
+          );
           if (hasAdminLog) return true;
         }
       }
@@ -829,7 +896,7 @@ class SupabaseDashboardStore {
         }
       }
 
-      if (usedFallback || (!usersToUpdate.length && typeof this.client.from(USERS).select === 'function')) {
+      if (usedFallback && typeof this.client.from(USERS).select === 'function') {
         try {
           const { data: allUsers, error: allErr } = await this.client
             .from(USERS)
@@ -1301,8 +1368,10 @@ class SupabaseDashboardStore {
     const nowIso = new Date().toISOString();
     const ops = [
       () => this.client.from('manager_discord_links').delete().eq('discord_user_id', id),
+      () => this.client.from('manager_discord_links').delete().eq('manager_user_id', id),
       () => this.client.from('manager_discord_links').delete().eq('username', id.toLowerCase()),
       () => this.client.from(USERS).update({ discord_user_id: null, updated_at: nowIso }).eq('discord_user_id', id),
+      () => this.client.from(USERS).update({ discord_user_id: null, updated_at: nowIso }).eq('id', id),
       () => this.client.from(USERS).update({ discord_user_id: null, updated_at: nowIso }).eq('username', id.toLowerCase()),
       () => this.client.from(SETTINGS).delete().eq('key', `discord_link:${id}`)
     ];
@@ -1334,12 +1403,14 @@ class SupabaseDashboardStore {
   async getDiscordLink(identifier) {
     if (!identifier) return null;
     const id = String(identifier).trim();
+    const qId = quotePostgrestValue(id);
+    const qLower = quotePostgrestValue(id.toLowerCase());
 
     // 1. Check manager_discord_links table
     try {
       const { data, error } = await this.client.from('manager_discord_links')
         .select('*')
-        .or(`discord_user_id.eq.${id},manager_user_id.eq.${id},username.eq.${id.toLowerCase()}`)
+        .or(`discord_user_id.eq.${qId},manager_user_id.eq.${qId},username.eq.${qLower}`)
         .eq('status', 'active')
         .maybeSingle();
       if (!error && data) return data;
@@ -1349,7 +1420,7 @@ class SupabaseDashboardStore {
     try {
       const { data, error } = await this.client.from(USERS)
         .select('discord_user_id, username, id, updated_at')
-        .or(`discord_user_id.eq.${id},username.eq.${id.toLowerCase()},id.eq.${id}`)
+        .or(`discord_user_id.eq.${qId},username.eq.${qLower},id.eq.${qId}`)
         .maybeSingle();
       if (!error && data?.discord_user_id) {
         return {
@@ -1420,12 +1491,27 @@ class SupabaseDashboardStore {
       const data = res?.data;
       if (!res?.error && data) {
         const assignedIds = Array.isArray(data.assigned_bot_ids)
-          ? data.assigned_bot_ids
-          : (typeof data.assigned_bot_ids === 'string' ? JSON.parse(data.assigned_bot_ids || '[]') : []);
+          ? data.assigned_bot_ids.map(String)
+          : (typeof data.assigned_bot_ids === 'string' ? JSON.parse(data.assigned_bot_ids || '[]').map(String) : []);
         const user = {
-          ...data,
+          id: data.id || ('usr_' + data.username),
           userId: data.id || data.username,
-          assignedBotIds: assignedIds
+          username: data.username,
+          role: data.role || 'user',
+          status: data.status || 'active',
+          isPermanent: Boolean(data.is_permanent),
+          expiresAt: data.expires_at || null,
+          planName: data.plan_name || 'Gói mặc định',
+          note: data.note || '',
+          allowAccountChange: data.allow_account_change !== false,
+          lockReason: data.lock_reason || '',
+          botCount: data.bot_count || 1,
+          botAliases: data.bot_aliases || {},
+          assignedBotIds: assignedIds,
+          workerIds: assignedIds,
+          discordUserId: dId,
+          createdAt: data.created_at,
+          updatedAt: data.updated_at
         };
         this.setCached(`discord_user:${dId}`, user, 5000);
         return user;
@@ -1481,18 +1567,37 @@ class SupabaseDashboardStore {
   }
 
   async getKey(code) {
+    const clean = String(code || '').trim();
+    if (!clean) return null;
+    const qCode = quotePostgrestValue(clean);
+    const qUpper = quotePostgrestValue(clean.toUpperCase());
+    if (this.client && typeof this.client.from === 'function') {
+      try {
+        const { data, error } = await this.client.from(KEYS).select('*')
+          .or(`code_hash.eq.${qCode},code.eq.${qUpper},code.eq.${qCode},key_code.eq.${qUpper},id.eq.${qCode}`)
+          .maybeSingle();
+        if (!error && data) return mapFrom(data, KEY_FIELDS);
+        if (error && !isMissingSchemaError(error) && error.code !== 'PGRST116') {
+          // Try simpler columns if key_code does not exist on older table
+          const fallback = await this.client.from(KEYS).select('*')
+            .or(`code_hash.eq.${qCode},code.eq.${qUpper},id.eq.${qCode}`)
+            .maybeSingle();
+          if (!fallback.error && fallback.data) return mapFrom(fallback.data, KEY_FIELDS);
+        }
+      } catch (_) {}
+    }
     if (this.adapter && typeof this.adapter.fetchKeys === 'function') {
       const keys = await this.adapter.fetchKeys();
       if (keys) {
-        const found = keys.find((k) => String(k.codeHash || k.code_hash || '').toLowerCase() === String(code || '').toLowerCase() || String(k.code || k.key || k.keyCode || '').toUpperCase() === String(code || '').toUpperCase() || String(k.id || k.keyId || '') === String(code || ''));
+        const found = keys.find((k) =>
+          String(k.codeHash || k.code_hash || '').toLowerCase() === clean.toLowerCase() ||
+          String(k.code || k.key || k.keyCode || '').toUpperCase() === clean.toUpperCase() ||
+          String(k.id || k.keyId || '') === clean
+        );
         if (found) return found;
       }
     }
-    const { data, error } = await this.client.from(KEYS).select('*')
-      .or(`code_hash.eq.${code},code.eq.${code},key_code.eq.${code},id.eq.${code}`)
-      .maybeSingle();
-    if (error) throw error;
-    return mapFrom(data, KEY_FIELDS);
+    return null;
   }
 
   async listKeys(limit = 100) {
@@ -1510,7 +1615,8 @@ class SupabaseDashboardStore {
     if (this.adapter && typeof this.adapter.deleteKey === 'function') {
       return await this.adapter.deleteKey(keyId);
     }
-    const { data, error } = await this.client.from(KEYS).delete().or(`id.eq.${keyId},key_id.eq.${keyId},code.eq.${keyId}`).select('*');
+    const qId = quotePostgrestValue(String(keyId || '').trim());
+    const { data, error } = await this.client.from(KEYS).delete().or(`id.eq.${qId},key_id.eq.${qId},code.eq.${qId}`).select('*');
     if (error) throw error;
     return Boolean(data?.length);
   }
@@ -1644,65 +1750,109 @@ class SupabaseDashboardStore {
     const targetObj = (entry.target && typeof entry.target === 'object')
       ? entry.target
       : { raw: String(entry.target || entry.targetId || '').slice(0, 160) };
+    const actionStr = String(entry.action || 'unknown').slice(0, 80);
+    const inferredCategory = entry.category || (
+      actionStr.startsWith('AUTH_') ? 'AUTH'
+        : (actionStr.includes('BOT') || actionStr.includes('WORKER') ? 'BOT'
+          : (actionStr.includes('USER') || actionStr.includes('KEY') ? 'USER' : 'SYSTEM'))
+    );
+    const logType = String(entry.logType || (inferredCategory === 'BOT' ? 'BOT' : 'SYSTEM')).toUpperCase();
+    const actorUsername = entry.actor?.username || entry.actorId || 'system';
+    const actorRole = entry.actor?.role || entry.actorRole || (String(actorUsername).toLowerCase() === 'admin' ? 'admin' : 'system');
+    const actorIp = entry.actor?.ip || entry.actorIp || entry.details?.ip || '127.0.0.1';
+    const nowIso = new Date().toISOString();
 
     if (this.adapter && typeof this.adapter.insertAuditLog === 'function') {
       return await this.adapter.insertAuditLog({
         id: auditId,
-        actor: { username: entry.actorId || 'system', role: entry.actorRole || 'system', ip: entry.actorIp || '127.0.0.1' },
-        action: entry.action,
-        actionLabel: entry.actionLabel || entry.action,
+        logType,
+        category: inferredCategory,
+        actor: { username: actorUsername, role: actorRole, ip: actorIp },
+        action: actionStr,
+        actionLabel: entry.actionLabel || actionStr,
         target: targetObj,
         details: typeof entry.details === 'object' ? JSON.stringify(entry.details) : String(entry.details || ''),
         status: entry.status || 'SUCCESS',
-        timestamp: new Date().toISOString()
+        timestamp: nowIso
       });
     }
-    const nowIso = new Date().toISOString();
     const { error } = await this.client.from(AUDIT_LOGS).insert({
       id: auditId,
-      log_type: 'SYSTEM',
-      category: 'SYSTEM',
-      actor_username: entry.actorId || 'system',
-      action: String(entry.action || 'unknown').slice(0, 80),
-      action_label: String(entry.action || 'unknown').slice(0, 80),
+      log_type: logType,
+      category: inferredCategory,
+      actor_username: actorUsername,
+      actor_role: actorRole,
+      actor_ip: actorIp,
+      action: actionStr,
+      action_label: String(entry.actionLabel || actionStr).slice(0, 120),
       target: targetObj,
       details: typeof entry.details === 'object' ? JSON.stringify(entry.details) : String(entry.details || ''),
-      status: 'SUCCESS',
+      status: entry.status || 'SUCCESS',
       timestamp: nowIso
     });
     if (error && error.code !== '42P01') throw error;
   }
 
-  async listAudit(limit = 100) {
+  async listAudit(limitOrOpts = 100) {
+    const opts = (limitOrOpts && typeof limitOrOpts === 'object') ? limitOrOpts : { limit: limitOrOpts };
+    const limit = Math.max(1, Math.min(2000, Number(opts.limit) || 100));
     const parseAuditDetails = (val) => {
       if (!val) return null;
       if (typeof val === 'object') return val;
       try { return JSON.parse(val); } catch (_) { return val; }
     };
+    const normalizeAuditRow = (e) => {
+      const ts = e.timestamp || e.created_at || e.createdAt || null;
+      const username = e.actor?.username || e.actor_username || e.actor_id || 'system';
+      const role = e.actor?.role || e.actor_role || (String(username).toLowerCase() === 'admin' ? 'admin' : 'system');
+      const detailsParsed = parseAuditDetails(e.details);
+      const ip = e.actor?.ip || e.actor_ip || e.ip || (detailsParsed && typeof detailsParsed === 'object' ? detailsParsed.ip : null) || '127.0.0.1';
+      const action = String(e.action || 'UNKNOWN');
+      const category = String(e.category || (action.startsWith('AUTH_') ? 'AUTH' : (action.includes('BOT') || action.includes('WORKER') ? 'BOT' : 'SYSTEM'))).toUpperCase();
+      const logType = String(e.logType || e.log_type || (category === 'BOT' ? 'BOT' : 'SYSTEM')).toUpperCase();
+      return {
+        id: e.id || null,
+        logType,
+        category,
+        actorId: username,
+        actor: { username, role, ip },
+        action,
+        actionLabel: e.actionLabel || e.action_label || action,
+        target: e.target ?? '',
+        details: detailsParsed,
+        status: String(e.status || 'SUCCESS').toUpperCase(),
+        timestamp: ts,
+        createdAt: ts
+      };
+    };
+
     if (this.adapter && typeof this.adapter.fetchAuditLogs === 'function') {
-      const res = await this.adapter.fetchAuditLogs({ limit });
+      const res = await this.adapter.fetchAuditLogs({
+        limit,
+        page: opts.page,
+        logType: opts.logType,
+        category: opts.category,
+        actor: opts.actor,
+        search: opts.search
+      });
       const rows = Array.isArray(res?.logs) ? res.logs : (Array.isArray(res?.entries) ? res.entries : null);
       if (rows) {
-        return rows.map((e) => ({
-          id: e.id || null,
-          actorId: e.actor?.username || e.actor_username || 'system',
-          action: e.action,
-          target: typeof e.target === 'string' ? e.target : JSON.stringify(e.target || ''),
-          details: parseAuditDetails(e.details),
-          createdAt: e.timestamp || e.created_at
-        }));
+        return rows.map(normalizeAuditRow);
       }
     }
-    const { data, error } = await this.client.from(AUDIT_LOGS).select('id,actor_username,action,target,details,timestamp').order('timestamp', { ascending: false }).limit(limit);
-    if (error && error.code !== '42P01') throw error;
-    return (data || []).map((row) => ({
-      id: row.id || null,
-      actorId: row.actor_username ?? row.actor_id,
-      action: row.action,
-      target: typeof row.target === 'string' ? row.target : JSON.stringify(row.target || ''),
-      details: parseAuditDetails(row.details),
-      createdAt: row.timestamp ?? row.created_at
-    }));
+    let query = this.client.from(AUDIT_LOGS)
+      .select('id,log_type,category,actor_username,actor_role,actor_ip,action,action_label,target,details,status,timestamp')
+      .order('timestamp', { ascending: false })
+      .limit(limit);
+    let res = await query;
+    if (res?.error && isMissingSchemaError(res.error)) {
+      res = await this.client.from(AUDIT_LOGS)
+        .select('id,actor_username,action,target,details,timestamp')
+        .order('timestamp', { ascending: false })
+        .limit(limit);
+    }
+    if (res?.error && res.error.code !== '42P01') throw res.error;
+    return (res?.data || []).map(normalizeAuditRow);
   }
 
   async clearAuditLogs() {

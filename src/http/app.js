@@ -183,6 +183,33 @@ function createApp({
     next();
   });
 
+  // 2.5 Static GUI Textures Route (mounted BEFORE session auth so 32x32 PNGs never trigger DB queries!)
+  const texturesCandidates = [
+    process.env.TEXTURES_DIR,
+    path.resolve(__dirname, '../../public/textures'),
+    path.resolve(process.cwd(), 'public/textures')
+  ].filter(Boolean);
+
+  const texturesPath = texturesCandidates.find((p) => {
+    try {
+      return fs.existsSync(p);
+    } catch (_) {
+      return false;
+    }
+  });
+
+  if (texturesPath) {
+    app.use(
+      '/textures',
+      express.static(texturesPath, {
+        maxAge: 2592000000,
+        setHeaders: (res) => {
+          res.setHeader('Cache-Control', 'public, max-age=2592000, immutable');
+        }
+      })
+    );
+  }
+
   // 3. Body Parsers
   app.use(express.json({ limit: '512kb', strict: true }));
   app.use(express.urlencoded({ extended: false, limit: '128kb' }));
@@ -301,6 +328,13 @@ function createApp({
     }
   }
 
+  const READ_POLL_AUTH_CACHE_TTL_MS = Math.max(0, Number(config?.sessionAuthCacheTtlMs ?? 15000) || 0);
+  function isCacheablePollRead(req) {
+    if (req.method !== 'GET' || READ_POLL_AUTH_CACHE_TTL_MS <= 0) return false;
+    const p = String(req.path || '');
+    return /^\/api\/(?:manager|user)\/(?:bots|announcement|bot\/[^/]+\/(?:snapshot|logs|chat-logs))$/.test(p);
+  }
+
   // 5. Dynamic Session Authentication Middleware
   app.use(async (req, _res, next) => {
     req.managerAuthChecked = true;
@@ -328,6 +362,14 @@ function createApp({
       } else {
         session = cachedSession;
       }
+    } else if (
+      cachedSession &&
+      isCacheablePollRead(req) &&
+      Number(cachedSession.expiresAt) > Date.now() &&
+      cachedSession._authVerifiedAt &&
+      (Date.now() - cachedSession._authVerifiedAt < READ_POLL_AUTH_CACHE_TTL_MS)
+    ) {
+      session = cachedSession;
     } else if (useDbAuth) {
       try {
         const authData = await store.adapter.fetchManagerAuthorization(tokenHash);
@@ -336,7 +378,7 @@ function createApp({
 
         if (dbSession && Number(dbSession.expiresAt) > Date.now()) {
           if (dbSession.role === 'admin') {
-            session = dbSession;
+            session = { ...dbSession, _authVerifiedAt: Date.now() };
             cacheSession(tokenHash, session);
           } else if (
             dbUser &&
@@ -344,31 +386,11 @@ function createApp({
             (!dbUser.id || !dbSession.userId || String(dbUser.id) === String(dbSession.userId)) &&
             (!dbUser.username || !dbSession.username || String(dbUser.username).toLowerCase() === String(dbSession.username).toLowerCase())
           ) {
-            const candidate = { ...dbSession };
+            // read_manager_authorization already returned the authoritative fresh DB user row;
+            // no redundant store.getAccess(bypassCache: true) query needed!
+            const candidate = { ...dbSession, _authVerifiedAt: Date.now() };
             applyFreshAccessToSession(candidate, dbUser);
-
-            if (typeof store.getAccess === 'function') {
-              try {
-                const userRec = await store.getAccess(candidate.userId, { bypassCache: true });
-                const idMismatch = Boolean(
-                  userRec &&
-                  candidate.userId &&
-                  userRec.userId &&
-                  String(candidate.userId).startsWith('usr_') &&
-                  String(userRec.userId) !== String(candidate.userId)
-                );
-                if (!userRec || idMismatch || String(userRec.status || '').toLowerCase() === 'disabled') {
-                  session = null;
-                } else {
-                  applyFreshAccessToSession(candidate, userRec);
-                  session = candidate;
-                }
-              } catch (_) {
-                session = null;
-              }
-            } else {
-              session = candidate;
-            }
+            session = candidate;
           }
         }
       } catch (_) {
@@ -379,7 +401,9 @@ function createApp({
         cacheSession(tokenHash, session);
       } else {
         activeSessions.delete(tokenHash);
-        if (typeof store.invalidateCache === 'function') store.invalidateCache();
+        if (cachedSession && typeof store.invalidateUserCache === 'function') {
+          store.invalidateUserCache(cachedSession.userId, cachedSession.username);
+        }
       }
     } else if (cachedSession) {
       if (Number(cachedSession.expiresAt) <= Date.now()) {
@@ -398,10 +422,13 @@ function createApp({
           );
           if (!userRec || idMismatch || String(userRec.status || '').toLowerCase() === 'disabled') {
             activeSessions.delete(tokenHash);
-            if (typeof store.invalidateCache === 'function') store.invalidateCache();
+            if (typeof store.invalidateUserCache === 'function') {
+              store.invalidateUserCache(cachedSession.userId, cachedSession.username);
+            }
             session = null;
           } else {
             applyFreshAccessToSession(cachedSession, userRec);
+            cachedSession._authVerifiedAt = Date.now();
             session = cachedSession;
           }
         } catch (_) {
@@ -488,18 +515,26 @@ function createApp({
     });
   });
 
-  // 6.2 Readiness Probe (validates Database connectivity and Discord Gateway)
+  // 6.2 Readiness Probe (validates Database connectivity and Discord Gateway; DB probe cached 10s)
+  let readyDbCache = null;
   app.get(['/ready', '/api/ready'], async (_req, res) => {
     let dbOk = true;
     let dbLatencyMs = 0;
     if (store?.adapter && typeof store.adapter.testConnection === 'function') {
-      const start = Date.now();
-      try {
-        const testRes = await store.adapter.testConnection();
-        dbOk = Boolean(testRes?.ok);
-        dbLatencyMs = Date.now() - start;
-      } catch (_) {
-        dbOk = false;
+      const now = Date.now();
+      if (readyDbCache && (now - readyDbCache.checkedAt < 10000)) {
+        dbOk = readyDbCache.ok;
+        dbLatencyMs = readyDbCache.latencyMs;
+      } else {
+        const start = Date.now();
+        try {
+          const testRes = await store.adapter.testConnection();
+          dbOk = Boolean(testRes?.ok);
+          dbLatencyMs = Date.now() - start;
+        } catch (_) {
+          dbOk = false;
+        }
+        readyDbCache = { ok: dbOk, latencyMs: dbLatencyMs, checkedAt: Date.now() };
       }
     }
 
@@ -553,7 +588,8 @@ function createApp({
     broker,
     fleetOperations,
     config,
-    logger
+    logger,
+    invalidateUserSessions
   });
   app.use('/api/manager', userRouter);
   app.use('/api/rewards/link4m', userRouter);
@@ -585,33 +621,6 @@ function createApp({
   });
   app.use('/api/v1/workers/:workerId', workerRouter);
   app.use('/api/worker', workerRouter);
-
-  // Static GUI Textures Route
-  const texturesCandidates = [
-    process.env.TEXTURES_DIR,
-    path.resolve(__dirname, '../../public/textures'),
-    path.resolve(process.cwd(), 'public/textures')
-  ].filter(Boolean);
-
-  let texturesPath = texturesCandidates.find((p) => {
-    try {
-      return fs.existsSync(p);
-    } catch (_) {
-      return false;
-    }
-  });
-
-  if (texturesPath) {
-    app.use(
-      '/textures',
-      express.static(texturesPath, {
-        maxAge: 2592000000,
-        setHeaders: (res) => {
-          res.setHeader('Cache-Control', 'public, max-age=2592000, immutable');
-        }
-      })
-    );
-  }
 
   // 8. 404 Handler
   app.use((_req, res) => {

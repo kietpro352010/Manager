@@ -223,8 +223,15 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       if (!isExempt && providedKey && typeof store.getKey === 'function') {
         try {
           const keyRow = await store.getKey(providedKey);
-          if (keyRow && (keyRow.status === 'active' || keyRow.status === 'UNUSED' || !keyRow.status)) {
-            isExempt = true;
+          if (keyRow) {
+            const statusLower = String(keyRow.status || 'unused').toLowerCase();
+            const maxUses = Number(keyRow.maxUses ?? keyRow.max_uses ?? 1);
+            const usedCount = Number(keyRow.usedCount ?? keyRow.used_count ?? 0);
+            const isExhausted = maxUses > 0 && usedCount >= maxUses;
+            const isExpired = Boolean(keyRow.expiresAt && Date.parse(keyRow.expiresAt) <= Date.now());
+            if ((statusLower === 'active' || statusLower === 'unused' || !keyRow.status) && !isExhausted && !isExpired) {
+              isExempt = true;
+            }
           }
         } catch (_) {}
       }
@@ -388,6 +395,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         : (registered?.workerId ? [String(registered.workerId)] : []);
       let planName = registered?.planName || 'FREE TRIAL';
       let isPermanent = false;
+      let rentalExpiresAt = registered?.expiresAt || registered?.user?.expiresAt || null;
 
       // If a giftcode/key was provided, redeem it
       let keyRedeemed = false;
@@ -396,11 +404,12 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         try {
           await entitlementService.redeem(userId, providedKey, 'user');
           keyRedeemed = true;
-          const refreshed = await store.getUser(cleanUsername);
+          const refreshed = await store.getUser(cleanUsername, { bypassCache: true });
           if (refreshed) {
             assignedBotIds = refreshed.assignedBotIds || refreshed.workerIds || assignedBotIds;
             planName = refreshed.planName || planName;
             isPermanent = Boolean(refreshed.isPermanent);
+            rentalExpiresAt = refreshed.expiresAt || null;
           }
         } catch (keyErr) {
           keyRedeemed = false;
@@ -422,6 +431,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         assignedBotIds,
         createdAt: Date.now(),
         expiresAt,
+        expiresAtRental: rentalExpiresAt,
         status: 'active',
         isPermanent,
         planName,
@@ -432,10 +442,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       const dbAdapterEnabled = typeof store.adapter?.isEnabled !== 'function' || store.adapter.isEnabled();
       if (typeof store.adapter?.createManagerUserSession === 'function' && dbAdapterEnabled) {
         try {
-          const currentRev = typeof store.adapter.fetchUsersSnapshot === 'function'
-            ? (await store.adapter.fetchUsersSnapshot().catch(() => null))?.revision || 1
-            : 1;
-          const persistRes = await store.adapter.createManagerUserSession(session, currentRev);
+          const persistRes = await store.adapter.createManagerUserSession(session, 1);
           if (!persistRes || (typeof persistRes === 'object' && persistRes.ok === false)) {
             activeSessions.delete(tokenHash);
             return res.status(503).json({
@@ -460,6 +467,8 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
           action: 'AUTH_REGISTER',
           targetId: userId,
           actorId: cleanUsername,
+          actorRole: 'user',
+          actorIp: clientIp,
           details: { ip: clientIp, username: cleanUsername, deviceFingerprint }
         }).catch(() => {});
       }
@@ -474,7 +483,9 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
           role: 'user',
           assignedBotIds,
           isPermanent,
-          expiresAt: session.expiresAt
+          planName,
+          expiresAt: rentalExpiresAt,
+          sessionExpiresAt: session.expiresAt
         },
         message: (providedKey && !keyRedeemed)
           ? `Đăng ký tài khoản thành công, nhưng kích hoạt mã quà tặng thất bại: ${keyError}`
@@ -554,10 +565,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
           const dbAdapterEnabled = typeof store.adapter?.isEnabled !== 'function' || store.adapter.isEnabled();
           if (typeof store.adapter?.createManagerUserSession === 'function' && dbAdapterEnabled) {
             try {
-              const currentRev = typeof store.adapter.fetchUsersSnapshot === 'function'
-                ? (await store.adapter.fetchUsersSnapshot().catch(() => null))?.revision || 1
-                : 1;
-              const persistRes = await store.adapter.createManagerUserSession(session, currentRev);
+              const persistRes = await store.adapter.createManagerUserSession(session, 1);
               if (!persistRes || (typeof persistRes === 'object' && persistRes.ok === false)) {
                 activeSessions.delete(tokenHash);
                 return res.status(503).json({
@@ -581,6 +589,8 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
             action: 'AUTH_ADMIN_LOGIN',
             targetId: 'admin',
             actorId: 'admin',
+            actorRole: 'admin',
+            actorIp: clientIp,
             details: { ip: clientIp }
           });
 
@@ -681,10 +691,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       const dbAdapterEnabled = typeof store.adapter?.isEnabled !== 'function' || store.adapter.isEnabled();
       if (typeof store.adapter?.createManagerUserSession === 'function' && dbAdapterEnabled) {
         try {
-          const currentRev = typeof store.adapter.fetchUsersSnapshot === 'function'
-            ? (await store.adapter.fetchUsersSnapshot().catch(() => null))?.revision || 1
-            : 1;
-          const persistRes = await store.adapter.createManagerUserSession(session, currentRev);
+          const persistRes = await store.adapter.createManagerUserSession(session, 1);
           if (!persistRes || (typeof persistRes === 'object' && persistRes.ok === false)) {
             activeSessions.delete(tokenHash);
             return res.status(503).json({
@@ -704,12 +711,16 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         }
       }
 
-      if (typeof store.invalidateCache === 'function') store.invalidateCache();
+      if (typeof store.invalidateUserCache === 'function') {
+        store.invalidateUserCache(userId, cleanUsername);
+      }
 
       await store.addAudit({
         action: 'AUTH_USER_LOGIN',
         targetId: userId,
         actorId: cleanUsername,
+        actorRole: 'user',
+        actorIp: clientIp,
         details: { ip: clientIp, isExpired, isPermanent }
       });
 
@@ -749,6 +760,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       const correlationId = req.headers?.['x-correlation-id'] || req.headers?.['x-request-id'] || `corr_${crypto.randomUUID().slice(0, 8)}`;
       if (token) {
         const tokenHash = hashSessionToken(token);
+        const prevSess = activeSessions.get(tokenHash) || req.managerAuthSession || null;
         activeSessions.delete(tokenHash);
         if (typeof store.adapter?.deleteSession === 'function') {
           try {
@@ -760,7 +772,9 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
             logger.warn('Failed to revoke session from database on logout', { correlationId, tokenHash, error: dbErr.message });
           }
         }
-        if (typeof store.invalidateCache === 'function') store.invalidateCache();
+        if (prevSess && typeof store.invalidateUserCache === 'function') {
+          store.invalidateUserCache(prevSess.userId, prevSess.username);
+        }
       }
       res.setHeader('Set-Cookie', clearCookieHeader('kingmc_mgr_session', isHttps(req)));
       return res.json({ ok: true, message: 'Đăng xuất thành công.' });
@@ -802,8 +816,9 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         username: session.username,
         role: session.role,
         assignedBotIds: session.assignedBotIds,
-        isPermanent: session.isPermanent,
-        expiresAt: session.expiresAtRental || session.expiresAt,
+        isPermanent: Boolean(session.isPermanent),
+        expiresAt: session.role === 'admin' ? null : (session.expiresAtRental ?? null),
+        sessionExpiresAt: session.expiresAt,
         status: session.status,
         planName: session.planName,
         allowAccountChange: session.allowAccountChange

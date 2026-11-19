@@ -92,6 +92,7 @@ class EntitlementService {
     this.logger = logger;
     this.userLock = userLock;
     this.isSweepRunning = false;
+    this.stopPendingByUser = new Map();
     this.gracePeriodMs = Number.isFinite(gracePeriodMs) && gracePeriodMs >= 0
       ? gracePeriodMs
       : (config?.botExpirationGraceHours !== undefined
@@ -222,10 +223,13 @@ class EntitlementService {
 
     // 1. Kiểm tra hạn mức sử dụng (max_uses)
     const maxUses = normalizeMaxUses(key.maxUses ?? key.max_uses, 1);
-    const usedUsers = Array.isArray(key.usedUsers) ? key.usedUsers.map(String) : [];
+    const usedUsers = Array.isArray(key.usedUsers)
+      ? key.usedUsers.map((u) => String(u || '').trim().toLowerCase()).filter(Boolean)
+      : [];
     const normalizedUser = cleanUserId.toLowerCase();
+    const normalizedUsername = String(member?.username || '').trim().toLowerCase();
 
-    if (usedUsers.includes(normalizedUser)) {
+    if (usedUsers.includes(normalizedUser) || (normalizedUsername && usedUsers.includes(normalizedUsername))) {
       throw new Error('Tài khoản của bạn đã từng nhập mã Giftcode này rồi.');
     }
     if (maxUses > 0 && (key.usedCount || 0) >= maxUses) {
@@ -244,7 +248,7 @@ class EntitlementService {
     const addedDays = Math.max(1, Number(key.days) || 1);
     const expiresAt = isPermanent ? null : new Date(base + addedDays * 86400000).toISOString();
 
-    // 3. Phân bổ Bot rảnh
+    // 3. Phân bổ Bot rảnh (dùng map ownership 1 lần thay vì N+1 query assignedUser)
     const currentIds = Array.isArray(member?.workerIds) ? member.workerIds.map(String) : [];
     const desired = [...currentIds];
     const fixedIds = Array.isArray(key.workerIds) ? key.workerIds.map(String) : (Array.isArray(key.botIds) ? key.botIds.map(String) : []);
@@ -253,13 +257,42 @@ class EntitlementService {
     const newFixedCount = fixedIds.filter((workerId) => !currentIds.includes(workerId)).length;
     const targetCount = Math.max(currentIds.length, Number(key.botCount) || 1, currentIds.length + newFixedCount);
 
+    let ownerByWorkerId = null;
+    if (typeof this.store?.listAccess === 'function') {
+      try {
+        const allUsers = await this.store.listAccess();
+        if (Array.isArray(allUsers)) {
+          ownerByWorkerId = new Map();
+          for (const u of allUsers) {
+            const ownerId = String(u.userId || u.id || u.username || '');
+            const ids = Array.isArray(u.workerIds) ? u.workerIds : (Array.isArray(u.assignedBotIds) ? u.assignedBotIds : []);
+            for (const wid of ids) {
+              const keyWid = String(wid || '').trim().toLowerCase();
+              if (keyWid) ownerByWorkerId.set(keyWid, ownerId);
+            }
+          }
+        }
+      } catch (_) {
+        ownerByWorkerId = null;
+      }
+    }
+
+    const getOwner = async (workerId) => {
+      const cleanWid = String(workerId || '').trim().toLowerCase();
+      if (ownerByWorkerId) {
+        return ownerByWorkerId.get(cleanWid) || null;
+      }
+      const assigned = await this.store.assignedUser(workerId);
+      return assigned ? String(assigned.userId || '') : null;
+    };
+
     // Gán các bot cố định trong key
     for (const workerId of fixedIds) {
       if (desired.length >= targetCount) break;
       if (desired.includes(workerId)) continue;
       if (!registeredIds.has(workerId)) continue;
-      const assigned = await this.store.assignedUser(workerId);
-      if (assigned && assigned.userId !== cleanUserId) continue;
+      const ownerId = await getOwner(workerId);
+      if (ownerId && ownerId !== cleanUserId) continue;
       desired.push(workerId);
     }
 
@@ -268,7 +301,7 @@ class EntitlementService {
       for (const worker of candidates) {
         if (desired.length >= targetCount) break;
         if (desired.includes(String(worker.workerId))) continue;
-        if (await this.store.assignedUser(String(worker.workerId))) continue;
+        if (await getOwner(String(worker.workerId))) continue;
         desired.push(String(worker.workerId));
       }
     }
@@ -441,7 +474,15 @@ class EntitlementService {
         if (u.isPermanent || !u.expiresAt || u.status === 'disabled') continue;
         const listExpiryTime = Date.parse(u.expiresAt);
         if (!Number.isFinite(listExpiryTime) || listExpiryTime > now) continue;
-        if (u.status === 'expired' && (!Array.isArray(u.stopPendingWorkers) || u.stopPendingWorkers.length === 0)) {
+        const memPending = this.stopPendingByUser.get(u.userId);
+        const listPending = Array.isArray(u.stopPendingWorkers) && u.stopPendingWorkers.length
+          ? u.stopPendingWorkers
+          : (Array.isArray(memPending) ? memPending : []);
+        if (u.status === 'expired' && listPending.length === 0) {
+          continue;
+        }
+        // Already in grace_period and still within grace window -> skip redundant DB fetch & write!
+        if (u.status === 'grace_period' && now <= listExpiryTime + effectiveGracePeriodMs) {
           continue;
         }
 
@@ -451,10 +492,16 @@ class EntitlementService {
             ? await this.store.getAccess(u.userId, { bypassCache: true }).catch(() => null)
             : null) || u;
 
-          if (freshUser.isPermanent) return;
+          if (freshUser.isPermanent) {
+            this.stopPendingByUser.delete(freshUser.userId);
+            return;
+          }
           if (!freshUser.expiresAt) return;
           const expiryTime = Date.parse(freshUser.expiresAt);
-          if (!Number.isFinite(expiryTime) || expiryTime > now) return;
+          if (!Number.isFinite(expiryTime) || expiryTime > now) {
+            this.stopPendingByUser.delete(freshUser.userId);
+            return;
+          }
 
           // Skip permanently disabled accounts
           if (freshUser.status === 'disabled') return;
@@ -462,27 +509,32 @@ class EntitlementService {
           // Distinguish isInGracePeriod: if expiryTime < now <= expiryTime + gracePeriodMs
           if (now <= expiryTime + effectiveGracePeriodMs) {
             // DO NOT stop worker. Keep bot running in game.
-            if (freshUser.status !== 'grace_period' || !freshUser.inGracePeriod) {
+            if (freshUser.status !== 'grace_period') {
               await this.store.setAccess(freshUser.userId, {
                 ...freshUser,
                 status: 'grace_period',
                 inGracePeriod: true
               }, 'system:grace_period');
+              const remainingGraceMs = Math.max(0, (expiryTime + effectiveGracePeriodMs) - now);
+              this.logger?.info('user_in_grace_period_bot_kept_running', {
+                userId: freshUser.userId,
+                username: freshUser.username,
+                expiresAt: freshUser.expiresAt,
+                remainingGraceMs,
+                remainingMinutes: Math.round(remainingGraceMs / 60000)
+              });
             }
-            const remainingGraceMs = Math.max(0, (expiryTime + effectiveGracePeriodMs) - now);
-            this.logger?.info('user_in_grace_period_bot_kept_running', {
-              userId: freshUser.userId,
-              username: freshUser.username,
-              expiresAt: freshUser.expiresAt,
-              remainingGraceMs,
-              remainingMinutes: Math.round(remainingGraceMs / 60000)
-            });
             return;
           }
 
           // If here: isGracePeriodExpired (now > expiryTime + gracePeriodMs)
+          const trackedPending = Array.isArray(freshUser.stopPendingWorkers) && freshUser.stopPendingWorkers.length
+            ? freshUser.stopPendingWorkers
+            : (this.stopPendingByUser.get(freshUser.userId) || []);
+
           // If already fully expired and has no pending unstopped bots, skip
-          if (freshUser.status === 'expired' && (!freshUser.stopPendingWorkers || freshUser.stopPendingWorkers.length === 0)) {
+          if (freshUser.status === 'expired' && trackedPending.length === 0) {
+            this.stopPendingByUser.delete(freshUser.userId);
             return;
           }
 
@@ -491,11 +543,10 @@ class EntitlementService {
             : ((Array.isArray(freshUser.assignedBotIds) && freshUser.assignedBotIds.length) ? freshUser.assignedBotIds : []);
 
           // Determine which bots still need to be stopped
-          const botsToStop = Array.isArray(freshUser.stopPendingWorkers) && freshUser.stopPendingWorkers.length
-            ? freshUser.stopPendingWorkers
-            : workerIds;
+          const botsToStop = trackedPending.length ? trackedPending : workerIds;
 
           if (botsToStop.length === 0) {
+            this.stopPendingByUser.delete(freshUser.userId);
             if (freshUser.status !== 'expired') {
               await this.store.setAccess(freshUser.userId, {
                 ...freshUser,
@@ -517,6 +568,7 @@ class EntitlementService {
 
           // Mark as expiring while waiting for STOP results
           if (freshUser.status === 'active' || freshUser.status === 'grace_period') {
+            this.stopPendingByUser.set(freshUser.userId, [...botsToStop]);
             await this.store.setAccess(freshUser.userId, {
               ...freshUser,
               status: 'expiring',
@@ -555,6 +607,7 @@ class EntitlementService {
 
           const latestExpiry = latestUser.expiresAt ? Date.parse(latestUser.expiresAt) : NaN;
           if (latestUser.isPermanent || (Number.isFinite(latestExpiry) && latestExpiry > Date.now()) || latestUser.status === 'active') {
+            this.stopPendingByUser.delete(latestUser.userId);
             this.logger?.info('user_renewed_during_graceful_stop_cancelling_expiration', {
               userId: latestUser.userId,
               status: latestUser.status,
@@ -565,6 +618,7 @@ class EntitlementService {
 
           if (remainingFailed.length === 0) {
             // All bots confirmed stopped: transition to terminal 'expired' state
+            this.stopPendingByUser.delete(latestUser.userId);
             await this.store.setAccess(latestUser.userId, {
               ...latestUser,
               status: 'expired',
@@ -579,6 +633,7 @@ class EntitlementService {
             });
           } else {
             // Some stops unconfirmed: retain in 'expiring' for automatic retry on next cycle
+            this.stopPendingByUser.set(latestUser.userId, [...remainingFailed]);
             await this.store.setAccess(latestUser.userId, {
               ...latestUser,
               status: 'expiring',

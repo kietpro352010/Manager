@@ -551,18 +551,26 @@ class SupabaseAdapter {
 
     mapDatabaseUser(u) {
         const encryptedPassword = String(u.password || '');
-        const password = decryptUserPassword(encryptedPassword);
-        if (encryptedPassword && isUnsupportedCredentialCiphertext(encryptedPassword)) {
-            throw new Error('Mật khẩu cloud dùng định dạng mã hóa không được hỗ trợ: ' + encryptedPassword.slice(0, 12) + '…');
-        }
-        if (encryptedPassword && isStoredCredentialCiphertext(encryptedPassword) && password === null) {
-            throw new Error('Không thể giải mã mật khẩu cloud. Hãy giữ nguyên MANAGER_MASTER_KEY khi deploy.');
+        let password = null;
+        let passwordUnreadable = false;
+        try {
+            password = decryptUserPassword(encryptedPassword);
+            if (encryptedPassword && (isUnsupportedCredentialCiphertext(encryptedPassword) || (isStoredCredentialCiphertext(encryptedPassword) && password === null))) {
+                passwordUnreadable = true;
+                password = null;
+                console.warn('[SUPABASE] Không thể giải mã mật khẩu user (giữ nguyên row để tránh sập danh sách):', u.username || u.id);
+            }
+        } catch (err) {
+            passwordUnreadable = true;
+            password = null;
+            console.warn('[SUPABASE] Lỗi giải mã mật khẩu user:', u.username || u.id, err?.message || err);
         }
         const assignedArr = Array.isArray(u.assigned_bot_ids) ? u.assigned_bot_ids : [];
         const mapped = {
             id: u.id,
             username: u.username,
             password,
+            passwordUnreadable,
             role: u.role || 'user',
             status: u.status || 'active',
             assignedBotIds: assignedArr,
@@ -574,8 +582,10 @@ class SupabaseAdapter {
             allowAccountChange: u.allow_account_change !== false,
             lockReason: String(u.lock_reason || ''),
             note: String(u.note || ''),
-            registeredIp: u.registered_ip || u.registeredIp || (typeof u.note === 'string' && u.note.match(/\[IP:\s*([^\]]+)\]/) ? u.note.match(/\[IP:\s*([^\]]+)\]/)[1].trim() : ''),
-            createdIp: u.created_ip || u.createdIp || (typeof u.note === 'string' && u.note.match(/\[IP:\s*([^\]]+)\]/) ? u.note.match(/\[IP:\s*([^\]]+)\]/)[1].trim() : ''),
+            registeredIp: u.registered_ip || u.registeredIp || u.registration_ip || (typeof u.note === 'string' && u.note.match(/\[IP:\s*([^\]]+)\]/) ? u.note.match(/\[IP:\s*([^\]]+)\]/)[1].trim() : ''),
+            createdIp: u.created_ip || u.createdIp || u.registration_ip || (typeof u.note === 'string' && u.note.match(/\[IP:\s*([^\]]+)\]/) ? u.note.match(/\[IP:\s*([^\]]+)\]/)[1].trim() : ''),
+            registrationIp: u.registration_ip || '',
+            deviceFingerprint: u.device_fingerprint || '',
             createdAt: u.created_at,
             updatedAt: u.updated_at
         };
@@ -651,7 +661,7 @@ class SupabaseAdapter {
                     id: String(userRow.id || ''), username: String(userRow.username || ''), status: String(userRow.status || 'active'),
                     assignedBotIds: Array.isArray(userRow.assigned_bot_ids) ? userRow.assigned_bot_ids.map((id) => String(id).trim()).filter(Boolean) : [],
                     expiresAt: userRow.expires_at || null, planName: String(userRow.plan_name || 'Gói thường'),
-                    isPermanent: Boolean(userRow.is_permanent === true || (!userRow.expires_at && String(userRow.status || 'active').toLowerCase() === 'active')),
+                    isPermanent: Boolean(userRow.is_permanent === true),
                     allowAccountChange: userRow.allow_account_change !== false, lockReason: String(userRow.lock_reason || ''),
                     botCount: Math.max(1, parseInt(userRow.bot_count ?? userRow.botCount, 10) || (Array.isArray(userRow.assigned_bot_ids) ? userRow.assigned_bot_ids.length : 1))
                 } : null
@@ -681,7 +691,7 @@ class SupabaseAdapter {
                 id: String(row.id || ''), username: String(row.username || ''), status: String(row.status || 'active'),
                 assignedBotIds: Array.isArray(row.assigned_bot_ids) ? row.assigned_bot_ids.map((id) => String(id).trim()).filter(Boolean) : [],
                 expiresAt: row.expires_at || null, planName: String(row.plan_name || 'Gói thường'),
-                isPermanent: Boolean(row.is_permanent === true || (!row.expires_at && String(row.status || 'active').toLowerCase() === 'active')),
+                isPermanent: Boolean(row.is_permanent === true),
                 allowAccountChange: row.allow_account_change !== false, lockReason: String(row.lock_reason || ''),
                 botCount: Math.max(1, parseInt(row.bot_count ?? row.botCount, 10) || (Array.isArray(row.assigned_bot_ids) ? row.assigned_bot_ids.length : 1))
             } : null };
@@ -977,9 +987,11 @@ class SupabaseAdapter {
     async deleteKey(keyId) {
         if (!this.isEnabled() || !keyId) return false;
         try {
-            const raw = String(keyId).trim();
+            const raw = String(keyId).trim().replace(/["\\]/g, '');
             const id = raw.startsWith('key_') ? raw : ('key_' + raw);
-            const res = await fetch(`${this.url}/rest/v1/manager_keys?or=(id.eq.${encodeURIComponent(id)},code.eq.${encodeURIComponent(raw)})`, {
+            const quotedId = encodeURIComponent(`"${id}"`);
+            const quotedRaw = encodeURIComponent(`"${raw}"`);
+            const res = await fetch(`${this.url}/rest/v1/manager_keys?or=(id.eq.${quotedId},code.eq.${quotedRaw})`, {
                 method: 'DELETE',
                 headers: this.getHeaders(),
                 signal: AbortSignal.timeout(5000)
@@ -2051,9 +2063,13 @@ class SupabaseAdapter {
         if (!this.isEnabled() || !name) return false;
         try {
             const res = await fetch(`${this.url}/rest/v1/manager_backups?name=eq.${encodeURIComponent(name)}`, {
-                method: 'DELETE', headers: this.getHeaders(), signal: AbortSignal.timeout(8000)
+                method: 'DELETE',
+                headers: { ...this.getHeaders(), Prefer: 'return=representation' },
+                signal: AbortSignal.timeout(8000)
             });
-            return res.ok;
+            if (!res.ok) return false;
+            const deleted = await res.json().catch(() => null);
+            return Array.isArray(deleted) ? deleted.length > 0 : true;
         } catch (err) {
             console.error('[SUPABASE] Lỗi xóa backup:', err.message);
             return false;

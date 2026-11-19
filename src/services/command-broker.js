@@ -20,7 +20,9 @@ class CommandBroker {
     this.pollWaiters = new Map();
     this.wakeVersions = new Map();
     this.pendingResults = new Map();
+    this.resultWaiters = new Map();
     this.outboxTimer = null;
+    this.outboxIntervalMs = 30000;
     this.outboxRunning = false;
     this.idleOutboxTicks = 0;
     this.stateSyncRunning = false;
@@ -45,26 +47,48 @@ class CommandBroker {
     return { leaseMs, leaseSeconds, renewIntervalMs };
   }
 
-  startOutboxProcessor({ intervalMs = 5000 } = {}) {
-    if (this.outboxTimer) return;
-    this.outboxTimer = setInterval(async () => {
-      if (this.idleOutboxTicks >= 2 && (this.idleOutboxTicks % 2) === 1) {
-        this.idleOutboxTicks += 1;
-        return;
-      }
+  _scheduleNextOutboxTick(delayMs) {
+    if (this.outboxTimer) {
+      clearTimeout(this.outboxTimer);
+      this.outboxTimer = null;
+    }
+    if (!this._outboxActive) return;
+    const safeDelay = Math.max(100, Number(delayMs) || this.outboxIntervalMs);
+    this.outboxTimer = setTimeout(async () => {
+      this.outboxTimer = null;
+      if (!this._outboxActive) return;
       const hadWork = await this.processOutboxBatch().catch(() => false);
       if (hadWork) {
         this.idleOutboxTicks = 0;
+        this._scheduleNextOutboxTick(this.outboxIntervalMs);
       } else {
-        this.idleOutboxTicks = Math.min(100, this.idleOutboxTicks + 1);
+        this.idleOutboxTicks = Math.min(10, this.idleOutboxTicks + 1);
+        const backoffSchedule = [this.outboxIntervalMs, 60000, 180000, 300000];
+        const nextDelay = backoffSchedule[Math.min(this.idleOutboxTicks, backoffSchedule.length - 1)];
+        this._scheduleNextOutboxTick(Math.max(this.outboxIntervalMs, nextDelay));
       }
-    }, intervalMs);
+    }, safeDelay);
     this.outboxTimer.unref?.();
   }
 
+  startOutboxProcessor({ intervalMs = 30000 } = {}) {
+    if (this._outboxActive) return;
+    this._outboxActive = true;
+    this.outboxIntervalMs = Math.max(1000, Number(intervalMs) || 30000);
+    this.idleOutboxTicks = 0;
+    this._scheduleNextOutboxTick(this.outboxIntervalMs);
+  }
+
+  triggerOutbox(delayMs = 250) {
+    if (!this._outboxActive) return;
+    this.idleOutboxTicks = 0;
+    this._scheduleNextOutboxTick(delayMs);
+  }
+
   stopOutboxProcessor() {
+    this._outboxActive = false;
     if (this.outboxTimer) {
-      clearInterval(this.outboxTimer);
+      clearTimeout(this.outboxTimer);
       this.outboxTimer = null;
     }
   }
@@ -517,29 +541,82 @@ class CommandBroker {
       }
     }
 
-    // 3. Fallback wait with polling on DB if command is still in-flight
-    const startTime = Date.now();
-    while (Date.now() - startTime < timeoutMs) {
-      await new Promise((r) => setTimeout(r, 200));
-      if (typeof this.commandStore?.get === 'function') {
-        try {
-          const stored = await this.commandStore.get(cid);
-          if (stored && (stored.status === 'completed' || stored.status === 'failed' || stored.status === 'expired')) {
-            const isCompleted = stored.status === 'completed';
-            return {
-              ok: isCompleted,
-              delivered: stored.status !== 'expired',
-              timedOut: stored.status === 'expired',
-              commandId: cid,
-              action: stored.action,
-              result: stored.result
-            };
-          }
-        } catch (_) {}
-      }
-    }
+    // 3. Fallback wait: listen for in-memory result notification (0ms local wake-up)
+    //    AND backoff DB polling (1000ms -> 2000ms) for multi-instance environments.
+    return new Promise((resolve) => {
+      let settled = false;
+      let pollTimer = null;
+      let deadlineTimer = null;
+      let pollStep = 0;
+      const startTime = Date.now();
+      const shortPollMode = timeoutMs <= 1200;
 
-    return { ok: false, delivered: false, timedOut: true, commandId: cid, result: null };
+      const finish = (outcome) => {
+        if (settled) return;
+        settled = true;
+        if (pollTimer) clearTimeout(pollTimer);
+        if (deadlineTimer) clearTimeout(deadlineTimer);
+        const set = this.resultWaiters.get(cid);
+        if (set) {
+          set.delete(onResultNotify);
+          if (set.size === 0) this.resultWaiters.delete(cid);
+        }
+        resolve(outcome);
+      };
+
+      const onResultNotify = (res, action) => {
+        finish({
+          ok: res?.ok !== false,
+          delivered: true,
+          timedOut: false,
+          commandId: cid,
+          action: action || null,
+          result: res
+        });
+      };
+
+      if (!this.resultWaiters.has(cid)) this.resultWaiters.set(cid, new Set());
+      this.resultWaiters.get(cid).add(onResultNotify);
+
+      deadlineTimer = setTimeout(() => {
+        finish({ ok: false, delivered: false, timedOut: true, commandId: cid, result: null });
+      }, Math.max(50, timeoutMs));
+      deadlineTimer.unref?.();
+
+      const schedulePoll = () => {
+        if (settled) return;
+        const remaining = timeoutMs - (Date.now() - startTime);
+        if (remaining <= 0) return;
+        const nextDelay = shortPollMode
+          ? Math.min(remaining, Math.max(50, Math.min(200, Math.floor(timeoutMs / 4))))
+          : Math.min(remaining, pollStep === 0 ? 1000 : 2000);
+        pollStep += 1;
+        pollTimer = setTimeout(async () => {
+          pollTimer = null;
+          if (settled) return;
+          if (typeof this.commandStore?.get === 'function') {
+            try {
+              const stored = await this.commandStore.get(cid);
+              if (stored && (stored.status === 'completed' || stored.status === 'failed' || stored.status === 'expired')) {
+                const isCompleted = stored.status === 'completed';
+                return finish({
+                  ok: isCompleted,
+                  delivered: stored.status !== 'expired',
+                  timedOut: stored.status === 'expired',
+                  commandId: cid,
+                  action: stored.action,
+                  result: stored.result
+                });
+              }
+            } catch (_) {}
+          }
+          schedulePoll();
+        }, nextDelay);
+        pollTimer.unref?.();
+      };
+
+      schedulePoll();
+    });
   }
 
   async acceptResult(workerId, payload = {}) {
@@ -1244,9 +1321,20 @@ class CommandBroker {
     }
 
     const completed = await this.commandStore.complete(wid, cid, result);
-    if (candidateStatus && typeof candidateStatus === 'object' && typeof this.registry?.updateStatus === 'function') {
+
+    // Sync live inventory / currentWindow / status from command results immediately into registry cache
+    const hasLivePatch = Boolean(
+      (candidateStatus && typeof candidateStatus === 'object') ||
+      (result && typeof result === 'object' && (result.inventory || Object.prototype.hasOwnProperty.call(result, 'currentWindow')))
+    );
+    if (hasLivePatch && typeof this.registry?.updateStatus === 'function') {
+      const mergedStatus = {
+        ...(candidateStatus && typeof candidateStatus === 'object' ? candidateStatus : {}),
+        ...(result?.inventory && typeof result.inventory === 'object' ? { inventory: result.inventory } : {}),
+        ...(result && Object.prototype.hasOwnProperty.call(result, 'currentWindow') ? { currentWindow: result.currentWindow } : {})
+      };
       try {
-        await this.registry.updateStatus(wid, candidateStatus, 'manager-command-poll');
+        await this.registry.updateStatus(wid, mergedStatus, 'manager-command-poll');
       } catch (err) {
         this.logger?.warn?.('command_status_sync_failed', {
           workerId: wid,
@@ -1259,6 +1347,13 @@ class CommandBroker {
 
     if (pending && pending.workerId === wid && typeof pending.finish === 'function') {
       pending.finish(result);
+    }
+    const waiters = this.resultWaiters.get(cid);
+    if (waiters && waiters.size > 0) {
+      for (const notify of [...waiters]) {
+        try { notify(result, action || null); } catch (_) {}
+      }
+      this.resultWaiters.delete(cid);
     }
     return { ok: Boolean(completed || pending) };
   }
