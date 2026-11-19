@@ -838,6 +838,7 @@ window.openDiscordLinkModal = openDiscordLinkModal;
 window.closeDiscordLinkModal = closeDiscordLinkModal;
 window.unlinkDiscordAccount = unlinkDiscordAccount;
 window.loadDiscordLinkStatus = loadDiscordLinkStatus;
+window.toggleDiscordNotifications = toggleDiscordNotifications;
 window.submitChangePassword = submitChangePassword;
 window.openChangelogModal = openChangelogModal;
 window.closeChangelogModal = closeChangelogModal;
@@ -916,6 +917,7 @@ window.addEventListener('unhandledrejection',event=>{
       if (!routed) await refreshHome();
       scheduleNextManagerPoll();
       checkAndShowAnnouncement();
+      loadDiscordLinkStatus({ silent: true });
       if (typeof checkRewardQueryParams === 'function') checkRewardQueryParams();
     } else if (res.status === 401) {
       currentUser = null;

@@ -146,7 +146,7 @@ class AdminNotifier {
     return true;
   }
 
-  async sendAlert({ source = 'Manager', event = 'error', message = '', error = null, details = {}, level = 'error', bypassInGameFilter = false } = {}) {
+  async sendAlert({ source = 'Manager', event = 'error', message = '', error = null, details = {}, level = 'error', bypassInGameFilter = false, skipDm = false } = {}) {
     // Filter out ordinary in-game events unless explicitly flagged as a verified AFK lifecycle alert
     if (!bypassInGameFilter) {
       const filterHaystack = `${event} ${message} ${details?.lastKickReason || ''} ${details?.state || ''}`.toLowerCase();
@@ -240,7 +240,7 @@ class AdminNotifier {
 
     this.alertTimestamps.push(now);
 
-    const item = { source, event, message: `${message}${repeatNote}`, error, details, level, timestamp: now };
+    const item = { source, event, message: `${message}${repeatNote}`, error, details, level, skipDm: Boolean(skipDm), timestamp: now };
     this.pendingBatch.push(item);
 
     if (this.batchTimer) clearTimeout(this.batchTimer);
@@ -310,6 +310,7 @@ class AdminNotifier {
       event: `Tổng hợp ${items.length} sự cố dồn dập`,
       message: `Hệ thống ghi nhận ${items.length} sự cố xảy ra liên tiếp trong 3.5 giây vừa qua.`,
       level: highestLevel,
+      skipDm: items.every((i) => i.skipDm === true),
       details: {
         totalAlerts: items.length,
         sources,
@@ -341,7 +342,7 @@ class AdminNotifier {
 
         const failedChannels = [];
 
-        if (channels.includes('dm')) {
+        if (channels.includes('dm') && !item.skipDm) {
           try {
             await this.dispatchDm(item);
           } catch (err) {
@@ -781,10 +782,13 @@ class AdminNotifier {
       eventToggleAllowed = settings.notifyOnReconnectExhausted !== false;
     }
 
-    // Look up the assigned user for this bot
+    // Look up the assigned user and verify an ACTIVE Web <-> Discord link (strictly linked accounts only)
     let assignedUserId = '';
     let assignedUsername = '';
     let targetDiscordUserId = '';
+    let userMasterDiscordNotifyEnabled = true;
+
+    const isValidSnowflake = (val) => /^\d{17,20}$/.test(String(val || '').trim());
 
     if (targetStore) {
       if (typeof targetStore.assignedUser === 'function') {
@@ -798,19 +802,53 @@ class AdminNotifier {
           const userRec = await targetStore.getAccess(assignedUserId).catch(() => null);
           if (userRec) {
             assignedUsername = String(userRec.username || assignedUserId);
-            if (userRec.discordUserId || userRec.discord_user_id) {
-              targetDiscordUserId = String(userRec.discordUserId || userRec.discord_user_id).trim();
+          }
+        }
+        // Strictly resolve active Web <-> Discord link via getDiscordLink
+        if (typeof targetStore.getDiscordLink === 'function') {
+          let link = await targetStore.getDiscordLink(assignedUserId).catch(() => null);
+          if (!link && assignedUsername && assignedUsername !== assignedUserId) {
+            link = await targetStore.getDiscordLink(assignedUsername).catch(() => null);
+          }
+          if (link && String(link.status || 'active').toLowerCase() !== 'revoked') {
+            const candidateId = String(link.discord_user_id || link.discordUserId || '').trim();
+            if (isValidSnowflake(candidateId)) {
+              targetDiscordUserId = candidateId;
+            }
+            if (!assignedUsername && link.username) {
+              assignedUsername = String(link.username);
             }
           }
         }
-        if (!targetDiscordUserId && typeof targetStore.getDiscordLink === 'function') {
-          const link = await targetStore.getDiscordLink(assignedUserId).catch(() => null);
-          if (link?.discord_user_id || link?.discordUserId) {
-            targetDiscordUserId = String(link.discord_user_id || link.discordUserId).trim();
+        // Check User's master Discord DM notification toggle (default: enabled)
+        if (typeof targetStore.getSetting === 'function') {
+          let pref = await targetStore.getSetting(`user_discord_notify:${assignedUserId}`).catch(() => null);
+          if (pref === null && assignedUsername && assignedUsername.toLowerCase() !== assignedUserId.toLowerCase()) {
+            pref = await targetStore.getSetting(`user_discord_notify:${assignedUsername.toLowerCase()}`).catch(() => null);
           }
-          if (!assignedUsername && link?.username) {
-            assignedUsername = String(link.username);
+          if (pref && typeof pref === 'object' && pref.enabled === false) {
+            userMasterDiscordNotifyEnabled = false;
+          } else if (pref === false) {
+            userMasterDiscordNotifyEnabled = false;
           }
+        }
+      }
+    }
+
+    // Check Admin's master Discord DM notification toggle & fallback to Admin's active Web-linked Discord ID
+    let adminDiscordNotifyEnabled = true;
+    if (targetStore) {
+      if (!this.adminUserId && typeof targetStore.getDiscordLink === 'function') {
+        const adminLink = await targetStore.getDiscordLink('admin').catch(() => null);
+        const adminCandidate = String(adminLink?.discord_user_id || adminLink?.discordUserId || '').trim();
+        if (adminLink && String(adminLink.status || 'active').toLowerCase() !== 'revoked' && isValidSnowflake(adminCandidate)) {
+          this.adminUserId = adminCandidate;
+        }
+      }
+      if (typeof targetStore.getSetting === 'function') {
+        const adminPref = await targetStore.getSetting('user_discord_notify:admin').catch(() => null);
+        if ((adminPref && typeof adminPref === 'object' && adminPref.enabled === false) || adminPref === false) {
+          adminDiscordNotifyEnabled = false;
         }
       }
     }
@@ -853,7 +891,14 @@ class AdminNotifier {
     ];
 
     let userNotified = false;
-    if (assignedUserId && targetDiscordUserId && userNotifyEnabled && eventToggleAllowed) {
+    const canNotifyAssignedUser = Boolean(
+      assignedUserId &&
+      targetDiscordUserId &&
+      userMasterDiscordNotifyEnabled &&
+      userNotifyEnabled &&
+      eventToggleAllowed
+    );
+    if (canNotifyAssignedUser) {
       userNotified = await this.dispatchUserDm({
         discordUserId: targetDiscordUserId,
         title,
@@ -870,6 +915,7 @@ class AdminNotifier {
       assignedUserId: assignedUserId || null,
       assignedUsername: assignedUsername || null,
       discordUserId: targetDiscordUserId || null,
+      userMasterDiscordNotifyEnabled,
       userNotifyEnabled,
       eventToggleAllowed,
       userNotified,
@@ -878,11 +924,13 @@ class AdminNotifier {
     if (this.sentUserAlerts.length > 100) this.sentUserAlerts.shift();
 
     // Always notify Admin as well (and persist to Web Dashboard System Logs via sendAlert)
+    // Skip duplicate Admin DM if Admin already received the User DM on the same Discord ID, or if Admin muted Discord DMs
+    const skipAdminDm = !adminDiscordNotifyEnabled || (userNotified && targetDiscordUserId && targetDiscordUserId === this.adminUserId);
     if (!skipAdminAlert) {
       await this.sendAlert({
         source: 'KingMC AFK Monitor',
         event: eventType,
-        message: `${description}${assignedUsername ? `\n• **Khách thuê:** \`${assignedUsername}\` (${userNotified ? 'Đã nhắn DM Discord' : 'Chưa liên kết Discord / Đã tắt thông báo'})` : '\n• **Khách thuê:** `Chưa gán`'}`,
+        message: `${description}${assignedUsername ? `\n• **Khách thuê:** \`${assignedUsername}\` (${userNotified ? 'Đã nhắn DM Discord' : (!targetDiscordUserId ? 'Chưa liên kết Discord với Web' : 'Đã tắt thông báo Discord')})` : '\n• **Khách thuê:** `Chưa gán`'}`,
         details: {
           workerId: id,
           botNumber,
@@ -894,7 +942,8 @@ class AdminNotifier {
           reason: reasonText
         },
         level,
-        bypassInGameFilter: true
+        bypassInGameFilter: true,
+        skipDm: skipAdminDm
       });
     }
 

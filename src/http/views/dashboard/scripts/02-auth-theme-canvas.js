@@ -885,6 +885,7 @@ async function handleLoginSubmit(event) {
       await refreshHome();
       scheduleNextManagerPoll();
       checkAndShowAnnouncement();
+      loadDiscordLinkStatus({ silent: true });
       if (typeof checkRewardQueryParams === 'function') checkRewardQueryParams();
     }, 350);
 
@@ -1102,7 +1103,49 @@ function closeChangePasswordModal() {
   document.getElementById('changePasswordModal')?.classList.add('hidden');
 }
 
-async function loadDiscordLinkStatus() {
+let currentDiscordLinkState = { linked: false, discordNotifyEnabled: true, loaded: false };
+let discordNotifyToggleInFlight = false;
+
+function renderDiscordNotifyControls() {
+  const enabled = currentDiscordLinkState.discordNotifyEnabled !== false;
+  const linked = currentDiscordLinkState.linked === true;
+  const isAdmin = currentUser?.role === 'admin';
+
+  const toolbarBtn = document.getElementById('discordDmNotifyBtn');
+  if (toolbarBtn) {
+    if (!linked && currentDiscordLinkState.loaded && !isAdmin) {
+      toolbarBtn.textContent = '💬 TB Discord: Chưa liên kết';
+      toolbarBtn.title = 'Hãy liên kết tài khoản Web với Discord để bật nhận tin nhắn riêng (DM)';
+    } else {
+      toolbarBtn.textContent = enabled ? '🔔 TB Discord: BẬT' : '🔕 TB Discord: TẮT';
+      toolbarBtn.title = enabled
+        ? 'Đang BẬT nhận thông báo riêng qua Discord (DM) — bấm để tắt'
+        : 'Đang TẮT nhận thông báo riêng qua Discord (DM) — bấm để bật lại';
+    }
+    toolbarBtn.classList.toggle('active', enabled && (linked || isAdmin));
+  }
+
+  const statusText = document.getElementById('discordNotifyStatusText');
+  const toggleBtn = document.getElementById('discordNotifyToggleBtn');
+  const hint = document.getElementById('discordNotifyHint');
+  if (statusText) {
+    statusText.style.color = enabled ? '#10b981' : '#f59e0b';
+    statusText.textContent = enabled ? '🔔 ĐANG BẬT' : '🔕 ĐANG TẮT';
+  }
+  if (toggleBtn) {
+    toggleBtn.textContent = enabled ? '🔕 Tắt thông báo Discord' : '🔔 Bật thông báo Discord';
+    toggleBtn.className = enabled ? 'small danger' : 'small primary';
+  }
+  if (hint) {
+    if (!linked && !isAdmin) {
+      hint.textContent = '⚠️ Tài khoản Web của bạn chưa liên kết Discord. Chỉ tài khoản Web đã liên kết Discord (dùng lệnh /login trên Discord) mới nhận được tin nhắn riêng (DM) khi bot die, đang AFK bị kick/văng hoặc reconnect.';
+    } else {
+      hint.textContent = 'Tự động nhắn riêng (DM) tới tài khoản Discord đang liên kết với tài khoản Web này khi bot được gán bị die, đang AFK bị kick/văng, kết nối lại AFK thành công hoặc dừng do reconnect thất bại.';
+    }
+  }
+}
+
+async function loadDiscordLinkStatus({ silent = false } = {}) {
   const statusText = document.getElementById('discordLinkStatusText');
   const details = document.getElementById('discordLinkDetails');
   const linkedId = document.getElementById('discordLinkedId');
@@ -1111,26 +1154,76 @@ async function loadDiscordLinkStatus() {
   try {
     const res = await requestJson('/api/user/discord-link');
     const data = res.data || {};
-    if (res.ok && data.ok && data.linked) {
-      if (statusText) { statusText.style.color = '#10b981'; statusText.textContent = '✅ Đã liên kết với Discord'; }
-      if (details) details.style.display = 'block';
-      if (linkedId) linkedId.textContent = data.discordUserId || '---';
-      if (linkedDate) linkedDate.textContent = data.linkedAt ? new Date(data.linkedAt).toLocaleString('vi-VN') : 'Không rõ';
-      if (unlinkBtn) unlinkBtn.classList.remove('hidden');
-    } else if (res.ok && data.ok) {
-      if (statusText) { statusText.style.color = '#f59e0b'; statusText.textContent = '⚠️ Chưa liên kết Discord'; }
-      if (details) details.style.display = 'none';
-      if (unlinkBtn) unlinkBtn.classList.add('hidden');
-    } else {
+    if (res.ok && data.ok) {
+      currentDiscordLinkState = {
+        linked: Boolean(data.linked),
+        discordNotifyEnabled: data.discordNotifyEnabled !== false,
+        loaded: true
+      };
+      renderDiscordNotifyControls();
+      if (data.linked) {
+        if (statusText) { statusText.style.color = '#10b981'; statusText.textContent = '✅ Đã liên kết với Discord'; }
+        if (details) details.style.display = 'block';
+        if (linkedId) linkedId.textContent = data.discordUserId || '---';
+        if (linkedDate) linkedDate.textContent = data.linkedAt ? new Date(data.linkedAt).toLocaleString('vi-VN') : 'Không rõ';
+        if (unlinkBtn) unlinkBtn.classList.remove('hidden');
+      } else {
+        if (statusText) { statusText.style.color = '#f59e0b'; statusText.textContent = '⚠️ Chưa liên kết Discord'; }
+        if (details) details.style.display = 'none';
+        if (unlinkBtn) unlinkBtn.classList.add('hidden');
+      }
+    } else if (!silent) {
       throw new Error(data.error || 'Không thể kiểm tra trạng thái liên kết.');
     }
   } catch (e) {
+    if (silent) return;
     if (statusText) {
       statusText.style.color = '#ef4444';
       statusText.textContent = '❌ ' + (e && e.message ? e.message : 'Lỗi kiểm tra trạng thái');
     }
     if (details) details.style.display = 'none';
     if (unlinkBtn) unlinkBtn.classList.add('hidden');
+  }
+}
+
+async function toggleDiscordNotifications() {
+  if (discordNotifyToggleInFlight) return;
+  if (!currentDiscordLinkState.loaded) {
+    await loadDiscordLinkStatus({ silent: true });
+  }
+  const isAdmin = currentUser?.role === 'admin';
+  const nextEnabled = !(currentDiscordLinkState.discordNotifyEnabled !== false);
+  if (!currentDiscordLinkState.linked && !isAdmin && nextEnabled) {
+    openDiscordLinkModal();
+    showToast('Vui lòng liên kết tài khoản Web với Discord (/login trên Discord) để nhận thông báo DM!', 'warning', 4500);
+    return;
+  }
+
+  discordNotifyToggleInFlight = true;
+  const toolbarBtn = document.getElementById('discordDmNotifyBtn');
+  const modalBtn = document.getElementById('discordNotifyToggleBtn');
+  if (toolbarBtn) toolbarBtn.disabled = true;
+  if (modalBtn) modalBtn.disabled = true;
+  try {
+    const res = await requestJson('/api/user/discord-notify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: nextEnabled })
+    });
+    const data = res.data || {};
+    if (res.ok && data.ok) {
+      currentDiscordLinkState.discordNotifyEnabled = data.discordNotifyEnabled !== false;
+      renderDiscordNotifyControls();
+      showToast(data.message || (currentDiscordLinkState.discordNotifyEnabled ? 'Đã BẬT thông báo Discord.' : 'Đã TẮT thông báo Discord.'), 'success');
+    } else {
+      showToast(data.error || 'Không thể cập nhật cài đặt thông báo Discord.', 'error');
+    }
+  } catch (err) {
+    showToast('Lỗi kết nối: ' + (err && err.message ? err.message : 'Thất bại'), 'error');
+  } finally {
+    discordNotifyToggleInFlight = false;
+    if (toolbarBtn) toolbarBtn.disabled = false;
+    if (modalBtn) modalBtn.disabled = false;
   }
 }
 

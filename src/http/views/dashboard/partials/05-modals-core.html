@@ -604,6 +604,18 @@
           <div style="margin-top:2px;"><b>Thời gian liên kết:</b> <span id="discordLinkedDate" style="color:var(--muted);"></span></div>
         </div>
       </div>
+      <div id="discordNotifyControlBox" style="padding:12px;border-radius:8px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);display:flex;flex-direction:column;gap:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+          <div>
+            <div style="font-size:12px;color:var(--muted);">THÔNG BÁO RIÊNG QUA DISCORD (DM):</div>
+            <div id="discordNotifyStatusText" style="font-weight:700;font-size:13.5px;color:#10b981;margin-top:2px;">🔔 ĐANG BẬT</div>
+          </div>
+          <button id="discordNotifyToggleBtn" type="button" class="small" onclick="toggleDiscordNotifications()">🔕 Tắt thông báo Discord</button>
+        </div>
+        <div id="discordNotifyHint" style="font-size:12px;color:var(--muted);line-height:1.45;">
+          Tự động nhắn riêng (DM) tới tài khoản Discord đang liên kết với tài khoản Web này khi bot được gán bị die, đang AFK bị kick/văng, kết nối lại AFK thành công hoặc dừng do reconnect thất bại.
+        </div>
+      </div>
       <div id="discordLinkInstruction" style="font-size:13px;color:var(--muted);line-height:1.5;">
         <p style="margin:0 0 6px 0;">Để liên kết tài khoản Discord với Web Manager:</p>
         <ol style="padding-left:18px;margin:0;">

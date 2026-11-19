@@ -1497,20 +1497,92 @@ function createUserApi({
     }
   });
 
-  // 18b. DISCORD LINKING STATUS & UNLINK
+  // 18b. DISCORD LINKING STATUS, DM NOTIFICATION TOGGLE & UNLINK
+  async function readUserDiscordNotifyEnabled(user) {
+    if (!store || typeof store.getSetting !== 'function') return true;
+    const primaryKey = String(user.userId || user.username || '').trim();
+    const fallbackKey = String(user.username || '').trim().toLowerCase();
+    let pref = primaryKey ? await store.getSetting(`user_discord_notify:${primaryKey}`).catch(() => null) : null;
+    if (pref === null && fallbackKey && fallbackKey !== primaryKey.toLowerCase()) {
+      pref = await store.getSetting(`user_discord_notify:${fallbackKey}`).catch(() => null);
+    }
+    if (pref === null && user.role === 'admin') {
+      pref = await store.getSetting('user_discord_notify:admin').catch(() => null);
+    }
+    if (pref === false || (pref && typeof pref === 'object' && pref.enabled === false)) {
+      return false;
+    }
+    return true;
+  }
+
   router.get(['/user/discord-link', '/discord-link'], requireSession, async (req, res) => {
     try {
       const user = req.managerAuthSession;
-      const link = await store.getDiscordLink(user.userId || user.username);
-      if (!link) {
-        return res.json({ ok: true, linked: false });
+      let link = await store.getDiscordLink(user.userId || user.username);
+      if (!link && user.username && user.username !== user.userId) {
+        link = await store.getDiscordLink(user.username);
+      }
+      const discordNotifyEnabled = await readUserDiscordNotifyEnabled(user);
+      if (!link || String(link.status || 'active').toLowerCase() === 'revoked') {
+        return res.json({ ok: true, linked: false, discordNotifyEnabled });
       }
       return res.json({
         ok: true,
         linked: true,
         discordUserId: link.discord_user_id || link.discordUserId,
         username: link.username || user.username,
-        linkedAt: link.linked_at || link.linkedAt || null
+        linkedAt: link.linked_at || link.linkedAt || null,
+        discordNotifyEnabled
+      });
+    } catch (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+  });
+
+  router.post(['/user/discord-notify', '/discord-notify'], requireSession, async (req, res) => {
+    try {
+      const user = req.managerAuthSession;
+      const rawEnabled = req.body?.enabled;
+      if (typeof rawEnabled !== 'boolean') {
+        return res.status(400).json({ ok: false, error: 'Tham số enabled phải là true hoặc false.' });
+      }
+      const enabled = rawEnabled;
+      const userKey = String(user.userId || user.username || '').trim();
+      const record = {
+        enabled,
+        userId: userKey,
+        username: user.username || userKey,
+        role: user.role || 'user',
+        updatedAt: new Date().toISOString()
+      };
+      if (store && typeof store.setSetting === 'function') {
+        if (userKey) {
+          await store.setSetting(`user_discord_notify:${userKey}`, record);
+        }
+        const unameKey = String(user.username || '').trim().toLowerCase();
+        if (unameKey && unameKey !== userKey.toLowerCase()) {
+          await store.setSetting(`user_discord_notify:${unameKey}`, record);
+        }
+        if (user.role === 'admin') {
+          await store.setSetting('user_discord_notify:admin', record);
+        }
+      }
+      if (store && typeof store.addAudit === 'function') {
+        await store.addAudit({
+          action: 'USER_DISCORD_NOTIFY_TOGGLED',
+          targetId: userKey,
+          actorId: user.username || userKey,
+          actorRole: user.role || 'user',
+          actorIp: req.ip || '127.0.0.1',
+          details: { enabled }
+        }).catch(() => null);
+      }
+      return res.json({
+        ok: true,
+        discordNotifyEnabled: enabled,
+        message: enabled
+          ? 'Đã BẬT nhận tin nhắn thông báo riêng qua Discord (DM).'
+          : 'Đã TẮT nhận tin nhắn thông báo riêng qua Discord (DM).'
       });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
