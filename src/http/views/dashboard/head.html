@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="vi" data-theme="deep-galaxy">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>KBOT Manager — Bảng Điều Khiển Quản Lý Bot Minecraft</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23080511'/%3E%3Cpath d='M16 5l9 3.5v7c0 6-4 9.5-9 11.5-5-2-9-5.5-9-11.5v-7L16 5z' fill='none' stroke='%238b5cf6' stroke-width='2.2'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script data-kbot-theme-boot>
+(function(){
+  try {
+    var raw = localStorage.getItem('kbot_theme') || localStorage.getItem('kbot_dashboard_theme') || localStorage.getItem('kbot_cosmic_mode') || 'deep-galaxy';
+    var map = {
+      'deep-galaxy': 'deep-galaxy',
+      'galaxy': 'deep-galaxy',
+      'vivid': 'deep-galaxy',
+      'ocean-abyss': 'ocean-abyss',
+      'ocean': 'ocean-abyss',
+      'blue': 'ocean-abyss',
+      'deep-ocean': 'ocean-abyss',
+      'oceanic': 'ocean-abyss',
+      'violet-dusk': 'violet-dusk',
+      'sunset': 'violet-dusk',
+      'subtle': 'violet-dusk',
+      'off': 'violet-dusk',
+      'moonlight': 'moonlight',
+      'morning': 'moonlight',
+      'light': 'moonlight'
+    };
+    var theme = map[raw] || 'deep-galaxy';
+    document.documentElement.setAttribute('data-theme', theme);
+    document.documentElement.style.colorScheme = theme === 'moonlight' ? 'light' : 'dark';
+  } catch (_) {}
+})();
+</script>

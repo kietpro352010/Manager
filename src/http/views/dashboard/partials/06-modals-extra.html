@@ -1,0 +1,545 @@
+<div id="changelogModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="changelogModalTitle">
+  <div class="modal-card changelog-card">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:12px;border-bottom:1px solid rgba(255,255,255,0.08);">
+      <div>
+        <h3 id="changelogModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">📜 Nhật Ký Cập Nhật & Lịch Sử Phiên Bản</h3>
+        <div style="color:var(--muted);font-size:11.5px;margin-top:2px;">Hành trình tối ưu và nâng cấp KingMC Sentinel (V1.0 - V11.8 Pure Render)</div>
+      </div>
+      <button type="button" class="small" onclick="closeChangelogModal()" aria-label="Đóng">✕</button>
+    </div>
+
+    <div class="changelog-body">
+      <!-- V11.7 -->
+      <div class="timeline-item latest">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">🚀 KBOT Commercial Enterprise Edition V11.7 (Pure Render Production)</span>
+          <span class="timeline-badge current">ZERO BANDWIDTH WASTE • REALTIME SYNC • DISCORD SUPPORT • 99.9% UPTIME</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Đồng Bộ Dữ Liệu Tức Thì (Không Cần F5):</strong> Toàn bộ thao tác nạp key gia hạn, đổi biệt danh bot, tạo tài khoản hay cập nhật từ Supabase Cloud đều hiển thị ngay lập tức trên màn hình một cách mượt mà và liền mạch.</li>
+            <li><strong>Bảng Trạng Thái Phân Tách Chuẩn Xác:</strong> Tách biệt rõ ràng giữa <code>Offline / Kicked</code> (bot bị ngắt kết nối Minecraft) và <code>Lỗi / Unreachable</code> (máy chủ bot con mất kết nối web), giúp theo dõi hạm đội chuẩn xác 100%.</li>
+            <li><strong>Đảm Bảo Bot Luôn Kết Nối (Always Connected):</strong> Tối ưu hóa giao thức kết nối nội bộ giữa Manager và Bot con; tự động fallback qua cổng sức khỏe <code>/health</code>, loại bỏ hoàn toàn tình trạng link bot con sống nhưng manager báo nhầm Unreachable.</li>
+            <li><strong>Nút Hỗ Trợ Discord Tiện Lợi:</strong> Bổ sung nút bấm Discord trực tiếp ở chân trang, giúp khách thuê và admin liên hệ hỗ trợ kỹ thuật hoặc cập nhật thông báo cộng đồng nhanh chóng.</li>
+            <li><strong>Siêu Tiết Kiệm Băng Thông (Render 5GB/tháng):</strong> Tối ưu hóa chu kỳ kiểm tra ETag, loại bỏ dữ liệu thừa và nén dữ liệu cấp độ cao, đảm bảo hệ thống vận hành liên tục 24/7 suốt cả tháng mà không lo cạn kiệt băng thông Render.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V11.6 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">👑 KBOT Commercial Enterprise Edition V11.6 (Performance & Experience Evolution)</span>
+          <span class="timeline-badge">HIGH-SPEED REAL-TIME • 99.9% AFK UPTIME • SMART RECONNECT • SEAMLESS MOBILE UI</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Tối Ưu Tốc Độ Truyền Tải &amp; Độ Nhạy (High-Speed Real-Time):</strong> Nâng cấp cơ chế truyền dữ liệu telemetry, giảm độ trễ cập nhật trạng thái bot xuống mức tối thiểu, bảng điều khiển phản hồi mượt mà tức thì và tiết kiệm tối đa dữ liệu mạng.</li>
+            <li><strong>Tăng Cường Độ Ổn Định AFK (Uptime 99.9%):</strong> Nâng cấp thuật toán tự động kết nối lại (Auto-Reconnect) thông minh khi máy chủ KingMC bảo trì hoặc gặp sự cố mạng, bảo đảm bot tự động vào lại, giữ vững vị trí và duy trì cày cuốc liên tục 24/7.</li>
+            <li><strong>Giao Diện Trực Quan &amp; Tối Ưu Mobile:</strong> Hoàn thiện hiển thị chi tiết các chỉ số sinh tồn (máu, thanh đói, tọa độ, totem, giáp) sắc nét; hỗ trợ giao diện cảm ứng mượt mà và chuẩn xác trên mọi dòng điện thoại.</li>
+            <li><strong>Chuẩn Hóa Thời Hạn Thuê Minh Bạch:</strong> Cải tiến hệ thống tính toán thời gian thuê bot chuẩn xác đến từng phút, hiển thị rõ ràng thời hạn sử dụng và hỗ trợ nhập mã Key bản quyền gia hạn trực tiếp mà không cần tải lại trang.</li>
+            <li><strong>Bảo Mật Phiên Làm Việc &amp; Đăng Nhập Liền Mạch:</strong> Bảo vệ dữ liệu cá nhân an toàn tuyệt đối, duy trì phiên đăng nhập ổn định không bị đăng xuất bất ngờ khi đang theo dõi bot.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V11.5 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">👑 KBOT Commercial Enterprise Edition V11.5 (Full Enterprise SaaS)</span>
+          <span class="timeline-badge">SELF-REGISTER • FULL-PAGE DEDICATED SECTIONS • RESTRICTED BLUR OVERLAYS • 1-BOT-1-USER</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Tự Đăng Ký Tài Khoản Khách Thuê:</strong> Khách hàng có thể tự đăng ký tài khoản trực tiếp trên Web với username độc nhất (không phân biệt hoa thường), xác thực chính sách mật khẩu và nhận ngay 1 ngày dùng thử hoặc kích hoạt mã Key bản quyền.</li>
+            <li><strong>Thanh Điều Hướng Toàn Diện &amp; Nút Tài Khoản Góc Phải:</strong> Menu tài khoản được neo cố định góc trên bên phải trên mọi thiết bị (PC &amp; Mobile), tích hợp nút Đăng Xuất ở ngay đầu danh mục và mở các tab chuyển trang lớn trực quan.</li>
+            <li><strong>Tách Biệt Toàn Trang (Full-Page Dedicated Sections):</strong> Chuyển đổi toàn bộ các trang Quản Lý User &amp; Key, Nhật Ký Hoạt Động (Audit Trail Enterprise) và Quản Lý Sao Lưu (Disaster Recovery) sang dạng toàn trang độc lập, tiện lợi hơn gấp 10 lần các modal pop-up cũ.</li>
+            <li><strong>Màn Hình Khóa &amp; Hết Hạn Làm Mờ Nền (Blurred Restriction Overlays):</strong> Người dùng bị tạm khóa hoặc hết hạn vẫn có thể đăng nhập để xem thông báo/lời nhắn từ Admin hoặc kích hoạt Key gia hạn và chuyển hướng sang Discord hỗ trợ, trong khi toàn bộ nền Dashboard phía sau bị làm mờ và khóa tương tác tuyệt đối.</li>
+            <li><strong>Phân Quyền Độc Quyền 1-Bot-1-User:</strong> Mỗi bot chỉ được cấp phát cho tối đa 1 khách thuê; bot đã có chủ sở hữu sẽ tự động hiển thị xám với nhãn người dùng đang giữ, yêu cầu xác nhận trước khi hủy quyền để chuyển giao cho người mới.</li>
+            <li><strong>Cơ Chế Gia Hạn Linh Hoạt &amp; Thu Hồi Vĩnh Viễn:</strong> Thêm hệ thống nút gia hạn nhanh (+1N, +3N, +7N, +15N, +30N, -1N, 👑 Vĩnh viễn, ⏱ Tùy chỉnh). Nếu tài khoản VIP Vĩnh Viễn được điều chỉnh cộng/trừ ngày hoặc cố định ngày, quyền vĩnh viễn sẽ tự động hủy và tính từ thời điểm hiện tại; đồng thời giao diện người dùng vĩnh viễn được tối giản bỏ nút nhập Key.</li>
+            <li><strong>Bảo Mật Cao Cấp &amp; Tự Phục Hồi Dữ Liệu:</strong> Mã hóa dữ liệu bảo mật chuẩn scrypt; cơ chế tự phục hồi đa đường dẫn giải quyết triệt để lỗi tài khoản biến mất sau chu kỳ Logout / Login.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V11.4 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">🚀 KBOT Cloud Native Edition V11.4 (Persistence & UI Harmony)</span>
+          <span class="timeline-badge">ROCK-SOLID PERSISTENCE • DOCKING UI • 100% FLEET SYNC</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Khắc Phục Triệt Để Mất Dữ Liệu Tài Khoản:</strong> Tái cấu trúc cơ chế tự phục hồi (Self-Healing) và quy trình sao lưu; bảo toàn tuyệt đối danh sách tài khoản khách thuê qua chu kỳ Logout / Login mà không bị ghi đè bởi bản backup cũ.</li>
+            <li><strong>Bố Cục Menu Tài Khoản Chuẩn Mực:</strong> Nút người dùng được neo vững chắc ở phía bên phải thanh công cụ; menu dropdown mở rộng theo hướng bên trái (<code>right: 0; left: auto;</code>) hiển thị trọn vẹn không bao giờ tràn màn hình.</li>
+            <li><strong>Đồng Bộ Dữ Liệu Hai Chiều Hoàn Hảo:</strong> Kết nối thông suốt giữa Manager và Bot Worker qua biến môi trường <code>BOT_SECRET_KEY</code> thống nhất trên bảng điều khiển hosting, bảo đảm 100% lệnh, mật khẩu, tài khoản và lịch trình đồng nhất giữa các hosting riêng biệt.</li>
+            <li><strong>Tối Ưu Phần Cứng & Băng Thông:</strong> Giảm tải CPU idle với chu kỳ polling thông minh thích ứng (500ms khi hoạt động, 5000ms khi ẩn tab), khóa giới hạn mảng log tránh tràn RAM trên gói Render cơ bản.</li>
+            <li><strong>Hiệu Ứng Hoạt Ảnh Mượt Mà:</strong> Thêm chuyển động nâng thẻ bot khi di chuột, highlight hàng bảng quản trị và chuyển đổi mượt mà các tab.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V11.3 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">🛡️ KBOT Cloud Native Edition V11.3 (Pure Render Optimized)</span>
+          <span class="timeline-badge">PURE RENDER • SESSION REVOCATION • ATOMIC ROLLBACK</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Triển Khai Độc Quyền Pure Render Cloud:</strong> Tối ưu hóa toàn diện cho Render Web Service, tự động nhận diện PORT 10000 fallback, thanh trừng triệt để toàn bộ mã nguồn và nền tảng cũ.</li>
+            <li><strong>Thu Hồi Phiên Đăng Nhập Tức Thì Khi Đổi Mật Khẩu:</strong> Tự động vô hiệu hóa toàn bộ active session của tài khoản khi quản trị viên hoặc người dùng cập nhật mật khẩu mới, ép đăng nhập lại trên mọi thiết bị và bot con.</li>
+            <li><strong>Lưu Trữ Nguyên Tử (Atomic Persistence & Rollback):</strong> Cơ chế hoàn tác in-memory an toàn 100% khi ghi dữ liệu tài khoản (users) hoặc mã key bản quyền thất bại, ngăn chặn mất đồng bộ trạng thái hệ thống.</li>
+            <li><strong>Đồng Bộ Hash Mật Khẩu Login Gate:</strong> Cổng <code>/api/auth/verify-bot-access</code> truyền tải đầy đủ hash mật khẩu chuẩn scrypt để Bot Worker giám sát phiên đăng nhập theo thời gian thực.</li>
+            <li><strong>Giao Diện Quản Trị Bảo Mật Cao:</strong> Loại bỏ triệt để nguy cơ chèn chuỗi HTML injection trong modal tài khoản quản trị và khắc phục race condition khi cập nhật thẻ tóm tắt bot.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V10.0 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">🚀 KBOT Commercial Pro Edition V10.0 (16.10.2026)</span>
+          <span class="timeline-badge current">SAAS COMMERCIAL & MULTI-HOST CLOUD</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Thương Hiệu & Trải Nghiệm Thương Mại KBOT:</strong> Chính thức ra mắt nền tảng thương mại KBOT hoàn chỉnh cho dịch vụ thuê bot AFK KingMC số 1.</li>
+            <li><strong>SaaS Showcase & Landing Portal:</strong> Tích hợp giao diện giới thiệu sản phẩm trực quan, 5 quyền lợi khách thuê vượt trội, quy trình hoạt động 3 bước và cam kết SLA 99.9% Uptime.</li>
+            <li><strong>Cổng Hỗ Trợ Cộng Đồng Discord 24/7:</strong> Tích hợp nút kết nối trực tiếp kênh Discord hỗ trợ kỹ thuật và mua key tự động (https://discord.gg/mJWX5Xp3z).</li>
+            <li><strong>Tối Ưu Đồng Bộ Đa Máy Chủ (Multi-Host Sync):</strong> Hoạt động ổn định bất kể Manager và Bot Worker triển khai trên các hạ tầng khác nhau (Render Web Service, VPS Linux, Docker, máy chủ riêng).</li>
+            <li><strong>Bảo Mật Quân Sự Scrypt & Zero Plaintext:</strong> Cơ chế mã hóa hai chiều và đồng bộ offline cache bảo vệ tuyệt đối thông tin khách hàng.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V9.3 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">🛡️ KingMC Real-Time & Security V9.3</span>
+          <span class="timeline-badge current">REAL-TIME 500MS & AUTH SYNC</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Polling Real-time 500ms mượt mà, chống nghẽn:</strong> Nâng cấp tần số polling lên 500ms với cơ chế gọi tuần tự async/await, loại bỏ triệt để xung đột race-condition khi nhiều tab cùng mở.</li>
+            <li><strong>Khóa Bảo Mật Service-to-Service Nội Bộ:</strong> Sử dụng <code>BOT_SECRET_KEY</code> cấu hình qua biến môi trường giữa Manager và Bot con, khóa chặt 100% API riêng tư của Bot con trước mọi truy cập trái phép.</li>
+            <li><strong>Đồng Bộ Tài Khoản Auth Sync (Scrypt Hash):</strong> Manager đồng bộ danh sách khách thuê và phân quyền xuống từng Bot con bằng chuẩn băm scrypt bảo mật, khách có thể đăng nhập trực tiếp trên Web Bot con mà không cần Manager online.</li>
+            <li><strong>Bảo Vệ Giao Diện Bot Con Chống Lộ Dữ Liệu:</strong> Login Gate che kín UI mặc định ngay từ HTML, thêm nút Đăng xuất trên topbar và Modal lịch sử cập nhật riêng cho Bot con.</li>
+            <li><strong>Nút Xem Mật Khẩu (👁 / 🙈) & Chip Lệnh Nhanh Chuẩn Hóa:</strong> Nút con mắt xem mật khẩu ở cả 2 file, chip lệnh nhanh (/dn, /login, /pay) tự điền tham số và không auto gửi.</li>
+            <li><strong>Reset Bàn Giao Khách Mới Sạch 100%:</strong> Xóa trắng hoàn toàn trạng thái trong RAM, xóa sạch username không để lại dấu vết của khách cũ.</li>
+            <li><strong>Quản Lý Bản Sao Lưu & Đồng Bộ Hẹn Giờ Bật/Tắt Hàng Loạt:</strong> Thêm nút xóa từng file Backup có kiểm tra bảo mật, bổ sung cấu hình hẹn giờ On/Off cố định và chu kỳ trong modal đồng bộ hàng loạt.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V9.0 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">🚀 KingMC Commercial SaaS & Audit Trail Pro Max V9.0</span>
+          <span class="timeline-badge current">SAAS COMMERCIAL & AUDIT TRAIL</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Nhật Ký Hoạt Động & Lịch Sử Cập Nhật Toàn Diện (Audit Trail Pro Max):</strong> Ghi nhận 100% thời gian thực mọi hành vi, thao tác người dùng và sự kiện tự động (Xác thực, Điều khiển bot, Tài khoản Minecraft, Cài đặt, Túi đồ, Hạm đội, Khách thuê, Giftcode, Watchdog, Auto-Healing).</li>
+            <li><strong>Bộ Lọc Đa Năng & Xuất Dữ Liệu (Export CSV / JSONL):</strong> Hỗ trợ tìm kiếm từ khóa, phân loại theo danh mục (AUTH, BOT, FLEET, USER, LICENSE, SYSTEM), phân loại theo trạng thái (Thành công, Thất bại, Bị chặn), phân trang mượt mà và tải file báo cáo CSV/JSONL về máy tính với font tiếng Việt chuẩn UTF-8 BOM.</li>
+            <li><strong>Xóa Lịch Sử Nhật Ký Có Kiểm Soát (Audit Retention & Clear):</strong> Admin có quyền xóa sạch nhật ký cũ, hệ thống tự động ghi nhận lại sự kiện xóa vào nhật ký mới để đảm bảo tính minh bạch và toàn vẹn dữ liệu.</li>
+            <li><strong>Hệ Thống Thuê Bot & Gói Cước Tự Động (Subscription Engine):</strong> Quản lý thời hạn thuê chính xác từng giây, đồng hồ đếm ngược trực quan, cảnh báo sắp hết hạn và tự động thu hồi/tắt bot an toàn khi hết hạn.</li>
+            <li><strong>Hệ Thống Mã Kích Hoạt (License Key / Giftcode):</strong> Tạo key gia hạn linh hoạt theo ngày/gói, tự động kích hoạt nạp ngày thuê qua Web Toolbar hoặc Login Gate.</li>
+            <li><strong>Tự Đổi Tài Khoản Minecraft & Reset Bàn Giao:</strong> Khách thuê được chủ động đổi nick/pass bot của mình (kèm phân quyền Admin), tính năng 1-click Reset bàn giao bot sạch sẽ cho khách mới.</li>
+            <li><strong>Broadcast Lệnh Hạm Đội & Remote GUI Inspector:</strong> Gửi lệnh hàng loạt cho toàn hạm đội bot, tương tác ảo click slot rương/kho đồ từ xa.</li>
+            <li><strong>Xử Lý Triệt Để 24 Lỗi Kỹ Thuật (Bug Fixes):</strong> Khóa AES cố định không đổi khi restart container, log stream ổn định, phân quyền RBAC chặt chẽ, tối ưu DOM không giật lag.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V8.2 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">🌱 KingMC Eco Sentinel & UI Evolution V8.2</span>
+          <span class="timeline-badge past">ECO MODE & FLEET RESOURCE BAR</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Siêu Tối Ưu Eco Mode (Giảm 80% CPU & Lock RAM &lt; 220MB):</strong> Khi bot AFK tĩnh, tắt toàn bộ tính toán vật lý collision/raycasting (<code>physicsEnabled = false</code>), triệt tiêu gói tin hạt/ánh sáng/âm thanh không cần thiết và giới hạn buffer log 150 mục.</li>
+            <li><strong>Fleet Resource Overview Bar:</strong> Bổ sung thanh thống kê tài nguyên hạm đội chuẩn Glassmorphism (Tổng RAM, RAM TB/bot, số bot đang kích hoạt Eco, mức CPU tiết kiệm ước tính ~80%).</li>
+            <li><strong>Thanh Đo RAM Usage & Badge Eco Trên Thẻ Bot:</strong> Hiển thị badge <code>🌱 ECO ACTIVE</code> và thanh tiến trình RAM đổi màu trực quan theo ngưỡng dung lượng (&lt;200MB Xanh, 200-320MB Vàng/Lam, &gt;320MB Cam).</li>
+            <li><strong>Đồng Bộ Cài Đặt Eco Toàn Hạm Đội:</strong> Hỗ trợ bật/tắt Eco Mode hàng loạt chỉ với 1 click trong modal Đồng bộ Cài đặt và từng bot riêng biệt.</li>
+            <li><strong>Tối Ưu Giao Diện Di Động (Mobile UX):</strong> Chuẩn hóa touch targets &ge; 44px, grid co giãn thích ứng mượt mà trên mọi kích thước màn hình smartphone.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V8.1 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">⚡ KingMC Telemetry Sentinel V8.1</span>
+          <span class="timeline-badge past">SMART WATCHDOG & TELEMETRY</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Smart Watchdog Chống Kẹt Sảnh (&gt; 28s):</strong> Tự động phát hiện bot bị kẹt ở tọa độ đăng nhập hoặc sảnh quá 28 giây mà không vào được server AFK, tự động ngắt kết nối và đăng nhập lại từ đầu.</li>
+            <li><strong>Ghost Freeze Watchdog (&gt; 35s):</strong> Lắng nghe luồng gói tin socket trực tiếp từ KingMC. Nếu quá 35s không nhận được packet (đứt kết nối ngầm), bot tự động Hard Reset kết nối.</li>
+            <li><strong>Full Jitter Exponential Backoff:</strong> Thuật toán kết nối lại ngẫu nhiên đều kết hợp độ lệch pha theo ID bot (Fleet Phase Staggering), xóa bỏ nghẽn mạng Thundering Herd và chống ban IP hạm đội.</li>
+            <li><strong>Cảnh Báo Telemetry Máu Yếu &amp; Tử Vong:</strong> Tích hợp webhook Discord Rich Embed và Telegram cảnh báo tức thì khi bot còn &le; 10 HP (&le; 5 tim) hoặc tử vong trong game (kèm tọa độ chi tiết).</li>
+            <li><strong>Fleet Auto-Healing Lệch Pha:</strong> Cơ chế tự phục hồi bot offline của Manager giãn cách 2.5s mỗi bot, đảm bảo máy chủ không bị shock tải khi có nhiều bot cùng ngắt kết nối.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V8.0 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">👑 KingMC Enterprise Fleet V8.0</span>
+          <span class="timeline-badge past">ENTERPRISE SECURITY</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Bảo Mật Mật Khẩu:</strong> Mật khẩu Admin được băm bằng <code>scrypt</code>; mật khẩu tài khoản và thông tin đăng nhập bot được bảo vệ khi lưu trên Supabase bằng khóa cấu hình môi trường.</li>
+            <li><strong>Chống Brute-Force Đăng Nhập:</strong> Giới hạn 5 lần thử trong 15 phút, khóa IP và độ trễ lũy thừa bảo vệ cổng đăng nhập.</li>
+            <li><strong>Sao Lưu Cloud:</strong> Tạo snapshot vào Supabase định kỳ, trước thao tác lớn và giữ tối đa 30 bản gần nhất.</li>
+            <li><strong>Audit Trail:</strong> Ghi nhận hoạt động quản trị vào bảng <code>audit_logs</code> trên Supabase, có phân trang và lọc trên giao diện Admin.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V7.2 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">⭐ KingMC Sentinel V7.2</span>
+          <span class="timeline-badge past">ZERO-FLICKER & PROFILE</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Zero-Flicker Instant Loading:</strong> Tối ưu hóa render phân giải phiên đăng nhập phía máy chủ; triệt tiêu 100% hiện tượng chớp nhấp nháy màn hình khi vừa mở web.</li>
+            <li><strong>Menu Hồ Sơ Dropdown Góc Phải:</strong> Tích hợp nút Avatar thông minh (👑 Admin / 👤 User), hiển thị thông tin tài khoản, cấp bậc và bảng điều khiển trực quan.</li>
+            <li><strong>Tính Năng Tự Đổi Mật Khẩu (Self-Service):</strong> Cung cấp form đổi mật khẩu an toàn cho cả User lẫn Admin trực tiếp từ menu hồ sơ.</li>
+            <li><strong>Tinh Giản Cổng Đăng Nhập:</strong> Chuẩn hóa ô nhập tài khoản ("Nhập tên đăng nhập..."), gỡ bỏ các văn bản hướng dẫn rườm rà.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V7.1 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">⭐ KingMC Sentinel V7.1</span>
+          <span class="timeline-badge past">MULTI-USER RBAC</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Phân Quyền Đa Người Dùng (RBAC):</strong> Tách biệt Quản trị viên (Admin) và Operator; phân quyền chỉ định bot con cho từng thành viên.</li>
+            <li><strong>Hệ Thống Thông Báo Sentinel:</strong> Popup thông báo admin thông minh với 3 chế độ (Hằng ngày 1 lần/ngày, Mọi lần vào, Khung thời gian).</li>
+            <li><strong>Bảo Mật Phiên 30 Ngày:</strong> Lưu phiên bền vững trong bảng <code>manager_sessions</code> trên Supabase; không phụ thuộc filesystem host.</li>
+            <li><strong>Đồng Bộ HUD Toàn Diện:</strong> Huy hiệu PRO V7.1, Role badge, Platform và RAM Manager hiển thị sắc nét xuyên suốt từ Dashboard đến chi tiết bot con.</li>
+            <li><strong>Bảo Mật Dữ Liệu Bot:</strong> Ẩn hoàn toàn form tài khoản/mật khẩu bot con đối với tài khoản User thường.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V7.0 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">⭐ KingMC Commander V7.0</span>
+          <span class="timeline-badge past">INTELLIGENT SCHEDULER</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Hẹn Giờ Bot Thông Minh:</strong> Hỗ trợ đặt lịch theo giờ cố định hằng ngày hoặc chạy theo chu kỳ tuần tự.</li>
+            <li><strong>Auto Chat Đa Dòng:</strong> Lên lịch gửi tin nhắn lặp lại với độ trễ (delay) mượt mà chống spam block.</li>
+            <li><strong>Kéo Thả Hòm Đồ:</strong> Tương tác trực tiếp kéo thả slot trang bị, chuyển đổi Hotbar và vứt item ra thế giới thực.</li>
+            <li><strong>Smart Anti-AFK Kick:</strong> Mô phỏng hành vi di chuyển, vung tay nhẹ nhàng chống AFK kick.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V6.0 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">⭐ KingMC Sentinel Guard V6.1 (V6.0)</span>
+          <span class="timeline-badge past">WEBHOOK WATCHDOG</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Cảnh Báo Webhook:</strong> Tích hợp thông báo tức thời qua Discord & Telegram khi bot offline quá 5 phút hoặc sắp hết Totem.</li>
+            <li><strong>Watchdog Tự Phục Hồi:</strong> Tự động phát hiện bot bị kẹt hoặc mất kết nối và kích hoạt tái kết nối thông minh.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V5.0 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">⭐ KingMC Performance V5.0</span>
+          <span class="timeline-badge past">REALTIME SPARKLINES</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Đồ Thị SVG Sparklines:</strong> Theo dõi biến thiên Ping và RAM RSS trực quan theo thời gian thực.</li>
+            <li><strong>Tối Ưu Bộ Nhớ:</strong> Tinh chỉnh cân đối tài nguyên ổn định trong mức 300 - 500 MB RAM.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V4.0 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">⭐ KingMC Dynamic Hub V4.0</span>
+          <span class="timeline-badge past">REGISTRY & BACKUP</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Quản Lý Bot Trực Tuyến:</strong> Thêm, sửa URL, xóa bot trực tiếp từ giao diện không cần khởi động lại server.</li>
+            <li><strong>Sao Lưu Danh Sách:</strong> Hỗ trợ Export và Import khôi phục danh sách bot bằng định dạng file JSON.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V3.0 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">⭐ KingMC Inventory V3.0</span>
+          <span class="timeline-badge past">WORLD INTERACTION</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Giao Diện Hòm Đồ 36 Ô:</strong> Giám sát slot trang bị, Hotbar, hiển thị thanh Máu (Health), Đói (Hunger) và số lượng Totem.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V2.1 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">⭐ KingMC Core V2.0 (V2.1)</span>
+          <span class="timeline-badge past">MULTI-BOT CONTROL</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Điều Khiển Hàng Loạt:</strong> Nút chạy, dừng, khởi động lại tất cả bot cùng lúc; bảng thống kê KPI tập trung.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V1.1 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">⭐ KingMC Console V1.1</span>
+          <span class="timeline-badge past">CHAT & QUICK COMMANDS</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Live Console:</strong> Theo dõi Event Log và Chat Log trực tiếp; chip gửi lệnh nhanh <code>/menu</code> (Slot 24), <code>/dn</code>, <code>/login</code>, <code>/bal</code>, <code>/team chat</code>.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V1.0 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
+          <span class="timeline-version">🚀 KingMC Genesis V1.0</span>
+          <span class="timeline-badge past">INITIAL RELEASE</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Khởi Tạo Nền Tảng:</strong> Hệ thống KingMC AFK Bot cơ bản và giao diện web giám sát độc lập.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-actions" style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.06);">
+      <button type="button" onclick="closeChangelogModal()">Đóng</button>
+    </div>
+</div>
+</div>
+
+<div id="supabaseModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="supabaseModalTitle">
+  <div class="modal-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+      <h3 id="supabaseModalTitle" style="margin:0;font-size:18px;display:flex;align-items:center;gap:8px;">
+        <span aria-hidden="true">☁️</span> Cấu hình Supabase Cloud Database
+      </h3>
+      <span id="supabaseStatusBadge" class="vip-pill" style="background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.3);">
+        ⚪ Đang kiểm tra...
+      </span>
+    </div>
+
+    <div id="supabaseAlertBox" role="alert" aria-atomic="true" class="login-alert hidden" style="margin-bottom:14px;"></div>
+
+    <p style="font-size:12.5px;color:var(--muted);line-height:1.5;margin-bottom:16px;">
+      Đồng bộ người dùng, License Key, hạm đội, phiên đăng nhập, cài đặt Bot và Audit Log lên Supabase PostgreSQL. Khi tạo project Supabase mới, sao chép SQL bên dưới và chạy một lần trong SQL Editor trước khi kết nối.
+    </p>
+
+    <div class="form-row">
+      <label for="supabaseUrlInput">Supabase Project URL</label>
+      <input id="supabaseUrlInput" type="text" placeholder="https://xyzcompany.supabase.co" autocomplete="off" spellcheck="false">
+    </div>
+
+    <div class="form-row">
+      <label for="supabaseKeyInput">Supabase Service Role Key / API Key</label>
+      <div class="password-input-wrap">
+        <input id="supabaseKeyInput" type="password" placeholder="eyJh..." autocomplete="off">
+        <button type="button" class="password-toggle-btn" aria-label="Hiện hoặc ẩn Supabase API key" aria-pressed="false" onclick="togglePasswordVisibility('supabaseKeyInput', this)">👁</button>
+      </div>
+      <small style="color:var(--muted);font-size:11px;margin-top:4px;display:block;">
+        Khuyên dùng <strong>service_role secret</strong> từ Supabase Dashboard (Settings &gt; API) để có toàn quyền đồng bộ bảng.
+      </small>
+    </div>
+
+    <div style="background:rgba(56,189,248,0.06);border:1px solid rgba(56,189,248,0.2);border-radius:10px;padding:12px;margin:16px 0;font-size:12px;color:#cbd5e1;line-height:1.5;">
+      <div style="font-weight:700;color:#38bdf8;margin-bottom:4px;">💡 Trạng thái hiện tại:</div>
+      <div id="supabaseStatusMsg">Chưa tải trạng thái kết nối.</div>
+    </div>
+
+    <div class="modal-actions" style="margin-top:16px;gap:8px;flex-wrap:wrap;">
+      <button type="button" onclick="closeSupabaseModal()">Đóng</button>
+      <button type="button" class="secondary" id="supabaseSchemaBtn" onclick="copySupabaseSchemaSql()">📋 Sao chép SQL tạo bảng</button>
+      <button type="button" class="secondary" id="supabaseTestBtn" onclick="testSupabaseConnection()">🧪 Kiểm tra kết nối</button>
+      <button type="button" class="secondary" id="supabaseSyncBtn" onclick="syncAllToSupabase()">⬆ Tải lên Supabase Cloud</button>
+      <button type="button" class="secondary" id="supabaseSyncDownBtn" onclick="syncDownFromSupabase()">⬇ Đồng bộ xuống</button>
+      <button type="button" class="secondary" id="resolveAllResetsBtn" onclick="resolveAllPendingResets()" style="color:#f59e0b;border-color:rgba(245,158,11,0.4);" title="Dọn dẹp và gỡ bỏ tất cả xung đột / checkpoint reset đang treo">🧹 Dọn dẹp Reset Treo</button>
+      <button type="button" class="primary" id="supabaseSaveBtn" onclick="saveSupabaseConfig()">💾 Lưu cấu hình</button>
+    </div>
+  </div>
+</div>
+
+
+  <!-- MODAL BROADCAST LỆNH -->
+  <div id="broadcastModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="broadcastModalTitle">
+    <div class="modal-card" style="max-width:480px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <h3 id="broadcastModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">📡 Broadcast Lệnh Hàng Loạt</h3>
+        <button type="button" class="small" onclick="closeBroadcastModal()" aria-label="Đóng">✕</button>
+      </div>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:12px;">Gửi đồng loạt 1 lệnh chat hoặc câu lệnh server (/bal, /menu, /spawn,...) tới toàn bộ các bot trong quyền quản lý của bạn:</p>
+      <div style="margin-bottom:12px;">
+        <label for="broadcastTargetTag" style="display:block;font-size:12px;color:var(--muted);margin-bottom:5px;font-weight:600;">🎯 Đối tượng nhận lệnh:</label>
+        <select id="broadcastTargetTag" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.3);color:var(--text);border:1px solid var(--border);font-size:13px;outline:none;">
+          <option value="">🌐 Toàn bộ bot trong danh sách</option>
+        </select>
+      </div>
+      <div style="margin-bottom:14px;">
+        <label for="broadcastCommandInput" class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;">Lệnh hoặc tin nhắn Broadcast</label>
+        <input type="text" id="broadcastCommandInput" placeholder="Ví dụ: /bal hoặc /menu hoặc Tin nhắn..." style="width:100%;box-sizing:border-box;" />
+      </div>
+      <div class="chip-row" style="margin-bottom:14px;display:flex;gap:6px;flex-wrap:wrap;">
+        <button type="button" class="small" onclick="document.getElementById('broadcastCommandInput').value='/bal'">/bal</button>
+        <button type="button" class="small" onclick="document.getElementById('broadcastCommandInput').value='/menu'">/menu</button>
+        <button type="button" class="small" onclick="document.getElementById('broadcastCommandInput').value='/spawn'">/spawn</button>
+        <button type="button" class="small" onclick="document.getElementById('broadcastCommandInput').value='/team chat'">/team chat</button>
+      </div>
+      <div id="broadcastResultBox" role="status" aria-live="polite" style="display:none;font-size:12px;margin-bottom:12px;padding:8px;border-radius:6px;"></div>
+      <div class="modal-actions" style="margin-top:16px;">
+        <button type="button" onclick="closeBroadcastModal()">Hủy</button>
+        <button type="button" class="primary" onclick="submitBroadcastCommand()">🚀 Bắn Lệnh Ngay</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL GIA HẠN BẰNG KEY (USER) -->
+  <div id="renewModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="renewModalTitle">
+    <div class="modal-card" style="max-width:440px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <h3 id="renewModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">🎁 Gia Hạn Gói Thuê Bằng Mã Key</h3>
+        <button type="button" class="small" onclick="closeRenewModal()" aria-label="Đóng">✕</button>
+      </div>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:14px;">Nhập mã kích hoạt (License Key/Giftcode) được cấp bởi Quản trị viên để gia hạn thời gian sử dụng bot:</p>
+      <div style="margin-bottom:14px;">
+        <label for="renewKeyInput" style="font-size:12px;color:var(--muted);font-weight:600;display:block;margin-bottom:4px;">MÃ KEY GIA HẠN:</label>
+        <input type="text" id="renewKeyInput" placeholder="VD: KINGMC-7D-ABC123" style="width:100%;box-sizing:border-box;text-transform:uppercase;" />
+      </div>
+      <div id="renewResultBox" role="status" aria-live="polite" style="display:none;font-size:12px;margin-bottom:12px;padding:8px;border-radius:6px;"></div>
+      <div class="modal-actions" style="margin-top:16px;">
+        <button type="button" onclick="closeRenewModal()">Đóng</button>
+        <button type="button" class="primary" onclick="submitRenewKey()">Kích Hoạt Ngay</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL QUẢN LÝ KEY GIA HẠN (ADMIN ONLY) -->
+  <div id="keyManagementModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="keyManagementModalTitle">
+    <div class="modal-card" style="max-width:750px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <h3 id="keyManagementModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">🎟️ Quản Lý Mã Key Gia Hạn (License Keys)</h3>
+        <button type="button" class="small" onclick="closeKeyManagementModal()" aria-label="Đóng">✕</button>
+      </div>
+      <div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);padding:14px;border-radius:8px;margin-bottom:16px;">
+        <h4 style="margin:0 0 10px 0;font-size:14px;">Tạo Mã Key Mới</h4>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+          <div>
+            <label for="createKeyDays" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">GÓI THUÊ (NGÀY):</label>
+            <div style="display:flex;gap:4px;align-items:center;">
+              <select id="createKeyDays" onchange="onKeyDaysSelectChange('modal')" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px;border-radius:6px;font-size:13px;">
+                <option value="1">1 Ngày (Dùng thử)</option>
+                <option value="3">3 Ngày</option>
+                <option value="7" selected>7 Ngày (1 Tuần)</option>
+                <option value="14">14 Ngày (2 Tuần)</option>
+                <option value="30">30 Ngày (1 Tháng)</option>
+                <option value="lifetime">👑 Vĩnh Viễn</option>
+                <option value="custom">✏️ Tùy chỉnh ngày...</option>
+              </select>
+              <input type="number" id="createKeyCustomDays" aria-label="Số ngày gói thuê tùy chỉnh" min="1" max="3650" placeholder="Số ngày" style="display:none;width:75px;background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px;border-radius:6px;font-size:13px;" />
+            </div>
+          </div>
+          <div>
+            <label for="createKeyPlan" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">TÊN GÓI:</label>
+            <input type="text" id="createKeyPlan" placeholder="VD: Gói Tuần VIP" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 10px;border-radius:6px;font-size:13px;width:130px;" />
+          </div>
+          <div>
+            <label for="createKeyBotCount" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">SỐ BOT:</label>
+            <input type="number" id="createKeyBotCount" value="1" min="1" max="50" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 10px;border-radius:6px;font-size:13px;width:60px;" />
+          </div>
+          <div>
+            <label for="createKeyMaxUses" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">LƯỢT DÙNG (0=∞):</label>
+            <input type="number" id="createKeyMaxUses" value="1" min="0" max="10000" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 10px;border-radius:6px;font-size:13px;width:72px;" />
+          </div>
+          <div>
+            <label for="createKeyCount" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">SỐ LƯỢNG KEY:</label>
+            <input type="number" id="createKeyCount" value="1" min="1" max="10" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 10px;border-radius:6px;font-size:13px;width:60px;" />
+          </div>
+          <button type="button" class="primary" onclick="submitCreateKeys()" style="padding:8px 16px;">+ Tạo Key</button>
+        </div>
+      </div>
+
+      <div style="max-height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;">
+        <table style="width:100%;border-collapse:collapse;font-size:12px;text-align:left;">
+          <thead>
+            <tr style="background:rgba(255,255,255,0.06);border-bottom:1px solid var(--border);">
+              <th style="padding:8px 10px;">MÃ KEY</th>
+              <th style="padding:8px 10px;">GÓI</th>
+              <th style="padding:8px 10px;">TRẠNG THÁI</th>
+              <th style="padding:8px 10px;">NGƯỜI KÍCH HOẠT</th>
+              <th style="padding:8px 10px;">HẾT HẠN</th>
+              <th style="padding:8px 10px;text-align:right;">THAO TÁC</th>
+            </tr>
+          </thead>
+          <tbody id="keysTableBody"></tbody>
+        </table>
+      </div>
+      <div class="modal-actions" style="margin-top:16px;">
+        <button type="button" onclick="closeKeyManagementModal()">Đóng</button>
+      </div>
+    </div>
+  </div>
+
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>

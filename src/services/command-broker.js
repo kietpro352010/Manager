@@ -22,6 +22,7 @@ class CommandBroker {
     this.pendingResults = new Map();
     this.outboxTimer = null;
     this.outboxRunning = false;
+    this.idleOutboxTicks = 0;
     this.stateSyncRunning = false;
     this.stateSyncBlockedReason = null;
     this.missingAtomicRpcLogged = false;
@@ -46,8 +47,17 @@ class CommandBroker {
 
   startOutboxProcessor({ intervalMs = 5000 } = {}) {
     if (this.outboxTimer) return;
-    this.outboxTimer = setInterval(() => {
-      void this.processOutboxBatch();
+    this.outboxTimer = setInterval(async () => {
+      if (this.idleOutboxTicks >= 2 && (this.idleOutboxTicks % 2) === 1) {
+        this.idleOutboxTicks += 1;
+        return;
+      }
+      const hadWork = await this.processOutboxBatch().catch(() => false);
+      if (hadWork) {
+        this.idleOutboxTicks = 0;
+      } else {
+        this.idleOutboxTicks = Math.min(100, this.idleOutboxTicks + 1);
+      }
     }, intervalMs);
     this.outboxTimer.unref?.();
   }
@@ -60,18 +70,22 @@ class CommandBroker {
   }
 
   async processOutboxBatch() {
-    await this.processPendingStateSyncs().catch((err) => {
+    let hadWork = false;
+    const syncSummary = await this.processPendingStateSyncs().catch((err) => {
       this.logger?.warn?.('pending_state_sync_batch_error', { message: err.message });
+      return null;
     });
+    if (syncSummary && syncSummary.processed > 0) hadWork = true;
 
-    if (this.outboxRunning) return;
+    if (this.outboxRunning) return hadWork;
     this.outboxRunning = true;
     try {
       const store = this.commandStore?.adapter || this.registry?.store?.adapter;
-      if (!store || typeof store.claimOutboxBatch !== 'function') return;
+      if (!store || typeof store.claimOutboxBatch !== 'function') return hadWork;
 
       const batch = await store.claimOutboxBatch(this.instanceId, 10, 60);
-      if (!Array.isArray(batch) || batch.length === 0) return;
+      if (!Array.isArray(batch) || batch.length === 0) return hadWork;
+      hadWork = true;
 
       for (const item of batch) {
         const payload = item.payload || {};
@@ -110,6 +124,7 @@ class CommandBroker {
     } finally {
       this.outboxRunning = false;
     }
+    return hadWork;
   }
 
   normalizePayload(action, payload = {}) {
@@ -166,6 +181,7 @@ class CommandBroker {
       throw err;
     }
 
+    this.idleOutboxTicks = 0;
     this.logger.info('worker_command_dispatch', { workerId, provider: worker.provider, action });
     const resolvedAction = action === 'reconnect' ? 'restart' : action;
     const command = {
@@ -1046,6 +1062,7 @@ class CommandBroker {
   }
 
   async reportResult(workerId, commandId, rawResult) {
+    this.idleOutboxTicks = 0;
     const wid = String(workerId || '').trim().toLowerCase();
     const cid = String(commandId || '').trim();
     const pending = this.pendingResults.get(cid);

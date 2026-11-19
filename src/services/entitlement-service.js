@@ -437,6 +437,14 @@ class EntitlementService {
       let expiredCount = 0;
 
       for (const u of users) {
+        // Pre-filter before acquiring lock / bypassing cache to avoid N+1 DB reads on active/permanent/disabled users
+        if (u.isPermanent || !u.expiresAt || u.status === 'disabled') continue;
+        const listExpiryTime = Date.parse(u.expiresAt);
+        if (!Number.isFinite(listExpiryTime) || listExpiryTime > now) continue;
+        if (u.status === 'expired' && (!Array.isArray(u.stopPendingWorkers) || u.stopPendingWorkers.length === 0)) {
+          continue;
+        }
+
         const processUser = async () => {
           // Re-fetch fresh user from DB to avoid acting on stale snapshot
           const freshUser = (typeof this.store.getAccess === 'function'

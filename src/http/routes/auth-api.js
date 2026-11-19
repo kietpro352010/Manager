@@ -9,7 +9,8 @@ const {
   verifyUserPassword,
   verifyAdminPassword,
   hashAdminPassword,
-  timingSafeStringEquals
+  timingSafeStringEquals,
+  isStoredCredentialCiphertext
 } = require('../../utils/secrets');
 
 const {
@@ -255,7 +256,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       }
 
       const userId = `usr_${crypto.randomUUID().slice(0, 12)}`;
-      const hashedPassword = hashPassword(cleanPassword);
+      const hashedPassword = encryptUserPassword(cleanPassword);
 
       // Check trial configuration from store / config
       let isTrialEnabled = config?.trialGiftEnabled !== undefined ? Boolean(config.trialGiftEnabled) : true;
@@ -618,16 +619,17 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
 
       const userId = String(user.id || user.userId || cleanUsername);
 
-      // AUTH-01: Auto-migrate legacy AES passwords to scrypt on successful login
-      if (!String(user.password || '').startsWith('scrypt$')) {
+      // Auto-migrate legacy scrypt/plaintext user passwords to reversible AES-256-GCM on successful login
+      const storedRawPassword = String(user._rawEncryptedPassword || user.password || '');
+      if (!isStoredCredentialCiphertext(storedRawPassword)) {
         try {
-          const migratedHash = hashPassword(cleanPassword);
-          await store.setAccess(userId, { ...user, password: migratedHash }, 'auth-migrate-scrypt');
-          user.password = migratedHash;
+          const migratedCipher = encryptUserPassword(cleanPassword);
+          await store.setAccess(userId, { username: user.username, password: migratedCipher }, 'auth-migrate-aes');
+          user.password = migratedCipher;
           if (typeof store.invalidateCache === 'function') store.invalidateCache();
-          logger.info?.('User password auto-migrated to scrypt', { userId, username: cleanUsername });
+          logger.info?.('User password auto-migrated to reversible AES-256-GCM', { userId, username: cleanUsername });
         } catch (migErr) {
-          logger.warn?.('Password auto-migration to scrypt failed', { userId, error: migErr.message });
+          logger.warn?.('Password auto-migration to AES failed', { userId, error: migErr.message });
         }
       }
 
@@ -854,9 +856,9 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         return res.status(401).json({ ok: false, error: 'Mật khẩu hiện tại không chính xác.' });
       }
 
-      const hashedPassword = hashPassword(newPassword);
+      const hashedPassword = encryptUserPassword(newPassword);
       user.password = hashedPassword;
-      await store.setAccess(session.userId, { ...user, password: hashedPassword }, 'user-change-password');
+      await store.setAccess(session.userId, { username: user.username, password: hashedPassword }, 'user-change-password');
 
       if (typeof store.adapter?.revokeUserSessions === 'function') {
         await store.adapter.revokeUserSessions(session.userId || session.username).catch(() => null);

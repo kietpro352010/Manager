@@ -153,8 +153,8 @@ async function main() {
   });
   const wispbyteKeepAlive = new WispbyteKeepAliveManager({ store: accessStore, config: runtimeConfig, logger, adminNotifier });
 
-  // Start background workers
-  broker.startOutboxProcessor({ intervalMs: 5000 });
+  // Start background workers (optimized intervals to reduce idle Supabase/Render usage)
+  broker.startOutboxProcessor({ intervalMs: Number(process.env.OUTBOX_POLL_INTERVAL_MS) || 30000 });
 
   // Định kỳ kiểm tra khách hết hạn và dừng bot êm ái (Graceful Expire Stop)
   const expiredCheckInterval = setInterval(async () => {
@@ -163,7 +163,7 @@ async function main() {
     } catch (err) {
       logger.warn('expired_users_check_failed', { error: err.message });
     }
-  }, 60000);
+  }, 120000);
   expiredCheckInterval.unref();
 
   // 5. Adaptive Memory Sweeper (Trụ cột 1.1)

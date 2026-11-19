@@ -22,6 +22,12 @@ function isRpcUnavailableError(error) {
   );
 }
 
+const WORKER_LIST_COLUMNS = [
+  'worker_id', 'bot_number', 'name', 'provider', 'service_url', 'render_service_id',
+  'secret_ciphertext', 'enabled', 'settings', 'status', 'last_event',
+  'last_heartbeat', 'created_at', 'updated_at'
+].join(',');
+
 const FIELDS = {
   workerId: 'worker_id', botNumber: 'bot_number', name: 'name', provider: 'provider',
   serviceUrl: 'service_url', renderServiceId: 'render_service_id', secretCiphertext: 'secret_ciphertext',
@@ -79,7 +85,7 @@ class SupabaseWorkerStore {
   }
 
   async list() {
-    const { data, error } = await this.client.from(TABLE).select('*').order('bot_number', { ascending: true }).order('created_at', { ascending: true });
+    const { data, error } = await this.client.from(TABLE).select(WORKER_LIST_COLUMNS).order('bot_number', { ascending: true }).order('created_at', { ascending: true });
     if (error && error.code !== 'PGRST116') throw error;
     return (data || []).map(fromRow);
   }
@@ -122,9 +128,15 @@ class SupabaseWorkerStore {
     return worker;
   }
 
-  async update(workerId, patch) {
-    const { data, error } = await this.client.from(TABLE).update({ ...toRow(patch), updated_at: new Date().toISOString() })
-      .eq('worker_id', workerId).select('*').maybeSingle();
+  async update(workerId, patch, { returning = true } = {}) {
+    const query = this.client.from(TABLE).update({ ...toRow(patch), updated_at: new Date().toISOString() })
+      .eq('worker_id', workerId);
+    if (!returning) {
+      const { error } = await query;
+      if (error) throw error;
+      return null;
+    }
+    const { data, error } = await query.select('*').maybeSingle();
     if (error) throw error;
     return fromRow(data);
   }

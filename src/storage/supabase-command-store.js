@@ -245,11 +245,11 @@ class SupabaseCommandStore {
     try {
       const now = new Date().toISOString();
       const cutoff300s = new Date(Date.now() - 300 * 1000).toISOString();
-      const cutoff30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      const cutoff7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
       await Promise.allSettled([
         this.client.from(TABLE).update({ status: 'expired' }).in('status', ['queued', 'delivered']).lte('expires_at', now),
         this.client.from(TABLE).delete().in('status', ['completed', 'failed', 'expired']).lt('created_at', cutoff300s),
-        this.client.from(TABLE).delete().lt('created_at', cutoff30d)
+        this.client.from(TABLE).delete().lt('created_at', cutoff7d)
       ]);
     } catch (_) {}
 

@@ -161,7 +161,7 @@ class SupabaseDashboardStore {
     return entry.data;
   }
 
-  setCached(key, data, ttlMs = 2500) {
+  setCached(key, data, ttlMs = 15000) {
     this.cache.set(key, { data, expiresAt: Date.now() + ttlMs });
   }
 
@@ -191,12 +191,14 @@ class SupabaseDashboardStore {
       } catch (_) {}
     }
 
-    // 3. Dọn dẹp bản ghi cũ nếu bảng tồn tại
+    // 3. Dọn dẹp bản ghi cũ nếu bảng tồn tại (giảm DB size & Log Ingestion)
     try {
       const now = new Date().toISOString();
-      const auditCutoff = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString();
+      const auditCutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      const posCutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
       await Promise.allSettled([
         this.client.from(AUDIT_LOGS).delete().lt('timestamp', auditCutoff),
+        this.client.from('bot_position_logs').delete().lt('changed_at', posCutoff),
         this.client.from(LINK_ATTEMPTS).delete().lt('purge_at', now)
       ]);
     } catch (_) {}
@@ -425,7 +427,7 @@ class SupabaseDashboardStore {
         const p = String(fields.password);
         userRow.password = (p.startsWith('scrypt$') || isStoredCredentialCiphertext(p))
           ? p
-          : hashPassword(p);
+          : encryptUserPassword(p);
       } else if (existingUser?.password) {
         userRow.password = existingUser.password;
       }
@@ -926,7 +928,7 @@ class SupabaseDashboardStore {
       throw new Error('Tên đăng nhập không hợp lệ.');
     }
     const safePassword = password
-      ? ((String(password).startsWith('scrypt$') || isStoredCredentialCiphertext(password)) ? password : hashPassword(password))
+      ? ((String(password).startsWith('scrypt$') || isStoredCredentialCiphertext(password)) ? password : encryptUserPassword(password))
       : '';
 
     // 1. Try Supabase RPC (fail closed on DB/business errors; fallback only if RPC is absent)
@@ -1525,19 +1527,29 @@ class SupabaseDashboardStore {
   // --------------------------------------------------------------------------
   // SETTINGS & RUNTIME
   // --------------------------------------------------------------------------
-  async getSetting(key) {
+  async getSetting(key, { bypassCache = false } = {}) {
+    const cacheKey = `setting:${key}`;
+    if (!bypassCache) {
+      const cached = this.getCached(cacheKey);
+      if (cached !== null) return cached;
+    }
     const { data, error } = await this.client.from(SETTINGS).select('value,updated_at').eq('key', key).maybeSingle();
     if (error && error.code !== 'PGRST116') throw error;
-    if (!data) return null;
-    if (Array.isArray(data.value)) return data.value;
-    if (data.value && typeof data.value === 'object') return { ...data.value, updatedAt: data.updated_at };
-    return data.value ?? null;
+    let resolved = null;
+    if (data) {
+      if (Array.isArray(data.value)) resolved = data.value;
+      else if (data.value && typeof data.value === 'object') resolved = { ...data.value, updatedAt: data.updated_at };
+      else resolved = data.value ?? null;
+    }
+    this.setCached(cacheKey, resolved, 30000);
+    return resolved;
   }
 
   async setSetting(key, value) {
     const { error } = await this.client.from(SETTINGS).upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' });
     if (error) throw error;
-    return this.getSetting(key);
+    this.cache.delete(`setting:${key}`);
+    return this.getSetting(key, { bypassCache: true });
   }
 
   // --------------------------------------------------------------------------

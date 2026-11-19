@@ -3,11 +3,37 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
+const crypto = require('node:crypto');
 const express = require('express');
 const helmet = require('helmet');
 
 const { PUBLIC_LOGIN_HTML } = require('./views/login-html');
 const { HTML: DASHBOARD_HTML } = require('./views/dashboard-html');
+
+function prepareCompressedView(html) {
+  const raw = Buffer.from(String(html || ''), 'utf8');
+  const gzip = zlib.gzipSync(raw, { level: 9 });
+  const etag = `W/"${crypto.createHash('sha256').update(raw).digest('hex').slice(0, 16)}"`;
+  return { raw, gzip, etag };
+}
+
+const PRECOMPRESSED_DASHBOARD = prepareCompressedView(DASHBOARD_HTML);
+const PRECOMPRESSED_LOGIN = prepareCompressedView(PUBLIC_LOGIN_HTML);
+
+function acceptsGzipEncoding(req) {
+  const acceptEncoding = String(req?.headers?.['accept-encoding'] || '');
+  let wildcardQuality = null;
+  let gzipQuality = null;
+  for (const entry of acceptEncoding.split(',')) {
+    const [name, ...params] = entry.trim().toLowerCase().split(';');
+    const qParam = params.find((param) => /^\s*q\s*=/.test(param));
+    const quality = qParam ? Number(qParam.split('=')[1]) : 1;
+    if (!Number.isFinite(quality) || quality < 0 || quality > 1) continue;
+    if (name === 'gzip') gzipQuality = quality;
+    else if (name === '*') wildcardQuality = quality;
+  }
+  return gzipQuality !== null ? gzipQuality > 0 : wildcardQuality > 0;
+}
 
 const {
   createAuthApi,
@@ -386,10 +412,25 @@ function createApp({
 
   // 6. Root SPA Route (Login view if unauthenticated, Dashboard view if authenticated)
   app.get('/', (req, res) => {
-    if (req.managerAuthSession) {
-      return res.type('html').send(DASHBOARD_HTML);
+    const view = req.managerAuthSession ? PRECOMPRESSED_DASHBOARD : PRECOMPRESSED_LOGIN;
+    res.setHeader('Vary', 'Accept-Encoding, Cookie');
+    res.setHeader('Cache-Control', 'private, no-cache');
+    res.setHeader('ETag', view.etag);
+    const ifNoneMatch = String(req.headers['if-none-match'] || '');
+    if (ifNoneMatch && ifNoneMatch.split(',').some((tag) => tag.trim().replace(/-gzip(?="?$)/, '') === view.etag)) {
+      return res.status(304).end();
     }
-    return res.type('html').send(PUBLIC_LOGIN_HTML);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    if (req.method === 'HEAD') {
+      return res.end();
+    }
+    if (acceptsGzipEncoding(req)) {
+      res.setHeader('Content-Encoding', 'gzip');
+      res.setHeader('Content-Length', String(view.gzip.length));
+      return res.end(view.gzip);
+    }
+    res.setHeader('Content-Length', String(view.raw.length));
+    return res.end(view.raw);
   });
 
   function getDegradedChecks() {

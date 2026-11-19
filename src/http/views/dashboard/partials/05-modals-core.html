@@ -1,0 +1,620 @@
+<!-- MODAL TẠM KHÓA USER KÈM LỜI NHẮN (ADMIN) -->
+<div id="userLockReasonModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="userLockReasonModalTitle">
+  <div class="modal-card" style="max-width:440px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <h3 id="userLockReasonModalTitle" style="margin:0;color:#ef4444;display:flex;align-items:center;gap:8px;">🔒 Tạm Khóa Tài Khoản</h3>
+      <button type="button" class="small" onclick="closeUserLockReasonModal()" aria-label="Đóng">✕</button>
+    </div>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:12px;">
+      Bạn đang chuẩn bị tạm khóa tài khoản <strong id="lockTargetUsername" style="color:#fff;"></strong>.
+      Tài khoản này sẽ bị làm mờ màn hình khi đăng nhập và hiển thị lời nhắn bên dưới:
+    </p>
+    <input id="lockTargetUserId" type="hidden">
+    <div class="form-row">
+      <label for="lockReasonInput">Lời nhắn gửi đến người dùng (Hiển thị khi đăng nhập)</label>
+      <textarea id="lockReasonInput" rows="3" placeholder="Ví dụ: Tài khoản bị tạm khóa do vi phạm nội quy / Đang chờ xác minh thanh toán..."></textarea>
+    </div>
+    <div class="modal-actions" style="margin-top:16px;">
+      <button type="button" onclick="closeUserLockReasonModal()">Hủy</button>
+      <button type="button" class="danger" onclick="submitLockUserWithReason()">🔒 Xác Nhận Khóa</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL CẤU HÌNH LINK4M (ADMIN) -->
+<div id="link4mSettingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="link4mSettingsModalTitle">
+  <div class="modal-card" style="max-width:540px;width:100%;box-sizing:border-box;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:10px;">
+      <h3 id="link4mSettingsModalTitle" style="margin:0;color:#facc15;display:flex;align-items:center;gap:8px;">⚡ Cài Đặt Vượt Link +12h (Link4M)</h3>
+      <button type="button" class="small" onclick="closeLink4mConfigModal()" aria-label="Đóng">✕</button>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:14px;font-size:13px;">
+      <div style="padding:10px 12px;background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.4);border-radius:8px;color:#fca5a5;font-size:12px;line-height:1.5;">
+        ⚠️ <strong>LƯU Ý QUY ĐỊNH LINK4M (INCENTIVIZED TRAFFIC):</strong><br>
+        Chính sách của Link4M cấm lưu lượng truy cập có thưởng trừ khi được thỏa thuận và phê duyệt trước. Vui lòng đảm bảo bạn đã xin phép Link4M và cấu hình <strong>Khóa bí mật Webhook Postback</strong> để hệ thống chỉ cộng giờ khi nhận tín hiệu hoàn tất thực sự từ server Link4M.
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:rgba(15,23,42,0.6);border:1px solid var(--border);border-radius:8px;">
+        <label for="link4mModalEnabled" style="margin:0;cursor:pointer;">
+          <strong style="color:var(--text);display:block;">Bật tính năng Vượt Link:</strong>
+          <span style="font-size:11.5px;color:var(--muted);">Cho phép khách thuê tự vượt link nhận +12h vào tài khoản</span>
+        </label>
+        <input type="checkbox" id="link4mModalEnabled" style="width:20px;height:20px;cursor:pointer;">
+      </div>
+
+      <div>
+        <label for="link4mModalMode" style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Chế độ tạo liên kết:</label>
+        <select id="link4mModalMode" style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);" onchange="updateLink4mModalFields()">
+          <option value="custom_url">🔗 Link Rút Gọn Cố Định (Admin tự tạo link dán vào)</option>
+          <option value="api">🤖 Tự Động Gọi API Link4M (Tạo link động cho từng lượt)</option>
+        </select>
+      </div>
+
+      <div id="link4mCustomUrlGroup">
+        <label for="link4mModalUrl" style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Đường dẫn Link rút gọn gán vào:</label>
+        <input type="text" id="link4mModalUrl" placeholder="Ví dụ: https://link4m.co/abcxyz" style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
+        <span style="font-size:11.5px;color:var(--muted);display:block;margin-top:4px;">Khi người dùng bấm vượt link, hệ thống sẽ mở link này.</span>
+      </div>
+
+      <div id="link4mApiTokenGroup" style="display:none;">
+        <label for="link4mModalApiToken" style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Link4M Publisher API Token:</label>
+        <input type="text" id="link4mModalApiToken" placeholder="Nhập API Token từ tài khoản Link4M của bạn..." style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
+        <span style="font-size:11.5px;color:var(--muted);display:block;margin-top:4px;">Backend sẽ tự gọi https://link4m.co/api để rút gọn link trả thưởng động.</span>
+      </div>
+
+      <div style="display:flex;gap:12px;">
+        <div style="flex:1;">
+          <label for="link4mModalHours" style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Số giờ cộng mỗi lượt:</label>
+          <input type="number" id="link4mModalHours" min="1" max="48" value="12" style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
+        </div>
+        <div style="flex:1;">
+          <label for="link4mModalDailyLimit" style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Giới hạn lượt / ngày (VN):</label>
+          <input type="number" id="link4mModalDailyLimit" min="1" max="10" value="2" style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
+        </div>
+      </div>
+
+      <div>
+        <label for="link4mModalSecretKey" style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Khóa bí mật Webhook Postback (Tùy chọn):</label>
+        <input type="text" id="link4mModalSecretKey" placeholder="Để trống nếu không dùng server postback..." style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
+      </div>
+    </div>
+
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;border-top:1px solid var(--border);padding-top:12px;">
+      <button type="button" class="secondary" onclick="closeLink4mConfigModal()">Đóng</button>
+      <button type="button" class="primary" onclick="saveLink4mConfigModal()">💾 Lưu Cài Đặt</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL TÙY CHỈNH HẠN THUÊ USER (ADMIN) -->
+<div id="customRenewModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="customRenewModalTitle">
+  <div class="modal-card" style="max-width:440px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <h3 id="customRenewModalTitle" style="margin:0;color:#38bdf8;display:flex;align-items:center;gap:8px;">⏱ Tùy Chỉnh Hạn Thuê Bot</h3>
+      <button type="button" class="small" onclick="closeCustomRenewModal()" aria-label="Đóng">✕</button>
+    </div>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:12px;">
+      Điều chỉnh thời hạn cho tài khoản <strong id="customRenewTargetUser" style="color:#fff;"></strong>:
+    </p>
+    <input id="customRenewTargetUserId" type="hidden">
+    <div class="form-row">
+      <label for="customRenewMode">Hình thức điều chỉnh</label>
+      <select id="customRenewMode" onchange="handleCustomRenewModeChange()">
+        <option value="add_days">Cộng thêm số ngày (+N ngày)</option>
+        <option value="subtract_days">Trừ bớt số ngày (-N ngày)</option>
+        <option value="set_date">Đặt mốc ngày giờ cụ thể</option>
+        <option value="set_permanent">👑 Đặt VIP Vĩnh Viễn</option>
+      </select>
+    </div>
+    <div id="customRenewDaysGroup" class="form-row">
+      <label for="customRenewDaysInput">Số ngày điều chỉnh</label>
+      <input type="number" id="customRenewDaysInput" value="7" min="1" max="3650">
+    </div>
+    <div id="customRenewDateGroup" class="form-row" style="display:none;">
+      <label for="customRenewDateInput">Mốc ngày giờ hết hạn mới</label>
+      <input type="datetime-local" id="customRenewDateInput">
+    </div>
+    <div class="form-row">
+      <label for="customRenewPlanNameInput">Tên gói cước / Ghi chú hạn (Tùy chỉnh)</label>
+      <input type="text" id="customRenewPlanNameInput" placeholder="Ví dụ: Gói Tuần VIP, 15 Ngày Khuyến Mãi...">
+    </div>
+    <div class="note" style="margin-top:10px;">
+      * Lưu ý: Nếu tài khoản đang là Vĩnh viễn, khi cộng/trừ ngày hoặc đặt mốc mới, quyền Vĩnh viễn sẽ tự động hủy và chuyển sang mốc ngày giờ mới.
+    </div>
+    <div class="modal-actions" style="margin-top:16px;">
+      <button type="button" onclick="closeCustomRenewModal()">Hủy</button>
+      <button type="button" class="primary" onclick="submitCustomRenew()">💾 Cập Nhật Hạn</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL XÁC NHẬN CHUYỂN QUYỀN BOT 1-USER-1-BOT -->
+<div id="reassignBotConfirmModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="reassignBotConfirmModalTitle" style="z-index:9999999;">
+  <div class="modal-card" style="max-width:460px;border-color:rgba(234,179,8,0.5);">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+      <span style="font-size:28px;" aria-hidden="true">⚠️</span>
+      <div>
+        <h3 id="reassignBotConfirmModalTitle" style="margin:0;color:#eab308;font-size:17px;">Xác Nhận Chuyển Quyền Sở Hữu Bot</h3>
+        <div style="font-size:12px;color:var(--muted);">Nguyên tắc 1-Bot-1-User độc quyền</div>
+      </div>
+    </div>
+    <p id="reassignBotConfirmMsg" style="font-size:13px;line-height:1.5;color:#e2e8f0;margin-bottom:16px;background:rgba(234,179,8,0.1);padding:12px;border-radius:8px;border:1px dashed rgba(234,179,8,0.3);">
+      Bot này hiện đang được cấp cho người dùng khác. Bạn có chắc chắn muốn hủy bot khỏi người dùng cũ để cấp cho người này không?
+    </p>
+    <div class="modal-actions">
+      <button type="button" onclick="closeReassignBotConfirmModal(false)">Hủy (Giữ nguyên)</button>
+      <button type="button" class="primary" style="background:#eab308;color:#000;font-weight:750;" onclick="closeReassignBotConfirmModal(true)">✓ Đồng Ý Chuyển Bot</button>
+    </div>
+  </div>
+</div>
+<div id="addBotModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="addBotModalTitle">
+  <div class="modal-card" style="max-width:540px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <h3 id="addBotModalTitle" style="margin:0;color:#38bdf8;display:flex;align-items:center;gap:8px;">➕ Thêm Bot Con (Cụm 2-in-1 & Hàng Loạt)</h3>
+      <button type="button" class="small" onclick="closeAddBotModal()" aria-label="Đóng">✕</button>
+    </div>
+
+    <!-- FORM VIEW -->
+    <div id="addBotFormView">
+      <div class="form-row">
+        <label for="addBotUrl" style="display:flex;justify-content:space-between;align-items:center;">
+          <span>Web URL của bot con (1 hoặc nhiều link Render / Wispbyte)</span>
+          <span id="addBotUrlCountBadge" style="font-size:11.5px;color:#38bdf8;font-weight:700;">0 link</span>
+        </label>
+        <textarea id="addBotUrl" rows="4" autocomplete="off" oninput="updateAddBotUrlCounter()" placeholder="Dán 1 hoặc nhiều link bot tại đây, phân biệt bằng dấu cách hoặc xuống dòng:&#10;https://kbot-worker.onrender.com" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:12.5px;padding:10px;resize:vertical;line-height:1.45;"></textarea>
+      </div>
+      <div class="form-row">
+        <label for="addBotLabel">Tên hiển thị / Tiền tố đặt tên (Không bắt buộc)</label>
+        <input id="addBotLabel" autocomplete="off" placeholder="Ví dụ: Bot (Để trống sẽ tự động đặt theo Bot #ID)">
+      </div>
+      <div class="note" style="line-height:1.5;">
+        💡 <strong>Tự động nhận diện Dual-Slot (2-in-1):</strong> Mỗi link Worker Render/Wispbyte sẽ tự động bung <strong>2 Bot độc lập</strong> (Slot 1 & Slot 2). Hệ thống tự sinh ID và Secret bí mật.
+      </div>
+      <div class="modal-actions" style="margin-top:16px;">
+        <button type="button" onclick="closeAddBotModal()">Hủy</button>
+        <button type="button" id="confirmAddBotButton" class="primary" onclick="addBotFromWeb()">➕ Thêm Bot</button>
+      </div>
+    </div>
+
+    <!-- RESULT VIEW -->
+    <div id="addBotResultView" style="display:none;">
+      <div style="background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.35);border-radius:8px;padding:12px;margin-bottom:12px;">
+        <div id="addBotResultSuccessTitle" style="color:#4ade80;font-weight:700;font-size:14px;margin-bottom:4px;">🎉 Đã thêm thành công!</div>
+        <div style="font-size:12px;color:var(--text);opacity:0.9;">Hệ thống đã tự động gán ID và sinh khóa bảo mật (Secret Key) riêng biệt cho từng Bot.</div>
+      </div>
+      <div class="form-row">
+        <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;font-size:12px;font-weight:700;color:#38bdf8;">
+          <span>Biến môi trường mẫu cần dán vào Render / Wispbyte:</span>
+          <button type="button" class="small primary" onclick="copyText(document.getElementById('addBotEnvConfigArea')?.value)">📋 Sao chép</button>
+        </label>
+        <textarea id="addBotEnvConfigArea" readonly rows="7" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:12px;padding:10px;background:rgba(0,0,0,0.5);color:#a5f3fc;border:1px solid var(--border);border-radius:6px;resize:vertical;line-height:1.45;"></textarea>
+      </div>
+      <div class="modal-actions" style="margin-top:16px;">
+        <button type="button" class="primary" onclick="finishAddBotModal()">Hoàn tất & Cập nhật</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="editBotModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="editBotModalTitle">
+  <div class="modal-card" style="max-width:480px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <h3 id="editBotModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">✏️ Chỉnh Sửa Thông Tin & Tag Bot</h3>
+      <button type="button" class="small" onclick="closeEditBotModal()" aria-label="Đóng">✕</button>
+    </div>
+    <input id="editBotId" type="hidden">
+    <div class="form-row" style="margin-bottom:10px;">
+      <label for="editBotLabel" style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">Tên hiển thị / Ghi chú</label>
+      <input id="editBotLabel" placeholder="Ví dụ: Bot Farm Lúa, Bot VIP..." autocomplete="off" style="width:100%;box-sizing:border-box;">
+    </div>
+    <div class="form-row admin-only" style="margin-bottom:10px;">
+      <label for="editBotUrl" style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">Web URL bot con</label>
+      <input id="editBotUrl" placeholder="https://kbot-instance.onrender.com" autocomplete="off" style="width:100%;box-sizing:border-box;">
+    </div>
+    <div class="form-row admin-only" style="margin-bottom:10px;display:none;">
+      <label for="editBotSecretKey" style="display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">
+        <span>Khóa bảo mật Worker (Secret Key)</span>
+        <small style="color:var(--muted);font-weight:normal;">Bỏ trống để dùng mặc định</small>
+      </label>
+      <div style="position:relative;display:flex;align-items:center;">
+        <input id="editBotSecretKey" type="password" placeholder="Khóa kết nối Service-to-Service nội bộ..." autocomplete="off" style="width:100%;box-sizing:border-box;padding-right:60px;">
+        <button type="button" class="small" onclick="toggleEditSecretKeyVisibility()" style="position:absolute;right:4px;padding:3px 8px;font-size:11px;">Hiện</button>
+      </div>
+      <div style="font-size:11px;color:#38bdf8;margin-top:3px;">
+        ⚡ <strong>Direct Connection:</strong> Không bắt buộc! Chỉ cần nhập URL là Manager tự kết nối trực tiếp với Worker.
+      </div>
+    </div>
+    <div class="form-row" style="margin-bottom:12px;">
+      <label for="editBotTags" style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">🏷️ Nhóm Tags (ngăn cách bởi dấu phẩy)</label>
+      <input id="editBotTags" placeholder="farm, afk, lobby, vip..." autocomplete="off" oninput="renderEditBotTagPreviews(this.value)" style="width:100%;box-sizing:border-box;">
+      <div id="editBotTagsPreview" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;min-height:24px;"></div>
+      <div id="editBotTagSuggestions" style="display:flex;flex-wrap:wrap;gap:5px;margin-top:8px;"></div>
+    </div>
+    <div class="form-row admin-only" style="margin-bottom:12px;background:rgba(255,255,255,0.03);padding:10px 12px;border-radius:8px;border:1px solid var(--border);">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0;font-size:13px;font-weight:600;color:var(--text);">
+        <input type="checkbox" id="editBotRentable" style="width:16px;height:16px;cursor:pointer;">
+        <span>Cho phép thuê (Nằm trong danh sách cấp phát tự động)</span>
+      </label>
+      <div style="font-size:11.5px;color:var(--muted);margin-top:4px;line-height:1.4;">
+        Nếu bỏ chọn, bot này sẽ không bao giờ được cấp tự động khi khách đăng ký mới hoặc nạp Giftcode.
+      </div>
+      <div id="editBotRentalStatus" style="font-size:12px;margin-top:6px;"></div>
+    </div>
+    <div class="modal-actions" style="margin-top:16px;">
+      <button type="button" onclick="closeEditBotModal()">Hủy</button>
+      <button type="button" class="primary" onclick="saveEditBot()">💾 Lưu Thay Đổi</button>
+    </div>
+  </div>
+</div>
+<div id="adminModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="adminModalTitle">
+  <div class="modal-card modal-lg">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <h3 id="adminModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">🔑 Mật Khẩu Tài Khoản Bot (Tất cả Bot)</h3>
+      <button type="button" class="small" onclick="closeAdminModal()" aria-label="Đóng">✕</button>
+    </div>
+    <div id="adminCredentialStep">
+      <div id="adminCredentialList" class="credential-list">
+        <div style="text-align:center;padding:24px;color:var(--muted);">⏳ Đang tải thông tin tài khoản bot...</div>
+      </div>
+      <div class="modal-actions" style="margin-top:16px;">
+        <button type="button" class="small" onclick="loadAdminCredentials()">🔄 Tải lại</button>
+        <button type="button" class="primary" onclick="closeAdminModal()">Đóng</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="announcementAdminModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="announcementAdminModalTitle">
+  <div class="modal-card modal-lg">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <h3 id="announcementAdminModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">📢 Quản Trị Thông Báo Người Dùng</h3>
+      <button type="button" class="small" onclick="closeAnnouncementAdminModal()" aria-label="Đóng">✕</button>
+    </div>
+    <div class="form-row">
+      <label class="check-row" style="margin:0;padding:9px 12px;background:var(--card2);border:1px solid var(--border);border-radius:10px;cursor:pointer;">
+        <input id="announcementEnabled" type="checkbox" checked>
+        <span style="font-weight:750;color:#fff;">Kích hoạt hiển thị thông báo popup tới người dùng</span>
+      </label>
+    </div>
+    <div class="form-row">
+      <label for="announcementTitle">Tiêu đề thông báo</label>
+      <input id="announcementTitle" autocomplete="off" placeholder="Ví dụ: 📢 THÔNG BÁO TỪ QUẢN TRỊ VIÊN">
+    </div>
+    <div class="form-row">
+      <label for="announcementContent">Nội dung thông báo (hỗ trợ xuống dòng, emoji, bullet points)</label>
+      <textarea id="announcementContent" rows="6" placeholder="Nhập nội dung thông báo hàng ngày hoặc thông tin bảo trì..."></textarea>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div class="form-row">
+        <label for="announcementMode">Chế độ hiển thị</label>
+        <select id="announcementMode" onchange="handleAnnouncementModeChange()">
+          <option value="daily">🗓️ Hằng ngày (Lần đầu vào trong ngày hiện 1 lần)</option>
+          <option value="every_login">⚡ Mọi lần truy cập / đăng nhập</option>
+          <option value="time_range">⏳ Khoảng thời gian cố định</option>
+        </select>
+      </div>
+      <div id="announcementDateRangeGroup" class="form-row" style="display:none;">
+        <label for="announcementStartDate">Khoảng ngày hiển thị</label>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <input id="announcementStartDate" type="date" style="padding:7px 9px;font-size:12px;">
+          <span>đến</span>
+          <input id="announcementEndDate" type="date" aria-label="Ngày kết thúc hiển thị thông báo" style="padding:7px 9px;font-size:12px;">
+        </div>
+      </div>
+    </div>
+    <div class="note" style="margin:8px 0 16px;">
+      ℹ️ <strong>Cơ chế hiển thị:</strong> Khi chọn <em>Hằng ngày</em>, người dùng bấm "Đã hiểu & Đóng" thì trong ngày đó sẽ không hiện lại nữa; sang ngày hôm sau khi truy cập lại sẽ tự động xuất hiện.
+    </div>
+    <div class="modal-actions" style="display:flex;justify-content:space-between;align-items:center;">
+      <button type="button" class="small" onclick="previewAnnouncementModal()">👁️ Xem trước (Preview)</button>
+      <div style="display:flex;gap:8px;">
+        <button type="button" onclick="closeAnnouncementAdminModal()">Hủy</button>
+        <button type="button" class="primary" onclick="saveAnnouncementConfig()">💾 Lưu Thông Báo</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="userAnnouncementModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="userAnnouncementTitle" style="z-index:999999;">
+  <div class="modal-card user-announcement-card">
+    <div class="user-announcement-header">
+      <div class="announcement-bell-badge" aria-hidden="true">📢</div>
+      <div style="flex:1;">
+        <div class="announcement-badge-pill">👑 THÔNG BÁO TỪ QUẢN TRỊ VIÊN</div>
+        <h3 id="userAnnouncementTitle" class="announcement-main-title">THÔNG BÁO HỆ THỐNG</h3>
+        <div id="userAnnouncementTime" class="announcement-sub-date">Cập nhật lúc --</div>
+      </div>
+      <button type="button" class="announcement-close-btn" onclick="dismissUserAnnouncement()" title="Đóng" aria-label="Đóng">✕</button>
+    </div>
+    <div id="userAnnouncementBody" class="user-announcement-body"></div>
+    <div class="user-announcement-footer">
+      <div id="userAnnouncementFreqNote" class="announcement-freq-note">
+        🗓️ Thông báo này sẽ chỉ xuất hiện 1 lần trong ngày hôm nay.
+      </div>
+      <button type="button" class="primary announcement-ack-btn" onclick="dismissUserAnnouncement()">
+        ✨ ĐÃ HIỂU & ĐÓNG
+      </button>
+    </div>
+  </div>
+</div>
+<div id="batchSettingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="batchSettingsModalTitle">
+  <div class="modal-card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <h3 id="batchSettingsModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">⚙️ Đồng bộ Cài đặt Hàng loạt</h3>
+      <button type="button" class="small" onclick="closeBatchSettingsModal()" aria-label="Đóng">✕</button>
+    </div>
+    <div style="margin-bottom:14px;">
+      <label for="batchTargetTag" style="display:block;font-size:12px;color:var(--muted);margin-bottom:5px;font-weight:600;">🎯 Đối tượng áp dụng:</label>
+      <select id="batchTargetTag" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.3);color:var(--text);border:1px solid var(--border);font-size:13px;outline:none;">
+        <option value="">🌐 Toàn bộ bot trong danh sách</option>
+      </select>
+    </div>
+    <div class="setting-list" style="margin:14px 0;">
+      <label class="check-row"><input id="batchEcoMode" type="checkbox" checked> <span>🌱 Eco Mode Siêu Tiết Kiệm (Giảm 80% CPU & giữ RAM &lt; 220MB)</span></label>
+      <label class="check-row"><input id="batchAutoTotem" type="checkbox" checked> <span>Auto Totem phản xạ tức thì (&lt; 50ms)</span></label>
+      <label class="check-row"><input id="batchAntiHungry" type="checkbox" checked> <span>Anti Hungry / Auto Eat</span></label>
+      <label class="check-row"><input id="batchAutoReconnect" type="checkbox" checked> <span>Auto Reconnect + LOGIN/DN/MENU</span></label>
+      <label class="check-row"><input id="batchAntiAfkKick" type="checkbox" checked> <span>Smart Anti-AFK Kick (Xoay đầu, vung tay nhẹ)</span></label>
+    </div>
+    <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border);">
+      <label class="check-row" style="margin-bottom:8px;">
+        <input id="batchSyncSpawnCommandsEnabled" type="checkbox" onchange="document.getElementById('batchSpawnCommandsDetails').style.display = this.checked ? 'block' : 'none'">
+        <span style="font-weight:700;color:var(--accent);">⚡ Đồng bộ Lệnh Tự Động (spawnCommands)</span>
+      </label>
+      <div id="batchSpawnCommandsDetails" style="display:none;padding:10px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:6px;margin-top:6px;">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px;">Mỗi dòng một lệnh (/warp afk, /fix all, /feed) — chạy tuần tự khi bot vào trạng thái AFK:</div>
+        <textarea id="batchSpawnCommands" aria-label="Danh sách lệnh tự động spawnCommands" placeholder="/fix all&#10;/warp afk&#10;/feed" rows="2" style="width:100%;box-sizing:border-box;font-size:12px;padding:8px;background:rgba(0,0,0,0.3);color:var(--text);border:1px solid var(--border);border-radius:6px;font-family:monospace;resize:vertical;"></textarea>
+      </div>
+    </div>
+    <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
+      <label class="check-row" style="margin-bottom:10px;">
+        <input id="batchSyncScheduleEnabled" type="checkbox" onchange="document.getElementById('batchScheduleDetails').style.display = this.checked ? 'block' : 'none'">
+        <span style="font-weight:700;color:var(--accent);">⏰ Đồng bộ Hẹn giờ Bật/Tắt Bot (On/Off)</span>
+      </label>
+      <div id="batchScheduleDetails" style="display:none;padding:12px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:6px;margin-top:8px;">
+        <label class="check-row" style="margin-bottom:10px;">
+          <input id="batchScheduleActive" type="checkbox" checked>
+          <span>Kích hoạt lịch hẹn giờ</span>
+        </label>
+        <div class="form-row" style="margin-bottom:10px;">
+          <label for="batchScheduleMode">Chế độ hẹn giờ</label>
+          <select id="batchScheduleMode" onchange="handleBatchScheduleModeChange()">
+            <option value="fixed">Giờ cố định mỗi ngày</option>
+            <option value="cycle">Chu kỳ lặp lại</option>
+          </select>
+        </div>
+        <div id="batchFixedSettings">
+          <div style="display:flex;gap:10px;">
+            <div class="form-row" style="flex:1;">
+              <label for="batchFixedStopTime">Giờ Tắt (VD: 04:30)</label>
+              <input type="time" id="batchFixedStopTime" value="04:30">
+            </div>
+            <div class="form-row" style="flex:1;">
+              <label for="batchFixedStartTime">Giờ Bật (VD: 05:30)</label>
+              <input type="time" id="batchFixedStartTime" value="05:30">
+            </div>
+          </div>
+        </div>
+        <div id="batchCycleSettings" style="display:none;">
+          <div style="display:flex;gap:10px;">
+            <div class="form-row" style="flex:1;">
+              <label for="batchCycleStopMinutes">Phút chạy trước khi Tắt</label>
+              <input type="number" id="batchCycleStopMinutes" value="120" min="1" max="43200">
+            </div>
+            <div class="form-row" style="flex:1;">
+              <label for="batchCycleStartMinutes">Phút nghỉ trước khi Bật</label>
+              <input type="number" id="batchCycleStartMinutes" value="300" min="1" max="43200">
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" onclick="closeBatchSettingsModal()">Hủy</button>
+      <button type="button" class="primary" onclick="submitBatchSettings()">Áp dụng tất cả</button>
+    </div>
+  </div>
+</div>
+<div id="webhookModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="webhookModalTitle">
+  <div class="modal-card">
+    <h3 id="webhookModalTitle">🔔 Cài đặt Cảnh báo Webhook (Discord & Telegram)</h3>
+    <div style="margin:12px 0 16px;">
+      <label class="check-row"><input id="webhookEnabled" type="checkbox"> <span style="font-weight:700;color:var(--green);">Kích hoạt hệ thống Cảnh báo Webhook</span></label>
+    </div>
+    <div class="form-row">
+      <label for="webhookDiscordUrl">Discord Webhook URL</label>
+      <input id="webhookDiscordUrl" placeholder="https://discord.com/api/webhooks/...">
+    </div>
+    <div class="form-row">
+      <label for="webhookTelegramToken">Telegram Bot Token (Tùy chọn)</label>
+      <input id="webhookTelegramToken" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11">
+    </div>
+    <div class="form-row">
+      <label for="webhookTelegramChatId">Telegram Chat ID (Tùy chọn)</label>
+      <input id="webhookTelegramChatId" placeholder="-100123456789 hoặc ID cá nhân">
+    </div>
+    <div class="setting-list" style="margin:14px 0;">
+      <label class="check-row"><input id="webhookNotifyOffline" type="checkbox" checked> <span>🚨 Cảnh báo khi Bot Offline hoặc Kicked quá 5 phút</span></label>
+      <label class="check-row"><input id="webhookNotifyRecover" type="checkbox" checked> <span>✅ Thông báo khi Bot Phục Hồi trực tuyến trở lại</span></label>
+      <label class="check-row"><input id="webhookNotifyLowTotem" type="checkbox" checked> <span>🪙 Cảnh báo khẩn khi Bot sắp hết Totem (&le; 1 cái)</span></label>
+      <label class="check-row"><input id="webhookNotifyLowHealth" type="checkbox" checked> <span>🩸 Cảnh báo khẩn khi Máu yếu (&le; 5 tim / 10 HP)</span></label>
+      <label class="check-row"><input id="webhookNotifyDeath" type="checkbox" checked> <span>💀 Cảnh báo khi Bot tử vong (chết trong game)</span></label>
+    </div>
+    <div class="form-row">
+      <label for="webhookOfflineThreshold">Ngưỡng thời gian Offline để báo (Phút):</label>
+      <input id="webhookOfflineThreshold" type="number" min="1" max="60" value="5" style="width:120px;">
+    </div>
+    <div class="modal-actions" style="margin-top:16px;">
+      <button type="button" onclick="closeWebhookModal()">Đóng</button>
+      <button type="button" class="secondary" onclick="testWebhookSettings()">🧪 Gửi thử (Test)</button>
+      <button type="button" class="primary" onclick="saveWebhookSettings()">💾 Lưu cài đặt</button>
+    </div>
+  </div>
+</div>
+<div id="userManagementModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="userManagementModalTitle">
+  <div class="modal-card modal-lg">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px;">
+      <div>
+        <h3 id="userManagementModalTitle" style="margin:0 0 4px;font-size:18.5px;">👥 Quản lý Người dùng & Phân quyền Bot (RBAC)</h3>
+        <div style="color:var(--muted);font-size:12px;">Tạo tài khoản và phân quyền vận hành bot cho từng thành viên.</div>
+      </div>
+      <button type="button" class="primary" onclick="openCreateUserModal()">＋ Thêm Người Dùng Mới</button>
+    </div>
+
+    <div class="user-table-wrap">
+      <table class="user-table">
+        <thead>
+          <tr>
+            <th>TÊN ĐĂNG NHẬP</th>
+            <th>GÓI & HẠN THUÊ</th>
+            <th>GHI CHÚ</th>
+            <th>TRẠNG THÁI</th>
+            <th>BOT ĐƯỢC CẤP QUYỀN</th>
+            <th style="text-align:right;">THAO TÁC</th>
+          </tr>
+        </thead>
+        <tbody id="userTableBody">
+          <tr><td colspan="6" style="text-align:center;padding:24px;color:var(--muted);">Đang tải danh sách người dùng...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" onclick="closeUserManagementModal()">Đóng</button>
+    </div>
+  </div>
+</div>
+
+<div id="userEditModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="userEditModalTitle">
+  <div class="modal-card" style="width:min(580px, 98vw);">
+    <h3 id="userEditModalTitle">Thêm Người Dùng Mới</h3>
+    <input id="userFormId" type="hidden">
+    <div class="form-row">
+      <label for="userFormUsername">Tên đăng nhập (Username)</label>
+      <input id="userFormUsername" autocomplete="off" placeholder="Ví dụ: operator1">
+    </div>
+    <div class="form-row">
+      <label for="userFormPassword">Mật khẩu (Password)</label>
+      <div class="password-input-wrap">
+        <input id="userFormPassword" type="text" autocomplete="off" placeholder="Nhập mật khẩu (tối thiểu 6 ký tự)...">
+        <button type="button" class="password-toggle-btn" onclick="generateRandomUserPassword()" title="Tạo mật khẩu ngẫu nhiên" aria-label="Tạo mật khẩu ngẫu nhiên">🎲</button>
+      </div>
+    </div>
+    <div class="form-row">
+      <label for="userFormStatus">Trạng thái tài khoản</label>
+      <select id="userFormStatus" class="search-box" style="width:100%;">
+        <option value="active">🟢 Đang hoạt động (Cho phép đăng nhập)</option>
+        <option value="expired">⚠️ Hết hạn thuê</option>
+        <option value="disabled">🔴 Tạm khóa (Không thể đăng nhập)</option>
+      </select>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div class="form-row">
+        <label for="userFormPlanName">Tên gói cước</label>
+        <input id="userFormPlanName" placeholder="Ví dụ: Gói Tuần, VIP Tháng...">
+      </div>
+      <div class="form-row">
+        <label for="userFormExpiresAt">Hạn thuê (Bỏ trống = Vĩnh viễn)</label>
+        <input id="userFormExpiresAt" type="datetime-local">
+      </div>
+    </div>
+    <div class="form-row">
+      <label for="userFormNote">Ghi chú liên hệ (Zalo / Facebook / SĐT)</label>
+      <input id="userFormNote" placeholder="Ví dụ: Zalo: 0912345678 (Anh Nam)">
+    </div>
+    <div class="form-row" style="margin-top:6px;">
+      <label class="check-row" style="cursor:pointer;font-size:12.5px;">
+        <input id="userFormAllowAccountChange" type="checkbox" checked>
+        <span>Cho phép khách tự đổi Username & Mật khẩu Minecraft của bot</span>
+      </label>
+    </div>
+
+    <div style="margin-top:14px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+        <span style="color:var(--muted);font-size:11.5px;font-weight:700;">DANH SÁCH BOT CẤP QUYỀN VẬN HÀNH</span>
+        <div style="display:flex;gap:8px;">
+          <button type="button" class="small" onclick="toggleSelectAllUserBots(true)">Chọn hết</button>
+          <button type="button" class="small" onclick="toggleSelectAllUserBots(false)">Bỏ hết</button>
+        </div>
+      </div>
+      <div id="userFormBotsGrid" class="bot-checkbox-grid"></div>
+    </div>
+
+    <div class="modal-actions" style="margin-top:20px;">
+      <button type="button" onclick="closeUserEditModal()">Hủy</button>
+      <button id="userFormSubmitBtn" type="button" class="primary" onclick="saveUserForm()">Lưu Người Dùng</button>
+    </div>
+  </div>
+</div>
+
+<div id="changePasswordModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="changePasswordModalTitle">
+  <div class="modal-card" style="width:min(440px, 96vw);">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <h3 id="changePasswordModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">🔑 Đổi Mật Khẩu Tài Khoản</h3>
+      <button type="button" class="small" onclick="closeChangePasswordModal()" aria-label="Đóng">✕</button>
+    </div>
+    <form id="changePasswordForm" onsubmit="submitChangePassword(event)" style="display:flex;flex-direction:column;gap:12px;">
+      <div class="form-row" style="margin-bottom:0;">
+        <label for="changePassUsernameDisplay">Tài khoản</label>
+        <input id="changePassUsernameDisplay" type="text" disabled style="opacity:0.8;background:rgba(255,255,255,0.04);">
+      </div>
+      <div class="form-row" style="margin-bottom:0;">
+        <label for="changePassOld">Mật khẩu hiện tại</label>
+        <div class="password-input-wrap">
+          <input id="changePassOld" type="password" autocomplete="current-password" placeholder="Nhập mật khẩu hiện tại..." required>
+          <button type="button" class="password-toggle-btn" aria-label="Hiện hoặc ẩn mật khẩu hiện tại" aria-pressed="false" onclick="togglePasswordVisibility('changePassOld', this)">👁</button>
+        </div>
+      </div>
+      <div class="form-row" style="margin-bottom:0;">
+        <label for="changePassNew">Mật khẩu mới (tối thiểu 6 ký tự)</label>
+        <div class="password-input-wrap">
+          <input id="changePassNew" type="password" minlength="6" autocomplete="new-password" placeholder="Nhập mật khẩu mới (tối thiểu 6 ký tự)..." required>
+          <button type="button" class="password-toggle-btn" aria-label="Hiện hoặc ẩn mật khẩu mới" aria-pressed="false" onclick="togglePasswordVisibility('changePassNew', this)">👁</button>
+        </div>
+      </div>
+      <div class="form-row" style="margin-bottom:0;">
+        <label for="changePassConfirm">Xác nhận mật khẩu mới</label>
+        <div class="password-input-wrap">
+          <input id="changePassConfirm" type="password" minlength="6" autocomplete="new-password" placeholder="Nhập lại mật khẩu mới..." required>
+          <button type="button" class="password-toggle-btn" aria-label="Hiện hoặc ẩn xác nhận mật khẩu" aria-pressed="false" onclick="togglePasswordVisibility('changePassConfirm', this)">👁</button>
+        </div>
+      </div>
+      <div id="changePassAlert" role="alert" aria-atomic="true" class="login-alert hidden" style="margin-top:4px;"></div>
+      <div class="modal-actions" style="margin-top:12px;">
+        <button type="button" onclick="closeChangePasswordModal()">Hủy</button>
+        <button id="changePassSubmitBtn" type="submit" class="primary">💾 Cập Nhật Mật Khẩu</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="discordLinkModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="discordLinkModalTitle">
+  <div class="modal-card" style="width:min(460px, 96vw);">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <h3 id="discordLinkModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">💬 Liên Kết Tài Khoản Discord</h3>
+      <button type="button" class="small" onclick="closeDiscordLinkModal()" aria-label="Đóng">✕</button>
+    </div>
+    <div id="discordLinkContent" style="display:flex;flex-direction:column;gap:12px;">
+      <div id="discordLinkStatusBox" style="padding:12px;border-radius:8px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:4px;">TRẠNG THÁI LIÊN KẾT:</div>
+        <div id="discordLinkStatusText" style="font-weight:600;font-size:14px;display:flex;align-items:center;gap:6px;">
+          <span>Đang kiểm tra...</span>
+        </div>
+        <div id="discordLinkDetails" style="margin-top:8px;font-size:13px;display:none;">
+          <div><b>Discord ID:</b> <span id="discordLinkedId" style="font-family:monospace;color:#38bdf8;"></span></div>
+          <div style="margin-top:2px;"><b>Thời gian liên kết:</b> <span id="discordLinkedDate" style="color:var(--muted);"></span></div>
+        </div>
+      </div>
+      <div id="discordLinkInstruction" style="font-size:13px;color:var(--muted);line-height:1.5;">
+        <p style="margin:0 0 6px 0;">Để liên kết tài khoản Discord với Web Manager:</p>
+        <ol style="padding-left:18px;margin:0;">
+          <li>Vào server Discord KingMC hoặc chat trực tiếp với Bot.</li>
+          <li>Gõ lệnh <code>/login</code> trên Discord và điền username/password của tài khoản Web.</li>
+          <li>Hệ thống sẽ tự động xác thực và liên kết 1:1 ngay lập tức.</li>
+        </ol>
+      </div>
+      <div id="discordLinkActions" style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
+        <button type="button" onclick="closeDiscordLinkModal()">Đóng</button>
+        <button id="discordUnlinkBtn" type="button" class="danger hidden" onclick="unlinkDiscordAccount()">🗑 Hủy Liên Kết</button>
+      </div>
+    </div>
+  </div>
+</div>

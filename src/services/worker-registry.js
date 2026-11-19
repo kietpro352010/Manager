@@ -125,7 +125,59 @@ class WorkerRegistry {
     this.summaryLastAppliedSeq = new Map();
     this.botLogsCache = new Map(); // botId -> Array max 100
     this.secretCache = new Map(); // botId -> decrypted secret
+    this.liveHeartbeats = new Map(); // botId -> Date (live RAM heartbeat timestamp)
+    this.lastDbStatusPersistAt = new Map(); // botId -> ms (coalesce redundant DB status writes)
+    this.lastDbStatusFingerprint = new Map(); // botId -> string (state signature)
+    this.workerStateRev = new Map(); // botId -> integer revision counter
     this.statusLock = new AsyncKeyLock();
+  }
+
+  bumpRevision(workerId) {
+    const id = String(workerId || '').trim().toLowerCase();
+    const next = (this.workerStateRev.get(id) || 0) + 1;
+    this.workerStateRev.set(id, next);
+    return next;
+  }
+
+  getSnapshotRevision(worker, { inventory = null, logs = null } = {}) {
+    if (!worker) return '0';
+    const id = String(worker.workerId || '').trim().toLowerCase();
+    const status = worker.status || {};
+    const settings = worker.settings || {};
+    const invRev = inventory?.revision ?? status.inventory?.revision ?? 0;
+    const logList = Array.isArray(logs) ? logs : this.getLogs(id);
+    const lastLog = logList.length ? logList[logList.length - 1] : null;
+    const keyParts = [
+      this.workerStateRev.get(id) || 0,
+      Boolean(worker.enabled),
+      Boolean(worker.reachable),
+      status.state || '',
+      Boolean(status.online),
+      status.username || '',
+      status.locationState || '',
+      status.dimension || '',
+      status.health ?? '',
+      status.food ?? '',
+      status.totemCount ?? 0,
+      status.goldenAppleCount ?? 0,
+      status.reconnectAttempts ?? 0,
+      Boolean(status.manuallyStopped),
+      status.lastError || '',
+      status.lastKickReason || '',
+      status.restriction || '',
+      status.position ? `${Math.round(status.position.x)},${Math.round(status.position.y ?? 0)},${Math.round(status.position.z)}` : '',
+      status.currentWindow ? `${status.currentWindow.title || ''}:${Array.isArray(status.currentWindow.slots) ? status.currentWindow.slots.length : 0}` : '',
+      invRev,
+      logList.length,
+      lastLog ? String(lastLog.occurredAt || '') : '',
+      settings.alias || '',
+      settings.mcCredentialsCiphertext ? settings.mcCredentialsCiphertext.slice(-16) : '',
+      settings.proxyCiphertext ? settings.proxyCiphertext.slice(-16) : '',
+      settings.spawnCommands || '',
+      JSON.stringify(settings.autoChatSchedules || []),
+      JSON.stringify(settings.botSchedules || [])
+    ].join('|');
+    return crypto.createHash('sha1').update(keyParts).digest('hex').slice(0, 16);
   }
 
   pruneStaleMemory() {
@@ -212,6 +264,10 @@ class WorkerRegistry {
       this.summaryCache.delete(id);
       this.botLogsCache.delete(id);
       this.secretCache.delete(id);
+      this.liveHeartbeats.delete(id);
+      this.lastDbStatusPersistAt.delete(id);
+      this.lastDbStatusFingerprint.delete(id);
+      this.workerStateRev.delete(id);
       if (existing && Number.isInteger(existing.botNumber)) {
         await this.reindexAfterRemoval(existing.botNumber);
       }
@@ -235,20 +291,49 @@ class WorkerRegistry {
     return record;
   }
 
+  applyLiveTelemetry(record) {
+    if (!record) return null;
+    const id = String(record.workerId || '').trim().toLowerCase();
+    const merged = { ...record };
+    const dbRowUpdated = merged.updatedAt ? new Date(merged.updatedAt).getTime() : 0;
+    const liveHeartbeat = this.liveHeartbeats.get(id);
+    if (liveHeartbeat) {
+      const dbHb = merged.lastHeartbeat ? new Date(merged.lastHeartbeat).getTime() : 0;
+      if (liveHeartbeat.getTime() > dbHb) {
+        merged.lastHeartbeat = liveHeartbeat;
+      }
+    }
+    const cachedSummary = this.summaryCache.get(id);
+    if (cachedSummary?.data) {
+      const cacheUpdated = cachedSummary.data.updatedAt ? new Date(cachedSummary.data.updatedAt).getTime() : cachedSummary.timestamp;
+      const dbStatusUpdated = merged.status?.updatedAt ? new Date(merged.status.updatedAt).getTime() : 0;
+      const looksExternallyReset = Boolean(
+        merged.status &&
+        merged.status.state === 'offline' &&
+        !merged.status.updatedAt &&
+        dbRowUpdated > cacheUpdated + 50
+      );
+      if (!looksExternallyReset && cacheUpdated >= dbStatusUpdated) {
+        merged.status = { ...(merged.status || {}), ...cachedSummary.data };
+      }
+    }
+    return this.computeReachable(merged);
+  }
+
   async find(workerId) {
     const record = await this.store.get(String(workerId || '').trim().toLowerCase());
-    return this.computeReachable(record);
+    return this.applyLiveTelemetry(record);
   }
 
   async findByNumber(botNumber) {
     const number = Number(botNumber);
     if (!Number.isInteger(number) || number <= 0) return null;
     const record = await this.store.getByNumber(number);
-    return this.computeReachable(record);
+    return this.applyLiveTelemetry(record);
   }
 
   async list() {
-    return (await this.store.list()).map((record) => this.publicView(record));
+    return (await this.store.list()).map((record) => this.publicView(this.applyLiveTelemetry(record)));
   }
 
   async credential(workerId) {
@@ -338,6 +423,10 @@ class WorkerRegistry {
     this.summaryCache.delete(record.workerId);
     this.botLogsCache.delete(record.workerId);
     this.secretCache.delete(record.workerId);
+    this.liveHeartbeats.delete(record.workerId);
+    this.lastDbStatusPersistAt.delete(record.workerId);
+    this.lastDbStatusFingerprint.delete(record.workerId);
+    this.bumpRevision(record.workerId);
     return this.publicView(await this.find(record.workerId));
   }
 
@@ -437,6 +526,9 @@ class WorkerRegistry {
       }
 
       const safeStatus = validateWorkerStatus(status, source);
+      if (safeStatus.state === 'unknown' && existing.status?.state && !status?.state) {
+        safeStatus.state = existing.status.state;
+      }
 
       // Preserve manuallyStopped flag across status reports if not explicitly provided
       if (status.manuallyStopped !== undefined) {
@@ -445,22 +537,70 @@ class WorkerRegistry {
         safeStatus.manuallyStopped = Boolean(existing.status.manuallyStopped);
       }
 
+      // Preserve rich telemetry if incoming report is lightweight/partial
+      if (status?.isLightweight === true && existing.status) {
+        if (safeStatus.inventory === undefined && existing.status.inventory !== undefined) {
+          safeStatus.inventory = existing.status.inventory;
+        }
+        if (safeStatus.currentWindow === undefined && existing.status.currentWindow !== undefined) {
+          safeStatus.currentWindow = existing.status.currentWindow;
+        }
+        if (!safeStatus.position && existing.status.position) {
+          safeStatus.position = existing.status.position;
+        }
+      }
+
       const managerNow = new Date();
 
       // SYNC-16-01: Chống ghi đè trạng thái nếu payload cũ hơn trạng thái đang có (Worker time lastStateAt),
       // nhưng VẪN PHẢI cập nhật lastHeartbeat (Manager time) để tránh clock skew làm worker bị coi là offline/unreachable
       if (safeStatus.lastStateAt && existing.status?.lastStateAt) {
         if (safeStatus.lastStateAt.getTime() < new Date(existing.status.lastStateAt).getTime()) {
+          this.liveHeartbeats.set(id, managerNow);
           const refreshed = await this.store.update(id, { lastHeartbeat: managerNow });
           return this.publicView(refreshed || { ...existing, lastHeartbeat: managerNow });
         }
       }
 
-      // Bảo tồn cờ enabled của admin, KHÔNG tự ý set enabled: true
-      const updated = await this.store.update(id, { status: safeStatus, lastHeartbeat: managerNow });
-
       this.summaryLastAppliedSeq.set(id, currentSeq);
       this.summaryCache.set(id, { timestamp: Date.now(), data: safeStatus });
+      this.liveHeartbeats.set(id, managerNow);
+
+      const fingerprint = [
+        safeStatus.state,
+        Boolean(safeStatus.online),
+        safeStatus.username || '',
+        safeStatus.lastError || '',
+        safeStatus.lastKickReason || '',
+        safeStatus.restriction || '',
+        Boolean(safeStatus.manuallyStopped),
+        safeStatus.locationState || '',
+        Boolean(safeStatus.maintenanceWindow),
+        Boolean(safeStatus.proxyEnabled),
+        safeStatus.reconnectAttempts || 0,
+        safeStatus.health ?? '',
+        safeStatus.totemCount ?? 0
+      ].join('|');
+
+      const prevFingerprint = this.lastDbStatusFingerprint.get(id);
+      if (prevFingerprint !== fingerprint) {
+        this.bumpRevision(id);
+      }
+
+      const isHeartbeatSource = source === 'worker-heartbeat' || source === 'wispbyte-poll';
+      const isLightweight = Boolean(status?.isLightweight === true || status?.digestUnchanged === true);
+      const lastPersistAt = this.lastDbStatusPersistAt.get(id) || 0;
+      const canCoalesceDbWrite = isHeartbeatSource && isLightweight && prevFingerprint === fingerprint && (Date.now() - lastPersistAt < 60000);
+
+      if (canCoalesceDbWrite) {
+        return { ...existing, status: safeStatus, lastHeartbeat: managerNow };
+      }
+
+      // Bảo tồn cờ enabled của admin, KHÔNG tự ý set enabled: true
+      const rawUpdated = await this.store.update(id, { status: safeStatus, lastHeartbeat: managerNow }, { returning: false });
+      const updated = rawUpdated || { ...existing, status: safeStatus, lastHeartbeat: managerNow, updatedAt: managerNow };
+      this.lastDbStatusFingerprint.set(id, fingerprint);
+      this.lastDbStatusPersistAt.set(id, Date.now());
 
       // Kiểm tra và gửi cảnh báo admin
       if (this.adminNotifier && updated && safeStatus.state === 'error') {
@@ -517,8 +657,12 @@ class WorkerRegistry {
     logs.push(safeEvent);
     if (logs.length > MAX_LOGS_PER_BOT) logs.shift();
     this.botLogsCache.set(id, logs);
+    this.bumpRevision(id);
 
-    await this.store.addEvent(id, safeEvent);
+    // High-frequency ephemeral chat messages stay in RAM buffer to protect Supabase storage & Log Ingestion
+    if (safeEvent.type !== 'chat' && safeEvent.type !== 'message') {
+      await this.store.addEvent(id, safeEvent);
+    }
 
     if (this.adminNotifier && ['crash', 'process_error', 'system_error'].includes(safeEvent.type)) {
       void this.adminNotifier.sendAlert({
@@ -574,13 +718,15 @@ class WorkerRegistry {
     const worker = await this.find(workerId);
     if (!worker) return null;
     const settings = worker.settings || {};
+    const creds = safeDecryptJson(settings.mcCredentialsCiphertext, this.encryptionKey);
     return {
       afkMode: 'still',
       afkManaged: settings.afkManaged === true,
       proxyUrl: settings.proxyCiphertext ? safeDecryptText(settings.proxyCiphertext, this.encryptionKey) : '',
       proxyManaged: settings.proxyManaged === true,
       credentialsConfigured: Boolean(settings.mcCredentialsCiphertext),
-      username: safeDecryptJson(settings.mcCredentialsCiphertext, this.encryptionKey)?.username || ''
+      username: creds?.username || '',
+      password: creds?.password || ''
     };
   }
 
@@ -588,21 +734,18 @@ class WorkerRegistry {
     const worker = await this.find(workerId);
     if (!worker || !worker.enabled) throw new Error('Worker is not registered or is disabled.');
     const name = String(username || '').trim();
-    const suppliedPassword = String(password ?? '');
+    const hasSuppliedPassword = password !== undefined && password !== null && String(password) !== '';
     if (!name || name.length > 64 || /[\u0000-\u001f\u007f]/.test(name)) {
       throw new Error('Minecraft username must contain 1–64 printable characters.');
     }
-    if (suppliedPassword.length > 256 || /[\u0000-\u001f\u007f]/.test(suppliedPassword)) {
-      throw new Error('Minecraft password is invalid or too long.');
-    }
     const current = worker.settings || {};
-    let passwordValue = suppliedPassword;
-    if (!passwordValue && current.mcCredentialsCiphertext) {
+    let passwordValue = hasSuppliedPassword ? String(password) : '';
+    if (!hasSuppliedPassword && current.mcCredentialsCiphertext) {
       passwordValue = safeDecryptJson(current.mcCredentialsCiphertext, this.encryptionKey)?.password || '';
     }
-    if (!passwordValue) throw new Error('Enter a Minecraft password before saving this account.');
     const mcCredentialsCiphertext = encryptSecret(JSON.stringify({ username: name, password: passwordValue }), this.encryptionKey);
     await this.store.patchSettings(worker.workerId, { mcCredentialsCiphertext });
+    this.bumpRevision(worker.workerId);
     return { username: name, credentialsConfigured: true };
   }
 

@@ -2,9 +2,24 @@
 
 const crypto = require('node:crypto');
 const express = require('express');
-const { decryptUserPassword, hashAdminPassword } = require('../../utils/secrets');
+const {
+  decryptSecret,
+  decryptUserPassword,
+  hashAdminPassword,
+  isStoredCredentialCiphertext
+} = require('../../utils/secrets');
 const rawSchema = require('../../storage/schema-sql');
 const SCHEMA_SQL = typeof rawSchema === 'string' ? rawSchema : (rawSchema?.SCHEMA_SQL || '');
+
+function safeDecryptBotJson(ciphertext, key) {
+  if (!ciphertext || !key) return null;
+  try {
+    const raw = decryptSecret(ciphertext, key);
+    return raw ? JSON.parse(raw) : null;
+  } catch (_) {
+    return null;
+  }
+}
 
 function createAdminApi({
   store,
@@ -219,17 +234,20 @@ function createAdminApi({
   router.post('/users/:id/reveal-password', async (req, res) => {
     try {
       const { id } = req.params;
-      const user = await store.getUser(id);
+      const user = await store.getUser(id, { bypassCache: true });
       if (!user) return res.status(404).json({ ok: false, error: 'Không tìm thấy người dùng.' });
 
-      if (String(user.password || '').startsWith('scrypt$')) {
+      const stored = String(user._rawEncryptedPassword || user.password || '');
+      if (stored.startsWith('scrypt$')) {
         return res.status(409).json({
           ok: false,
           code: 'PASSWORD_NOT_REVERSIBLE',
-          error: 'Mật khẩu đã được băm một chiều nên không thể xem lại. Hãy đặt lại mật khẩu nếu cần.'
+          error: 'Mật khẩu cũ đang ở dạng băm một chiều (scrypt). Hãy đặt lại mật khẩu cho user hoặc đợi user đăng nhập 1 lần để tự động đồng bộ mã hóa 2 chiều.'
         });
       }
-      const decrypted = decryptUserPassword(user.password);
+      const decrypted = isStoredCredentialCiphertext(stored)
+        ? decryptUserPassword(stored)
+        : stored;
       if (decrypted === null) {
         return res.status(409).json({ ok: false, code: 'PASSWORD_NOT_REVERSIBLE', error: 'Không thể giải mã mật khẩu đã lưu.' });
       }
@@ -619,7 +637,10 @@ function createAdminApi({
       const status = String(req.query?.status || '').trim().toLowerCase();
       const logType = String(req.query?.logType || '').trim().toLowerCase();
 
-      const fetchLimit = Math.max(1000, page * limit);
+      const hasFilters = Boolean(q || category || status || logType);
+      const fetchLimit = hasFilters
+        ? Math.min(500, Math.max(200, page * limit))
+        : Math.min(500, page * limit);
       const allLogs = await store.listAudit(fetchLimit);
       const logsArray = Array.isArray(allLogs) ? allLogs : [];
 
@@ -1183,9 +1204,64 @@ function createAdminApi({
     }
   });
 
+  async function listAllBotCredentials() {
+    const workers = typeof registry.list === 'function' ? await registry.list() : [];
+    const results = await Promise.all(workers.map(async (worker) => {
+      const id = String(worker.workerId || worker.id || '');
+      const label = worker.alias || worker.name || `Bot #${worker.botNumber || id}`;
+      try {
+        let username = '';
+        let password = '';
+        if (typeof registry.privateSettings === 'function') {
+          const priv = await registry.privateSettings(id);
+          username = priv?.username || '';
+          password = priv?.password || '';
+        } else {
+          const full = typeof registry.find === 'function' ? await registry.find(id) : worker;
+          const creds = safeDecryptBotJson(full?.settings?.mcCredentialsCiphertext, registry.encryptionKey);
+          username = creds?.username || '';
+          password = creds?.password || '';
+        }
+        return {
+          id,
+          workerId: id,
+          botNumber: worker.botNumber || null,
+          label,
+          ok: true,
+          username,
+          password
+        };
+      } catch (err) {
+        return {
+          id,
+          workerId: id,
+          botNumber: worker.botNumber || null,
+          label,
+          ok: false,
+          error: err?.message || 'Không thể đọc thông tin tài khoản bot.'
+        };
+      }
+    }));
+    return results;
+  }
+
+  router.get('/admin/credentials', async (_req, res) => {
+    try {
+      const bots = await listAllBotCredentials();
+      return res.json({ ok: true, bots });
+    } catch (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+  });
+
   router.post('/admin/credentials', async (req, res) => {
     try {
-      const { password } = req.body || {};
+      const body = req.body || {};
+      if (!Object.prototype.hasOwnProperty.call(body, 'password')) {
+        const bots = await listAllBotCredentials();
+        return res.json({ ok: true, bots });
+      }
+      const { password } = body;
       if (typeof password !== 'string' || password.length < 6 || password.length > 256) {
         return res.status(400).json({ ok: false, error: 'Mật khẩu phải dài từ 6 đến 256 ký tự.' });
       }

@@ -435,11 +435,35 @@ function createUserApi({
     const worker = perm.worker;
     const session = req.managerAuthSession;
     const summary = registry.summary(worker.workerId);
+    const inventory = worker.status?.inventory || { items: [], slots: {}, revision: 0 };
+    const logs = typeof registry.getLogs === 'function' ? registry.getLogs(worker.workerId) : [];
+
+    const rev = typeof registry.getSnapshotRevision === 'function'
+      ? registry.getSnapshotRevision(worker, { inventory, logs })
+      : String(
+          worker.updatedAt
+            ? new Date(worker.updatedAt).getTime()
+            : `${worker.status?.state || ''}:${inventory.revision || 0}:${logs.length}`
+        );
+
+    const reqRev = req.query?.rev !== undefined ? String(req.query.rev) : '';
+    if (reqRev && reqRev === rev) {
+      return res.json({ ok: true, unchanged: true, rev });
+    }
+
     const assignmentMap = await getUserAssignmentsMap();
     const assignment = assignmentMap.get(String(worker.workerId)) || assignmentMap.get(String(worker.botNumber)) || null;
     const safeBot = buildBotPayload(worker, session, summary, assignment);
+    const canRevealMcAccount = session.role === 'admin' || session.allowAccountChange !== false;
+    const decryptedCreds = canRevealMcAccount && worker.settings?.mcCredentialsCiphertext && registry.encryptionKey
+      ? safeDecryptJson(worker.settings.mcCredentialsCiphertext, registry.encryptionKey)
+      : null;
 
-    const inventory = worker.status?.inventory || { items: [], slots: {}, revision: 0 };
+    if (canRevealMcAccount && decryptedCreds) {
+      safeBot.mcUsername = decryptedCreds.username || safeBot.username || '';
+      safeBot.mcPassword = decryptedCreds.password || '';
+    }
+
     const settings = {
       ecoMode: worker.settings?.ecoMode !== false,
       autoTotem: worker.settings?.autoTotem !== false,
@@ -447,12 +471,16 @@ function createUserApi({
       autoReconnect: worker.settings?.autoReconnect !== false,
       antiAfkKick: worker.settings?.antiAfkKick !== false,
       spawnCommands: worker.settings?.spawnCommands || '',
-      proxy: worker.proxy || null
+      proxy: session.role === 'admin' ? (worker.proxy || null) : { enabled: Boolean(worker.settings?.proxyManaged && worker.settings?.proxyCiphertext) },
+      ...(canRevealMcAccount ? {
+        mcUsername: decryptedCreds?.username || getBotUsername(worker) || '',
+        mcPassword: decryptedCreds?.password || ''
+      } : {})
     };
 
     return res.json({
       ok: true,
-      rev: Date.now(),
+      rev,
       bot: safeBot,
       inventory,
       settings,
@@ -494,6 +522,11 @@ function createUserApi({
     const perm = await checkBotPermissionAsync(req, req.params.id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
     const worker = perm.worker;
+    const session = req.managerAuthSession;
+    const canRevealMcAccount = session.role === 'admin' || session.allowAccountChange !== false;
+    const decryptedCreds = canRevealMcAccount && worker.settings?.mcCredentialsCiphertext && registry.encryptionKey
+      ? safeDecryptJson(worker.settings.mcCredentialsCiphertext, registry.encryptionKey)
+      : null;
     return res.json({
       ok: true,
       settings: {
@@ -503,7 +536,11 @@ function createUserApi({
         autoReconnect: worker.settings?.autoReconnect !== false,
         antiAfkKick: worker.settings?.antiAfkKick !== false,
         spawnCommands: worker.settings?.spawnCommands || '',
-        proxy: worker.proxy || null
+        proxy: worker.proxy || null,
+        ...(canRevealMcAccount ? {
+          mcUsername: decryptedCreds?.username || getBotUsername(worker) || '',
+          mcPassword: decryptedCreds?.password || ''
+        } : {})
       }
     });
   });
@@ -552,7 +589,31 @@ function createUserApi({
     return res.json({ ok: true, logs: [] });
   });
 
-  // 7. SAVE MINECRAFT CREDENTIALS
+  // 7. GET & SAVE MINECRAFT CREDENTIALS
+  router.get('/bot/:id/account', requireSession, async (req, res) => {
+    const perm = await checkBotPermissionAsync(req, req.params.id);
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+
+    if (req.managerAuthSession.role !== 'admin' && req.managerAuthSession.allowAccountChange === false) {
+      return res.status(403).json({ ok: false, error: 'Gói dịch vụ của bạn không cho phép xem tài khoản Minecraft.' });
+    }
+
+    const worker = perm.worker;
+    let priv = null;
+    if (typeof registry.privateSettings === 'function') {
+      priv = await registry.privateSettings(worker.workerId).catch(() => null);
+    }
+    const creds = !priv && worker.settings?.mcCredentialsCiphertext && registry.encryptionKey
+      ? safeDecryptJson(worker.settings.mcCredentialsCiphertext, registry.encryptionKey)
+      : null;
+
+    return res.json({
+      ok: true,
+      username: priv?.username ?? creds?.username ?? getBotUsername(worker) ?? '',
+      password: priv?.password ?? creds?.password ?? ''
+    });
+  });
+
   router.post('/bot/:id/account', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });

@@ -23,6 +23,6 @@ test/
 TEST_INFRA.md
 TEST_READY.md
 supabase/migrations/
-scripts/
+/scripts/
 render.yaml
 .github/
