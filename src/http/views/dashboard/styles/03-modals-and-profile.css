@@ -11,7 +11,7 @@
   display: grid;
   place-items: center;
   padding: 20px;
-  z-index: 10000;
+  z-index: var(--z-modal, 1000);
   overscroll-behavior: contain;
 }
 
@@ -66,7 +66,7 @@
 .login-gate {
   position: fixed;
   inset: 0;
-  z-index: 99999;
+  z-index: var(--z-lock, 1500);
   display: flex;
   align-items: safe center;
   justify-content: center;
@@ -403,7 +403,7 @@
   border-radius: 16px;
   box-shadow: var(--shadow-lg);
   padding: 8px;
-  z-index: 300;
+  z-index: var(--z-dropdown, 400);
   overscroll-behavior: contain;
   animation: modalZoomIn 0.16s cubic-bezier(0.16, 1, 0.3, 1);
   scrollbar-width: thin;

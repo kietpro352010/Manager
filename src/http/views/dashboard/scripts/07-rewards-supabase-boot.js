@@ -354,17 +354,26 @@ window.toggleTrialGiftSetting = toggleTrialGiftSetting;
 window.saveTrialDaysSetting = saveTrialDaysSetting;
 
 function updateDetailUptime(){
-  if(!detailBot||detailBot.status!=='afk')return;
-  const base=Math.max(0,Math.floor(Number(detailBot.uptimeSeconds||0)));
-  const extra=Math.floor((Date.now()-uptimeSyncAt)/1000);
-  const seconds=Math.min(base+extra,3596399);
+  const st = String(detailBot?.status || '').toLowerCase();
+  if(!detailBot || !['online', 'afk'].includes(st)) return;
+  let seconds = 0;
+  const connectedMs = detailBot.connectedAt ? Date.parse(detailBot.connectedAt) : NaN;
+  if (Number.isFinite(connectedMs) && connectedMs > 0) {
+    seconds = Math.max(0, Math.floor((Date.now() - connectedMs) / 1000));
+  } else {
+    const base = Math.max(0, Math.floor(Number(detailBot.uptimeSeconds || 0)));
+    const extra = Math.max(0, Math.floor((Date.now() - uptimeSyncAt) / 1000));
+    seconds = base + extra;
+  }
+  seconds = Math.min(seconds, 3596399);
   const h=Math.floor(seconds/3600);const m=Math.floor((seconds%3600)/60);const s=seconds%60;
   const el=document.getElementById('detailUptime');if(el)el.textContent=h+'h '+m+'m '+s+'s';
 }
 
 async function handleRenameClick(btn) {
   if (!btn) return;
-  const botId = Number(btn.getAttribute('data-bot-id'));
+  const botId = String(btn.getAttribute('data-bot-id') || '').trim();
+  if (!botId) return;
   const currentLabel = btn.getAttribute('data-bot-label') || '';
   await renameBotAlias(botId, currentLabel);
 }
@@ -450,8 +459,9 @@ async function copySupabaseSchemaSql() {
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang lấy SQL...'; }
   try {
     const res = await requestJson('/api/manager/supabase/schema');
-    if (!res.ok || !res.data?.sql) throw new Error(res.data?.error || 'Không thể lấy SQL schema.');
-    const sql = String(res.data.sql);
+    const rawSql = res.data?.sql || res.data?.raw || '';
+    if (!res.ok || !rawSql) throw new Error(res.data?.error || 'Không thể lấy SQL schema.');
+    const sql = String(rawSql);
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(sql);
     } else {
@@ -951,11 +961,16 @@ let lastUserActivityAt = Date.now();
 
 // managerPollTimerId declared at top of client script
 function scheduleNextManagerPoll() {
-  if (managerPollTimerId) clearTimeout(managerPollTimerId);
-  if (!currentUser) return;
-  const isIdle = Date.now() - lastUserActivityAt > 2 * 60 * 1000;
-  const delay = document.hidden ? 30000 : (isIdle ? 15000 : 5000); // 5s active poll, 15s idle, 30s hidden tab
+  if (managerPollTimerId) {
+    clearTimeout(managerPollTimerId);
+    managerPollTimerId = null;
+  }
+  if (!currentUser || document.hidden) return; // BW-02: pause polling completely while tab is hidden
+  const isIdle = Date.now() - lastUserActivityAt > 90 * 1000;
+  const delay = isIdle ? 20000 : 8000; // 8s active poll, 20s idle (>90s), 0 while hidden
   managerPollTimerId = setTimeout(async () => {
+    managerPollTimerId = null;
+    if (document.hidden || !currentUser) return;
     try {
       const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
       if (isOnline && !routeResolving && currentUser) {
@@ -963,7 +978,7 @@ function scheduleNextManagerPoll() {
         else await refreshDetail(false);
       }
     } finally {
-      if (currentUser) {
+      if (currentUser && !document.hidden) {
         scheduleNextManagerPoll();
       }
     }
@@ -972,12 +987,17 @@ function scheduleNextManagerPoll() {
 
 document.addEventListener('visibilitychange', () => {
   if (!currentUser) return;
-  if (!document.hidden) {
-    lastUserActivityAt = Date.now();
-    lastHomeSig = ''; // Force immediate fresh reconciliation on tab focus
-    if (selectedBotId === null) refreshHome();
-    else refreshDetail(true);
+  if (document.hidden) {
+    if (managerPollTimerId) {
+      clearTimeout(managerPollTimerId);
+      managerPollTimerId = null;
+    }
+    return;
   }
+  lastUserActivityAt = Date.now();
+  lastHomeSig = ''; // Force immediate fresh reconciliation on tab focus
+  if (selectedBotId === null) void refreshHome();
+  else void refreshDetail(true);
   scheduleNextManagerPoll();
 });
 

@@ -188,8 +188,8 @@ function statusMeta(status, available=true, manuallyStopped=false, bot=null) {
 }
 
 function showToast(message, type = 'info', duration = 3200) {
-  const toast=document.getElementById('toast');
-  if(!toast) return;
+  const container = document.getElementById('toast');
+  if (!container) return;
   const icons = {
     success: '✅ ',
     error: '❌ ',
@@ -197,14 +197,39 @@ function showToast(message, type = 'info', duration = 3200) {
     info: 'ℹ️ '
   };
   const icon = icons[type] || '';
-  toast.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">' +
-    '<span>' + icon + escapeHtml(message || '') + '</span>' +
-    '<span style="cursor:pointer;opacity:0.6;font-size:14px;padding:0 2px;" onclick="document.getElementById(\'toast\').style.display=\'none\'" title="Đóng">✕</span>' +
-    '</div>';
-  toast.className = 'toast toast-' + type;
-  toast.style.display='block';
-  clearTimeout(showToast.timer);
-  showToast.timer=setTimeout(()=>{toast.style.display='none'}, duration);
+  container.className = 'toast-stack';
+  container.style.display = 'flex';
+
+  while (container.children.length >= 3) {
+    container.firstElementChild.remove();
+  }
+
+  const item = document.createElement('div');
+  item.className = 'toast toast-item toast-' + type;
+  item.style.display = 'block';
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:10px;';
+  const textSpan = document.createElement('span');
+  textSpan.textContent = icon + String(message || '');
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.textContent = '✕';
+  closeBtn.title = 'Đóng';
+  closeBtn.setAttribute('aria-label', 'Đóng thông báo');
+  closeBtn.style.cssText = 'background:transparent;border:none;color:inherit;cursor:pointer;opacity:0.7;font-size:14px;padding:0 2px;line-height:1;';
+  const removeItem = () => {
+    item.remove();
+    if (!container.children.length) {
+      container.style.display = 'none';
+    }
+  };
+  closeBtn.addEventListener('click', removeItem);
+  row.appendChild(textSpan);
+  row.appendChild(closeBtn);
+  item.appendChild(row);
+  container.appendChild(item);
+
+  setTimeout(removeItem, Math.max(1200, Number(duration) || 3200));
 }
 
 function escapeHtml(value) {
@@ -467,11 +492,6 @@ function botCardHtml(bot) {
         '<span class="bot-id-chip">#' + idStr + '</span>' +
         '<h2 class="bot-card-name" title="' + escapeHtml(bot.label) + '">' + escapeHtml(bot.label) + '</h2>' +
         '<button type="button" class="bot-mini-btn btn-rename-alias" data-bot-id="' + escapeHtml(id) + '" data-bot-label="' + escapeHtml(bot.label) + '" ' + cardDisabledAttr + (isCardLocked ? cardDisabledStyle + cardDisabledTitle : 'title="Đổi tên / Ghi chú hiển thị"') + ' onclick="event.stopPropagation(); handleRenameClick(this)">✏</button>' +
-        '<div class="bot-card-quick-actions" style="display:inline-flex;margin-left:4px;" onclick="event.stopPropagation()">' +
-          (isOffline ?
-            '<button type="button" class="bot-mini-btn" ' + cardDisabledAttr + (isCardLocked ? cardDisabledStyle + cardDisabledTitle : 'title="Chạy bot ngay"') + ' style="background:rgba(16,185,129,0.18);color:#34d399;border:1px solid rgba(16,185,129,0.45);font-weight:700;' + (isCardLocked ? 'opacity:0.45;cursor:not-allowed;' : '') + '" onclick="quickCardAction(this,' + escapeHtml(idArg) + ',\'start\')">▶ Chạy</button>' :
-            '<button type="button" class="bot-mini-btn danger" ' + cardDisabledAttr + (isCardLocked ? cardDisabledStyle + cardDisabledTitle : 'title="Dừng bot ngay"') + ' style="' + (isCardLocked ? 'opacity:0.45;cursor:not-allowed;' : '') + '" onclick="quickCardAction(this,' + escapeHtml(idArg) + ',\'stop\')">■ Dừng</button>') +
-        '</div>' +
       '</div>' +
       (isAdmin ?
         '<div class="bot-card-admin-actions" onclick="event.stopPropagation()">' +
@@ -661,6 +681,7 @@ async function quickRedeemKeyOnCard(btnOrInput, botId) {
 }
 window.quickRedeemKeyOnCard = quickRedeemKeyOnCard;
 
+let lastGraceExpireRefreshAt = 0;
 function updateCardGraceCountdowns() {
   const timers = document.querySelectorAll('.grace-countdown-timer[data-expiry]');
   if (!timers || timers.length === 0) return;
@@ -684,7 +705,8 @@ function updateCardGraceCountdowns() {
     }
   });
 
-  if (hasTransitioned) {
+  if (hasTransitioned && (now - lastGraceExpireRefreshAt >= 20000)) {
+    lastGraceExpireRefreshAt = now;
     lastHomeSig = '';
     void refreshHome();
   }
@@ -802,7 +824,10 @@ async function saveEditBot(){
   const rawTags=document.getElementById('editBotTags')?.value || '';
   const tags = rawTags.split(/[,;\s]+/).map(t => t.trim().toLowerCase().replace(/^#/, '')).filter(Boolean);
   const rentable = document.getElementById('editBotRentable') ? document.getElementById('editBotRentable').checked : true;
-  if(currentUser?.role !== 'user' && !url){showToast('URL không được trống.');return;}
+  const targetBotObj = bots.find(b => String(b.workerId || b.id) === id);
+  const targetProvider = String(targetBotObj?.provider || targetBotObj?.source || '').toLowerCase();
+  const isRenderProvider = targetProvider === 'render';
+  if(currentUser?.role !== 'user' && isRenderProvider && !url){showToast('URL không được trống đối với bot Render.');return;}
   try{
     let data;
     if (currentUser?.role === 'user') {

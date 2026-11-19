@@ -187,16 +187,6 @@
     border-color: rgba(56, 189, 248, 0.3);
     transform: translateX(4px) translateY(-1px);
   }
-  body.theme-sunset .kpi-card:hover,
-  body.theme-sunset .bot-card:hover {
-    border-color: rgba(249, 115, 22, 0.55);
-    box-shadow: 0 22px 52px -8px rgba(0, 0, 0, 0.7), 0 0 28px rgba(249, 115, 22, 0.18);
-  }
-  body.theme-morning .kpi-card:hover,
-  body.theme-morning .bot-card:hover {
-    border-color: rgba(45, 212, 191, 0.55);
-    box-shadow: 0 22px 52px -8px rgba(0, 0, 0, 0.7), 0 0 28px rgba(45, 212, 191, 0.18);
-  }
 }
 
 @media (prefers-reduced-motion: no-preference) {

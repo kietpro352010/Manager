@@ -1593,25 +1593,31 @@ const THEME_MAP = {
   'light': 'moonlight'
 };
 
+let cachedPublicTheme = null;
+
 function normalizePublicTheme(raw) {
   return THEME_MAP[String(raw || '').trim()] || 'deep-galaxy';
 }
 
 function getActivePublicTheme() {
+  if (cachedPublicTheme) return cachedPublicTheme;
   try {
-    return normalizePublicTheme(
+    cachedPublicTheme = normalizePublicTheme(
       localStorage.getItem('kbot_theme') ||
       localStorage.getItem('kbot_dashboard_theme') ||
       localStorage.getItem('kbot_cosmic_mode') ||
       'deep-galaxy'
     );
+    return cachedPublicTheme;
   } catch (_) {
-    return 'deep-galaxy';
+    cachedPublicTheme = 'deep-galaxy';
+    return cachedPublicTheme;
   }
 }
 
 function applyPublicTheme(themeName) {
   const theme = normalizePublicTheme(themeName);
+  cachedPublicTheme = theme;
   try {
     localStorage.setItem('kbot_theme', theme);
     localStorage.setItem('kbot_dashboard_theme', theme);
@@ -2064,14 +2070,29 @@ async function pingServerHealth() {
 
 async function loadPublicSystemInfo() {
   try {
-    const [sysRes, healthRes, loginCfgRes] = await Promise.all([
-      fetch('/api/public/system-info', { credentials: 'same-origin' }).catch(() => null),
-      fetch('/health', { credentials: 'same-origin' }).catch(() => null),
-      fetch('/api/auth/login-config', { credentials: 'same-origin' }).catch(() => null)
-    ]);
-    const sysData = sysRes ? await sysRes.json().catch(() => ({})) : {};
-    const healthData = healthRes ? await healthRes.json().catch(() => ({})) : null;
-    const loginCfgData = loginCfgRes ? await loginCfgRes.json().catch(() => ({})) : {};
+    let sysData = {};
+    let healthData = null;
+    let loginCfgData = {};
+    let sysOk = false;
+
+    const bootRes = await fetch('/api/public/bootstrap', { credentials: 'same-origin' }).catch(() => null);
+    const bootData = bootRes && bootRes.ok ? await bootRes.json().catch(() => null) : null;
+    if (bootData && bootData.ok && bootData.systemInfo) {
+      sysData = bootData.systemInfo;
+      healthData = bootData.health || null;
+      loginCfgData = bootData.loginConfig || {};
+      sysOk = Boolean(sysData.ok);
+    } else {
+      const [sysRes, healthRes, loginCfgRes] = await Promise.all([
+        fetch('/api/public/system-info', { credentials: 'same-origin' }).catch(() => null),
+        fetch('/health', { credentials: 'same-origin' }).catch(() => null),
+        fetch('/api/auth/login-config', { credentials: 'same-origin' }).catch(() => null)
+      ]);
+      sysData = sysRes ? await sysRes.json().catch(() => ({})) : {};
+      healthData = healthRes ? await healthRes.json().catch(() => ({})) : null;
+      loginCfgData = loginCfgRes ? await loginCfgRes.json().catch(() => ({})) : {};
+      sysOk = Boolean(sysRes && sysRes.ok && sysData && sysData.ok);
+    }
 
     const trialGiftEnabled = loginCfgData && loginCfgData.trialGiftEnabled !== undefined
       ? loginCfgData.trialGiftEnabled
@@ -2084,7 +2105,7 @@ async function loadPublicSystemInfo() {
       renderTrialCallout(trialGiftEnabled, trialDays);
     }
 
-    if (sysRes && sysRes.ok && sysData && sysData.ok) {
+    if (sysOk) {
       if (trialGiftEnabled === undefined && sysData.trialGiftEnabled !== undefined) {
         renderTrialCallout(sysData.trialGiftEnabled, sysData.trialDays);
       }
@@ -2444,7 +2465,7 @@ async function loadPublicSystemInfo() {
   }
 
   let lastTime = 0;
-  const frameInterval = 1000 / 45;
+  const frameInterval = 1000 / 30;
 
   function frame(timestamp) {
     rafId = null;

@@ -432,7 +432,7 @@
 .account-restriction-overlay {
   position: fixed;
   inset: 0;
-  z-index: 999999;
+  z-index: var(--z-lock, 1500);
   display: flex;
   align-items: safe center;
   justify-content: center;

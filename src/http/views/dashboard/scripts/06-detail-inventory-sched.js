@@ -686,10 +686,12 @@ async function copyToClipboard(text, label) {
 }
 window.copyToClipboard = copyToClipboard;
 
+let detailChatSendInFlight = false;
 async function sendDetailMessage(event){
   event.preventDefault();
-  if(detailRequestInFlight)return;
+  if(detailChatSendInFlight)return;
   const input=document.getElementById('detailMessageInput');
+  const sendBtn=document.querySelector('#detailChatForm button[type="submit"], #detailSendButton');
   const text=String(input?.value||'');
   if(!text.trim()){showToast('Nội dung không được trống.');return;}
   if (!detailCommandHistory.length || detailCommandHistory[detailCommandHistory.length - 1] !== text.trim()) {
@@ -697,11 +699,17 @@ async function sendDetailMessage(event){
     if (detailCommandHistory.length > 50) detailCommandHistory.shift();
   }
   detailCommandHistoryIndex = -1;
+  detailChatSendInFlight = true;
+  if (sendBtn) sendBtn.disabled = true;
   try{
     const result=await detailPost('/send',{text});
     showToast(result.data?.message||result.data?.error||'Đã xử lý.');
     if(result.ok){input.value='';await loadDetailChat(true);}
   }catch(err){showToast(err.message||'Không thể gửi chat.');}
+  finally{
+    detailChatSendInFlight = false;
+    if (sendBtn) sendBtn.disabled = false;
+  }
 }
 
 async function saveDetailAccount(){
@@ -789,17 +797,23 @@ function renderDetailProxy(proxy) {
 }
 
 // SEC-06/BUG-17: snapshot công khai chỉ chứa proxy { enabled }. Admin phải tải chi
-// tiết đầy đủ (host/port/username + mật khẩu masked) từ GET /settings và render lại.
+// tiết đầy đủ (host/port/username + mật khẩu masked) từ GET /settings 1 lần khi mở bot (BW-02).
 // Non-admin gọi hàm này là no-op (proxy đã bị Manager strip khỏi session data).
-async function loadFullSettingsForAdmin() {
+let _loadedAdminSettingsBotId = null;
+async function loadFullSettingsForAdmin(force = false) {
   if (currentUser?.role !== 'admin' || selectedBotId === null) return;
+  const targetId = String(selectedBotId);
+  if (!force && _loadedAdminSettingsBotId === targetId) return;
+  _loadedAdminSettingsBotId = targetId;
   try {
     const data = await detailGet('/settings');
+    if (String(selectedBotId) !== targetId) return;
     const settings = data?.settings || data || {};
     if (settings.proxy) renderDetailProxy(settings.proxy);
     const sp = document.getElementById('detailSpawnCommands');
     if (sp && !detailSettingsDirty && typeof settings.spawnCommands === 'string') sp.value = settings.spawnCommands;
   } catch (_) {
+    if (_loadedAdminSettingsBotId === targetId) _loadedAdminSettingsBotId = null;
     // Không phá trang nếu worker offline — badge {enabled} từ snapshot vẫn hiển thị.
   }
 }
@@ -825,8 +839,10 @@ async function saveDetailProxy() {
     if (res.ok) {
       showToast('Đã lưu cấu hình Proxy thành công!');
       lastHomeSig = '';
+      _loadedAdminSettingsBotId = null;
       if (selectedBotId !== null) detailLastRevMap.delete(selectedBotId);
       await refreshDetail(true);
+      await loadFullSettingsForAdmin(true);
     } else {
       showToast('Lỗi lưu Proxy: ' + (res.data?.error || 'Không rõ nguyên nhân'));
     }

@@ -10,7 +10,7 @@ let pendingBotReassignCallback = null;
 let currentNavPage = 'dashboard';
 
 // Điều hướng trang lớn (Full-Page Navigation Router)
-function navigateTo(pageName) {
+function navigateTo(pageName, options = {}) {
   if (pageName === 'users' || pageName === 'audit' || pageName === 'backup') {
     if (!currentUser || currentUser.role !== 'admin') {
       pageName = 'dashboard';
@@ -45,7 +45,17 @@ function navigateTo(pageName) {
     const url = new URL(window.location.href);
     url.searchParams.delete('bot');
     url.searchParams.delete('botUrl');
-    history.pushState({}, '', url.pathname + url.search);
+    if (['users', 'audit', 'backup'].includes(pageName)) {
+      url.searchParams.set('page', pageName);
+    } else {
+      url.searchParams.delete('page');
+    }
+    const nextUrl = url.pathname + url.search;
+    const currentUrl = window.location.pathname + window.location.search;
+    if (!options.skipHistory && nextUrl !== currentUrl) {
+      if (options.replace) history.replaceState({ page: pageName }, '', nextUrl);
+      else history.pushState({ page: pageName }, '', nextUrl);
+    }
   }
 
   const targetPage = pages[pageName] || pages.dashboard;
@@ -78,7 +88,7 @@ function fitGlobalProfileDropdownHeight() {
   const btnBottom = btn && typeof btn.getBoundingClientRect === 'function'
     ? btn.getBoundingClientRect().bottom
     : 60;
-  const maxHeightPx = Math.max(200, Math.floor(viewportH - btnBottom - 16));
+  const maxHeightPx = Math.max(120, Math.floor(viewportH - btnBottom - 16));
   dropdown.style.maxHeight = maxHeightPx + 'px';
   dropdown.style.overflowY = 'auto';
   dropdown.style.overflowX = 'hidden';
@@ -97,6 +107,7 @@ function toggleGlobalProfileDropdown(event) {
 }
 window.toggleGlobalProfileDropdown = toggleGlobalProfileDropdown;
 window.addEventListener('resize', fitGlobalProfileDropdownHeight, { passive: true });
+window.addEventListener('orientationchange', fitGlobalProfileDropdownHeight, { passive: true });
 
 function closeGlobalProfileDropdown() {
   const dropdown = document.getElementById('globalUserProfileDropdown');
@@ -162,13 +173,15 @@ function trapModalFocus(modalEl) {
 
 function openAccessibleModal(modalEl) {
   if (!modalEl) return;
+  if (typeof closeGlobalProfileDropdown === 'function') closeGlobalProfileDropdown();
   modalEl._previousActiveElement = document.activeElement;
   modalEl.classList.remove('hidden');
   trapModalFocus(modalEl);
   setTimeout(() => {
     const focusable = getVisibleFocusableElements(modalEl);
     if (focusable.length > 0) {
-      focusable[0].focus();
+      const primaryInput = focusable.find((el) => ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) && el.type !== 'hidden');
+      (primaryInput || focusable[0]).focus();
     } else {
       if (!modalEl.hasAttribute('tabindex')) modalEl.setAttribute('tabindex', '-1');
       modalEl.focus();
@@ -195,12 +208,14 @@ function setupAccessibleModals() {
       const observer = new MutationObserver(() => {
         const isHidden = modal.classList.contains('hidden') || (modal.style && modal.style.display === 'none');
         if (wasHidden && !isHidden) {
-          // Modal opened: record previous active element and focus first interactive element
+          if (typeof closeGlobalProfileDropdown === 'function') closeGlobalProfileDropdown();
+          // Modal opened: record previous active element and focus primary input or first interactive element
           modal._previousActiveElement = document.activeElement;
           setTimeout(() => {
             const focusable = getVisibleFocusableElements(modal);
             if (focusable.length > 0) {
-              focusable[0].focus();
+              const primaryInput = focusable.find((el) => ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) && el.type !== 'hidden');
+              (primaryInput || focusable[0]).focus();
             } else {
               if (!modal.hasAttribute('tabindex')) modal.setAttribute('tabindex', '-1');
               modal.focus();
@@ -233,7 +248,7 @@ if (typeof document !== 'undefined') {
   }
 }
 
-// ⌨️ ACCESSIBILITY: Đóng menu/cổng/modal khi nhấn phím Escape và khôi phục focus
+// ⌨️ ACCESSIBILITY: Đóng menu/cổng/modal khi nhấn phím Escape và khôi phục focus (KHÔNG đóng màn hình khóa tài khoản)
 window.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   const dropdown = document.getElementById('globalUserProfileDropdown');
@@ -247,7 +262,7 @@ window.addEventListener('keydown', (e) => {
     if (currentUser) hideLoginGate();
     return;
   }
-  const openModals = Array.from(document.querySelectorAll('.modal:not(.hidden), .account-restriction-overlay:not(.hidden)'));
+  const openModals = Array.from(document.querySelectorAll('.modal:not(.hidden)'));
   if (openModals.length > 0) {
     const modal = openModals[openModals.length - 1];
     closeAccessibleModal(modal);
@@ -465,10 +480,19 @@ async function refreshWhitelistTable() {
           '<td><span class="chip" style="font-size:11px;">' + byEsc + '</span></td>' +
           '<td style="font-size:12px;color:var(--muted);">' + timeEsc + '</td>' +
           '<td style="text-align:right;">' +
-            '<button type="button" class="small danger" onclick="deleteIpWhitelist(\'' + ipEsc + '\')" style="padding:4px 8px;font-size:11px;">🗑 Xóa</button>' +
+            '<button type="button" class="small danger btn-delete-ip-whitelist" data-delete-ip="' + ipEsc + '" style="padding:4px 8px;font-size:11px;">🗑 Xóa</button>' +
           '</td>' +
         '</tr>';
       }).join('');
+      if (!tbody._ipDeleteDelegated) {
+        tbody._ipDeleteDelegated = true;
+        tbody.addEventListener('click', (ev) => {
+          const btn = ev.target && ev.target.closest ? ev.target.closest('[data-delete-ip]') : null;
+          if (!btn) return;
+          const targetIp = btn.getAttribute('data-delete-ip');
+          if (targetIp) void deleteIpWhitelist(targetIp);
+        });
+      }
     }
   } catch (err) {
     if (tbody) tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--red);padding:24px;">Lỗi: ' + escapeHtml(err.message) + '</td></tr>';
@@ -551,13 +575,13 @@ async function refreshUserManagementPage() {
     userManagementAvailableBots = Array.isArray(res.data?.availableBots) ? res.data.availableBots : [];
     userManagementBotOwnership = (res.data?.botOwnership && typeof res.data.botOwnership === 'object') ? res.data.botOwnership : {};
 
-    // Cập nhật các thống kê số liệu
+    // Cập nhật các thống kê số liệu (UX-01: chỉ tính Vĩnh Viễn khi isPermanent === true)
     const total = userManagementList.length;
     const now = Date.now();
-    const activeCount = userManagementList.filter(u => u.status === 'active' && (u.isPermanent || !u.expiresAt || Date.parse(u.expiresAt) > now)).length;
+    const activeCount = userManagementList.filter(u => u.status === 'active' && (u.isPermanent === true || (u.expiresAt && Date.parse(u.expiresAt) > now))).length;
     const disabledCount = userManagementList.filter(u => u.status === 'disabled').length;
-    const expiredCount = userManagementList.filter(u => !u.isPermanent && (u.status === 'expired' || (u.expiresAt && Date.parse(u.expiresAt) <= now))).length;
-    const lifetimeCount = userManagementList.filter(u => Boolean(u.isPermanent) || !u.expiresAt).length;
+    const expiredCount = userManagementList.filter(u => u.isPermanent !== true && (u.status === 'expired' || (u.expiresAt && Date.parse(u.expiresAt) <= now))).length;
+    const lifetimeCount = userManagementList.filter(u => u.isPermanent === true).length;
 
     const elTotal = document.getElementById('userMgmtTotalCount'); if (elTotal) elTotal.textContent = total;
     const elStatAll = document.getElementById('statUserAll'); if (elStatAll) elStatAll.textContent = total;
@@ -691,11 +715,11 @@ function renderUserTable() {
       if (!matchUser && !matchNote && !matchPlan) return false;
     }
 
-    // Lọc theo trạng thái
-    const isAct = u.status === 'active' && (u.isPermanent || !u.expiresAt || Date.parse(u.expiresAt) > now);
+    // Lọc theo trạng thái (UX-01: chỉ coi là Vĩnh Viễn khi isPermanent === true)
+    const isLife = u.isPermanent === true;
+    const isAct = u.status === 'active' && (isLife || (u.expiresAt && Date.parse(u.expiresAt) > now));
     const isDis = u.status === 'disabled';
-    const isExp = !u.isPermanent && (u.status === 'expired' || (u.expiresAt && Date.parse(u.expiresAt) <= now));
-    const isLife = Boolean(u.isPermanent || !u.expiresAt);
+    const isExp = !isLife && (u.status === 'expired' || (u.expiresAt && Date.parse(u.expiresAt) <= now));
 
     if (currentUserStatusFilter === 'active') return isAct;
     if (currentUserStatusFilter === 'disabled') return isDis;
@@ -714,8 +738,8 @@ function renderUserTable() {
 
   const rowsHtml = filtered.map(u => {
     const isDis = u.status === 'disabled';
-    const isExp = !u.isPermanent && (u.status === 'expired' || (u.expiresAt && Date.parse(u.expiresAt) <= now));
-    const isLife = Boolean(u.isPermanent || !u.expiresAt);
+    const isLife = u.isPermanent === true;
+    const isExp = !isLife && (u.status === 'expired' || (u.expiresAt && Date.parse(u.expiresAt) <= now));
     const uidAttr = escapeHtml(String(u.id));
     const unameAttr = escapeHtml(String(u.username || ''));
 
@@ -752,6 +776,8 @@ function renderUserTable() {
     let expBadge = '';
     if (isLife) {
       expBadge = '<span class="badge-lifetime">👑 Vĩnh Viễn</span>';
+    } else if (!u.expiresAt) {
+      expBadge = '<span style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;color:#94a3b8;background:rgba(148,163,184,0.14);border:1px solid rgba(148,163,184,0.3);">⚪ Chưa kích hoạt</span>';
     } else if (isExp) {
       const expExact = typeof formatFullDateTime === 'function' ? formatFullDateTime(u.expiresAt) : new Date(u.expiresAt).toLocaleString('vi-VN');
       expBadge = '<span class="badge-expired" title="Hết hạn: ' + escapeHtml(expExact) + '">⛔ Hết hạn (' + escapeHtml(expExact) + ')</span>';

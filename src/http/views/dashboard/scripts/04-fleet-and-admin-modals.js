@@ -228,17 +228,27 @@ async function handleImportFile(event) {
 window.handleImportFile = handleImportFile;
 
 async function reconnectOfflineBots() {
-  const offlineList = bots.filter(b => (!b.available || b.status === 'offline' || b.status === 'kicked') && !b.manuallyStopped);
+  const offlineList = bots.filter(b => (!b.available || b.status === 'offline' || b.status === 'kicked' || b.status === 'error') && !b.manuallyStopped);
   if (!offlineList.length) {
     showToast('Tất cả bot đều đang hoạt động tốt!');
     return;
   }
   if (!confirm('Kết nối lại ' + offlineList.length + ' bot đang Offline / Lỗi?')) return;
   showToast('Đang kết nối lại ' + offlineList.length + ' bot...');
+  if (currentUser?.role === 'admin') {
+    try {
+      const res = await requestJson('/api/manager/all/reconnect', { method: 'POST', timeoutMs: 30000 });
+      if (res.ok) {
+        showToast(res.data?.message || ('Đã gửi lệnh kết nối lại các bot lỗi!'), 'success');
+        await refreshHome();
+        return;
+      }
+    } catch (_) {}
+  }
   let success = 0;
   for (const b of offlineList) {
     try {
-      const res = await requestJson('/api/manager/bot/' + encodeURIComponent(String(b.id)) + '/start', {
+      const res = await requestJson('/api/manager/bot/' + encodeURIComponent(String(b.workerId || b.id)) + '/start', {
         method: 'POST',
         timeoutMs: 15000
       });
@@ -500,6 +510,22 @@ function filterBots() {
   reconcileBotCards(filtered);
 }
 
+function computeBotCardSig(b) {
+  const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : null;
+  const expKey = userExp && userExp.isExpired ? (userExp.inGracePeriod ? 'grace' : 'expired') : 'ok';
+  const pos = b.position || b.roundedLocation || null;
+  const posStr = pos && Number.isFinite(Number(pos.x)) ? `${Math.round(pos.x)},${Math.round(pos.y)},${Math.round(pos.z)}` : '';
+  return JSON.stringify([
+    b.status, b.available, !!b.manuallyStopped, b.label, b.username,
+    b.ping !== null && b.ping !== undefined ? Math.round(Number(b.ping) / 10) : null,
+    b.tps !== null && b.tps !== undefined ? Number(b.tps).toFixed(1) : null,
+    b.health, b.totemCount, Math.floor(Number(b.uptimeSeconds || 0) / 60),
+    posStr, b.ecoMode, b.rentable, b.assignedUsername, b.lastError, b.lastKickReason,
+    b.ipAddress, b.tags, b.hardware?.botRamMb, b.hardware?.hostCpuPercent,
+    currentUser?.role || '', expKey
+  ]);
+}
+
 function reconcileBotCards(filtered) {
   const grid = document.getElementById('botGrid');
   if (!grid || draggedBotId !== null) return;
@@ -522,24 +548,28 @@ function reconcileBotCards(filtered) {
   filtered.forEach((b, idx) => {
     const id = String(b.id);
     const existing = currentMap.get(id);
-    let newHtml = '';
-    try { newHtml = botCardHtml(b); } catch (_) { return; }
+    const cardSig = computeBotCardSig(b);
 
     if (existing) {
-      const temp = document.createElement('div');
-      temp.innerHTML = newHtml;
-      const fresh = temp.firstElementChild;
-      if (fresh) {
-        if (existing.innerHTML !== fresh.innerHTML) {
+      if (existing.dataset.cardSig !== cardSig) {
+        let newHtml = '';
+        try { newHtml = botCardHtml(b); } catch (_) { return; }
+        const temp = document.createElement('div');
+        temp.innerHTML = newHtml;
+        const fresh = temp.firstElementChild;
+        if (fresh) {
           const activeEl = document.activeElement;
           const hasFocusInside = activeEl && existing.contains(activeEl);
           const hasDirtyInput = existing.querySelector && existing.querySelector('[data-dirty="true"]');
           if (!hasFocusInside && !hasDirtyInput) {
-            existing.innerHTML = fresh.innerHTML;
+            if (existing.innerHTML !== fresh.innerHTML) {
+              existing.innerHTML = fresh.innerHTML;
+            }
+            if (existing.className !== fresh.className) {
+              existing.className = fresh.className;
+            }
+            existing.dataset.cardSig = cardSig;
           }
-        }
-        if (existing.className !== fresh.className) {
-          existing.className = fresh.className;
         }
       }
       const refNode = grid.children[idx] || null;
@@ -547,10 +577,13 @@ function reconcileBotCards(filtered) {
         grid.insertBefore(existing, refNode);
       }
     } else {
+      let newHtml = '';
+      try { newHtml = botCardHtml(b); } catch (_) { return; }
       const temp = document.createElement('div');
       temp.innerHTML = newHtml;
       const fresh = temp.firstElementChild;
       if (fresh) {
+        fresh.dataset.cardSig = cardSig;
         const refNode = grid.children[idx] || null;
         grid.insertBefore(fresh, refNode);
       }
@@ -997,7 +1030,22 @@ async function exportBotLogs(event, botId) {
     showToast('Đang lấy dữ liệu log của Bot ' + botId + '...');
     const result = await requestJson('/api/manager/bot/' + encodeURIComponent(String(botId)) + '/logs');
     if(!result.ok) throw new Error(result.data?.error || 'Không thể lấy log.');
-    const logLines = (result.data?.logs || []).join('\n') || 'Chưa có dữ liệu log.';
+    const rawLogs = Array.isArray(result.data?.logs) ? result.data.logs : [];
+    const formattedLines = rawLogs.map((entry) => {
+      if (typeof formatDetailLogEntryText === 'function') {
+        const text = formatDetailLogEntryText(entry, true);
+        if (text) return text;
+      }
+      if (typeof entry === 'string') return entry;
+      if (entry && typeof entry === 'object') {
+        const ts = entry.occurredAt || entry.timestamp || entry.createdAt || entry.time || '';
+        const type = entry.type || entry.level || '';
+        const msg = entry.message || entry.reason || entry.text || entry.line || JSON.stringify(entry);
+        return [ts ? '[' + ts + ']' : '', type ? '[' + String(type).toUpperCase() + ']' : '', msg].filter(Boolean).join(' ');
+      }
+      return String(entry ?? '');
+    }).filter(Boolean);
+    const logLines = formattedLines.join('\n') || 'Chưa có dữ liệu log.';
     const blob = new Blob([logLines], { type: 'text/plain;charset=utf-8' });
     url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1363,6 +1411,7 @@ function openBot(id) {
   lastChatRevision=-1;
   lastPositionHistoryRevision=-1;
   lastPositionHistoryFetchedAt=0;
+  if (typeof _loadedAdminSettingsBotId !== 'undefined') _loadedAdminSettingsBotId = null;
   detailInventory=null;
   detailSettingsDirty=false;
   detailAutoChatDirty=false;
@@ -1452,7 +1501,16 @@ lastPositionHistoryFetchedAt=0;
     }
 
     selectedBotId=null;
+    const pageParam = String(url.searchParams.get('page') || '').trim().toLowerCase();
+    if (['users', 'audit', 'backup'].includes(pageParam) && typeof navigateTo === 'function') {
+      navigateTo(pageParam, { skipHistory: true });
+      return true;
+    }
     document.getElementById('detailPage').classList.add('hidden');
+    ['userManagementPage', 'auditPage', 'backupPage'].forEach((pid) => {
+      const el = document.getElementById(pid);
+      if (el) el.classList.add('hidden');
+    });
     document.getElementById('homePage').classList.remove('hidden');
     return false;
   } finally {
@@ -1464,7 +1522,9 @@ window.addEventListener('popstate',()=>{
   detailSettingsDirty=false;
   detailAutoChatDirty=false;
   detailBotScheduleDirty=false;
-  void resolveRouteFromUrl().then(()=>{if(selectedBotId===null) return refreshHome();});
+  void resolveRouteFromUrl().then((handled)=>{
+    if (!handled && selectedBotId === null) return refreshHome();
+  });
 });
 
 async function runAllAction(action) {

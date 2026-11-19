@@ -6,16 +6,43 @@ const kbotReducedMotionQuery = typeof window.matchMedia === 'function'
   ? window.matchMedia('(prefers-reduced-motion: reduce)')
   : { matches: false };
 
+let _cachedDashboardTheme = null;
+let _cachedBgEffectsDisabled = null;
+
+function isDashboardBgEffectsDisabled() {
+  if (_cachedBgEffectsDisabled !== null) return _cachedBgEffectsDisabled;
+  try {
+    _cachedBgEffectsDisabled = localStorage.getItem('kbot_bg_effects_off') === '1';
+  } catch (_) {
+    _cachedBgEffectsDisabled = false;
+  }
+  return _cachedBgEffectsDisabled;
+}
+
+function toggleDashboardBgEffects() {
+  const nextDisabled = !isDashboardBgEffectsDisabled();
+  _cachedBgEffectsDisabled = nextDisabled;
+  try { localStorage.setItem('kbot_bg_effects_off', nextDisabled ? '1' : '0'); } catch (_) {}
+  document.body.classList.toggle('cosmic-mode-off', nextDisabled);
+  const btn = document.getElementById('bgEffectsToggleBtn');
+  if (btn) {
+    btn.textContent = nextDisabled ? '✨ Bật hiệu ứng nền' : '💤 Tắt hiệu ứng nền';
+    btn.setAttribute('aria-pressed', nextDisabled ? 'true' : 'false');
+  }
+  if (typeof window.__kbotRefreshAppCosmicEngine === 'function') {
+    window.__kbotRefreshAppCosmicEngine();
+  }
+  if (typeof showToast === 'function') {
+    showToast(nextDisabled ? '💤 Đã tắt hiệu ứng nền để tiết kiệm pin & GPU.' : '✨ Đã bật lại hiệu ứng nền.', 'info');
+  }
+}
+window.toggleDashboardBgEffects = toggleDashboardBgEffects;
+
 function showLoginGate() {
   document.getElementById('loginGate')?.classList.remove('hidden');
   document.body.classList.add('cosmic-mode-login');
   const closeBtn = document.getElementById('loginGateCloseBtn');
   if (closeBtn) closeBtn.style.display = currentUser ? 'block' : 'none';
-  const v = document.getElementById('appGalaxyVideo');
-  if (v && !kbotReducedMotionQuery.matches && !document.hidden) {
-    v.playbackRate = 0.85;
-    v.play().catch(() => {});
-  }
 }
 
 function normalizeDashboardTheme(mode) {
@@ -41,15 +68,18 @@ function normalizeDashboardTheme(mode) {
 }
 
 function getSavedDashboardTheme() {
+  if (_cachedDashboardTheme) return _cachedDashboardTheme;
   try {
-    return normalizeDashboardTheme(
+    _cachedDashboardTheme = normalizeDashboardTheme(
       localStorage.getItem('kbot_theme') ||
       localStorage.getItem('kbot_dashboard_theme') ||
       localStorage.getItem('kbot_cosmic_mode') ||
       'deep-galaxy'
     );
+    return _cachedDashboardTheme;
   } catch (_) {
-    return 'deep-galaxy';
+    _cachedDashboardTheme = 'deep-galaxy';
+    return _cachedDashboardTheme;
   }
 }
 
@@ -62,6 +92,7 @@ function hideLoginGate() {
 
 function applyDashboardCosmicMode(mode) {
   var theme = normalizeDashboardTheme(mode);
+  _cachedDashboardTheme = theme;
 
   try {
     localStorage.setItem('kbot_theme', theme);
@@ -77,9 +108,16 @@ function applyDashboardCosmicMode(mode) {
   document.body.classList.remove(
     'theme-galaxy', 'theme-sunset', 'theme-morning', 'theme-off',
     'theme-deep-galaxy', 'theme-ocean-abyss', 'theme-violet-dusk', 'theme-moonlight',
-    'cosmic-mode-vivid', 'cosmic-mode-subtle', 'cosmic-mode-off'
+    'cosmic-mode-vivid', 'cosmic-mode-subtle'
   );
   document.body.classList.add('theme-' + theme);
+  const bgOff = isDashboardBgEffectsDisabled();
+  document.body.classList.toggle('cosmic-mode-off', bgOff);
+  const bgBtn = document.getElementById('bgEffectsToggleBtn');
+  if (bgBtn) {
+    bgBtn.textContent = bgOff ? '✨ Bật hiệu ứng nền' : '💤 Tắt hiệu ứng nền';
+    bgBtn.setAttribute('aria-pressed', bgOff ? 'true' : 'false');
+  }
 
   var themeBtns = document.querySelectorAll('[data-theme-choice]');
   themeBtns.forEach(function(el) {
@@ -105,18 +143,6 @@ function applyDashboardCosmicMode(mode) {
     }
   }
 
-  var v = document.getElementById('appGalaxyVideo');
-  if (v) {
-    if (theme === 'deep-galaxy' && !kbotReducedMotionQuery.matches && v.querySelector('source')) {
-      v.style.display = 'block';
-      v.style.transform = 'translate3d(0px,0px,0) scale(1.02)';
-      v.playbackRate = 0.85;
-      if (!document.hidden) v.play().catch(function() {});
-    } else {
-      v.pause();
-      v.style.display = 'none';
-    }
-  }
   if (typeof window.__kbotRefreshAppCosmicEngine === 'function') {
     window.__kbotRefreshAppCosmicEngine();
   }
@@ -447,7 +473,7 @@ function initCosmicStars() {
   initCosmicStars();
 
   function shouldRunCosmicLoop() {
-    var isOff = document.body.classList.contains('cosmic-mode-off') || document.body.classList.contains('theme-off');
+    var isOff = isDashboardBgEffectsDisabled() || document.body.classList.contains('cosmic-mode-off') || document.body.classList.contains('theme-off');
     return !document.hidden && !isOff && !kbotReducedMotionQuery.matches;
   }
 
@@ -457,8 +483,6 @@ function initCosmicStars() {
       rafId = null;
     }
     if (ctx) ctx.clearRect(0, 0, w, h);
-    var v = document.getElementById('appGalaxyVideo');
-    if (v) v.pause();
   }
 
   function startCosmicLoop() {
@@ -496,7 +520,7 @@ function initCosmicStars() {
   }
 
   var lastTime = 0;
-  var frameInterval = 1000 / 45;
+  var frameInterval = 1000 / 30;
 
   function render(timestamp) {
     rafId = null;
@@ -1012,14 +1036,18 @@ function applyUserRoleUI() {
   });
 
   const expEl = document.getElementById('globalDropdownExpires');
+  const isPermanentUser = !isAdmin && currentUser.isPermanent === true;
   if (expEl) {
     if (isAdmin) {
       expEl.style.display = 'none';
     } else {
       expEl.style.display = 'block';
-      if (!currentUser.expiresAt) {
+      if (isPermanentUser) {
         expEl.textContent = '👑 VIP Vĩnh Viễn';
         expEl.style.color = '#eab308';
+      } else if (!currentUser.expiresAt) {
+        expEl.textContent = '⚪ Chưa kích hoạt gói';
+        expEl.style.color = '#94a3b8';
       } else {
         const expDate = new Date(currentUser.expiresAt);
         const isExp = Date.now() > expDate.getTime();
@@ -1029,8 +1057,7 @@ function applyUserRoleUI() {
     }
   }
 
-  // Ẩn nút nhập mã key đối với tài khoản VIP Vĩnh Viễn
-  const isPermanentUser = !isAdmin && !currentUser.expiresAt;
+  // Ẩn nút nhập mã key chỉ đối với Admin hoặc tài khoản VIP Vĩnh Viễn thực sự (isPermanent === true)
   const renewBtnTop = document.getElementById('btnUserRenewKey');
   const renewBtnDropdown = document.getElementById('globalRenewKeyBtn');
   if (renewBtnTop) renewBtnTop.style.display = (isAdmin || isPermanentUser) ? 'none' : '';

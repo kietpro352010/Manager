@@ -865,7 +865,7 @@ function updateUserHeaderCountdown() {
     if (bannerPlan) bannerPlan.textContent = currentUser.planName || 'Gói thường';
   }
 
-  if (!currentUser.expiresAt) {
+  if (currentUser.isPermanent === true) {
     badge.style.display = 'inline-flex';
     badge.style.background = 'rgba(16,185,129,0.15)';
     badge.style.color = 'var(--green)';
@@ -881,6 +881,26 @@ function updateUserHeaderCountdown() {
       }
       banner.style.background = 'rgba(16,185,129,0.1)';
       banner.style.borderColor = 'rgba(16,185,129,0.3)';
+    }
+    return;
+  }
+
+  if (!currentUser.expiresAt) {
+    badge.style.display = 'inline-flex';
+    badge.style.background = 'rgba(148,163,184,0.15)';
+    badge.style.color = '#cbd5e1';
+    badge.style.border = '1px solid rgba(148,163,184,0.35)';
+    badge.innerHTML = '<span>⚪ <b>Chưa kích hoạt gói</b></span><button class="small primary" onclick="openRenewModal()" style="margin-left:6px;">🔑 Nhập Key kích hoạt</button>';
+
+    if (banner) {
+      if (bannerIcon) bannerIcon.textContent = '🔑';
+      if (bannerExactTime) bannerExactTime.textContent = 'Chưa kích hoạt';
+      if (bannerCountdown) {
+        bannerCountdown.textContent = 'Nhập mã Key để kích hoạt gói thuê bot';
+        bannerCountdown.style.color = '#cbd5e1';
+      }
+      banner.style.background = 'rgba(30,41,59,0.65)';
+      banner.style.borderColor = 'rgba(148,163,184,0.35)';
     }
     return;
   }
@@ -993,9 +1013,17 @@ async function refreshDetail(force=false) {
       if(snapshot && snapshot.unchanged){
         uptimeSyncAt=Date.now();
         updateDetailUptime();
-        await loadDetailLogs(force, requestGeneration, requestBotId);
-        if(!isCurrentRequest()) return;
-        await loadDetailChat(force, requestGeneration, requestBotId);
+        const snapLogRev = (snapshot.logRevision !== undefined && snapshot.logRevision !== null) ? Number(snapshot.logRevision) : null;
+        const snapChatRev = (snapshot.chatLogRevision !== undefined && snapshot.chatLogRevision !== null) ? Number(snapshot.chatLogRevision) : null;
+        if (detailBot && snapLogRev !== null && Number.isFinite(snapLogRev)) detailBot.logRevision = snapLogRev;
+        if (detailBot && snapChatRev !== null && Number.isFinite(snapChatRev)) detailBot.chatLogRevision = snapChatRev;
+        if (force || (snapLogRev !== null && Number.isFinite(snapLogRev) && snapLogRev !== lastEventRevision)) {
+          await loadDetailLogs(force, requestGeneration, requestBotId);
+          if(!isCurrentRequest()) return;
+        }
+        if (force || (snapChatRev !== null && Number.isFinite(snapChatRev) && snapChatRev !== lastChatRevision)) {
+          await loadDetailChat(force, requestGeneration, requestBotId);
+        }
         return;
       }
 
@@ -1052,7 +1080,9 @@ async function refreshDetail(force=false) {
       if(!isCurrentRequest()) return;
       await loadDetailChat(force, requestGeneration, requestBotId);
       if(!isCurrentRequest()) return;
-      await loadDetailPositionHistory(force, requestGeneration, requestBotId);
+      if (force) {
+        await loadDetailPositionHistory(false, requestGeneration, requestBotId);
+      }
     } catch(err) {
       if(!isCurrentRequest()) return;
       if(err && err.status===404){

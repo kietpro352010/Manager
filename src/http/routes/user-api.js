@@ -45,11 +45,10 @@ function parseProxyUrlToObject(proxyUrl) {
       host: parsed.hostname.replace(/^\[|\]$/g, ''),
       port: Number(parsed.port) || '',
       username: decodeURIComponent(parsed.username || ''),
-      password: decodeURIComponent(parsed.password || ''),
-      url: raw
+      hasPassword: Boolean(parsed.password)
     };
   } catch (_) {
-    return { enabled: true, protocol: 'socks5', host: '', port: '', username: '', password: '', url: raw };
+    return { enabled: true, protocol: 'socks5', host: '', port: '', username: '', hasPassword: false };
   }
 }
 
@@ -241,6 +240,10 @@ function createUserApi({
       PAYLOAD_TOO_LARGE: 413,
       WORKER_NOT_FOUND: 404,
       LIFECYCLE_CONFLICT: 409,
+      INVENTORY_STALE: 409,
+      WINDOW_STALE: 409,
+      REVISION_MISMATCH: 409,
+      BOT_NOT_ONLINE: 409,
       WORKER_DISABLED: 409,
       WORKER_RESTRICTED: 409,
       RATE_LIMIT: 429,
@@ -695,9 +698,7 @@ function createUserApi({
       autoReconnect: worker.settings?.autoReconnect !== false,
       antiAfkKick: worker.settings?.antiAfkKick !== false,
       spawnCommands: canRevealMcAccount ? (worker.settings?.spawnCommands || '') : (worker.settings?.spawnCommands ? '********' : ''),
-      proxy: session.role === 'admin'
-        ? resolveAdminProxyObject(worker)
-        : { enabled: Boolean(worker.settings?.proxyManaged && worker.settings?.proxyCiphertext) },
+      proxy: { enabled: Boolean(worker.settings?.proxyManaged && worker.settings?.proxyCiphertext) },
       ...(canRevealMcAccount ? {
         mcUsername: decryptedCreds?.username || getBotUsername(worker) || '',
         mcPassword: decryptedCreds?.password || ''
