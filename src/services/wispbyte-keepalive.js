@@ -1,10 +1,24 @@
 'use strict';
 
+const dns = require('node:dns').promises;
+const net = require('node:net');
 const { encryptUserPassword, decryptUserPassword, isStoredCredentialCiphertext } = require('../utils/secrets');
 
 const DEFAULT_PANEL_URL = 'https://wispbyte.com/client';
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+
+function isPrivateOrBlockedIpAddress(ip) {
+  const clean = String(ip || '').replace(/^::ffff:/i, '').replace(/^\[|\]$/g, '').trim().toLowerCase();
+  if (!clean) return true;
+  if (clean === '::1' || clean === '::' || clean === '0.0.0.0') return true;
+  if (/^127\./.test(clean) || /^10\./.test(clean) || /^192\.168\./.test(clean)) return true;
+  if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(clean)) return true;
+  if (/^169\.254\./.test(clean) || /^100\.(6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\./.test(clean)) return true;
+  if (/^0\./.test(clean)) return true;
+  if (clean.startsWith('fc') || clean.startsWith('fd') || clean.startsWith('fe80:') || clean.startsWith('ff')) return true;
+  return false;
+}
 
 function validatePanelUrl(urlStr) {
   const raw = String(urlStr || '').trim();
@@ -14,25 +28,47 @@ function validatePanelUrl(urlStr) {
   } catch {
     throw new Error('Panel URL không đúng định dạng URL.');
   }
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-    throw new Error('Panel URL chỉ chấp nhận giao thức HTTP/HTTPS.');
-  }
-  const hostname = parsed.hostname.toLowerCase();
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
   if (
     hostname === 'localhost' ||
     hostname === '127.0.0.1' ||
     hostname === '::1' ||
+    hostname === '0.0.0.0' ||
     hostname === '169.254.169.254' ||
     hostname.endsWith('.internal') ||
-    hostname.endsWith('.local')
+    hostname.endsWith('.local') ||
+    hostname.endsWith('.localhost')
   ) {
     throw new Error('Panel URL không được trỏ tới máy chủ nội bộ hoặc địa chỉ metadata.');
   }
   // Check private IP ranges
+  if (net.isIP(hostname) && isPrivateOrBlockedIpAddress(hostname)) {
+    throw new Error('Panel URL không được trỏ tới dải IP mạng nội bộ.');
+  }
   if (/^10\./.test(hostname) || /^192\.168\./.test(hostname) || /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname)) {
     throw new Error('Panel URL không được trỏ tới dải IP mạng nội bộ.');
   }
+  if (parsed.protocol !== 'https:') {
+    throw new Error('Panel URL chỉ chấp nhận giao thức HTTPS để bảo vệ cookie phiên.');
+  }
   return raw;
+}
+
+async function assertPublicPanelHost(urlStr) {
+  const parsed = new URL(urlStr);
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (net.isIP(hostname)) {
+    if (isPrivateOrBlockedIpAddress(hostname)) {
+      throw new Error('Panel URL không được trỏ tới dải IP mạng nội bộ.');
+    }
+    return;
+  }
+  const records = await dns.lookup(hostname, { all: true }).catch(() => []);
+  for (const rec of records) {
+    if (rec?.address && isPrivateOrBlockedIpAddress(rec.address)) {
+      throw new Error('Panel URL phân giải sang địa chỉ IP nội bộ (SSRF blocked).');
+    }
+  }
 }
 
 function maskCookie(cookie) {
@@ -208,6 +244,9 @@ class WispbyteKeepAliveManager {
     }
 
     try {
+      if (this.fetch === global.fetch) {
+        await assertPublicPanelHost(targetUrl);
+      }
       this.logger.info?.('wispbyte_manager_ping_start', { accountId: account.id, targetUrl });
       const res = await this.fetch(targetUrl, {
         method: 'GET',
@@ -218,7 +257,8 @@ class WispbyteKeepAliveManager {
           'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
           'Cache-Control': 'no-cache'
         },
-        redirect: 'manual'
+        redirect: 'manual',
+        signal: AbortSignal.timeout(15000)
       });
 
       const location = res.headers.get('location') || '';

@@ -157,6 +157,7 @@ function encryptUserPassword(value, key = null) {
 function decryptUserPassword(value, key = null, previousKey = null) {
   if (value === null || value === undefined || value === '') return '';
   const stored = String(value);
+  if (stored.startsWith('scrypt$')) return null;
   if (isUnsupportedCredentialCiphertext(stored)) return null;
   if (!isStoredCredentialCiphertext(stored)) return stored;
 
@@ -260,8 +261,10 @@ function timingSafeStringEquals(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
   const bufA = Buffer.from(a, 'utf8');
   const bufB = Buffer.from(b, 'utf8');
-  if (bufA.length !== bufB.length) return false;
-  return crypto.timingSafeEqual(bufA, bufB);
+  const digestA = crypto.createHash('sha256').update(bufA).digest();
+  const digestB = crypto.createHash('sha256').update(bufB).digest();
+  const digestMatch = crypto.timingSafeEqual(digestA, digestB);
+  return digestMatch && bufA.length === bufB.length;
 }
 
 function safeEqual(leftValue, rightValue) {

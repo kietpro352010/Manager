@@ -2,11 +2,26 @@
 
 const SECRET_KEY = /password|secret|token|cookie|authorization|api.?key|credential|proxy.?url/i;
 
+const URL_CREDENTIAL_REGEX = /(:\/\/[^\s:@]+:)[^\s@]+(@)/g;
+
+function redactStringSecrets(str) {
+  if (typeof str !== 'string') return str;
+  if (str.includes('://') && str.includes('@')) {
+    return str.replace(URL_CREDENTIAL_REGEX, '$1***$2');
+  }
+  return str;
+}
+
 function redact(value, key = '', visited = new WeakSet(), depth = 0) {
   if (SECRET_KEY.test(key)) return '[REDACTED]';
   if (depth > 8) return '[MAX_DEPTH]';
   if (value instanceof Error) {
-    return { name: value.name, message: value.message, stack: value.stack, code: value.code };
+    return {
+      name: value.name,
+      message: redactStringSecrets(value.message),
+      stack: redactStringSecrets(value.stack),
+      code: value.code
+    };
   }
   if (Array.isArray(value)) {
     if (visited.has(value)) return '[CIRCULAR]';
@@ -20,8 +35,8 @@ function redact(value, key = '', visited = new WeakSet(), depth = 0) {
       Object.entries(value).map(([childKey, childValue]) => [childKey, redact(childValue, childKey, visited, depth + 1)])
     );
   }
-  if (typeof value === 'string' && value.includes('://') && value.includes('@')) {
-    return value.replace(/(:\/\/[^:]+:)[^@]+(@)/, '$1***$2');
+  if (typeof value === 'string') {
+    return redactStringSecrets(value);
   }
   return value;
 }

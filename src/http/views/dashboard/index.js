@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 
 const STYLE_FILES = [
   'styles/01-tokens-and-base.css',
@@ -40,6 +41,12 @@ const STYLES = STYLE_FILES.map(readAsset).join('\n');
 const BODY = PARTIAL_FILES.map(readAsset).join('\n');
 const SCRIPTS = SCRIPT_FILES.map(readAsset).join('\n');
 
+const CSS_HASH = crypto.createHash('sha256').update(STYLES).digest('hex').slice(0, 12);
+const JS_HASH = crypto.createHash('sha256').update(SCRIPTS).digest('hex').slice(0, 12);
+const CSS_PATH = `/assets/dashboard.${CSS_HASH}.css`;
+const JS_PATH = `/assets/dashboard.${JS_HASH}.js`;
+
+// Full inline bundle preserved for backward-compatible static analysis / tests
 const HTML = `${HEAD}
 <style>
 ${STYLES}
@@ -52,12 +59,26 @@ ${SCRIPTS}
 </body>
 </html>`;
 
+// Lightweight HTML shell referencing content-hashed immutable static CSS/JS assets (BW-01)
+const SHELL_HTML = `${HEAD}
+<link rel="stylesheet" href="${CSS_PATH}">
+</head>
+${BODY}
+<script src="${JS_PATH}"></script>
+</body>
+</html>`;
+
 module.exports = {
   HTML,
+  SHELL_HTML,
   HEAD,
   STYLES,
   BODY,
   SCRIPTS,
+  CSS_HASH,
+  JS_HASH,
+  CSS_PATH,
+  JS_PATH,
   STYLE_FILES,
   PARTIAL_FILES,
   SCRIPT_FILES

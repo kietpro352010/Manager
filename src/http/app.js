@@ -8,31 +8,84 @@ const express = require('express');
 const helmet = require('helmet');
 
 const { PUBLIC_LOGIN_HTML } = require('./views/login-html');
-const { HTML: DASHBOARD_HTML } = require('./views/dashboard-html');
+const {
+  SHELL_HTML: DASHBOARD_SHELL_HTML,
+  STYLES: DASHBOARD_STYLES,
+  SCRIPTS: DASHBOARD_SCRIPTS,
+  CSS_PATH: DASHBOARD_CSS_PATH,
+  JS_PATH: DASHBOARD_JS_PATH
+} = require('./views/dashboard-html');
 
-function prepareCompressedView(html) {
-  const raw = Buffer.from(String(html || ''), 'utf8');
+function prepareCompressedView(content, contentType = 'text/html; charset=utf-8') {
+  const raw = Buffer.from(String(content || ''), 'utf8');
   const gzip = zlib.gzipSync(raw, { level: 9 });
+  const brotli = typeof zlib.brotliCompressSync === 'function'
+    ? zlib.brotliCompressSync(raw, {
+        params: {
+          [zlib.constants.BROTLI_PARAM_QUALITY]: 9,
+          [zlib.constants.BROTLI_PARAM_MODE]: zlib.constants.BROTLI_MODE_TEXT
+        }
+      })
+    : null;
   const etag = `W/"${crypto.createHash('sha256').update(raw).digest('hex').slice(0, 16)}"`;
-  return { raw, gzip, etag };
+  return { raw, gzip, brotli, etag, contentType };
 }
 
-const PRECOMPRESSED_DASHBOARD = prepareCompressedView(DASHBOARD_HTML);
-const PRECOMPRESSED_LOGIN = prepareCompressedView(PUBLIC_LOGIN_HTML);
+const PRECOMPRESSED_DASHBOARD = prepareCompressedView(DASHBOARD_SHELL_HTML, 'text/html; charset=utf-8');
+const PRECOMPRESSED_DASHBOARD_CSS = prepareCompressedView(DASHBOARD_STYLES, 'text/css; charset=utf-8');
+const PRECOMPRESSED_DASHBOARD_JS = prepareCompressedView(DASHBOARD_SCRIPTS, 'application/javascript; charset=utf-8');
+const PRECOMPRESSED_LOGIN = prepareCompressedView(PUBLIC_LOGIN_HTML, 'text/html; charset=utf-8');
 
-function acceptsGzipEncoding(req) {
+function negotiateEncoding(req) {
   const acceptEncoding = String(req?.headers?.['accept-encoding'] || '');
   let wildcardQuality = null;
+  let brQuality = null;
   let gzipQuality = null;
   for (const entry of acceptEncoding.split(',')) {
     const [name, ...params] = entry.trim().toLowerCase().split(';');
     const qParam = params.find((param) => /^\s*q\s*=/.test(param));
     const quality = qParam ? Number(qParam.split('=')[1]) : 1;
     if (!Number.isFinite(quality) || quality < 0 || quality > 1) continue;
-    if (name === 'gzip') gzipQuality = quality;
+    if (name === 'br') brQuality = quality;
+    else if (name === 'gzip') gzipQuality = quality;
     else if (name === '*') wildcardQuality = quality;
   }
-  return gzipQuality !== null ? gzipQuality > 0 : wildcardQuality > 0;
+  const brAllowed = brQuality !== null ? brQuality > 0 : (wildcardQuality !== null && wildcardQuality > 0);
+  const gzipAllowed = gzipQuality !== null ? gzipQuality > 0 : (wildcardQuality !== null && wildcardQuality > 0);
+  if (brAllowed && typeof zlib.brotliCompress === 'function') {
+    if (brQuality === null || gzipQuality === null || brQuality >= gzipQuality) {
+      return 'br';
+    }
+  }
+  if (gzipAllowed) return 'gzip';
+  return null;
+}
+
+function sendPrecompressed(req, res, asset, { varyHeader = 'Accept-Encoding', cacheControl = 'private, no-cache' } = {}) {
+  res.setHeader('Vary', varyHeader);
+  res.setHeader('Cache-Control', cacheControl);
+  res.setHeader('ETag', asset.etag);
+  const ifNoneMatch = String(req.headers['if-none-match'] || '');
+  if (ifNoneMatch && ifNoneMatch.split(',').some((tag) => tag.trim().replace(/-(?:gzip|br)(?="?$)/, '') === asset.etag)) {
+    return res.status(304).end();
+  }
+  res.setHeader('Content-Type', asset.contentType);
+  if (req.method === 'HEAD') {
+    return res.end();
+  }
+  const enc = negotiateEncoding(req);
+  if (enc === 'br' && asset.brotli) {
+    res.setHeader('Content-Encoding', 'br');
+    res.setHeader('Content-Length', String(asset.brotli.length));
+    return res.end(asset.brotli);
+  }
+  if (enc === 'gzip' && asset.gzip) {
+    res.setHeader('Content-Encoding', 'gzip');
+    res.setHeader('Content-Length', String(asset.gzip.length));
+    return res.end(asset.gzip);
+  }
+  res.setHeader('Content-Length', String(asset.raw.length));
+  return res.end(asset.raw);
 }
 
 const {
@@ -116,9 +169,9 @@ function createApp({
     return false;
   }
 
-  // 1. Lightweight Zero-Dependency Gzip Compression Middleware (saves ~85% outbound bandwidth)
+  // 1. Lightweight Zero-Dependency Brotli/Gzip Compression Middleware (saves ~85-90% outbound bandwidth)
   app.use((req, res, next) => {
-    const acceptsGzip = acceptsGzipEncoding(req);
+    const preferredEncoding = negotiateEncoding(req);
     const originalSend = res.send;
     res.send = function (body) {
       if (res.headersSent || !body || req.method === 'HEAD' || [204, 304].includes(res.statusCode)) {
@@ -136,7 +189,7 @@ function createApp({
                              contentType.includes('css');
       if (!isCompressible) return originalSend.call(this, body);
       res.vary('Accept-Encoding');
-      if (!acceptsGzip || res.getHeader('Content-Encoding')) return originalSend.call(this, body);
+      if (!preferredEncoding || res.getHeader('Content-Encoding')) return originalSend.call(this, body);
       let buffer;
       try {
         buffer = Buffer.isBuffer(body)
@@ -146,6 +199,21 @@ function createApp({
         return originalSend.call(this, body);
       }
       if (buffer.length < 512) return originalSend.call(this, body);
+      if (preferredEncoding === 'br' && typeof zlib.brotliCompress === 'function') {
+        zlib.brotliCompress(buffer, {
+          params: {
+            [zlib.constants.BROTLI_PARAM_QUALITY]: 4,
+            [zlib.constants.BROTLI_PARAM_MODE]: zlib.constants.BROTLI_MODE_TEXT
+          }
+        }, (error, compressed) => {
+          if (res.headersSent || res.destroyed) return;
+          if (error) return originalSend.call(res, body);
+          res.setHeader('Content-Encoding', 'br');
+          res.removeHeader('Content-Length');
+          originalSend.call(res, compressed);
+        });
+        return this;
+      }
       zlib.gzip(buffer, { level: 5 }, (error, compressed) => {
         if (res.headersSent || res.destroyed) return;
         if (error) return originalSend.call(res, body);
@@ -209,6 +277,21 @@ function createApp({
       })
     );
   }
+
+  // 2.6 Content-Hashed Static Dashboard CSS/JS Assets (BW-01: immutable 1-year cache, 0 DB hits, Brotli+Gzip)
+  app.get(DASHBOARD_CSS_PATH, (req, res) => {
+    return sendPrecompressed(req, res, PRECOMPRESSED_DASHBOARD_CSS, {
+      varyHeader: 'Accept-Encoding',
+      cacheControl: 'public, max-age=31536000, immutable'
+    });
+  });
+
+  app.get(DASHBOARD_JS_PATH, (req, res) => {
+    return sendPrecompressed(req, res, PRECOMPRESSED_DASHBOARD_JS, {
+      varyHeader: 'Accept-Encoding',
+      cacheControl: 'public, max-age=31536000, immutable'
+    });
+  });
 
   // 3. Body Parsers
   app.use(express.json({ limit: '512kb', strict: true }));
@@ -446,27 +529,13 @@ function createApp({
     next();
   });
 
-  // 6. Root SPA Route (Login view if unauthenticated, Dashboard view if authenticated)
+  // 6. Root SPA Route (Login view if unauthenticated, Dashboard shell if authenticated)
   app.get('/', (req, res) => {
     const view = req.managerAuthSession ? PRECOMPRESSED_DASHBOARD : PRECOMPRESSED_LOGIN;
-    res.setHeader('Vary', 'Accept-Encoding, Cookie');
-    res.setHeader('Cache-Control', 'private, no-cache');
-    res.setHeader('ETag', view.etag);
-    const ifNoneMatch = String(req.headers['if-none-match'] || '');
-    if (ifNoneMatch && ifNoneMatch.split(',').some((tag) => tag.trim().replace(/-gzip(?="?$)/, '') === view.etag)) {
-      return res.status(304).end();
-    }
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    if (req.method === 'HEAD') {
-      return res.end();
-    }
-    if (acceptsGzipEncoding(req)) {
-      res.setHeader('Content-Encoding', 'gzip');
-      res.setHeader('Content-Length', String(view.gzip.length));
-      return res.end(view.gzip);
-    }
-    res.setHeader('Content-Length', String(view.raw.length));
-    return res.end(view.raw);
+    return sendPrecompressed(req, res, view, {
+      varyHeader: 'Accept-Encoding, Cookie',
+      cacheControl: 'private, no-cache'
+    });
   });
 
   function getDegradedChecks() {
