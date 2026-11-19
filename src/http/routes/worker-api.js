@@ -21,7 +21,10 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
     try {
       const worker = await registry.updateStatus(req.workerId, req.body?.status || {}, 'worker-heartbeat');
       if (!worker) return res.status(404).json({ ok: false, error: 'worker_not_found' });
-      return res.json({ ok: true });
+      const settingsRevision = typeof registry.getSettingsRevision === 'function'
+        ? registry.getSettingsRevision(req.workerId)
+        : 1;
+      return res.json({ ok: true, settingsRevision });
     } catch (error) { return next(error); }
   });
 
@@ -59,7 +62,10 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
         : (config.workerPollWaitMs || 15000);
 
       const command = await broker.poll(req.workerId, { waitMs });
-      return res.json({ ok: true, command });
+      const settingsRevision = typeof registry.getSettingsRevision === 'function'
+        ? registry.getSettingsRevision(req.workerId)
+        : 1;
+      return res.json({ ok: true, command, settingsRevision });
     } catch (error) { return next(error); }
   });
 

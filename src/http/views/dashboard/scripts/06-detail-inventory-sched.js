@@ -775,8 +775,9 @@ function renderDetailProxy(proxy) {
   const usernameInput = document.getElementById('detailProxyUsername');
   const passwordInput = document.getElementById('detailProxyPassword');
 
-  const p = proxy || {};
-  if (badge) {
+  if (!proxy || typeof proxy !== 'object') return;
+  const p = proxy;
+  if (badge && p.enabled !== undefined) {
     if (p.enabled) {
       badge.textContent = '🟢 BẬT';
       badge.style.background = 'rgba(34, 197, 94, 0.2)';
@@ -788,12 +789,20 @@ function renderDetailProxy(proxy) {
     }
   }
 
+  // Only overwrite host/port/username/password inputs when a full proxy object is provided (not the {enabled} stub from /snapshot)
+  if (p.host === undefined) return;
+
   if (enabledInput && document.activeElement !== enabledInput) enabledInput.checked = !!p.enabled;
   if (protocolInput && document.activeElement !== protocolInput) protocolInput.value = p.protocol || 'socks5';
   if (hostInput && document.activeElement !== hostInput) hostInput.value = p.host || '';
   if (portInput && document.activeElement !== portInput) portInput.value = p.port || '';
   if (usernameInput && document.activeElement !== usernameInput) usernameInput.value = p.username || '';
-  if (passwordInput && document.activeElement !== passwordInput) passwordInput.value = p.password || '';
+  if (passwordInput && document.activeElement !== passwordInput) {
+    passwordInput.value = p.password || '';
+    passwordInput.placeholder = p.hasPassword
+      ? '•••••••• (Đã lưu - để trống để giữ nguyên)'
+      : 'Mật khẩu proxy...';
+  }
 }
 
 // SEC-06/BUG-17: snapshot công khai chỉ chứa proxy { enabled }. Admin phải tải chi

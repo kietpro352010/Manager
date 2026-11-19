@@ -1396,6 +1396,11 @@ function openBot(id) {
   const dEvt = document.getElementById('detailEventLogs'); if (dEvt) dEvt.innerHTML = '<div style="color:var(--muted);padding:8px;">Đang tải nhật ký sự kiện...</div>';
   const dUser = document.getElementById('detailUsernameInput'); if (dUser) { dUser.value = ''; dUser.removeAttribute('data-dirty'); }
   const dPass = document.getElementById('detailPasswordInput'); if (dPass) { dPass.value = ''; dPass.removeAttribute('data-dirty'); }
+  ['detailProxyHost', 'detailProxyPort', 'detailProxyUsername', 'detailProxyPassword'].forEach(pid => {
+    const el = document.getElementById(pid);
+    if (el) { el.value = ''; if (pid === 'detailProxyPassword') el.placeholder = 'Mật khẩu proxy...'; }
+  });
+  const dProxyEn = document.getElementById('detailProxyEnabled'); if (dProxyEn) dProxyEn.checked = false;
   const dUp = document.getElementById('detailUptime'); if (dUp) dUp.textContent = '-';
   const dRec = document.getElementById('detailReconnects'); if (dRec) dRec.textContent = '-';
   const dStat = document.getElementById('detailStatus'); if (dStat) dStat.innerHTML = '<span class="dot yellow"></span> Đang tải...';

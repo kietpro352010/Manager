@@ -217,6 +217,29 @@ function createUserApi({
     return parseProxyUrlToObject('');
   }
 
+  function resolveProxyInputWithSavedPassword(rawProxy, worker, options = {}) {
+    if (rawProxy && typeof rawProxy === 'object' && !Array.isArray(rawProxy)) {
+      const providedPass = String(rawProxy.password || '');
+      const providedUser = String(rawProxy.username || '').trim();
+      const providedHost = String(rawProxy.host || '').trim().toLowerCase();
+      if (!providedPass && !rawProxy.clearPassword && providedUser && worker?.settings?.proxyCiphertext && registry?.encryptionKey) {
+        try {
+          const existingUrl = decryptSecret(worker.settings.proxyCiphertext, registry.encryptionKey);
+          if (existingUrl) {
+            const parsedExisting = new URL(existingUrl);
+            const existingUser = decodeURIComponent(parsedExisting.username || '');
+            const existingPass = decodeURIComponent(parsedExisting.password || '');
+            const existingHost = parsedExisting.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+            if (existingPass && existingUser === providedUser && (!providedHost || existingHost === providedHost)) {
+              return parseProxyInputToUrl({ ...rawProxy, password: existingPass }, options);
+            }
+          }
+        } catch (_) {}
+      }
+    }
+    return parseProxyInputToUrl(rawProxy, options);
+  }
+
   // Helper: Resolve worker by workerId (string) or botNumber (number/string)
   async function resolveWorker(targetId) {
     if (!targetId && targetId !== 0) return null;
@@ -1061,7 +1084,7 @@ function createUserApi({
     let proxyUrl = '';
     try {
       const rawProxy = req.body?.proxy !== undefined ? req.body.proxy : req.body?.proxyUrl;
-      proxyUrl = parseProxyInputToUrl(rawProxy, { ignoreEnabledFlag: true });
+      proxyUrl = resolveProxyInputWithSavedPassword(rawProxy, perm.worker, { ignoreEnabledFlag: true });
       if (!proxyUrl) {
         return res.status(400).json({ ok: false, error: 'Vui lòng nhập đầy đủ Host và Port Proxy.' });
       }
@@ -1104,7 +1127,7 @@ function createUserApi({
     let proxyUrl = '';
     try {
       const rawProxy = req.body?.proxy !== undefined ? req.body.proxy : req.body?.proxyUrl;
-      proxyUrl = parseProxyInputToUrl(rawProxy);
+      proxyUrl = resolveProxyInputWithSavedPassword(rawProxy, perm.worker);
       if (proxyUrl) {
         await validateProxyUrl(proxyUrl);
       }
@@ -1157,7 +1180,9 @@ function createUserApi({
       for (const boolKey of ['ecoMode', 'autoTotem', 'antiHungry', 'autoReconnect', 'antiAfkKick']) {
         if (patch[boolKey] !== undefined) settingsPatch[boolKey] = Boolean(patch[boolKey]);
       }
-      if (patch.spawnCommands !== undefined) settingsPatch.spawnCommands = String(patch.spawnCommands || '').slice(0, 1000);
+      if (patch.spawnCommands !== undefined && patch.spawnCommands !== '********') {
+        settingsPatch.spawnCommands = String(patch.spawnCommands || '').slice(0, 1000);
+      }
       if (Array.isArray(patch.autoChatSchedules)) settingsPatch.autoChatSchedules = patch.autoChatSchedules;
       if (Array.isArray(patch.botSchedules)) settingsPatch.botSchedules = patch.botSchedules;
 
@@ -1166,7 +1191,7 @@ function createUserApi({
           return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên (ADMIN) mới được thay đổi cấu hình Proxy.' });
         }
         const rawProxy = patch.proxy !== undefined ? patch.proxy : patch.proxyUrl;
-        const parsedProxyUrl = parseProxyInputToUrl(rawProxy);
+        const parsedProxyUrl = resolveProxyInputWithSavedPassword(rawProxy, worker);
         if (parsedProxyUrl) {
           await validateProxyUrl(parsedProxyUrl);
         }
@@ -1200,7 +1225,7 @@ function createUserApi({
         ok: true,
         message: 'Đã cập nhật cài đặt bot thành công.',
         settings: savedSettings,
-        bot: sanitizeBotForSession(updatedWorker || worker, req.managerAuthSession)
+        bot: buildBotPayload(updatedWorker || worker, req.managerAuthSession)
       });
     } catch (error) {
       const status = /Proxy|không hợp lệ|array/i.test(error.message) ? 400 : 500;
@@ -1334,6 +1359,8 @@ function createUserApi({
       session.status = 'active';
       session.inGracePeriod = false;
       session.expiresAtRental = result.expiresAt;
+      session._authVerifiedAt = 0;
+      store?.invalidateUserCache?.(session.userId, session.username);
 
       await store.addAudit({
         action: 'KEY_REDEEMED',

@@ -208,6 +208,7 @@ class WorkerRegistry {
     this.lastDbStatusPersistAt = new Map(); // botId -> ms (coalesce redundant DB status writes)
     this.lastDbStatusFingerprint = new Map(); // botId -> string (state signature)
     this.workerStateRev = new Map(); // botId -> integer revision counter
+    this.workerSettingsRev = new Map(); // botId -> integer settings revision counter
     this.botLogRev = new Map(); // botId -> integer log revision counter
     this.botChatLogRev = new Map(); // botId -> integer chat log revision counter
     this.statusLock = new AsyncKeyLock();
@@ -221,10 +222,24 @@ class WorkerRegistry {
     };
   }
 
+  bumpSettingsRevision(workerId) {
+    const id = String(workerId || '').trim().toLowerCase();
+    if (!id) return 1;
+    const next = (this.workerSettingsRev.get(id) || 1) + 1;
+    this.workerSettingsRev.set(id, next);
+    return next;
+  }
+
+  getSettingsRevision(workerId) {
+    const id = String(workerId || '').trim().toLowerCase();
+    return this.workerSettingsRev.get(id) || 1;
+  }
+
   bumpRevision(workerId) {
     const id = String(workerId || '').trim().toLowerCase();
     const next = (this.workerStateRev.get(id) || 0) + 1;
     this.workerStateRev.set(id, next);
+    this.bumpSettingsRevision(id);
     return next;
   }
 
@@ -828,8 +843,17 @@ class WorkerRegistry {
       state,
       restriction,
       restricted: Boolean(restriction),
+      settingsRevision: this.getSettingsRevision(worker.workerId),
       settings: {
         afkMode: 'still',
+        ecoMode: settings.ecoMode !== false,
+        autoTotem: settings.autoTotem !== false,
+        antiHungry: settings.antiHungry !== false,
+        autoReconnect: settings.autoReconnect !== false,
+        antiAfkKick: settings.antiAfkKick !== false,
+        spawnCommands: String(settings.spawnCommands || ''),
+        autoChatSchedules: Array.isArray(settings.autoChatSchedules) ? settings.autoChatSchedules : [],
+        botSchedules: Array.isArray(settings.botSchedules) ? settings.botSchedules : [],
         ...(settings.proxyManaged ? { proxyUrl: settings.proxyCiphertext ? safeDecryptText(settings.proxyCiphertext, this.encryptionKey) : '' } : {})
       },
       credentials: safeDecryptJson(settings.mcCredentialsCiphertext, this.encryptionKey)
@@ -922,14 +946,24 @@ class WorkerRegistry {
       }
       next.autoChatSchedules = patch.autoChatSchedules.slice(0, 20).map((item) => {
         const s = item && typeof item === 'object' ? item : {};
+        const rawMessages = Array.isArray(s.messages)
+          ? s.messages.map((m) => String(m || '').trim().slice(0, 256)).filter(Boolean)
+          : (s.message || s.text ? [String(s.message || s.text).trim().slice(0, 256)].filter(Boolean) : []);
+        const rawTimes = Array.isArray(s.times)
+          ? s.times.map((t) => String(t || '').trim().slice(0, 16)).filter(Boolean)
+          : (s.time ? [String(s.time).trim().slice(0, 16)].filter(Boolean) : []);
         return {
-          id: String(s.id || crypto.randomUUID().slice(0, 8)).slice(0, 32),
+          id: String(s.id || crypto.randomUUID().slice(0, 8)).slice(0, 48),
           enabled: s.enabled !== false,
-          message: String(s.message || s.text || '').trim().slice(0, 256),
-          intervalSeconds: Math.max(10, Math.min(86400, Number(s.intervalSeconds ?? s.intervalSec ?? s.interval ?? 300) || 300)),
-          time: s.time ? String(s.time).slice(0, 16) : ''
+          mode: s.mode === 'fixed' ? 'fixed' : 'interval',
+          messages: rawMessages.slice(0, 20),
+          message: rawMessages[0] || '',
+          times: rawTimes.slice(0, 24),
+          time: rawTimes[0] || '',
+          intervalSeconds: Math.max(10, Math.min(604800, Number(s.intervalSeconds ?? s.intervalSec ?? s.interval ?? 3600) || 3600)),
+          messageDelaySeconds: Math.max(0, Math.min(3600, Number(s.messageDelaySeconds ?? 2) || 0))
         };
-      }).filter((item) => item.message.length > 0);
+      }).filter((item) => item.messages.length > 0);
     }
     if (Object.hasOwn(patch, 'botSchedules')) {
       if (!Array.isArray(patch.botSchedules)) {
@@ -937,13 +971,41 @@ class WorkerRegistry {
       }
       next.botSchedules = patch.botSchedules.slice(0, 20).map((item) => {
         const s = item && typeof item === 'object' ? item : {};
+        if (Array.isArray(s.items)) {
+          const mode = s.mode === 'cycle' ? 'cycle' : 'fixed';
+          return {
+            id: String(s.id || crypto.randomUUID().slice(0, 8)).slice(0, 48),
+            enabled: s.enabled !== false,
+            mode,
+            items: s.items.slice(0, 30).map((sub, idx) => {
+              const it = sub && typeof sub === 'object' ? sub : {};
+              const act = ['start', 'stop', 'command'].includes(String(it.action || '').toLowerCase())
+                ? String(it.action).toLowerCase()
+                : 'stop';
+              const out = {
+                id: String(it.id || `${idx + 1}`).slice(0, 48),
+                action: act
+              };
+              if (mode === 'fixed') {
+                out.time = String(it.time || '04:30').trim().slice(0, 16);
+              } else {
+                out.afterMinutes = Math.max(1, Math.min(43200, Number(it.afterMinutes) || 120));
+              }
+              if (act === 'command') {
+                out.command = String(it.command || '').trim().slice(0, 256);
+              }
+              return out;
+            })
+          };
+        }
         const act = String(s.action || 'start').trim().toLowerCase();
         return {
-          id: String(s.id || crypto.randomUUID().slice(0, 8)).slice(0, 32),
+          id: String(s.id || crypto.randomUUID().slice(0, 8)).slice(0, 48),
           enabled: s.enabled !== false,
-          action: ['start', 'stop', 'restart', 'reconnect', 'chat'].includes(act) ? act : 'start',
+          action: ['start', 'stop', 'restart', 'reconnect', 'chat', 'command'].includes(act) ? act : 'start',
           time: String(s.time || '00:00').trim().slice(0, 16),
           days: Array.isArray(s.days) ? s.days.map((d) => Number(d)).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6) : [0, 1, 2, 3, 4, 5, 6],
+          command: s.command ? String(s.command).trim().slice(0, 256) : '',
           message: s.message ? String(s.message).trim().slice(0, 256) : ''
         };
       });
