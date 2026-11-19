@@ -38,13 +38,29 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
 
       // Check alerts (resolve human-friendly bot label and pass exact parameter order)
       if (adminNotifier) {
-        if (event.type === 'bot_death' || event.type === 'low_totem') {
+        if (['bot_death', 'low_totem', 'afk_kicked', 'afk_recovered', 'reconnect_exhausted'].includes(event.type)) {
           const workerMeta = await registry.find(req.workerId).catch(() => null);
           const botLabel = workerMeta?.alias || workerMeta?.name || req.workerId;
           if (event.type === 'bot_death') {
-            adminNotifier.notifyBotDeath(req.workerId, botLabel, event.coords || event.position || event.reason || null);
+            adminNotifier.notifyBotDeath?.(req.workerId, botLabel, event.coords || event.position || event.reason || null);
+            if (typeof adminNotifier.notifyBotLifecycleEvent === 'function') {
+              await adminNotifier.notifyBotLifecycleEvent({
+                workerId: req.workerId,
+                workerMeta,
+                event,
+                registry,
+                skipAdminAlert: true
+              });
+            }
           } else if (event.type === 'low_totem') {
-            adminNotifier.notifyLowTotem(req.workerId, botLabel, event.count ?? event.totemCount ?? 0);
+            adminNotifier.notifyLowTotem?.(req.workerId, botLabel, event.count ?? event.totemCount ?? 0);
+          } else if (typeof adminNotifier.notifyBotLifecycleEvent === 'function') {
+            await adminNotifier.notifyBotLifecycleEvent({
+              workerId: req.workerId,
+              workerMeta,
+              event,
+              registry
+            });
           }
         }
       }

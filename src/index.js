@@ -109,6 +109,7 @@ async function main() {
   const client = new Client({ intents: [GatewayIntentBits.Guilds] });
   const adminNotifier = new AdminNotifier({
     client,
+    store: accessStore,
     adminUserId: roleSettings?.adminUserId || config.adminUserId,
     logger
   });

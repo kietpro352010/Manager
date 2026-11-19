@@ -171,6 +171,10 @@ function renderDetailSettings(data){
   const h=document.getElementById('detailSettingAntiHungry');
   const r=document.getElementById('detailSettingAutoReconnect');
   const k=document.getElementById('detailSettingAntiAfkKick');
+  const un=document.getElementById('detailSettingUserNotifyEnabled');
+  const nk=document.getElementById('detailSettingNotifyOnAfkKick');
+  const nr=document.getElementById('detailSettingNotifyOnAfkRecover');
+  const ne=document.getElementById('detailSettingNotifyOnReconnectExhausted');
   const sp=document.getElementById('detailSpawnCommands');
 
   if(eco&&!detailSettingsDirty)eco.checked=settings.ecoMode!==false;
@@ -178,6 +182,10 @@ function renderDetailSettings(data){
   if(h&&!detailSettingsDirty)h.checked=settings.antiHungry!==false;
   if(r&&!detailSettingsDirty)r.checked=settings.autoReconnect!==false;
   if(k&&!detailSettingsDirty)k.checked=settings.antiAfkKick!==false;
+  if(un&&!detailSettingsDirty)un.checked=settings.userNotifyEnabled!==false;
+  if(nk&&!detailSettingsDirty)nk.checked=settings.notifyOnAfkKick!==false;
+  if(nr&&!detailSettingsDirty)nr.checked=settings.notifyOnAfkRecover!==false;
+  if(ne&&!detailSettingsDirty)ne.checked=settings.notifyOnReconnectExhausted!==false;
   // BUG-24: Worker hỗ trợ spawnCommands nhưng trang Detail trước đây không có field →
   // renderer/save bỏ qua. Với user không đủ quyền, worker trả '********' (masked);
   // giữ nguyên khi lưu để không ghi đè cấu hình cũ.
@@ -313,6 +321,10 @@ async function saveDetailSettings(){
     antiHungry:!!document.getElementById('detailSettingAntiHungry')?.checked,
     autoReconnect:!!document.getElementById('detailSettingAutoReconnect')?.checked,
     antiAfkKick:!!document.getElementById('detailSettingAntiAfkKick')?.checked,
+    userNotifyEnabled:!!document.getElementById('detailSettingUserNotifyEnabled')?.checked,
+    notifyOnAfkKick:!!document.getElementById('detailSettingNotifyOnAfkKick')?.checked,
+    notifyOnAfkRecover:!!document.getElementById('detailSettingNotifyOnAfkRecover')?.checked,
+    notifyOnReconnectExhausted:!!document.getElementById('detailSettingNotifyOnReconnectExhausted')?.checked,
     // BUG-24: đồng bộ Spawn Commands từ trang Detail (worker sanitizer cắt 5000 ký tự).
     // Giá trị '********' (masked) được worker phía sau hiểu là "giữ nguyên".
     ...(spawnElement?{spawnCommands:String(spawnElement.value||'')}:{})

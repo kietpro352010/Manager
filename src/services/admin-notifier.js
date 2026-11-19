@@ -43,9 +43,13 @@ function redactSensitiveObject(obj) {
 }
 
 class AdminNotifier {
-  constructor({ client, adminUserId = '', telegramBotToken = '', telegramChatId = '', logger } = {}) {
+  constructor({ client, store = null, adminUserId = '', telegramBotToken = '', telegramChatId = '', logger } = {}) {
     this.client = client;
+    this.store = store || null;
     this.adminUserId = String(adminUserId || '').trim();
+    this.userAlertCache = new Map();
+    this.sentUserAlerts = [];
+    this._persistingAudit = false;
     this.telegramBotToken = String(telegramBotToken || process.env.TELEGRAM_BOT_TOKEN || '').trim();
     this.telegramChatId = String(telegramChatId || process.env.TELEGRAM_CHAT_ID || '').trim();
     this.discordWebhookUrl = String(process.env.DISCORD_WEBHOOK_URL || '').trim();
@@ -96,6 +100,10 @@ class AdminNotifier {
     return this.adminUserId;
   }
 
+  setStore(store) {
+    this.store = store || null;
+  }
+
   setTelegramConfig(token, chatId) {
     this.telegramBotToken = String(token || '').trim();
     this.telegramChatId = String(chatId || '').trim();
@@ -138,19 +146,21 @@ class AdminNotifier {
     return true;
   }
 
-  async sendAlert({ source = 'Manager', event = 'error', message = '', error = null, details = {}, level = 'error' } = {}) {
-    // Filter out ordinary in-game events
-    const filterHaystack = `${event} ${message} ${details?.lastKickReason || ''} ${details?.state || ''}`.toLowerCase();
-    if (
-      filterHaystack.includes('kick') ||
-      filterHaystack.includes('banned') ||
-      filterHaystack.includes('bị ban') ||
-      filterHaystack.includes('bị kick') ||
-      filterHaystack.includes('ip_limited') ||
-      filterHaystack.includes('server_restriction') ||
-      filterHaystack.includes('disconnect.quitting')
-    ) {
-      return;
+  async sendAlert({ source = 'Manager', event = 'error', message = '', error = null, details = {}, level = 'error', bypassInGameFilter = false } = {}) {
+    // Filter out ordinary in-game events unless explicitly flagged as a verified AFK lifecycle alert
+    if (!bypassInGameFilter) {
+      const filterHaystack = `${event} ${message} ${details?.lastKickReason || ''} ${details?.state || ''}`.toLowerCase();
+      if (
+        filterHaystack.includes('kick') ||
+        filterHaystack.includes('banned') ||
+        filterHaystack.includes('bị ban') ||
+        filterHaystack.includes('bị kick') ||
+        filterHaystack.includes('ip_limited') ||
+        filterHaystack.includes('server_restriction') ||
+        filterHaystack.includes('disconnect.quitting')
+      ) {
+        return;
+      }
     }
 
     const dedupKey = `${source}:${event}:${details?.workerId || details?.id || ''}:${message.slice(0, 80)}`;
@@ -169,6 +179,30 @@ class AdminNotifier {
       for (const [k, v] of this.alertCache.entries()) {
         if (now - v.lastSent > this.cooldownMs * 3) this.alertCache.delete(k);
       }
+    }
+
+    // Persist system/database/discord/manager alert to Web Dashboard Audit Trail (Nhật Ký Hệ Thống)
+    if (this.store && typeof this.store.addAudit === 'function') {
+      const safeSourceKey = String(source || 'MANAGER').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '') || 'MANAGER';
+      void Promise.resolve().then(() => this.store.addAudit({
+        action: `SYSTEM_ALERT_${safeSourceKey}`,
+        actionLabel: `[${source}] ${event}`,
+        category: 'SYSTEM',
+        logType: 'SYSTEM',
+        status: level === 'warn' ? 'WARNING' : (level === 'info' ? 'SUCCESS' : 'FAILED'),
+        actorId: `system:${String(source || 'manager').toLowerCase()}`,
+        actorRole: 'system',
+        targetId: String(details?.workerId || details?.botId || details?.userId || source || 'system'),
+        message: redactSensitiveText(message).slice(0, 500),
+        details: redactSensitiveObject({
+          source,
+          event,
+          level,
+          message: String(message || '').slice(0, 500),
+          ...(details && typeof details === 'object' ? details : {}),
+          ...(error ? { error: typeof error === 'string' ? error : (error.message || String(error)) } : {})
+        })
+      })).catch(() => null);
     }
 
     // Sliding window rate limit check to prevent alert flooding during mass worker failures or cluster outages
@@ -340,7 +374,10 @@ class AdminNotifier {
           this.enqueueRetry(item, failedChannels, retries);
         }
 
-        await new Promise((r) => setTimeout(r, 600));
+        await new Promise((r) => {
+          const t = setTimeout(r, 600);
+          t.unref?.();
+        });
       }
     } finally {
       this.isSending = false;
@@ -679,8 +716,228 @@ class AdminNotifier {
     });
   }
 
+  async dispatchUserDm({ discordUserId, title, description, color = 0x3b82f6, fields = [] } = {}) {
+    const targetId = String(discordUserId || '').trim();
+    if (!targetId || !this.client || typeof this.client.users?.fetch !== 'function') return false;
+    try {
+      const user = await this.client.users.fetch(targetId).catch(() => null);
+      if (!user || typeof user.send !== 'function') return false;
+      const embed = new EmbedBuilder()
+        .setColor(color)
+        .setTitle(String(title || '🔔 Thông Báo Trạng Thái Bot').slice(0, 250))
+        .setDescription(String(description || '').slice(0, 3900))
+        .setTimestamp()
+        .setFooter({ text: 'KingMC AFK Bot Cloud • Thông báo riêng tự động cho chủ Bot' });
+      if (Array.isArray(fields) && fields.length > 0) {
+        embed.addFields(fields.slice(0, 8));
+      }
+      await user.send({ embeds: [embed] });
+      return true;
+    } catch (err) {
+      if (err?.code !== 50007) {
+        this.logger?.debug?.('user_dm_dispatch_failed', { discordUserId: targetId, error: err?.message });
+      }
+      return false;
+    }
+  }
+
+  async notifyBotLifecycleEvent({ workerId, workerMeta = null, event = {}, registry = null, store = null, skipAdminAlert = false } = {}) {
+    const id = String(workerId || '').trim().toLowerCase();
+    const eventType = String(event?.type || '').trim().toLowerCase();
+    if (!id || !['afk_kicked', 'bot_death', 'afk_recovered', 'reconnect_exhausted'].includes(eventType)) {
+      return { ok: false, skipped: true };
+    }
+
+    // Deduplicate rapid duplicate events per bot + eventType within 15 seconds
+    const dedupKey = `lifecycle:${id}:${eventType}`;
+    const now = Date.now();
+    const lastSentAt = this.userAlertCache.get(dedupKey) || 0;
+    if (now - lastSentAt < 15000) {
+      return { ok: true, deduplicated: true };
+    }
+    this.userAlertCache.set(dedupKey, now);
+    if (this.userAlertCache.size > 300) {
+      for (const [k, ts] of this.userAlertCache.entries()) {
+        if (now - ts > 60000) this.userAlertCache.delete(k);
+      }
+    }
+
+    const targetStore = store || this.store;
+    const worker = workerMeta
+      || (registry && typeof registry.find === 'function' ? await registry.find(id).catch(() => null) : null);
+    const botLabel = worker?.alias || worker?.name || (worker?.botNumber ? `Bot #${worker.botNumber}` : id);
+    const botNumber = worker?.botNumber || id;
+    const mcUsername = worker?.status?.username || worker?.settings?.username || '';
+    const settings = worker?.settings || {};
+
+    // Read user notification toggles on this bot (all default to true)
+    const userNotifyEnabled = settings.userNotifyEnabled !== false;
+    let eventToggleAllowed = true;
+    if (eventType === 'afk_kicked' || eventType === 'bot_death') {
+      eventToggleAllowed = settings.notifyOnAfkKick !== false;
+    } else if (eventType === 'afk_recovered') {
+      eventToggleAllowed = settings.notifyOnAfkRecover !== false;
+    } else if (eventType === 'reconnect_exhausted') {
+      eventToggleAllowed = settings.notifyOnReconnectExhausted !== false;
+    }
+
+    // Look up the assigned user for this bot
+    let assignedUserId = '';
+    let assignedUsername = '';
+    let targetDiscordUserId = '';
+
+    if (targetStore) {
+      if (typeof targetStore.assignedUser === 'function') {
+        const assignment = await targetStore.assignedUser(id).catch(() => null);
+        if (assignment?.userId) {
+          assignedUserId = String(assignment.userId).trim();
+        }
+      }
+      if (assignedUserId) {
+        if (typeof targetStore.getAccess === 'function') {
+          const userRec = await targetStore.getAccess(assignedUserId).catch(() => null);
+          if (userRec) {
+            assignedUsername = String(userRec.username || assignedUserId);
+            if (userRec.discordUserId || userRec.discord_user_id) {
+              targetDiscordUserId = String(userRec.discordUserId || userRec.discord_user_id).trim();
+            }
+          }
+        }
+        if (!targetDiscordUserId && typeof targetStore.getDiscordLink === 'function') {
+          const link = await targetStore.getDiscordLink(assignedUserId).catch(() => null);
+          if (link?.discord_user_id || link?.discordUserId) {
+            targetDiscordUserId = String(link.discord_user_id || link.discordUserId).trim();
+          }
+          if (!assignedUsername && link?.username) {
+            assignedUsername = String(link.username);
+          }
+        }
+      }
+    }
+
+    const reasonText = redactSensitiveText(event?.reason || event?.message || event?.coords || 'Không rõ chi tiết').slice(0, 300);
+    const attempts = Number(event?.attempts) || 0;
+    const timeStr = new Date(now).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
+
+    let title = '';
+    let description = '';
+    let color = 0x3b82f6;
+    let level = 'warn';
+
+    if (eventType === 'afk_kicked') {
+      title = `⚠️ [BÁO ĐỘNG AFK] ${botLabel} bị kick / văng khi đang treo AFK!`;
+      description = `Bot **${botLabel}** (#${botNumber}) đang ở khu vực treo AFK thì bị kick hoặc văng khỏi máy chủ.\n• **Lý do:** \`${reasonText}\`\n• **Trạng thái:** Hệ thống đang tự động thử kết nối lại (anti-cheat delay)...`;
+      color = 0xf59e0b;
+      level = 'warn';
+    } else if (eventType === 'bot_death') {
+      title = `💀 [BÁO ĐỘNG BOT DIE] ${botLabel} vừa bị chết trong game!`;
+      description = `Bot **${botLabel}** (#${botNumber}) vừa bị tiêu diệt trong máy chủ!\n• **Tọa độ / Chi tiết:** \`${reasonText}\``;
+      color = 0xef4444;
+      level = 'error';
+    } else if (eventType === 'afk_recovered') {
+      title = `✅ [KẾT NỐI LẠI THÀNH CÔNG] ${botLabel} đã vào lại khu vực AFK!`;
+      description = `Bot **${botLabel}** (#${botNumber}) đã tự động kết nối lại, vượt sảnh và vào lại cụm AFK thành công${attempts > 0 ? ` sau **${attempts} lần thử**` : ''}.`;
+      color = 0x22c55e;
+      level = 'info';
+    } else if (eventType === 'reconnect_exhausted') {
+      title = `🛑 [DỪNG RECONNECT] ${botLabel} kết nối lại thất bại quá nhiều lần!`;
+      description = `Bot **${botLabel}** (#${botNumber}) đã thử kết nối lại **${attempts || 'nhiều'} lần** liên tiếp (thời gian chờ tăng dần) nhưng không thành công nên hệ thống đã **tự động dừng kết nối**.\n• **Lý do cuối:** \`${reasonText}\`\n• **Hành động:** Vui lòng mở Web Dashboard kiểm tra và bấm **Chạy** khi máy chủ ổn định.`;
+      color = 0xef4444;
+      level = 'error';
+    }
+
+    const dmFields = [
+      { name: '🤖 Bot được gán', value: `\`${botLabel}\` (#${botNumber})`, inline: true },
+      ...(mcUsername ? [{ name: '🎮 Nhân vật MC', value: `\`${mcUsername}\``, inline: true }] : []),
+      { name: '⏰ Thời gian', value: timeStr, inline: true }
+    ];
+
+    let userNotified = false;
+    if (assignedUserId && targetDiscordUserId && userNotifyEnabled && eventToggleAllowed) {
+      userNotified = await this.dispatchUserDm({
+        discordUserId: targetDiscordUserId,
+        title,
+        description,
+        color,
+        fields: dmFields
+      });
+    }
+
+    this.sentUserAlerts.push({
+      workerId: id,
+      botLabel,
+      eventType,
+      assignedUserId: assignedUserId || null,
+      assignedUsername: assignedUsername || null,
+      discordUserId: targetDiscordUserId || null,
+      userNotifyEnabled,
+      eventToggleAllowed,
+      userNotified,
+      timestamp: now
+    });
+    if (this.sentUserAlerts.length > 100) this.sentUserAlerts.shift();
+
+    // Always notify Admin as well (and persist to Web Dashboard System Logs via sendAlert)
+    if (!skipAdminAlert) {
+      await this.sendAlert({
+        source: 'KingMC AFK Monitor',
+        event: eventType,
+        message: `${description}${assignedUsername ? `\n• **Khách thuê:** \`${assignedUsername}\` (${userNotified ? 'Đã nhắn DM Discord' : 'Chưa liên kết Discord / Đã tắt thông báo'})` : '\n• **Khách thuê:** `Chưa gán`'}`,
+        details: {
+          workerId: id,
+          botNumber,
+          botLabel,
+          mcUsername: mcUsername || undefined,
+          assignedUser: assignedUsername || assignedUserId || 'unassigned',
+          userNotified,
+          ...(attempts > 0 ? { attempts } : {}),
+          reason: reasonText
+        },
+        level,
+        bypassInGameFilter: true
+      });
+    }
+
+    return {
+      ok: true,
+      eventType,
+      assignedUserId: assignedUserId || null,
+      userNotified
+    };
+  }
+
+  _resolveLogSource(strEvent, strMsg, explicitSource) {
+    if (explicitSource) return explicitSource;
+    if (strEvent.includes('supabase') || strMsg.includes('supabase') || strMsg.includes('postgrest') || strMsg.includes('pgrst') || strEvent.includes('db_') || strEvent.includes('rpc_')) {
+      return 'Supabase Database';
+    }
+    if (strEvent.includes('discord') || strEvent.includes('interaction')) {
+      return 'Discord';
+    }
+    if (strEvent.includes('wispbyte')) {
+      return 'Wispbyte';
+    }
+    if (strEvent.includes('link4m')) {
+      return 'Link4M';
+    }
+    if (strEvent.includes('outbox') || strEvent.includes('state_sync') || strEvent.includes('broker')) {
+      return 'CommandBroker';
+    }
+    if (strEvent.includes('worker') || strEvent.includes('bot') || strMsg.includes('worker')) {
+      return 'Worker System';
+    }
+    return 'Manager';
+  }
+
   hookLogger(logger) {
     if (!logger || typeof logger !== 'object') return;
+    const isInternalAlertEvent = (strEvent) => (
+      strEvent.startsWith('admin_alert_') ||
+      strEvent.startsWith('admin_dm_') ||
+      strEvent.startsWith('user_dm_') ||
+      strEvent.startsWith('telegram_alert_') ||
+      strEvent.startsWith('discord_webhook_')
+    );
     try {
       const originalError = logger.error;
       if (typeof originalError === 'function') {
@@ -688,32 +945,9 @@ class AdminNotifier {
           originalError(event, fields);
           try {
             const strEvent = String(event || '').toLowerCase();
-            // Prevent recursive self-alerting when notifier dispatch itself logs errors
-            if (
-              strEvent.startsWith('admin_alert_') ||
-              strEvent.startsWith('admin_dm_') ||
-              strEvent.startsWith('telegram_alert_') ||
-              strEvent.startsWith('discord_webhook_')
-            ) {
-              return;
-            }
+            if (isInternalAlertEvent(strEvent)) return;
             const strMsg = String(fields?.message || fields?.error || '').toLowerCase();
-            let source = fields?.source;
-            if (!source) {
-              if (strEvent.includes('supabase') || strMsg.includes('supabase') || strMsg.includes('postgrest') || strMsg.includes('pgrst')) {
-                source = 'Supabase';
-              } else if (strEvent.includes('worker') || strEvent.includes('bot') || strMsg.includes('worker')) {
-                source = 'Worker';
-              } else if (strEvent.includes('discord') || strEvent.includes('interaction')) {
-                source = 'Discord';
-              } else if (strEvent.includes('wispbyte')) {
-                source = 'Wispbyte';
-              } else if (strEvent.includes('link4m')) {
-                source = 'Link4M';
-              } else {
-                source = 'Manager';
-              }
-            }
+            const source = this._resolveLogSource(strEvent, strMsg, fields?.source);
             const message = fields?.message || fields?.reason || fields?.error || String(event);
             const errorObj = fields?.error || (fields?.stack ? { message, stack: fields.stack } : null);
             void this.sendAlert({
@@ -723,6 +957,31 @@ class AdminNotifier {
               error: errorObj,
               details: fields,
               level: 'error'
+            });
+          } catch (_) {}
+        };
+      }
+
+      const originalWarn = logger.warn;
+      if (typeof originalWarn === 'function') {
+        logger.warn = (event, fields = {}) => {
+          originalWarn(event, fields);
+          try {
+            const strEvent = String(event || '').toLowerCase();
+            if (isInternalAlertEvent(strEvent)) return;
+            const strMsg = String(fields?.message || fields?.error || '').toLowerCase();
+            // Forward infrastructure / database / discord / manager system warnings (exclude ordinary Minecraft gameplay events)
+            const isInfraWarning = /supabase|postgrest|pgrst|database|db_|rpc_|outbox|state_sync|discord|wispbyte|link4m|worker_registration_lost|worker_system/i.test(`${strEvent} ${strMsg}`);
+            const isMinecraftNoise = /minecraft_|totem|food|lobby|window|chunk|kick|banned|ip_limited/i.test(`${strEvent} ${strMsg}`);
+            if (!isInfraWarning || isMinecraftNoise) return;
+            const source = this._resolveLogSource(strEvent, strMsg, fields?.source);
+            const message = fields?.message || fields?.reason || fields?.error || String(event);
+            void this.sendAlert({
+              source,
+              event: String(event),
+              message: String(message),
+              details: fields,
+              level: 'warn'
             });
           } catch (_) {}
         };

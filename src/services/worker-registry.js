@@ -825,6 +825,10 @@ class WorkerRegistry {
       antiHungry: settings.antiHungry !== false,
       autoReconnect: settings.autoReconnect !== false,
       antiAfkKick: settings.antiAfkKick !== false,
+      userNotifyEnabled: settings.userNotifyEnabled !== false,
+      notifyOnAfkKick: settings.notifyOnAfkKick !== false,
+      notifyOnAfkRecover: settings.notifyOnAfkRecover !== false,
+      notifyOnReconnectExhausted: settings.notifyOnReconnectExhausted !== false,
       spawnCommands: settings.spawnCommands || '',
       autoChatSchedules: Array.isArray(settings.autoChatSchedules) ? settings.autoChatSchedules : [],
       botSchedules: Array.isArray(settings.botSchedules) ? settings.botSchedules : []
@@ -931,8 +935,8 @@ class WorkerRegistry {
     }
     if (Object.hasOwn(patch, 'afkManaged')) next.afkManaged = Boolean(patch.afkManaged);
 
-    // Core bot gameplay/automation settings (F-08)
-    for (const boolKey of ['ecoMode', 'autoTotem', 'antiHungry', 'autoReconnect', 'antiAfkKick']) {
+    // Core bot gameplay/automation & notification settings (F-08)
+    for (const boolKey of ['ecoMode', 'autoTotem', 'antiHungry', 'autoReconnect', 'antiAfkKick', 'userNotifyEnabled', 'notifyOnAfkKick', 'notifyOnAfkRecover', 'notifyOnReconnectExhausted']) {
       if (Object.hasOwn(patch, boolKey) && patch[boolKey] !== undefined) {
         next[boolKey] = Boolean(patch[boolKey]);
       }

@@ -720,6 +720,10 @@ function createUserApi({
       antiHungry: worker.settings?.antiHungry !== false,
       autoReconnect: worker.settings?.autoReconnect !== false,
       antiAfkKick: worker.settings?.antiAfkKick !== false,
+      userNotifyEnabled: worker.settings?.userNotifyEnabled !== false,
+      notifyOnAfkKick: worker.settings?.notifyOnAfkKick !== false,
+      notifyOnAfkRecover: worker.settings?.notifyOnAfkRecover !== false,
+      notifyOnReconnectExhausted: worker.settings?.notifyOnReconnectExhausted !== false,
       spawnCommands: canRevealMcAccount ? (worker.settings?.spawnCommands || '') : (worker.settings?.spawnCommands ? '********' : ''),
       proxy: { enabled: Boolean(worker.settings?.proxyManaged && worker.settings?.proxyCiphertext) },
       ...(canRevealMcAccount ? {
@@ -793,6 +797,10 @@ function createUserApi({
         antiHungry: worker.settings?.antiHungry !== false,
         autoReconnect: worker.settings?.autoReconnect !== false,
         antiAfkKick: worker.settings?.antiAfkKick !== false,
+        userNotifyEnabled: worker.settings?.userNotifyEnabled !== false,
+        notifyOnAfkKick: worker.settings?.notifyOnAfkKick !== false,
+        notifyOnAfkRecover: worker.settings?.notifyOnAfkRecover !== false,
+        notifyOnReconnectExhausted: worker.settings?.notifyOnReconnectExhausted !== false,
         spawnCommands: canRevealMcAccount ? (worker.settings?.spawnCommands || '') : (worker.settings?.spawnCommands ? '********' : ''),
         proxy: session.role === 'admin'
           ? resolveAdminProxyObject(worker)
@@ -1163,21 +1171,28 @@ function createUserApi({
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
 
     const isAdmin = req.managerAuthSession.role === 'admin';
-    if (!isAdmin && req.managerAuthSession.allowAccountChange === false) {
+    const rawPatch = req.body || {};
+    const nested = (rawPatch.settings && typeof rawPatch.settings === 'object' && !Array.isArray(rawPatch.settings))
+      ? rawPatch.settings
+      : {};
+    const patch = { ...nested, ...rawPatch };
+    const notifyKeys = ['userNotifyEnabled', 'notifyOnAfkKick', 'notifyOnAfkRecover', 'notifyOnReconnectExhausted'];
+    const hasNotifyChanges = notifyKeys.some((k) => patch[k] !== undefined);
+    const hasRestrictedAccountChange = patch.spawnCommands !== undefined && patch.spawnCommands !== '********';
+
+    if (!isAdmin && req.managerAuthSession.allowAccountChange === false && (!hasNotifyChanges || hasRestrictedAccountChange)) {
       return res.status(403).json({ ok: false, error: 'Gói dịch vụ của bạn không cho phép tự đổi cài đặt bot.' });
     }
 
     try {
-      const rawPatch = req.body || {};
-      const nested = (rawPatch.settings && typeof rawPatch.settings === 'object' && !Array.isArray(rawPatch.settings))
-        ? rawPatch.settings
-        : {};
-      const patch = { ...nested, ...rawPatch };
       const worker = perm.worker;
 
       const settingsPatch = {};
       if (patch.alias !== undefined) settingsPatch.alias = String(patch.alias).trim().slice(0, 32);
-      for (const boolKey of ['ecoMode', 'autoTotem', 'antiHungry', 'autoReconnect', 'antiAfkKick']) {
+      const allowedBoolKeys = (!isAdmin && req.managerAuthSession.allowAccountChange === false)
+        ? notifyKeys
+        : ['ecoMode', 'autoTotem', 'antiHungry', 'autoReconnect', 'antiAfkKick', ...notifyKeys];
+      for (const boolKey of allowedBoolKeys) {
         if (patch[boolKey] !== undefined) settingsPatch[boolKey] = Boolean(patch[boolKey]);
       }
       if (patch.spawnCommands !== undefined && patch.spawnCommands !== '********') {
