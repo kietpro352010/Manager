@@ -39,27 +39,35 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
       // Check alerts (resolve human-friendly bot label and pass exact parameter order)
       if (adminNotifier) {
         if (['bot_death', 'low_totem', 'afk_kicked', 'afk_recovered', 'reconnect_exhausted'].includes(event.type)) {
-          const workerMeta = await registry.find(req.workerId).catch(() => null);
-          const botLabel = workerMeta?.alias || workerMeta?.name || req.workerId;
-          if (event.type === 'bot_death') {
-            adminNotifier.notifyBotDeath?.(req.workerId, botLabel, event.coords || event.position || event.reason || null);
-            if (typeof adminNotifier.notifyBotLifecycleEvent === 'function') {
+          try {
+            const workerMeta = await registry.find(req.workerId).catch(() => null);
+            const botLabel = workerMeta?.alias || workerMeta?.name || req.workerId;
+            if (event.type === 'bot_death') {
+              await Promise.resolve(adminNotifier.notifyBotDeath?.(req.workerId, botLabel, event.coords || event.position || event.reason || null));
+              if (typeof adminNotifier.notifyBotLifecycleEvent === 'function') {
+                await adminNotifier.notifyBotLifecycleEvent({
+                  workerId: req.workerId,
+                  workerMeta,
+                  event,
+                  registry,
+                  skipAdminAlert: true
+                });
+              }
+            } else if (event.type === 'low_totem') {
+              await Promise.resolve(adminNotifier.notifyLowTotem?.(req.workerId, botLabel, event.count ?? event.totemCount ?? 0));
+            } else if (typeof adminNotifier.notifyBotLifecycleEvent === 'function') {
               await adminNotifier.notifyBotLifecycleEvent({
                 workerId: req.workerId,
                 workerMeta,
                 event,
-                registry,
-                skipAdminAlert: true
+                registry
               });
             }
-          } else if (event.type === 'low_totem') {
-            adminNotifier.notifyLowTotem?.(req.workerId, botLabel, event.count ?? event.totemCount ?? 0);
-          } else if (typeof adminNotifier.notifyBotLifecycleEvent === 'function') {
-            await adminNotifier.notifyBotLifecycleEvent({
+          } catch (notifyErr) {
+            logger?.warn?.('worker_event_notification_failed', {
               workerId: req.workerId,
-              workerMeta,
-              event,
-              registry
+              eventType: event.type,
+              error: notifyErr?.message || String(notifyErr)
             });
           }
         }
@@ -168,7 +176,7 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
       return res.json({ ok: true, ack: true, time: new Date().toISOString() });
     } catch (error) {
       logger?.error('Worker report error', { error: error.message });
-      return res.status(500).json({ ok: false, error: error.message });
+      return res.status(500).json({ ok: false, error: 'internal_error' });
     }
   });
 

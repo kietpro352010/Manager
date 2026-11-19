@@ -173,14 +173,19 @@ class SupabaseDashboardStore {
     this._fallbackLock = new AsyncKeyLock();
   }
 
-  getCached(key) {
+  getCachedEntry(key) {
     const entry = this.cache.get(key);
-    if (!entry) return null;
+    if (!entry) return { hit: false, data: null };
     if (Date.now() > entry.expiresAt) {
       this.cache.delete(key);
-      return null;
+      return { hit: false, data: null };
     }
-    return entry.data;
+    return { hit: true, data: entry.data };
+  }
+
+  getCached(key) {
+    const entry = this.getCachedEntry(key);
+    return entry.hit ? entry.data : null;
   }
 
   setCached(key, data, ttlMs = 15000) {
@@ -1349,13 +1354,33 @@ class SupabaseDashboardStore {
     const id = String(identifier).trim();
     this.invalidateCache();
 
+    // Resolve existing link first so we know BOTH Discord ID and Web userId/username
+    const existingLink = await this.getDiscordLink(id).catch(() => null);
+    const linkedDiscordId = String(existingLink?.discord_user_id || existingLink?.discordUserId || '').trim();
+    const linkedManagerUserId = String(existingLink?.manager_user_id || existingLink?.managerUserId || '').trim();
+    const linkedUsername = String(existingLink?.username || '').trim();
+
+    const settingKeysToDelete = [...new Set(
+      [id, linkedDiscordId, linkedManagerUserId, linkedUsername, linkedUsername.toLowerCase()]
+        .filter(Boolean)
+        .map((v) => `discord_link:${v}`)
+    )];
+
     // 1. Try Supabase RPC (fail closed on real errors; fallback ONLY on missing RPC)
     if (typeof this.client?.rpc === 'function') {
       try {
         const { data, error } = await this.client.rpc('manager_unlink_discord_account', {
           p_identifier: id
         });
-        if (!error && data?.ok) return true;
+        if (!error && data?.ok) {
+          // Also purge any fallback manager_settings keys so legacy step-3 lookup cannot resurrect unlinked Discord ID
+          for (const settingKey of settingKeysToDelete) {
+            try {
+              await this.client.from(SETTINGS).delete().eq('key', settingKey);
+            } catch (_) {}
+          }
+          return true;
+        }
         if (error) {
           if (!isMissingRpcError(error)) {
             throw error instanceof Error ? error : new Error(error.message || 'Không thể hủy liên kết Discord.');
@@ -1370,15 +1395,22 @@ class SupabaseDashboardStore {
 
     // 2. Direct table + settings cleanup (ignore ONLY missing-schema errors; throw if zero ops succeeded)
     const nowIso = new Date().toISOString();
-    const ops = [
-      () => this.client.from('manager_discord_links').delete().eq('discord_user_id', id),
-      () => this.client.from('manager_discord_links').delete().eq('manager_user_id', id),
-      () => this.client.from('manager_discord_links').delete().eq('username', id.toLowerCase()),
-      () => this.client.from(USERS).update({ discord_user_id: null, updated_at: nowIso }).eq('discord_user_id', id),
-      () => this.client.from(USERS).update({ discord_user_id: null, updated_at: nowIso }).eq('id', id),
-      () => this.client.from(USERS).update({ discord_user_id: null, updated_at: nowIso }).eq('username', id.toLowerCase()),
-      () => this.client.from(SETTINGS).delete().eq('key', `discord_link:${id}`)
-    ];
+    const idCandidates = [...new Set([id, linkedDiscordId, linkedManagerUserId].filter(Boolean))];
+    const userCandidates = [...new Set([id.toLowerCase(), linkedUsername.toLowerCase()].filter(Boolean))];
+    const ops = [];
+    for (const cand of idCandidates) {
+      ops.push(() => this.client.from('manager_discord_links').delete().eq('discord_user_id', cand));
+      ops.push(() => this.client.from('manager_discord_links').delete().eq('manager_user_id', cand));
+      ops.push(() => this.client.from(USERS).update({ discord_user_id: null, updated_at: nowIso }).eq('discord_user_id', cand));
+      ops.push(() => this.client.from(USERS).update({ discord_user_id: null, updated_at: nowIso }).eq('id', cand));
+    }
+    for (const uname of userCandidates) {
+      ops.push(() => this.client.from('manager_discord_links').delete().eq('username', uname));
+      ops.push(() => this.client.from(USERS).update({ discord_user_id: null, updated_at: nowIso }).eq('username', uname));
+    }
+    for (const settingKey of settingKeysToDelete) {
+      ops.push(() => this.client.from(SETTINGS).delete().eq('key', settingKey));
+    }
     let completedOps = 0;
 
     for (const op of ops) {
@@ -1658,8 +1690,8 @@ class SupabaseDashboardStore {
   async getSetting(key, { bypassCache = false } = {}) {
     const cacheKey = `setting:${key}`;
     if (!bypassCache) {
-      const cached = this.getCached(cacheKey);
-      if (cached !== null) return cached;
+      const cached = this.getCachedEntry(cacheKey);
+      if (cached.hit) return cached.data;
     }
     const { data, error } = await this.client.from(SETTINGS).select('value,updated_at').eq('key', key).maybeSingle();
     if (error && error.code !== 'PGRST116') throw error;

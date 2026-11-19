@@ -172,10 +172,12 @@ function exportBotList() {
     url: b.url
   }));
   const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+  const objectUrl = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
+  a.href = objectUrl;
   a.download = 'kingmc_bots_backup.json';
   a.click();
+  setTimeout(() => { try { URL.revokeObjectURL(objectUrl); } catch (_) {} }, 1000);
   showToast('Đã xuất danh sách bot ra file JSON!');
 }
 window.exportBotList = exportBotList;
@@ -521,7 +523,9 @@ function computeBotCardSig(b) {
     b.tps !== null && b.tps !== undefined ? Number(b.tps).toFixed(1) : null,
     b.health, b.totemCount, Math.floor(Number(b.uptimeSeconds || 0) / 60),
     posStr, b.ecoMode, b.rentable, b.assignedUsername, b.lastError, b.lastKickReason,
-    b.ipAddress, b.tags, b.hardware?.botRamMb, b.hardware?.hostCpuPercent,
+    b.ipAddress, b.tags,
+    b.hostHardware?.botRssMb ?? b.hardware?.botRamMb ?? null,
+    b.hostHardware?.cpuPercent ?? b.hardware?.hostCpuPercent ?? null,
     currentUser?.role || '', expKey
   ]);
 }
@@ -652,6 +656,11 @@ async function checkAndShowAnnouncement() {
       if (dismissedDate === todayStr) {
         return;
       }
+    } else {
+      const sessionDismissed = sessionStorage.getItem('kingmc_ann_dismiss_session_' + annId);
+      if (sessionDismissed) {
+        return;
+      }
     }
 
     showUserAnnouncement(ann);
@@ -698,6 +707,8 @@ function dismissUserAnnouncement() {
     sessionStorage.setItem('kingmc_ann_dismiss_session_' + annId, '1');
   } else if (ann.mode === 'time_range') {
     localStorage.setItem('kingmc_ann_dismiss_range_' + annId, todayStr);
+  } else {
+    sessionStorage.setItem('kingmc_ann_dismiss_session_' + annId, '1');
   }
 }
 

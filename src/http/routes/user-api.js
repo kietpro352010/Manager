@@ -104,7 +104,9 @@ function normalizeAnnouncementValue(raw) {
       enabled,
       title,
       content,
-      mode: ['banner', 'modal', 'toast'].includes(String(raw.mode || '').toLowerCase()) ? String(raw.mode).toLowerCase() : 'banner',
+      mode: ['daily', 'every_login', 'time_range', 'banner', 'modal', 'toast'].includes(String(raw.mode || '').toLowerCase())
+        ? String(raw.mode).toLowerCase()
+        : 'daily',
       startDate: raw.startDate ? String(raw.startDate) : '',
       endDate: raw.endDate ? String(raw.endDate) : '',
       updatedAt: raw.updatedAt || null
@@ -1179,11 +1181,17 @@ function createUserApi({
       ? rawPatch.settings
       : {};
     const patch = { ...nested, ...rawPatch };
+    const isRestrictedUser = !isAdmin && req.managerAuthSession.allowAccountChange === false;
     const notifyKeys = ['userNotifyEnabled', 'notifyOnAfkKick', 'notifyOnAfkRecover', 'notifyOnReconnectExhausted'];
+    const restrictedPatchKeys = [
+      'alias', 'ecoMode', 'autoTotem', 'antiHungry', 'autoReconnect', 'antiAfkKick',
+      'autoChatSchedules', 'botSchedules', 'username', 'serverHost', 'serverPort', 'version'
+    ];
     const hasNotifyChanges = notifyKeys.some((k) => patch[k] !== undefined);
-    const hasRestrictedAccountChange = patch.spawnCommands !== undefined && patch.spawnCommands !== '********';
+    const hasRestrictedChange = (patch.spawnCommands !== undefined && patch.spawnCommands !== '********') ||
+      restrictedPatchKeys.some((k) => patch[k] !== undefined);
 
-    if (!isAdmin && req.managerAuthSession.allowAccountChange === false && (!hasNotifyChanges || hasRestrictedAccountChange)) {
+    if (isRestrictedUser && (!hasNotifyChanges || hasRestrictedChange)) {
       return res.status(403).json({ ok: false, error: 'Gói dịch vụ của bạn không cho phép tự đổi cài đặt bot.' });
     }
 
@@ -1191,18 +1199,18 @@ function createUserApi({
       const worker = perm.worker;
 
       const settingsPatch = {};
-      if (patch.alias !== undefined) settingsPatch.alias = String(patch.alias).trim().slice(0, 32);
-      const allowedBoolKeys = (!isAdmin && req.managerAuthSession.allowAccountChange === false)
+      if (!isRestrictedUser && patch.alias !== undefined) settingsPatch.alias = String(patch.alias).trim().slice(0, 32);
+      const allowedBoolKeys = isRestrictedUser
         ? notifyKeys
         : ['ecoMode', 'autoTotem', 'antiHungry', 'autoReconnect', 'antiAfkKick', ...notifyKeys];
       for (const boolKey of allowedBoolKeys) {
         if (patch[boolKey] !== undefined) settingsPatch[boolKey] = Boolean(patch[boolKey]);
       }
-      if (patch.spawnCommands !== undefined && patch.spawnCommands !== '********') {
+      if (!isRestrictedUser && patch.spawnCommands !== undefined && patch.spawnCommands !== '********') {
         settingsPatch.spawnCommands = String(patch.spawnCommands || '').slice(0, 1000);
       }
-      if (Array.isArray(patch.autoChatSchedules)) settingsPatch.autoChatSchedules = patch.autoChatSchedules;
-      if (Array.isArray(patch.botSchedules)) settingsPatch.botSchedules = patch.botSchedules;
+      if (!isRestrictedUser && Array.isArray(patch.autoChatSchedules)) settingsPatch.autoChatSchedules = patch.autoChatSchedules;
+      if (!isRestrictedUser && Array.isArray(patch.botSchedules)) settingsPatch.botSchedules = patch.botSchedules;
 
       if (patch.proxy !== undefined || patch.proxyUrl !== undefined) {
         if (!isAdmin) {
@@ -1216,10 +1224,12 @@ function createUserApi({
         settingsPatch.proxyUrl = parsedProxyUrl || null;
       }
 
-      if (patch.serverHost !== undefined) settingsPatch.serverHost = String(patch.serverHost).trim();
-      if (patch.serverPort !== undefined) settingsPatch.serverPort = Number(patch.serverPort);
-      if (patch.version !== undefined) settingsPatch.version = String(patch.version).trim();
-      if (patch.username !== undefined) settingsPatch.username = String(patch.username).trim();
+      if (isAdmin) {
+        if (patch.serverHost !== undefined) settingsPatch.serverHost = String(patch.serverHost).trim();
+        if (patch.serverPort !== undefined) settingsPatch.serverPort = Number(patch.serverPort);
+        if (patch.version !== undefined) settingsPatch.version = String(patch.version).trim();
+      }
+      if (!isRestrictedUser && patch.username !== undefined) settingsPatch.username = String(patch.username).trim();
 
       const savedSettings = await registry.updateSettings(worker.workerId, settingsPatch);
       const updatedWorker = await registry.find(worker.workerId);
@@ -1592,7 +1602,16 @@ function createUserApi({
   router.post(['/user/discord-unlink', '/discord-unlink'], requireSession, async (req, res) => {
     try {
       const user = req.managerAuthSession;
-      await store.unlinkDiscord(user.userId || user.username);
+      const primaryId = user.userId || user.username;
+      await store.unlinkDiscord(primaryId);
+      if (user.username && user.userId && user.username.toLowerCase() !== String(user.userId).toLowerCase()) {
+        const remainingLink = typeof store.getDiscordLink === 'function'
+          ? await store.getDiscordLink(user.username).catch(() => null)
+          : null;
+        if (remainingLink) {
+          await store.unlinkDiscord(user.username);
+        }
+      }
       return res.json({ ok: true, message: 'Đã hủy liên kết tài khoản Discord thành công.' });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });

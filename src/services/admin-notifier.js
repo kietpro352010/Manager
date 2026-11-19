@@ -1,6 +1,7 @@
 'use strict';
 
 const { EmbedBuilder } = require('discord.js');
+const { decryptSecret } = require('../utils/secrets');
 
 function escapeTelegramHtml(str) {
   if (str === undefined || str === null) return '';
@@ -43,10 +44,11 @@ function redactSensitiveObject(obj) {
 }
 
 class AdminNotifier {
-  constructor({ client, store = null, adminUserId = '', telegramBotToken = '', telegramChatId = '', logger } = {}) {
+  constructor({ client, store = null, adminUserId = '', telegramBotToken = '', telegramChatId = '', encryptionKey = '', logger } = {}) {
     this.client = client;
     this.store = store || null;
     this.adminUserId = String(adminUserId || '').trim();
+    this.encryptionKey = String(encryptionKey || '').trim();
     this.userAlertCache = new Map();
     this.sentUserAlerts = [];
     this._persistingAudit = false;
@@ -111,15 +113,39 @@ class AdminNotifier {
 
   configureWebhook(webhookCfg = {}) {
     if (!webhookCfg || typeof webhookCfg !== 'object') return;
-    if (webhookCfg.discordUrl !== undefined || webhookCfg.webhookUrl !== undefined) {
-      this.discordWebhookUrl = String(webhookCfg.discordUrl ?? webhookCfg.webhookUrl ?? '').trim();
+    const hasDiscordField = webhookCfg.discordUrl !== undefined || webhookCfg.webhookUrl !== undefined || webhookCfg.discordUrlCiphertext !== undefined;
+    if (hasDiscordField) {
+      let resolvedDiscordUrl = String(webhookCfg.discordUrl ?? webhookCfg.webhookUrl ?? '').trim();
+      const hasCiphertext = Boolean(webhookCfg.discordUrlCiphertext && typeof webhookCfg.discordUrlCiphertext === 'string');
+      if (!resolvedDiscordUrl && hasCiphertext && this.encryptionKey) {
+        try {
+          resolvedDiscordUrl = String(decryptSecret(webhookCfg.discordUrlCiphertext, this.encryptionKey) || '').trim();
+        } catch (_) {}
+      }
+      if (resolvedDiscordUrl || !hasCiphertext) {
+        this.discordWebhookUrl = resolvedDiscordUrl;
+      }
     }
     if (webhookCfg.enabled !== undefined) {
       this.webhookEnabled = Boolean(webhookCfg.enabled);
     }
-    if (webhookCfg.telegramToken !== undefined || webhookCfg.telegramChatId !== undefined) {
+    const hasTelegramField = webhookCfg.telegramToken !== undefined || webhookCfg.telegramTokenCiphertext !== undefined || webhookCfg.telegramChatId !== undefined;
+    if (hasTelegramField) {
+      let nextToken = this.telegramBotToken;
+      if (webhookCfg.telegramToken !== undefined || webhookCfg.telegramTokenCiphertext !== undefined) {
+        let resolvedToken = String(webhookCfg.telegramToken ?? '').trim();
+        const hasTokenCipher = Boolean(webhookCfg.telegramTokenCiphertext && typeof webhookCfg.telegramTokenCiphertext === 'string');
+        if (!resolvedToken && hasTokenCipher && this.encryptionKey) {
+          try {
+            resolvedToken = String(decryptSecret(webhookCfg.telegramTokenCiphertext, this.encryptionKey) || '').trim();
+          } catch (_) {}
+        }
+        if (resolvedToken || !hasTokenCipher) {
+          nextToken = resolvedToken;
+        }
+      }
       this.setTelegramConfig(
-        webhookCfg.telegramToken !== undefined ? webhookCfg.telegramToken : this.telegramBotToken,
+        nextToken,
         webhookCfg.telegramChatId !== undefined ? webhookCfg.telegramChatId : this.telegramChatId
       );
     }
@@ -458,11 +484,38 @@ class AdminNotifier {
     }
   }
 
+  async resolveEffectiveAdminDiscordId(targetStore = this.store) {
+    if (this.adminUserId && /^\d{17,20}$/.test(this.adminUserId)) {
+      return this.adminUserId;
+    }
+    if (targetStore && typeof targetStore.getDiscordLink === 'function') {
+      const adminLink = await targetStore.getDiscordLink('admin').catch(() => null);
+      const adminCandidate = String(adminLink?.discord_user_id || adminLink?.discordUserId || '').trim();
+      if (adminLink && String(adminLink.status || 'active').toLowerCase() !== 'revoked' && /^\d{17,20}$/.test(adminCandidate)) {
+        return adminCandidate;
+      }
+    }
+    return '';
+  }
+
+  async isAdminDmEnabled(targetStore = this.store) {
+    if (targetStore && typeof targetStore.getSetting === 'function') {
+      const adminPref = await targetStore.getSetting('user_discord_notify:admin').catch(() => null);
+      if ((adminPref && typeof adminPref === 'object' && adminPref.enabled === false) || adminPref === false) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   async dispatchDm(item) {
-    if (!this.adminUserId || !this.client) return;
+    if (!this.client) return;
+    const targetAdminId = await this.resolveEffectiveAdminDiscordId(this.store);
+    if (!targetAdminId) return;
+    if (!(await this.isAdminDmEnabled(this.store))) return;
     const { source, event, message, error, details, level, isBatch, batchCount, items } = item;
 
-    const user = await this.client.users.fetch(this.adminUserId).catch(() => null);
+    const user = await this.client.users.fetch(targetAdminId).catch(() => null);
     if (!user) return;
 
     const now = new Date();
@@ -576,7 +629,7 @@ class AdminNotifier {
       }
     }
 
-    const url = `https://api.telegram.org/bot${this.telegramBotToken}/sendMessage`;
+    const url = `https://api.telegram.org/bot${encodeURIComponent(this.telegramBotToken)}/sendMessage`;
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -835,23 +888,9 @@ class AdminNotifier {
       }
     }
 
-    // Check Admin's master Discord DM notification toggle & fallback to Admin's active Web-linked Discord ID
-    let adminDiscordNotifyEnabled = true;
-    if (targetStore) {
-      if (!this.adminUserId && typeof targetStore.getDiscordLink === 'function') {
-        const adminLink = await targetStore.getDiscordLink('admin').catch(() => null);
-        const adminCandidate = String(adminLink?.discord_user_id || adminLink?.discordUserId || '').trim();
-        if (adminLink && String(adminLink.status || 'active').toLowerCase() !== 'revoked' && isValidSnowflake(adminCandidate)) {
-          this.adminUserId = adminCandidate;
-        }
-      }
-      if (typeof targetStore.getSetting === 'function') {
-        const adminPref = await targetStore.getSetting('user_discord_notify:admin').catch(() => null);
-        if ((adminPref && typeof adminPref === 'object' && adminPref.enabled === false) || adminPref === false) {
-          adminDiscordNotifyEnabled = false;
-        }
-      }
-    }
+    // Check Admin's master Discord DM notification toggle & dynamically resolve Admin's active Web-linked Discord ID
+    const effectiveAdminDiscordId = await this.resolveEffectiveAdminDiscordId(targetStore);
+    const adminDiscordNotifyEnabled = await this.isAdminDmEnabled(targetStore);
 
     const reasonText = redactSensitiveText(event?.reason || event?.message || event?.coords || 'Không rõ chi tiết').slice(0, 300);
     const attempts = Number(event?.attempts) || 0;
@@ -891,12 +930,21 @@ class AdminNotifier {
     ];
 
     let userNotified = false;
+    const alreadyNotifiedAsAdmin = Boolean(
+      skipAdminAlert &&
+      eventType === 'bot_death' &&
+      adminDiscordNotifyEnabled &&
+      effectiveAdminDiscordId &&
+      targetDiscordUserId &&
+      targetDiscordUserId === effectiveAdminDiscordId
+    );
     const canNotifyAssignedUser = Boolean(
       assignedUserId &&
       targetDiscordUserId &&
       userMasterDiscordNotifyEnabled &&
       userNotifyEnabled &&
-      eventToggleAllowed
+      eventToggleAllowed &&
+      !alreadyNotifiedAsAdmin
     );
     if (canNotifyAssignedUser) {
       userNotified = await this.dispatchUserDm({
@@ -925,7 +973,7 @@ class AdminNotifier {
 
     // Always notify Admin as well (and persist to Web Dashboard System Logs via sendAlert)
     // Skip duplicate Admin DM if Admin already received the User DM on the same Discord ID, or if Admin muted Discord DMs
-    const skipAdminDm = !adminDiscordNotifyEnabled || (userNotified && targetDiscordUserId && targetDiscordUserId === this.adminUserId);
+    const skipAdminDm = !adminDiscordNotifyEnabled || (userNotified && targetDiscordUserId && targetDiscordUserId === effectiveAdminDiscordId);
     if (!skipAdminAlert) {
       await this.sendAlert({
         source: 'KingMC AFK Monitor',

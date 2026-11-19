@@ -55,7 +55,12 @@ async function execute(interaction, services) {
 
   let targetWorker = null;
   if (botIdOption) {
-    targetWorker = userBots.find(w => (w.workerId || w.id) === botIdOption);
+    const cleanOpt = String(botIdOption).trim().toLowerCase();
+    targetWorker = userBots.find((w) => {
+      const wid = String(w.workerId || w.id || '').trim().toLowerCase();
+      const bNum = w.botNumber !== undefined && w.botNumber !== null ? String(w.botNumber).trim().toLowerCase() : '';
+      return wid === cleanOpt || (bNum && bNum === cleanOpt);
+    });
     if (!targetWorker && user.role === 'admin') {
       targetWorker = { workerId: botIdOption };
     }
@@ -103,7 +108,7 @@ async function execute(interaction, services) {
   return renderBotLogs({
     user,
     worker: targetWorker,
-    logs: Array.isArray(logs) ? logs : []
+    logs: Array.isArray(logs) ? logs.slice(-linesOption) : []
   });
 }
 

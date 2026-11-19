@@ -3,14 +3,15 @@
 const net = require('node:net');
 const dns = require('node:dns');
 
+function normalizeHostToken(rawHost) {
+  return String(rawHost || '').trim().replace(/^\[|\]$/g, '').replace(/\.+$/, '').toLowerCase();
+}
+
 function isPrivateOrBlockedIp(ipStr) {
   if (!ipStr || typeof ipStr !== 'string') return true;
-  let ip = ipStr.trim().toLowerCase();
+  let ip = normalizeHostToken(ipStr);
 
-  // Strip square brackets [::1] -> ::1
-  ip = ip.replace(/^\[|\]$/g, '');
-
-  if (ip === 'localhost' || ip.endsWith('.localhost') || ip === 'metadata.google.internal') return true;
+  if (!ip || ip === 'localhost' || ip.endsWith('.localhost') || ip === 'metadata.google.internal' || ip.endsWith('.metadata.google.internal')) return true;
 
   // Handle IPv4-mapped IPv6 ::ffff:192.168.1.1
   if (ip.startsWith('::ffff:')) {
@@ -67,15 +68,15 @@ function isPrivateOrBlockedIp(ipStr) {
 }
 
 function isLocalOrPrivateHost(hostname) {
-  let host = String(hostname || '').replace(/^\[|\]$/g, '').toLowerCase();
+  let host = normalizeHostToken(hostname);
   try {
     if (host.includes('://')) {
-      host = new URL(host).hostname.toLowerCase();
+      host = normalizeHostToken(new URL(host).hostname);
     } else if (host.includes(':') && !host.includes('.')) {
       // not IPv4 with port, might be IPv6
     } else if (host.includes(':') && host.includes('.')) {
       // IPv4:port
-      host = host.split(':')[0];
+      host = normalizeHostToken(host.split(':')[0]);
     }
   } catch (_) {}
   if (['localhost', 'localhost.localdomain', '127.0.0.1', '::1', '0.0.0.0', 'instance-data'].includes(host) ||
@@ -105,7 +106,7 @@ async function validateSafeBotUrl(rawUrl) {
     throw new Error('URL bot không được chứa username/password.');
   }
 
-  const hostname = url.hostname.toLowerCase();
+  const hostname = normalizeHostToken(url.hostname);
 
   // Luôn chặn endpoint Cloud Metadata (AWS 169.254.169.254 / GCP metadata.google.internal)
   if (hostname === '169.254.169.254' || hostname === 'metadata.google.internal' || hostname.endsWith('.metadata.google.internal')) {
@@ -116,7 +117,7 @@ async function validateSafeBotUrl(rawUrl) {
   const allowedHosts = new Set(
     (process.env.ALLOWED_INTERNAL_HOSTS || '')
       .split(',')
-      .map((s) => s.trim().toLowerCase())
+      .map((s) => normalizeHostToken(s))
       .filter(Boolean)
   );
 
@@ -182,7 +183,7 @@ async function validateProxyUrl(rawUrl) {
     throw new Error('Proxy URL phải có cổng hợp lệ (1-65535).');
   }
 
-  const hostname = url.hostname.toLowerCase();
+  const hostname = normalizeHostToken(url.hostname);
 
   if (isLocalOrPrivateHost(hostname)) {
     throw new Error('Proxy không được trỏ về địa chỉ nội bộ hoặc loopback.');

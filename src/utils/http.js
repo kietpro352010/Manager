@@ -12,6 +12,29 @@ async function readJson(response) {
   }
 }
 
+function sleepAbortable(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason || Object.assign(new Error('HTTP request aborted'), { name: 'AbortError' }));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason || Object.assign(new Error('HTTP request aborted'), { name: 'AbortError' }));
+    };
+    const timer = setTimeout(() => {
+      if (signal && typeof signal.removeEventListener === 'function') {
+        signal.removeEventListener('abort', onAbort);
+      }
+      resolve();
+    }, ms);
+    timer.unref?.();
+    if (signal && typeof signal.addEventListener === 'function') {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+}
+
 async function fetchWithRetry(url, options = {}, { maxRetries = 3, initialDelayMs = 400, maxDelayMs = 3000, timeoutMs = 15000, logger = console } = {}) {
   let attempt = 0;
   while (attempt < maxRetries) {
@@ -21,6 +44,7 @@ async function fetchWithRetry(url, options = {}, { maxRetries = 3, initialDelayM
     attempt++;
     const controller = new AbortController();
     let timeoutId = null;
+    let onCallerAbort = null;
     try {
       let signal;
       const timeoutSignal = typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(timeoutMs) : null;
@@ -31,7 +55,7 @@ async function fetchWithRetry(url, options = {}, { maxRetries = 3, initialDelayM
           controller.abort(new Error(`HTTP request timeout after ${timeoutMs}ms`));
         }, timeoutMs);
         timeoutId.unref?.();
-        const onCallerAbort = () => controller.abort(options.signal.reason || new Error('HTTP request aborted'));
+        onCallerAbort = () => controller.abort(options.signal.reason || new Error('HTTP request aborted'));
         options.signal.addEventListener('abort', onCallerAbort, { once: true });
         signal = controller.signal;
       } else if (timeoutSignal) {
@@ -50,7 +74,7 @@ async function fetchWithRetry(url, options = {}, { maxRetries = 3, initialDelayM
         if (logger && typeof logger.warn === 'function') {
           logger.warn(`[HTTP RETRY] HTTP ${res.status} khi gọi ${String(url).split('?')[0]}. Thử lại lần ${attempt}/${maxRetries} sau ${delay}ms...`);
         }
-        await new Promise((r) => setTimeout(r, delay));
+        await sleepAbortable(delay, options.signal);
         continue;
       }
       return res;
@@ -65,12 +89,15 @@ async function fetchWithRetry(url, options = {}, { maxRetries = 3, initialDelayM
         if (logger && typeof logger.warn === 'function') {
           logger.warn(`[HTTP RETRY] Lỗi mạng (${err.message}) khi gọi ${String(url).split('?')[0]}. Thử lại lần ${attempt}/${maxRetries} sau ${delay}ms...`);
         }
-        await new Promise((r) => setTimeout(r, delay));
+        await sleepAbortable(delay, options.signal);
         continue;
       }
       throw err;
     } finally {
       if (timeoutId) clearTimeout(timeoutId);
+      if (onCallerAbort && options.signal && typeof options.signal.removeEventListener === 'function') {
+        options.signal.removeEventListener('abort', onCallerAbort);
+      }
     }
   }
 }

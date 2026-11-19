@@ -3,21 +3,14 @@
 const dns = require('node:dns').promises;
 const net = require('node:net');
 const { encryptUserPassword, decryptUserPassword, isStoredCredentialCiphertext } = require('../utils/secrets');
+const { isPrivateOrBlockedIp, isLocalOrPrivateHost } = require('./proxy-validation');
 
 const DEFAULT_PANEL_URL = 'https://wispbyte.com/client';
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 
 function isPrivateOrBlockedIpAddress(ip) {
-  const clean = String(ip || '').replace(/^::ffff:/i, '').replace(/^\[|\]$/g, '').trim().toLowerCase();
-  if (!clean) return true;
-  if (clean === '::1' || clean === '::' || clean === '0.0.0.0') return true;
-  if (/^127\./.test(clean) || /^10\./.test(clean) || /^192\.168\./.test(clean)) return true;
-  if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(clean)) return true;
-  if (/^169\.254\./.test(clean) || /^100\.(6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\./.test(clean)) return true;
-  if (/^0\./.test(clean)) return true;
-  if (clean.startsWith('fc') || clean.startsWith('fd') || clean.startsWith('fe80:') || clean.startsWith('ff')) return true;
-  return false;
+  return isPrivateOrBlockedIp(ip);
 }
 
 function validatePanelUrl(urlStr) {
@@ -28,24 +21,26 @@ function validatePanelUrl(urlStr) {
   } catch {
     throw new Error('Panel URL không đúng định dạng URL.');
   }
-  const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, '').replace(/\.+$/, '').toLowerCase();
   if (
+    !hostname ||
     hostname === 'localhost' ||
     hostname === '127.0.0.1' ||
     hostname === '::1' ||
     hostname === '0.0.0.0' ||
     hostname === '169.254.169.254' ||
+    hostname === 'metadata.google.internal' ||
+    hostname.endsWith('.metadata.google.internal') ||
     hostname.endsWith('.internal') ||
     hostname.endsWith('.local') ||
     hostname.endsWith('.localhost')
   ) {
     throw new Error('Panel URL không được trỏ tới máy chủ nội bộ hoặc địa chỉ metadata.');
   }
-  // Check private IP ranges
   if (net.isIP(hostname) && isPrivateOrBlockedIpAddress(hostname)) {
     throw new Error('Panel URL không được trỏ tới dải IP mạng nội bộ.');
   }
-  if (/^10\./.test(hostname) || /^192\.168\./.test(hostname) || /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname)) {
+  if (isLocalOrPrivateHost(hostname)) {
     throw new Error('Panel URL không được trỏ tới dải IP mạng nội bộ.');
   }
   if (parsed.protocol !== 'https:') {
@@ -56,7 +51,7 @@ function validatePanelUrl(urlStr) {
 
 async function assertPublicPanelHost(urlStr) {
   const parsed = new URL(urlStr);
-  const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, '').replace(/\.+$/, '').toLowerCase();
   if (net.isIP(hostname)) {
     if (isPrivateOrBlockedIpAddress(hostname)) {
       throw new Error('Panel URL không được trỏ tới dải IP mạng nội bộ.');
@@ -264,8 +259,9 @@ class WispbyteKeepAliveManager {
       const location = res.headers.get('location') || '';
       const html = await res.text().catch(() => '');
 
-      if (res.status === 301 || res.status === 302 || res.status === 307 || res.status === 308) {
-        if (location.includes('login') || location.includes('auth') || location.includes('discord')) {
+      if (res.status === 301 || res.status === 302 || res.status === 303 || res.status === 307 || res.status === 308) {
+        const locLower = location.toLowerCase();
+        if (locLower.includes('login') || locLower.includes('auth') || locLower.includes('discord')) {
           return {
             id: account.id,
             name: account.name || account.id,

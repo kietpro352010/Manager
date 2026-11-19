@@ -239,7 +239,6 @@ class WorkerRegistry {
     const id = String(workerId || '').trim().toLowerCase();
     const next = (this.workerStateRev.get(id) || 0) + 1;
     this.workerStateRev.set(id, next);
-    this.bumpSettingsRevision(id);
     return next;
   }
 
@@ -384,6 +383,7 @@ class WorkerRegistry {
       this.lastDbStatusPersistAt.delete(id);
       this.lastDbStatusFingerprint.delete(id);
       this.workerStateRev.delete(id);
+      this.workerSettingsRev.delete(id);
       if (existing && Number.isInteger(existing.botNumber)) {
         await this.reindexAfterRemoval(existing.botNumber);
       }
@@ -543,6 +543,7 @@ class WorkerRegistry {
     this.lastDbStatusPersistAt.delete(record.workerId);
     this.lastDbStatusFingerprint.delete(record.workerId);
     this.bumpRevision(record.workerId);
+    this.bumpSettingsRevision(record.workerId);
     return this.publicView(await this.find(record.workerId));
   }
 
@@ -896,6 +897,7 @@ class WorkerRegistry {
     const mcCredentialsCiphertext = encryptSecret(JSON.stringify({ username: name, password: passwordValue }), this.encryptionKey);
     await this.store.patchSettings(worker.workerId, { mcCredentialsCiphertext });
     this.bumpRevision(worker.workerId);
+    this.bumpSettingsRevision(worker.workerId);
     return { username: name, credentialsConfigured: true };
   }
 
@@ -1073,6 +1075,15 @@ class WorkerRegistry {
       : worker.settings;
     if (Object.keys(next).length > 0 || Object.keys(recordPatch).length > 0) {
       this.bumpRevision(worker.workerId);
+      const workerFacingKeys = [
+        'ecoMode', 'autoTotem', 'antiHungry', 'autoReconnect', 'antiAfkKick',
+        'spawnCommands', 'autoChatSchedules', 'botSchedules',
+        'proxyCiphertext', 'proxyManaged', 'afkMode', 'afkManaged',
+        'serverHost', 'serverPort', 'version', 'username'
+      ];
+      if (workerFacingKeys.some((k) => Object.hasOwn(next, k))) {
+        this.bumpSettingsRevision(worker.workerId);
+      }
     }
     return {
       afkMode: 'still',
@@ -1086,6 +1097,10 @@ class WorkerRegistry {
       antiHungry: (next.antiHungry ?? worker.settings?.antiHungry) !== false,
       autoReconnect: (next.autoReconnect ?? worker.settings?.autoReconnect) !== false,
       antiAfkKick: (next.antiAfkKick ?? worker.settings?.antiAfkKick) !== false,
+      userNotifyEnabled: (next.userNotifyEnabled ?? worker.settings?.userNotifyEnabled) !== false,
+      notifyOnAfkKick: (next.notifyOnAfkKick ?? worker.settings?.notifyOnAfkKick) !== false,
+      notifyOnAfkRecover: (next.notifyOnAfkRecover ?? worker.settings?.notifyOnAfkRecover) !== false,
+      notifyOnReconnectExhausted: (next.notifyOnReconnectExhausted ?? worker.settings?.notifyOnReconnectExhausted) !== false,
       spawnCommands: next.spawnCommands ?? worker.settings?.spawnCommands ?? '',
       autoChatSchedules: next.autoChatSchedules ?? worker.settings?.autoChatSchedules ?? [],
       botSchedules: next.botSchedules ?? worker.settings?.botSchedules ?? []

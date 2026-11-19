@@ -329,20 +329,29 @@ class CommandBroker {
       command,
       done: false,
       timer: null,
+      waiters: [],
+      settleWaiters: (payload) => {
+        const list = pending.waiters.splice(0, pending.waiters.length);
+        for (const waiter of list) {
+          try { waiter(payload); } catch (_) {}
+        }
+      },
       finish: (result) => {
         if (pending.done) return;
         pending.done = true;
         if (pending.timer) clearTimeout(pending.timer);
         this.pendingResults.delete(actualCommandId);
         const isSuccess = result ? (result.ok !== false) : true;
-        resolveCompletion({
+        const completionPayload = {
           ok: isSuccess,
           delivered: true,
           timedOut: false,
           commandId: actualCommandId,
           action: command.action,
           result
-        });
+        };
+        pending.settleWaiters(completionPayload);
+        resolveCompletion(completionPayload);
       }
     };
 
@@ -365,14 +374,16 @@ class CommandBroker {
         if (pending.done) return;
         pending.done = true;
         this.pendingResults.delete(actualCommandId);
-        resolveCompletion({
+        const timeoutPayload = {
           ok: false,
           delivered: false,
           timedOut: true,
           commandId: actualCommandId,
           action: command.action,
           result: null
-        });
+        };
+        pending.settleWaiters(timeoutPayload);
+        resolveCompletion(timeoutPayload);
       }, this.config.commandResultTimeoutMs);
       pending.timer.unref?.();
     }
@@ -484,18 +495,43 @@ class CommandBroker {
     const pending = this.pendingResults.get(cid);
     if (pending) {
       return new Promise((resolve) => {
-        const origFinish = pending.finish;
-        pending.finish = (res) => {
-          try { origFinish(res); } catch (_) {}
-          resolve({
-            ok: res?.ok !== false,
-            delivered: true,
-            timedOut: false,
+        let settled = false;
+        const done = (payload) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(waitTimer);
+          const idx = Array.isArray(pending.waiters) ? pending.waiters.indexOf(done) : -1;
+          if (idx !== -1) pending.waiters.splice(idx, 1);
+          resolve(payload);
+        };
+        const waitTimer = setTimeout(() => {
+          done({
+            ok: false,
+            delivered: false,
+            timedOut: true,
             commandId: cid,
             action: pending.action,
-            result: res
+            result: null
           });
-        };
+        }, Math.max(100, Number(timeoutMs) || 30000));
+        waitTimer.unref?.();
+
+        if (Array.isArray(pending.waiters)) {
+          pending.waiters.push(done);
+        } else {
+          const origFinish = pending.finish;
+          pending.finish = (res) => {
+            try { origFinish(res); } catch (_) {}
+            done({
+              ok: res?.ok !== false,
+              delivered: true,
+              timedOut: false,
+              commandId: cid,
+              action: pending.action,
+              result: res
+            });
+          };
+        }
       });
     }
 

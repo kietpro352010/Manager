@@ -321,9 +321,10 @@ function createApp({
       const cookies = parseCookies(req);
       const hasSessionCookie = Boolean(cookies.kingmc_mgr_session);
       const origin = req.headers['origin'];
+      const referer = req.headers['referer'];
       const host = req.headers['host'];
 
-      if (hasSessionCookie && !origin && !req.headers['referer']) {
+      if (hasSessionCookie && !origin && !referer) {
         return res.status(403).json({ ok: false, error: 'Yêu cầu từ trình duyệt thiếu header xác thực nguồn (Origin/Referer).' });
       }
 
@@ -335,6 +336,15 @@ function createApp({
           }
         } catch (_) {
           return res.status(403).json({ ok: false, error: 'Origin header không hợp lệ.' });
+        }
+      } else if (!origin && referer && host) {
+        try {
+          const refererHost = new URL(referer).host;
+          if (refererHost !== host) {
+            return res.status(403).json({ ok: false, error: 'Yêu cầu bị từ chối do vi phạm bảo vệ CSRF (Referer mismatch).' });
+          }
+        } catch (_) {
+          return res.status(403).json({ ok: false, error: 'Referer header không hợp lệ.' });
         }
       }
     }
@@ -704,6 +714,19 @@ function createApp({
     logger?.error('HTTP Server Error', { error: err.message, stack: err.stack });
     return res.status(500).json({ ok: false, error: 'internal_server_error' });
   });
+
+  function invalidateAdminSessions() {
+    let removed = 0;
+    for (const [hash, cached] of activeSessions.entries()) {
+      if (cached && cached.role === 'admin') {
+        activeSessions.delete(hash);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+  app.invalidateAdminSessions = invalidateAdminSessions;
+  app.invalidateUserSessions = invalidateUserSessions;
 
   return app;
 }

@@ -12,7 +12,8 @@ const {
   verifyUserPassword,
   verifyAdminPassword,
   hashAdminPassword,
-  encryptUserPassword
+  encryptUserPassword,
+  isStoredCredentialCiphertext
 } = require('../../utils/secrets');
 
 function isIgnorable(err) {
@@ -65,6 +66,15 @@ function checkCooldown(userId, cooldownMs = 800) {
   const now = Date.now();
   const last = userActionCooldown.get(userId) || 0;
   if (now - last < cooldownMs) return false;
+  if (userActionCooldown.size >= 2000 && !userActionCooldown.has(userId)) {
+    for (const [k, ts] of userActionCooldown.entries()) {
+      if (now - ts > 60000) userActionCooldown.delete(k);
+    }
+    if (userActionCooldown.size >= 2000) {
+      const oldest = userActionCooldown.keys().next().value;
+      if (oldest !== undefined) userActionCooldown.delete(oldest);
+    }
+  }
   userActionCooldown.set(userId, now);
   return true;
 }
@@ -75,6 +85,15 @@ function checkLoginRateLimit(discordUserId) {
   const now = Date.now();
   const record = discordLoginAttempts.get(discordUserId);
   if (!record || now - record.windowStart > 15 * 60 * 1000) {
+    if (discordLoginAttempts.size >= 2000 && !discordLoginAttempts.has(discordUserId)) {
+      for (const [k, val] of discordLoginAttempts.entries()) {
+        if (now - val.windowStart > 15 * 60 * 1000) discordLoginAttempts.delete(k);
+      }
+      if (discordLoginAttempts.size >= 2000) {
+        const oldest = discordLoginAttempts.keys().next().value;
+        if (oldest !== undefined) discordLoginAttempts.delete(oldest);
+      }
+    }
     discordLoginAttempts.set(discordUserId, { count: 1, windowStart: now });
     return { allowed: true };
   }
@@ -225,7 +244,7 @@ async function handlePanelInteraction(interaction, services) {
       const storedAdminPass = services.registry.getAdminPassword() || services.config.adminPassword;
       if (storedAdminPass && verifyAdminPassword(cleanPassword, storedAdminPass)) {
         resetLoginRateLimit(discordUserId);
-        await services.accessStore.linkDiscord(discordUserId, 'admin');
+        await services.accessStore.linkDiscord(discordUserId, 'admin', 'admin');
 
         return safeReply(interaction, {
           embeds: [
@@ -243,14 +262,16 @@ async function handlePanelInteraction(interaction, services) {
     }
 
     // 2. Check Regular User Login
-    const user = await services.accessStore.getUser(cleanUsername);
+    const user = await services.accessStore.getUser(cleanUsername, { bypassCache: true });
     if (!user) {
       return safeReply(interaction, {
         embeds: [embed('❌ ĐĂNG NHẬP THẤT BẠI', 'Tên đăng nhập hoặc mật khẩu không chính xác.', 0xef4444)]
       });
     }
 
-    const passMatch = verifyUserPassword(cleanPassword, user.password, services.config?.encryptionKey || services.registry?.encryptionKey);
+    const storedCredential = user.password || user._rawEncryptedPassword || '';
+    const encKey = services.config?.encryptionKey || services.registry?.encryptionKey;
+    const passMatch = verifyUserPassword(cleanPassword, storedCredential, encKey);
     if (!passMatch) {
       return safeReply(interaction, {
         embeds: [embed('❌ ĐĂNG NHẬP THẤT BẠI', 'Tên đăng nhập hoặc mật khẩu không chính xác.', 0xef4444)]
@@ -264,10 +285,10 @@ async function handlePanelInteraction(interaction, services) {
     }
 
     // Auto-migrate legacy scrypt$/plaintext user password to reversible AES-256-GCM
-    const encKey = services.config?.encryptionKey || services.registry?.encryptionKey;
-    if (encKey && typeof user.password === 'string' && !user.password.startsWith('enc$') && typeof services.accessStore?.setAccess === 'function') {
+    const rawCredential = String(user._rawEncryptedPassword || user.password || '');
+    if (encKey && rawCredential && !isStoredCredentialCiphertext(rawCredential) && typeof services.accessStore?.setAccess === 'function') {
       try {
-        await services.accessStore.setAccess(user.userId || user.username, {
+        await services.accessStore.setAccess(user.id || user.userId || user.username, {
           ...user,
           password: encryptUserPassword(cleanPassword, encKey)
         });
@@ -275,7 +296,7 @@ async function handlePanelInteraction(interaction, services) {
     }
 
     resetLoginRateLimit(discordUserId);
-    await services.accessStore.linkDiscord(discordUserId, user.username);
+    await services.accessStore.linkDiscord(discordUserId, user.username, user.id || user.userId || user.username);
 
     return safeReply(interaction, {
       embeds: [
@@ -327,6 +348,12 @@ async function handlePanelInteraction(interaction, services) {
     }
     if (typeof services.registry?.setAdminPassword === 'function') {
       services.registry.setAdminPassword(hashed);
+    }
+    if (typeof services.accessStore?.adapter?.revokeUserSessions === 'function') {
+      await services.accessStore.adapter.revokeUserSessions('admin').catch(() => null);
+    }
+    if (typeof services.invalidateAdminSessions === 'function') {
+      services.invalidateAdminSessions();
     }
 
     return safeReply(interaction, {

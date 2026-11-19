@@ -202,9 +202,11 @@ function attachInteractionHandler(client, { config, services, logger }) {
       });
       if (services.adminNotifier) {
         void services.adminNotifier.sendAlert({
-          type: 'discord_interaction_error',
-          severity: 'warn',
-          event: interaction.commandName || interaction.customId || 'interaction_failed',
+          source: 'Discord Interaction',
+          event: interaction.commandName || interaction.customId || 'discord_interaction_error',
+          message: error.message || 'Discord interaction failed',
+          error,
+          level: 'warn',
           details: {
             command: interaction.commandName || interaction.customId || 'component',
             user: `<@${interaction.user?.id}> (\`${interaction.user?.id}\`)`,

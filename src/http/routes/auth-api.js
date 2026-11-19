@@ -48,7 +48,8 @@ function getRequestManagerSessionToken(req) {
 }
 
 function isHttps(req) {
-  return !!(req.secure || req.headers['x-forwarded-proto'] === 'https');
+  const xfProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  return !!(req.secure || xfProto === 'https');
 }
 
 function serializeCookie(name, value, options = {}) {
@@ -72,6 +73,31 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       ? Number(config.sessionTtlDays) * 24 * 3600 * 1000
       : 24 * 3600 * 1000);
   const cookieMaxAge = Math.floor(sessionDurationMs / 1000);
+  const gracePeriodMs = Number.isFinite(config?.botExpirationGraceHours)
+    ? config.botExpirationGraceHours * 3600 * 1000
+    : (entitlementService?.gracePeriodMs !== undefined
+        ? entitlementService.gracePeriodMs
+        : (Number(config?.gracePeriodMs) > 0
+            ? Number(config.gracePeriodMs)
+            : (process.env.BOT_EXPIRATION_GRACE_HOURS !== undefined && !Number.isNaN(Number(process.env.BOT_EXPIRATION_GRACE_HOURS))
+                ? Number(process.env.BOT_EXPIRATION_GRACE_HOURS) * 3600 * 1000
+                : 6 * 60 * 60 * 1000)));
+
+  function cacheSession(tokenHash, session) {
+    if (!activeSessions || typeof activeSessions.set !== 'function') return;
+    if (activeSessions.size >= 500 && !activeSessions.has(tokenHash)) {
+      const now = Date.now();
+      for (const [k, s] of activeSessions.entries()) {
+        if (!s || (s.expiresAt && s.expiresAt <= now)) activeSessions.delete(k);
+      }
+      while (activeSessions.size >= 500) {
+        const oldest = activeSessions.keys().next().value;
+        if (oldest === undefined) break;
+        activeSessions.delete(oldest);
+      }
+    }
+    activeSessions.set(tokenHash, session);
+  }
 
   // In-memory brute-force protection
   const MAX_RATE_LIMIT_ENTRIES = (config && Number.isSafeInteger(Number(config.maxRateLimitEntries)) && Number(config.maxRateLimitEntries) > 0)
@@ -381,11 +407,11 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
             trialBotId: shouldAttemptTrial ? registeredWorkerIds[0] : undefined,
             botCount: shouldAttemptTrial ? 1 : undefined,
             workerIds: shouldAttemptTrial ? registeredWorkerIds : [],
-            expiresAt: registered.expiresAt || null,
+            expiresAt: registered.expiresAt || registered.user?.expiresAt || null,
             planName: registered.planName || 'FREE TRIAL',
             registrationIp: clientIp,
             deviceFingerprint,
-            registrationUserAgent: req.headers['user-agent']
+            registrationUserAgent: String(req.headers['user-agent'] || '').slice(0, 512)
           }, 'system-register');
         } catch (_) {}
       }
@@ -438,7 +464,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         allowAccountChange: true
       };
 
-      activeSessions.set(tokenHash, session);
+      cacheSession(tokenHash, session);
       const dbAdapterEnabled = typeof store.adapter?.isEnabled !== 'function' || store.adapter.isEnabled();
       if (typeof store.adapter?.createManagerUserSession === 'function' && dbAdapterEnabled) {
         try {
@@ -511,7 +537,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       const cleanUsername = String(username || '').trim();
       const cleanPassword = String(password || '');
       const providedKey = String(rawKey || '').trim();
-      const clientIp = req.ip || req.socket?.remoteAddress || '127.0.0.1';
+      const clientIp = resolveClientIp(req);
 
       if (!cleanUsername || cleanUsername.length > 32 || !cleanPassword || cleanPassword.length > 256) {
         return res.status(400).json({ ok: false, error: 'Tên đăng nhập hoặc mật khẩu không hợp lệ.' });
@@ -561,7 +587,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
             allowAccountChange: true
           };
 
-          activeSessions.set(tokenHash, session);
+          cacheSession(tokenHash, session);
           const dbAdapterEnabled = typeof store.adapter?.isEnabled !== 'function' || store.adapter.isEnabled();
           if (typeof store.adapter?.createManagerUserSession === 'function' && dbAdapterEnabled) {
             try {
@@ -666,11 +692,14 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
 
       const isPermanent = Boolean(updatedAccess?.isPermanent ?? user.isPermanent);
       const expiresAtDate = updatedAccess?.expiresAt || user.expiresAt;
-      const isExpired = !isPermanent && expiresAtDate && Date.parse(expiresAtDate) <= Date.now();
+      const expMs = expiresAtDate ? Date.parse(expiresAtDate) : NaN;
+      const nowMs = Date.now();
+      const isExpired = !isPermanent && Number.isFinite(expMs) && expMs <= nowMs;
+      const inGracePeriod = Boolean(isExpired && (nowMs - expMs) <= gracePeriodMs);
 
       const token = crypto.randomBytes(32).toString('hex');
       const tokenHash = hashSessionToken(token);
-      const expiresAt = Date.now() + sessionDurationMs;
+      const expiresAt = nowMs + sessionDurationMs;
 
       const session = {
         tokenHash,
@@ -678,16 +707,18 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         username: cleanUsername,
         role: 'user',
         assignedBotIds: assignedIds,
-        createdAt: Date.now(),
+        createdAt: nowMs,
         expiresAt,
-        status: isExpired ? 'expired' : 'active',
+        status: isExpired ? (inGracePeriod ? 'grace_period' : 'expired') : 'active',
+        inGracePeriod,
+        gracePeriodMs,
         isPermanent,
         planName: updatedAccess?.planName || user.planName || 'Gói thường',
         expiresAtRental: expiresAtDate,
         allowAccountChange: user.allowAccountChange !== false
       };
 
-      activeSessions.set(tokenHash, session);
+      cacheSession(tokenHash, session);
       const dbAdapterEnabled = typeof store.adapter?.isEnabled !== 'function' || store.adapter.isEnabled();
       if (typeof store.adapter?.createManagerUserSession === 'function' && dbAdapterEnabled) {
         try {
@@ -866,7 +897,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         return res.json({ ok: true, message: 'Đổi mật khẩu Quản trị viên thành công. Vui lòng đăng nhập lại.' });
       }
 
-      const user = await store.getUser(session.username);
+      const user = await store.getUser(session.username, { bypassCache: true });
       if (!user || !verifyUserPassword(currentPassword, user.password || user._rawEncryptedPassword)) {
         return res.status(401).json({ ok: false, error: 'Mật khẩu hiện tại không chính xác.' });
       }
@@ -878,8 +909,13 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       if (typeof store.adapter?.revokeUserSessions === 'function') {
         await store.adapter.revokeUserSessions(session.userId || session.username).catch(() => null);
       }
+      const targetIdLower = String(session.userId || '').trim().toLowerCase();
+      const targetUserLower = String(session.username || '').trim().toLowerCase();
       for (const [hash, s] of activeSessions.entries()) {
-        if (s && (s.userId === session.userId || s.username === session.username)) {
+        if (!s) continue;
+        const sIdLower = String(s.userId || '').trim().toLowerCase();
+        const sUserLower = String(s.username || '').trim().toLowerCase();
+        if ((targetIdLower && sIdLower === targetIdLower) || (targetUserLower && sUserLower === targetUserLower)) {
           activeSessions.delete(hash);
         }
       }

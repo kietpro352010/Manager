@@ -111,6 +111,7 @@ async function main() {
     client,
     store: accessStore,
     adminUserId: roleSettings?.adminUserId || config.adminUserId,
+    encryptionKey: config.encryptionKey,
     logger
   });
   adminNotifier.hookLogger(logger);
@@ -245,6 +246,8 @@ async function main() {
     config: runtimeConfig,
     logger
   });
+  services.invalidateAdminSessions = app.invalidateAdminSessions;
+  services.invalidateUserSessions = app.invalidateUserSessions;
 
   const server = http.createServer(app);
   await listenHttpServer(server, runtimeConfig.port, config.host || '0.0.0.0', { logger });

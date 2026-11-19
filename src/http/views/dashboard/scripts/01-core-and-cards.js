@@ -93,7 +93,7 @@ function normalizeClientBotUrl(value) {
 }
 
 function setDetailSettingsDisabled(disabled) {
-  document.querySelectorAll('#detailSettingEcoMode, #detailSettingAutoTotem, #detailSettingAntiHungry, #detailSettingAutoReconnect, #detailSettingAntiAfkKick, #detailSpawnCommands, #saveDetailSettingsButton')
+  document.querySelectorAll('#detailSettingEcoMode, #detailSettingAutoTotem, #detailSettingAntiHungry, #detailSettingAutoReconnect, #detailSettingAntiAfkKick, #detailSettingUserNotifyEnabled, #detailSettingNotifyOnAfkKick, #detailSettingNotifyOnAfkRecover, #detailSettingNotifyOnReconnectExhausted, #detailSpawnCommands, #saveDetailSettingsButton')
     .forEach(el => { el.disabled = !!disabled; });
 }
 
@@ -129,7 +129,7 @@ document.addEventListener('input',event=>{
     detailBotScheduleDirty=true;
     return;
   }
-  if(['detailSettingEcoMode','detailSettingAutoTotem','detailSettingAntiHungry','detailSettingAutoReconnect','detailSettingAntiAfkKick','detailSpawnCommands'].includes(event.target?.id)){
+  if(['detailSettingEcoMode','detailSettingAutoTotem','detailSettingAntiHungry','detailSettingAutoReconnect','detailSettingAntiAfkKick','detailSettingUserNotifyEnabled','detailSettingNotifyOnAfkKick','detailSettingNotifyOnAfkRecover','detailSettingNotifyOnReconnectExhausted','detailSpawnCommands'].includes(event.target?.id)){
     detailSettingsDirty=true;
   }
 });
@@ -142,7 +142,7 @@ document.addEventListener('change',event=>{
     detailBotScheduleDirty=true;
     return;
   }
-  if(['detailSettingEcoMode','detailSettingAutoTotem','detailSettingAntiHungry','detailSettingAutoReconnect','detailSettingAntiAfkKick','detailSpawnCommands'].includes(event.target?.id)){
+  if(['detailSettingEcoMode','detailSettingAutoTotem','detailSettingAntiHungry','detailSettingAutoReconnect','detailSettingAntiAfkKick','detailSettingUserNotifyEnabled','detailSettingNotifyOnAfkKick','detailSettingNotifyOnAfkRecover','detailSettingNotifyOnReconnectExhausted','detailSpawnCommands'].includes(event.target?.id)){
     detailSettingsDirty=true;
   }
 });
@@ -181,6 +181,11 @@ function statusMeta(status, available=true, manuallyStopped=false, bot=null) {
     connecting:['yellow','CONNECTING','connecting'],
     authenticating:['blue','AUTH','authenticating'],
     entering:['blue','ENTERING SERVER','entering'],
+    maintenance:['yellow','MAINTENANCE','maintenance'],
+    banned:['red','BANNED','banned'],
+    ip_limited:['orange','IP LIMITED','ip_limited'],
+    stopped:['gray','STOPPED','stopped'],
+    error:['red','ERROR','error'],
     kicked:['red','KICKED','kicked'],
     offline:['red','OFFLINE','offline']
   };

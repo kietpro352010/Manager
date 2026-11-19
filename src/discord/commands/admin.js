@@ -78,7 +78,10 @@ async function execute(interaction, services) {
     }
 
     services.accessControl.setRoleIds(adminRole.id, userRole.id);
-    if (adminUser) services.accessControl.setAdminUserId(adminUser.id);
+    if (adminUser) {
+      services.accessControl.setAdminUserId(adminUser.id);
+      services.adminNotifier?.setAdminUserId?.(adminUser.id);
+    }
 
     await services.accessStore.setSetting('discord_access', {
       guildId: interaction.guildId || services.config?.discordGuildId || '',
@@ -154,6 +157,12 @@ async function execute(interaction, services) {
     }
     if (typeof services.registry?.setAdminPassword === 'function') {
       services.registry.setAdminPassword(hashed);
+    }
+    if (typeof services.accessStore?.adapter?.revokeUserSessions === 'function') {
+      await services.accessStore.adapter.revokeUserSessions('admin').catch(() => null);
+    }
+    if (typeof services.invalidateAdminSessions === 'function') {
+      services.invalidateAdminSessions();
     }
 
     return {

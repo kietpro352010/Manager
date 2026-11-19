@@ -645,10 +645,12 @@ function createAdminApi({
       const skipped = [];
       for (const item of botsToImport) {
         try {
+          const rawUrl = String(item.url || item.serviceUrl || '').trim();
+          const safeUrl = rawUrl ? await validateSafeBotUrl(rawUrl) : '';
           const result = await registry.add({
             name: item.label || item.name,
             provider: item.provider || 'wispbyte',
-            serviceUrl: item.url || item.serviceUrl || '',
+            serviceUrl: safeUrl,
             serviceId: item.serviceId || ''
           });
           added.push(result.worker);
@@ -712,8 +714,15 @@ function createAdminApi({
           return res.status(400).json({ ok: false, error: 'URL bot không hợp lệ.' });
         }
         const serviceUrl = rawServiceUrl.trim().replace(/\/+$/, '');
-        if (serviceUrl && !/^https:\/\//i.test(serviceUrl) && !/^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(serviceUrl)) {
-          return res.status(400).json({ ok: false, error: 'Worker URL phải dùng HTTPS.' });
+        if (serviceUrl) {
+          if (!/^https:\/\//i.test(serviceUrl) && !/^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(serviceUrl)) {
+            return res.status(400).json({ ok: false, error: 'Worker URL phải dùng HTTPS.' });
+          }
+          try {
+            await validateSafeBotUrl(serviceUrl);
+          } catch (ssrfErr) {
+            return res.status(400).json({ ok: false, error: ssrfErr.message || 'Worker URL bị chặn do chính sách bảo mật (SSRF).' });
+          }
         }
         if (!serviceUrl && worker.provider === 'render' && !worker.renderServiceId) {
           return res.status(400).json({ ok: false, error: 'Render worker cần URL hoặc Render service ID.' });
@@ -1411,8 +1420,8 @@ function createAdminApi({
       const body = req.body || {};
       const title = String(body.title || '').trim().slice(0, 120);
       const content = String(body.content ?? body.announcement ?? body.message ?? '').trim().slice(0, 2000);
-      const modeRaw = String(body.mode || 'banner').trim().toLowerCase();
-      const mode = ['banner', 'modal', 'toast'].includes(modeRaw) ? modeRaw : 'banner';
+      const modeRaw = String(body.mode || 'daily').trim().toLowerCase();
+      const mode = ['daily', 'every_login', 'time_range', 'banner', 'modal', 'toast'].includes(modeRaw) ? modeRaw : 'daily';
       const enabled = body.enabled !== undefined ? Boolean(body.enabled) : Boolean(content || title);
       const startDate = body.startDate ? String(body.startDate).trim().slice(0, 64) : '';
       const endDate = body.endDate ? String(body.endDate).trim().slice(0, 64) : '';
