@@ -799,13 +799,18 @@
   border: 1px solid rgba(148, 163, 184, 0.3);
 }
 
-.pulse-status-dot,
-.pulse-icon {
+.pulse-status-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   display: inline-block;
   position: relative;
+  flex-shrink: 0;
+}
+.pulse-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
 }
 .pulse-status-dot::after {

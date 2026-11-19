@@ -4,7 +4,7 @@ const PUBLIC_LOGIN_HTML = `<!doctype html>
 <html lang="vi" data-theme="deep-galaxy">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
 <title>KBOT Manager — Đăng Nhập Hệ Thống Quản Lý Bot Minecraft</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">

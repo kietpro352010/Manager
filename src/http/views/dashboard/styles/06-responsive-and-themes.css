@@ -359,6 +359,7 @@
   }
   .kpi-card {
     padding: 12px 14px;
+    overflow: clip;
   }
   .kpi-value {
     font-size: 22px;
@@ -446,10 +447,11 @@
     gap: 6px !important;
   }
   .schedule-row-top {
-    grid-template-columns: 32px minmax(0, 1fr);
+    grid-template-columns: 28px minmax(0, 1fr) auto auto;
   }
-  .schedule-inline {
+  .schedule-row-top .schedule-inline {
     grid-column: 1 / -1;
+    order: 4;
   }
   .schedule-inline .action-select,
   .schedule-inline .time-input,
@@ -567,25 +569,38 @@
   .fleet-toolbar-tools > button:last-child:nth-child(odd) {
     grid-column: 1 / -1;
   }
-  #detailChatPanel .inline {
-    flex-wrap: wrap;
+  #detailChatPanel .chat-row {
+    align-items: stretch;
   }
   #detailChatPanel #detailMessageInput {
-    flex: 1 1 100% !important;
-    width: 100% !important;
+    flex: 1 1 0% !important;
+    width: auto !important;
+    min-width: 0;
   }
-  #detailChatPanel .inline > button {
-    flex: 1 1 calc(50% - 6px);
-    justify-content: center;
+  #detailChatPanel .chat-row > button {
+    flex: 0 0 auto;
+    white-space: nowrap;
   }
-  #detailAccountPanel form > div[style*="display:flex"],
+  #detailAccountPanel > div[style*="display:flex"],
   #accountExpiredOverlay div[style*="display:flex"],
-  #link4mSettingsModal div[style*="display:flex"] {
+  #link4mSettingsModal div[style*="display:flex"],
+  #announcementDateRangeGroup > div[style*="display:flex"],
+  #announcementAdminModal .modal-actions {
     flex-wrap: wrap !important;
   }
-  #detailAccountPanel form > div[style*="display:flex"] > button {
-    flex: 1 1 calc(50% - 6px);
+  #announcementDateRangeGroup input[type="date"] {
+    flex: 1 1 120px;
+    min-width: 0;
+  }
+  #detailAccountPanel > div[style*="display:flex"] > button {
+    flex: 1 1 140px;
     justify-content: center;
+  }
+  #batchFixedSettings > div[style*="display:flex"],
+  #batchCycleSettings > div[style*="display:flex"],
+  #link4mSettingsModal div[style*="display:flex;gap:12px"] {
+    flex-direction: column !important;
+    gap: 10px !important;
   }
   #userEditModal div[style*="grid-template-columns:1fr 1fr"],
   #announcementAdminModal div[style*="grid-template-columns:1fr 1fr"],
@@ -593,17 +608,21 @@
   #detailProxyPanel div[style*="grid-template-columns:1fr 1fr"] {
     grid-template-columns: 1fr !important;
   }
-  #subPanelKeys .create-key-card > div[style*="display:flex"] {
+  #subPanelKeys .create-key-card > div[style*="display:flex"],
+  #keyManagementModal .modal-card > div > div[style*="display:flex"] {
     display: grid !important;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px !important;
     align-items: stretch !important;
   }
   #subPanelKeys .create-key-card > div[style*="display:flex"] > div > input,
-  #subPanelKeys .create-key-card > div[style*="display:flex"] > div > select {
+  #subPanelKeys .create-key-card > div[style*="display:flex"] > div > select,
+  #keyManagementModal .modal-card > div > div[style*="display:flex"] > div > input,
+  #keyManagementModal .modal-card > div > div[style*="display:flex"] > div > select {
     width: 100% !important;
   }
-  #subPanelKeys .create-key-card > div[style*="display:flex"] > button {
+  #subPanelKeys .create-key-card > div[style*="display:flex"] > button,
+  #keyManagementModal .modal-card > div > div[style*="display:flex"] > button {
     grid-column: 1 / -1;
     width: 100%;
     justify-content: center;
@@ -624,6 +643,11 @@
   #userManagementPage .full-page-header > div:last-child > button {
     flex: 1 1 calc(50% - 6px);
     justify-content: center;
+    padding: 9px 8px;
+    font-size: 12.5px;
+  }
+  #userManagementPage .full-page-header > div:last-child > button.primary {
+    flex: 1 1 100%;
   }
 }
 
@@ -777,10 +801,22 @@
   }
   #btnUserLink4mReward,
   #btnExpiredLink4mReward {
+    display: block !important;
     width: 100%;
-    justify-content: center;
-    padding: 11px 14px !important;
+    text-align: center;
+    padding: 10px 12px !important;
+    font-size: 12.5px !important;
+    line-height: 1.4;
+  }
+  #loginSubmitBtn,
+  #regSubmitBtn {
     font-size: 13px !important;
+    padding: 11px 10px !important;
+  }
+  .fleet-toolbar-primary > button,
+  .fleet-toolbar-tools > button {
+    padding: 9px 8px !important;
+    font-size: 12px !important;
   }
   .user-profile-dropdown {
     position: fixed;
