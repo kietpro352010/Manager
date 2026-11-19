@@ -1,7 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder } = require('discord.js');
-const { renderAdminStatus, renderAdminBots, buildAdminPasswordModal, embed } = require('../panels/renderer');
+const { renderAdminStatus, renderAdminBots, buildAdminPasswordModal, getWorkerState, embed } = require('../panels/renderer');
 const { resolveLinkedUser } = require('../handlers/panel-handler');
 
 function checkUserAdmin(interaction, services, user) {
@@ -87,7 +87,7 @@ async function execute(interaction, services) {
       guildId: interaction.guildId || services.config?.discordGuildId || '',
       adminRoleId: adminRole.id,
       userRoleId: userRole.id,
-      adminUserId: adminUser ? adminUser.id : (services.config.adminUserId || ''),
+      adminUserId: adminUser ? adminUser.id : (services.accessControl?.adminUserId || services.config.adminUserId || ''),
       configuredBy: interaction.user?.id || 'discord-setup'
     });
 
@@ -158,7 +158,9 @@ async function execute(interaction, services) {
     if (typeof services.registry?.setAdminPassword === 'function') {
       services.registry.setAdminPassword(hashed);
     }
-    if (typeof services.accessStore?.adapter?.revokeUserSessions === 'function') {
+    if (typeof services.accessStore?.adapter?.revokeAdminSessions === 'function') {
+      await services.accessStore.adapter.revokeAdminSessions().catch(() => null);
+    } else if (typeof services.accessStore?.adapter?.revokeUserSessions === 'function') {
       await services.accessStore.adapter.revokeUserSessions('admin').catch(() => null);
     }
     if (typeof services.invalidateAdminSessions === 'function') {
@@ -179,12 +181,12 @@ async function execute(interaction, services) {
   // 2. STATUS
   if (subcommand === 'status') {
     const allWorkers = services.registry?.list ? await services.registry.list() : [];
-    const onlineWorkers = allWorkers.filter((w) => w.status?.online).length;
+    const onlineWorkers = allWorkers.filter((w) => getWorkerState(w).isOnline).length;
     const stats = { totalWorkers: allWorkers.length, onlineWorkers };
 
     let dbOk = true;
     let dbLatencyMs = 0;
-    const store = services.store || services.supabaseClient;
+    const store = services.accessStore?.adapter ? services.accessStore : (services.store || services.supabaseClient);
     if (store?.adapter && typeof store.adapter.testConnection === 'function') {
       const start = Date.now();
       try {
@@ -238,7 +240,7 @@ async function execute(interaction, services) {
 
     let dbOk = false;
     let dbLatencyMs = -1;
-    const store = services.store || services.supabaseClient;
+    const store = services.accessStore?.adapter ? services.accessStore : (services.store || services.supabaseClient);
     if (store?.adapter && typeof store.adapter.testConnection === 'function') {
       const start = Date.now();
       try {

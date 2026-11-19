@@ -48,6 +48,15 @@ class AsyncKeyLock {
 
     let execTimer = null;
     let timedOut = false;
+    let taskSettled = false;
+    let cleanedUp = false;
+    const cleanupOnce = () => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      release();
+      this.decrementCount(key, tail);
+    };
+
     let taskPromise;
     try {
       taskPromise = Promise.resolve(task());
@@ -58,6 +67,7 @@ class AsyncKeyLock {
     const execTimeoutPromise = new Promise((_, reject) => {
       if (executionTimeoutMs > 0) {
         execTimer = setTimeout(() => {
+          if (taskSettled) return;
           timedOut = true;
           reject(new Error(`Execution timeout for local key lock: ${key} (${executionTimeoutMs}ms)`));
         }, executionTimeoutMs);
@@ -66,9 +76,9 @@ class AsyncKeyLock {
     });
 
     taskPromise.finally(() => {
+      taskSettled = true;
       if (timedOut) {
-        release();
-        this.decrementCount(key, tail);
+        cleanupOnce();
       }
     }).catch(() => {});
 
@@ -76,9 +86,8 @@ class AsyncKeyLock {
       return await Promise.race([taskPromise, execTimeoutPromise]);
     } finally {
       if (execTimer) clearTimeout(execTimer);
-      if (!timedOut) {
-        release();
-        this.decrementCount(key, tail);
+      if (!timedOut || taskSettled) {
+        cleanupOnce();
       }
     }
   }

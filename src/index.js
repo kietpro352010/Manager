@@ -100,7 +100,14 @@ async function main() {
   if (adminRoleId || userRoleId) {
     accessControl.setRoleIds(adminRoleId, userRoleId);
     if (!roleSettings?.guildId || !roleSettings?.adminRoleId || !roleSettings?.userRoleId) {
-      roleSettings = { guildId: config.discordGuildId, adminRoleId, userRoleId, configuredBy: 'environment-compat' };
+      roleSettings = {
+        ...(roleSettings && typeof roleSettings === 'object' ? roleSettings : {}),
+        guildId: roleSettings?.guildId || config.discordGuildId,
+        adminRoleId,
+        userRoleId,
+        ...(adminUserId ? { adminUserId } : {}),
+        configuredBy: roleSettings?.configuredBy || 'environment-compat'
+      };
       await accessStore.setSetting('discord_access', roleSettings);
     }
   }
@@ -111,6 +118,8 @@ async function main() {
     client,
     store: accessStore,
     adminUserId: roleSettings?.adminUserId || config.adminUserId,
+    telegramBotToken: config.telegramBotToken,
+    telegramChatId: config.telegramChatId,
     encryptionKey: config.encryptionKey,
     logger
   });
@@ -286,12 +295,16 @@ async function main() {
     }
 
     client.once(Events?.ClientReady || 'clientReady', async () => {
-      logger.info('discord_bot_ready', { botUserId: client.user?.id || 'unknown' });
-      if (!config.discordClientId || !targetGuildId) {
-        const autoGuildId = targetGuildId || client.guilds?.cache?.first()?.id || null;
-        await registerSlash(autoGuildId);
+      try {
+        logger.info('discord_bot_ready', { botUserId: client.user?.id || 'unknown' });
+        if (!config.discordClientId || !targetGuildId) {
+          const autoGuildId = targetGuildId || client.guilds?.cache?.first()?.id || null;
+          await registerSlash(autoGuildId);
+        }
+        wispbyteKeepAlive.start({ discordClient: client, adminRoleId: accessControl.adminRoleId });
+      } catch (readyErr) {
+        logger.error('discord_ready_handler_failed', { error: readyErr?.message || String(readyErr) });
       }
-      wispbyteKeepAlive.start({ discordClient: client, adminRoleId: accessControl.adminRoleId });
     });
 
     client.on('error', (err) => {

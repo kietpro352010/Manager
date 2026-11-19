@@ -98,7 +98,14 @@ async function execute(interaction, services) {
       logs = await services.workerClient.getBotLogs(fullBotId, linesOption);
     } else if (services?.registry?.getLogs) {
       logs = await services.registry.getLogs(fullBotId, linesOption);
-    } else if (services?.store?.getAuditLogs) {
+    }
+    if ((!Array.isArray(logs) || logs.length === 0) && services?.store?.get) {
+      const fullRecord = await services.store.get(fullBotId, { includeEvents: true }).catch(() => null);
+      if (Array.isArray(fullRecord?.events) && fullRecord.events.length > 0) {
+        logs = fullRecord.events;
+      }
+    }
+    if ((!Array.isArray(logs) || logs.length === 0) && services?.store?.getAuditLogs) {
       logs = await services.store.getAuditLogs({ botId: fullBotId, limit: linesOption });
     }
   } catch (err) {

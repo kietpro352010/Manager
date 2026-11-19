@@ -1145,7 +1145,7 @@ function handleOccupiedBotClick(event, directBotId, directBotLabel, directOldOwn
 
     const msgEl = document.getElementById('reassignBotConfirmMsg');
     if (msgEl) {
-      msgEl.innerHTML = '⚠️ Bot <strong>#' + botId + ' (' + escapeHtml(botLabel) + ')</strong> hiện đang thuộc về người dùng <strong>' + escapeHtml(oldOwnerName) + '</strong>.<br/><br/>Bạn có chắc chắn muốn hủy bot khỏi <strong>' + escapeHtml(oldOwnerName) + '</strong> để cấp quyền cho người dùng này không?';
+      msgEl.innerHTML = '⚠️ Bot <strong>#' + escapeHtml(botId) + ' (' + escapeHtml(botLabel) + ')</strong> hiện đang thuộc về người dùng <strong>' + escapeHtml(oldOwnerName) + '</strong>.<br/><br/>Bạn có chắc chắn muốn hủy bot khỏi <strong>' + escapeHtml(oldOwnerName) + '</strong> để cấp quyền cho người dùng này không?';
     }
     pendingBotReassignCallback = () => {
       chk.checked = true;

@@ -57,7 +57,8 @@ class SupabaseWorkerStore {
     this.adapter = client.adapter || null;
     this.sequenceLock = new AsyncKeyLock();
     this.lastAllocatedBotNumber = 0;
-    this.cacheTtlMs = Math.max(0, Number(cacheTtlMs) || 30000);
+    const parsedTtl = Number(cacheTtlMs);
+    this.cacheTtlMs = Number.isFinite(parsedTtl) && parsedTtl >= 0 ? parsedTtl : 30000;
     this._listCache = null;
     this._itemCache = new Map();
     this._numberCache = new Map();
@@ -81,7 +82,17 @@ class SupabaseWorkerStore {
   }
 
   _cloneWorker(worker) {
-    return worker ? { ...worker } : null;
+    if (!worker) return null;
+    try {
+      return structuredClone(worker);
+    } catch (_) {
+      return {
+        ...worker,
+        ...(worker.settings && typeof worker.settings === 'object' ? { settings: { ...worker.settings } } : {}),
+        ...(worker.status && typeof worker.status === 'object' ? { status: { ...worker.status } } : {}),
+        ...(Array.isArray(worker.events) ? { events: worker.events.slice() } : {})
+      };
+    }
   }
 
   _cacheWorker(worker) {
@@ -265,13 +276,16 @@ class SupabaseWorkerStore {
       throw rpcError;
     }
 
-    // Fallback: reset settings về rỗng
-    await this.update(workerId, {
+    // Fallback: reset settings về rỗng (verify worker exists to match RPC semantics)
+    const updated = await this.update(workerId, {
       settings: {},
       status: { state: 'offline', online: false },
       events: [],
       lastEvent: null
     });
+    if (!updated) {
+      throw new Error(`Worker ${workerId} could not be reset or does not exist.`);
+    }
   }
 
   async remove(workerId) {

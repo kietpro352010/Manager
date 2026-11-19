@@ -38,8 +38,8 @@ const SECRET_CACHE_TTL_MS = 60000; // 60s TTL for worker secretCache (WORKER-02)
 const ROTATION_GRACE_PERIOD_MS = 5 * 60 * 1000; // 5m grace period for rotated secrets (WKR-02)
 
 const VALID_WORKER_STATES = new Set([
-  'online', 'offline', 'error', 'maintenance', 'stopped',
-  'connecting', 'authenticating', 'entering', 'kicked', 'afk',
+  'online', 'offline', 'error', 'maintenance', 'stopped', 'starting', 'stopping',
+  'connecting', 'reconnecting', 'authenticating', 'entering', 'kicked', 'afk', 'afk_locked',
   'waking', 'registered', 'idle', 'running', 'banned',
   'ip_limited', 'disconnected', 'unknown'
 ]);
@@ -455,9 +455,14 @@ class WorkerRegistry {
   async credential(workerId) {
     const id = String(workerId || '').trim().toLowerCase();
     const cached = this.secretCache.get(id);
+    const now = Date.now();
+    let preservedGrace = null;
     if (cached) {
-      const isExpired = cached.cachedAt && (Date.now() - cached.cachedAt > SECRET_CACHE_TTL_MS);
+      const isExpired = cached.cachedAt && (now - cached.cachedAt > SECRET_CACHE_TTL_MS);
       if (isExpired) {
+        if (typeof cached === 'object' && cached.previousSecret && cached.graceUntil && now < cached.graceUntil) {
+          preservedGrace = { previousSecret: cached.previousSecret, graceUntil: cached.graceUntil };
+        }
         this.secretCache.delete(id);
       } else {
         if (typeof cached === 'object') {
@@ -476,6 +481,7 @@ class WorkerRegistry {
     if (secret) {
       this.secretCache.set(id, {
         secret,
+        ...(preservedGrace || {}),
         enabled: Boolean(record.enabled),
         cachedAt: Date.now()
       });
@@ -593,24 +599,25 @@ class WorkerRegistry {
     const cached = this.secretCache.get(id);
     if (!cached) return false;
     const now = Date.now();
-    const isExpired = cached.cachedAt && (now - cached.cachedAt > SECRET_CACHE_TTL_MS);
-    if (isExpired) {
-      this.secretCache.delete(id);
-      return false;
-    }
-    const expected = typeof cached === 'object' ? cached.secret : cached;
     if (typeof cached === 'object' && cached.enabled === false) return false;
-    if (!expected) return false;
-    const left = Buffer.from(expected, 'utf8');
+    const withinGrace = Boolean(typeof cached === 'object' && cached.previousSecret && cached.graceUntil && now < cached.graceUntil);
+    const isExpired = cached.cachedAt && (now - cached.cachedAt > SECRET_CACHE_TTL_MS);
     const right = Buffer.from(secret, 'utf8');
-    if (left.length === right.length && crypto.timingSafeEqual(left, right)) {
-      return true;
-    }
-    if (cached.previousSecret && cached.graceUntil && now < cached.graceUntil) {
+    if (withinGrace) {
       const prevLeft = Buffer.from(cached.previousSecret, 'utf8');
       if (prevLeft.length === right.length && crypto.timingSafeEqual(prevLeft, right)) {
         return true;
       }
+    }
+    if (isExpired) {
+      if (!withinGrace) this.secretCache.delete(id);
+      return false;
+    }
+    const expected = typeof cached === 'object' ? cached.secret : cached;
+    if (!expected) return false;
+    const left = Buffer.from(expected, 'utf8');
+    if (left.length === right.length && crypto.timingSafeEqual(left, right)) {
+      return true;
     }
     return false;
   }
@@ -1087,7 +1094,9 @@ class WorkerRegistry {
     }
     return {
       afkMode: 'still',
-      proxyEnabled: Boolean(updated?.proxyCiphertext || next.proxyCiphertext),
+      proxyEnabled: Object.hasOwn(next, 'proxyCiphertext')
+        ? Boolean(next.proxyCiphertext)
+        : Boolean(updated?.proxyCiphertext ?? updated?.settings?.proxyCiphertext ?? worker.settings?.proxyCiphertext),
       alias: next.alias ?? worker.alias ?? worker.name,
       tags: next.tags ?? worker.tags ?? [],
       rentable: next.rentable ?? worker.rentable !== false,
@@ -1124,11 +1133,14 @@ class WorkerRegistry {
   }
 
   summary(workerId) {
-    return this.summaryCache.get(String(workerId)) || null;
+    const id = String(workerId || '').trim().toLowerCase();
+    return this.summaryCache.get(id) || null;
   }
 
   getLogs(workerId) {
-    return this.botLogsCache.get(String(workerId)) || [];
+    const id = String(workerId || '').trim().toLowerCase();
+    const logs = this.botLogsCache.get(id);
+    return Array.isArray(logs) ? logs.slice() : [];
   }
 
   async updateAlias(workerId, alias) {

@@ -1988,7 +1988,7 @@ class SupabaseAdapter {
             let query = `select=*&order=timestamp.desc&limit=${limit}&offset=${offset}`;
             if (logType) {
                 if (logType === 'SYSTEM') {
-                    query += `&or=(log_type.eq.SYSTEM,log_type.eq.MANAGER)`;
+                    query += `&log_type=in.(SYSTEM,MANAGER)`;
                 } else {
                     query += `&log_type=eq.${encodeURIComponent(logType)}`;
                 }

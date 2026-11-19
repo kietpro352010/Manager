@@ -23,7 +23,7 @@ function safe(value, max = 250) {
 function button(label, customId, style = ButtonStyle.Secondary, disabled = false, emoji = null) {
   const btn = new ButtonBuilder()
     .setLabel(String(label).slice(0, 80))
-    .setCustomId(customId)
+    .setCustomId(String(customId || 'noop').slice(0, 100))
     .setStyle(style)
     .setDisabled(disabled);
   if (emoji) btn.setEmoji(emoji);
@@ -110,7 +110,7 @@ function renderBotsList({ user, workers = [], page = 0, pageSize = 5, notice = '
     }
   }
 
-  const hasOnline = workers.some((w) => w.status?.online);
+  const hasOnline = workers.some((w) => getWorkerState(w).isOnline);
   const mainEmbed = embed('KINGMC CLOUD 24/7 — DANH SÁCH BOT', desc, hasOnline ? COLOR_ONLINE : COLOR_BRAND);
 
   // Components
@@ -399,7 +399,11 @@ function renderBotLogs({ user, worker, logs = [] }) {
       // 5. Standard key-value secret fields
       .replace(/(password|token|secret|apikey|access_token|refresh_token)\s*[:=]\s*[^\s,;]+/gi, '$1: [REDACTED]')
       // 6. Word boundary key: / key=
-      .replace(/\b(key)\s*[:=]\s*[^\s,;]+/gi, '$1: [REDACTED]');
+      .replace(/\b(key)\s*[:=]\s*[^\s,;]+/gi, '$1: [REDACTED]')
+      // 7. Minecraft auth commands (/login, /dn, /register, /dk, /changepassword)
+      .replace(/(\/(?:[a-z0-9_-]+:)?(?:login|l|register|reg|dn|dk|changepassword|changepass)\s+).+$/gim, '$1[REDACTED]')
+      // 8. Neutralize Discord markdown code-block breakout
+      .replace(/```/g, '`\u200b`\u200b`');
   };
 
   const formattedLogs = safeLogs.map((l) => {

@@ -6,6 +6,7 @@ const {
   renderBotDetail,
   renderAdminStatus,
   renderAdminBots,
+  getWorkerState,
   embed
 } = require('../panels/renderer');
 const {
@@ -357,7 +358,9 @@ async function handlePanelInteraction(interaction, services) {
     if (typeof services.registry?.setAdminPassword === 'function') {
       services.registry.setAdminPassword(hashed);
     }
-    if (typeof services.accessStore?.adapter?.revokeUserSessions === 'function') {
+    if (typeof services.accessStore?.adapter?.revokeAdminSessions === 'function') {
+      await services.accessStore.adapter.revokeAdminSessions().catch(() => null);
+    } else if (typeof services.accessStore?.adapter?.revokeUserSessions === 'function') {
       await services.accessStore.adapter.revokeUserSessions('admin').catch(() => null);
     }
     if (typeof services.invalidateAdminSessions === 'function') {
@@ -439,8 +442,9 @@ async function handlePanelInteraction(interaction, services) {
   if (customId.startsWith('bot:view:') || customId.startsWith('bot:refresh:')) {
     const workerId = customId.split(':')[2];
     const worker = await services.registry.find(workerId);
+    const allWorkers = user.role === 'admin' ? null : (typeof services.registry?.list === 'function' ? await services.registry.list() : null);
 
-    if (!worker || !checkBotOwnership(user, workerId, worker)) {
+    if (!worker || !checkBotOwnership(user, workerId, worker, allWorkers)) {
       return safeUpdate(interaction, {
         embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Bạn không có quyền truy cập hoặc bot này không tồn tại.', 0xef4444)],
         components: [renderBotsList({ user, workers: await getUserBots(user, services) }).components[0]]
@@ -455,8 +459,9 @@ async function handlePanelInteraction(interaction, services) {
   if (customId.startsWith('bot:start:') || customId.startsWith('bot:stop:') || customId.startsWith('bot:restart:')) {
     const [, action, workerId] = customId.split(':');
     const worker = await services.registry.find(workerId);
+    const allWorkers = user.role === 'admin' ? null : (typeof services.registry?.list === 'function' ? await services.registry.list() : null);
 
-    if (!worker || !checkBotOwnership(user, workerId, worker)) {
+    if (!worker || !checkBotOwnership(user, workerId, worker, allWorkers)) {
       return safeUpdate(interaction, {
         embeds: [embed('⛔ TỪ CHỐI THAO TÁC', 'Bạn không có quyền điều khiển bot này.', 0xef4444)]
       });
@@ -543,16 +548,17 @@ async function handlePanelInteraction(interaction, services) {
 
     if (customId === 'admin:status' || customId === 'admin:status:refresh') {
       const allWorkers = await services.registry.list();
-      const onlineWorkers = allWorkers.filter((w) => w.status?.online).length;
+      const onlineWorkers = allWorkers.filter((w) => getWorkerState(w).isOnline).length;
       const stats = { totalWorkers: allWorkers.length, onlineWorkers };
       let dbCheck = { ok: true, latencyMs: 0 };
-      if (services.store?.adapter && typeof services.store.adapter.testConnection === 'function') {
+      const dbStore = services.accessStore?.adapter ? services.accessStore : services.store;
+      if (dbStore?.adapter && typeof dbStore.adapter.testConnection === 'function') {
         const start = Date.now();
-        const testRes = await services.store.adapter.testConnection().catch((err) => ({ ok: false, error: err.message }));
+        const testRes = await dbStore.adapter.testConnection().catch((err) => ({ ok: false, error: err.message }));
         dbCheck = { ok: Boolean(testRes?.ok), latencyMs: Date.now() - start, error: testRes?.error };
-      } else if (services.store && typeof services.store.ping === 'function') {
+      } else if (dbStore && typeof dbStore.ping === 'function') {
         const start = Date.now();
-        const pingRes = await services.store.ping().catch((err) => ({ ok: false, error: err.message }));
+        const pingRes = await dbStore.ping().catch((err) => ({ ok: false, error: err.message }));
         dbCheck = { ok: Boolean(pingRes?.ok), latencyMs: Date.now() - start };
       }
 

@@ -1812,7 +1812,7 @@ async function refreshRegisterCaptcha() {
   if (container) {
     const span = document.createElement('span');
     span.style.fontSize = '11px';
-    span.style.color = 'var(--muted)';
+    span.style.color = 'var(--text-muted)';
     span.textContent = 'Đang tải Captcha...';
     container.replaceChildren(span);
   }

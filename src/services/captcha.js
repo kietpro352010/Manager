@@ -87,24 +87,24 @@ function createCaptchaToken(answer, secret, ttlSec = DEFAULT_TTL_SEC) {
 }
 
 function verifyCaptchaToken(token, answer, secret, nonceStore = usedNonces) {
-  if (!token || typeof token !== 'string') {
-    return { valid: false, error: 'Token Captcha không được để trống' };
+  if (!token || typeof token !== 'string' || token.length > 2048) {
+    return { valid: false, error: 'Token Captcha không được để trống hoặc không hợp lệ' };
   }
-  if (!answer || typeof answer !== 'string') {
-    return { valid: false, error: 'Câu trả lời Captcha không được để trống' };
+  if (!answer || typeof answer !== 'string' || answer.length > 64) {
+    return { valid: false, error: 'Câu trả lời Captcha không được để trống hoặc không hợp lệ' };
   }
   const activeSecret = resolveCaptchaSecret(secret);
   try {
     const raw = Buffer.from(token, 'base64url').toString('utf8');
     const { ts, ttl, nonce, sig } = JSON.parse(raw);
-    if (!ts || !nonce || !sig) {
+    if (!ts || typeof ts !== 'number' || !Number.isFinite(ts) || !nonce || !sig) {
       return { valid: false, error: 'Token Captcha không hợp lệ' };
     }
     const effectiveTtlSec = (typeof ttl === 'number' && Number.isFinite(ttl) && ttl > 0 && ttl <= 3600)
       ? ttl
       : DEFAULT_TTL_SEC;
     const now = Date.now();
-    if (now - ts > effectiveTtlSec * 1000) {
+    if (ts > now + 60000 || now - ts > effectiveTtlSec * 1000) {
       return { valid: false, error: 'Mã Captcha đã hết hạn' };
     }
     if (nonceStore instanceof Map) {
@@ -140,19 +140,19 @@ function verifyCaptchaToken(token, answer, secret, nonceStore = usedNonces) {
 
 function generateCaptcha(secret, ttlSec = DEFAULT_TTL_SEC) {
   const activeSecret = resolveCaptchaSecret(secret);
-  // Math challenge
-  const isPlus = Math.random() < 0.65;
+  // Math challenge (using crypto.randomInt for unbiased challenge generation)
+  const isPlus = crypto.randomInt(0, 100) < 65;
   let text = '';
   let answer = '';
 
   if (isPlus) {
-    const n1 = Math.floor(Math.random() * 15) + 3;
-    const n2 = Math.floor(Math.random() * 12) + 2;
+    const n1 = crypto.randomInt(3, 18);
+    const n2 = crypto.randomInt(2, 14);
     text = `${n1} + ${n2} = ?`;
     answer = String(n1 + n2);
   } else {
-    const n1 = Math.floor(Math.random() * 12) + 8;
-    const n2 = Math.floor(Math.random() * 7) + 1;
+    const n1 = crypto.randomInt(8, 20);
+    const n2 = crypto.randomInt(1, 8);
     text = `${n1} - ${n2} = ?`;
     answer = String(n1 - n2);
   }

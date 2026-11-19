@@ -652,6 +652,9 @@ function createAdminApi({
       if (!botsToImport.length) {
         return res.status(400).json({ ok: false, error: 'Danh sách bot nhập trống.' });
       }
+      if (botsToImport.length > 50) {
+        return res.status(400).json({ ok: false, error: 'Chỉ được nhập tối đa 50 bot mỗi lần.' });
+      }
 
       const added = [];
       const skipped = [];
@@ -1228,17 +1231,24 @@ function createAdminApi({
           try {
             if (store.client && typeof store.client.from === 'function') {
               const keyId = k.keyId || k.id || `key_${crypto.randomUUID()}`;
+              const rawCode = String(k.code || k.key || k.keyCode || '').trim();
+              const normalizedCode = rawCode.toUpperCase().replace(/[^A-Z0-9-]/g, '');
+              const computedHash = normalizedCode
+                ? crypto.createHash('sha256').update(normalizedCode).digest('hex')
+                : '';
               const row = {
                 id: keyId,
                 key_id: keyId,
-                code: k.code || k.key || k.keyCode || '',
-                code_hash: k.codeHash || k.code_hash || '',
-                code_suffix: k.codeSuffix || k.code_suffix || '',
+                code: rawCode,
+                code_hash: k.codeHash || k.code_hash || computedHash,
+                code_suffix: k.codeSuffix || k.code_suffix || (rawCode ? rawCode.slice(-4) : ''),
                 status: k.status || 'unused',
                 days: Number(k.days ?? 30),
                 is_permanent: Boolean(k.isPermanent ?? k.is_permanent),
                 bot_count: Number(k.botCount ?? k.bot_count ?? 1),
                 worker_ids: Array.isArray(k.workerIds || k.worker_ids) ? (k.workerIds || k.worker_ids) : [],
+                allow_account_change: (k.allowAccountChange ?? k.allow_account_change) !== false,
+                note: String(k.note || ''),
                 plan_name: k.planName || k.plan_name || 'Standard',
                 max_uses: Number(k.maxUses ?? k.max_uses ?? 1),
                 used_count: Number(k.usedCount ?? k.used_count ?? 0),
@@ -1558,6 +1568,7 @@ function createAdminApi({
           body: JSON.stringify({
             content: '🔔 **KingMC Manager**: Kiểm tra kết nối Discord Webhook thành công!'
           }),
+          redirect: 'manual',
           signal: AbortSignal.timeout(8000)
         });
         if (!resp.ok) {
@@ -1574,6 +1585,7 @@ function createAdminApi({
             text: '🔔 <b>KingMC Manager</b>: Kiểm tra kết nối Telegram thành công!',
             parse_mode: 'HTML'
           }),
+          redirect: 'manual',
           signal: AbortSignal.timeout(8000)
         });
         if (!resp.ok) {

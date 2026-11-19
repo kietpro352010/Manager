@@ -603,7 +603,7 @@ function createUserApi({
         .digest('hex')
         .slice(0, 16);
 
-      if (req.query?.sig && String(req.query.sig) === sig) {
+      if (typeof req.query?.sig === 'string' && req.query.sig === sig) {
         return res.json({
           ok: true,
           unchanged: true,
@@ -732,7 +732,7 @@ function createUserApi({
             : `${worker.status?.state || ''}:${inventory.revision || 0}:${logs.length}`
         );
 
-    const reqRev = req.query?.rev !== undefined ? String(req.query.rev) : '';
+    const reqRev = typeof req.query?.rev === 'string' ? req.query.rev : '';
     if (reqRev && reqRev === rev) {
       return res.json({ ok: true, unchanged: true, rev });
     }
@@ -954,13 +954,23 @@ function createUserApi({
   });
 
   // 8. SEND CHAT MESSAGE VIA BOT (accepts both message and text)
+  const RESTRICTED_MC_CHAT_CMD_RE = /^\/\s*(?:[a-z0-9_-]+:)?(?:register|reg|login|l|dn|dk|changepassword|changepass|password|unregister|email)\b/i;
+  const redactChatCommandForAudit = (msg) => String(msg || '').replace(
+    /(\/(?:[a-z0-9_-]+:)?(?:login|l|register|reg|dn|dk|changepassword|changepass|password|unregister|email)\s+).+$/gim,
+    '$1[REDACTED]'
+  );
+
   router.post('/bot/:id/send', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
 
     const worker = perm.worker;
-    const message = String(req.body?.text || req.body?.message || '').trim();
+    const rawMessage = req.body?.text ?? req.body?.message;
+    const message = (typeof rawMessage === 'string' || typeof rawMessage === 'number') ? String(rawMessage).trim() : '';
     if (!message) return res.status(400).json({ ok: false, error: 'Nội dung tin nhắn không được để trống.' });
+    if (req.managerAuthSession?.role !== 'admin' && req.managerAuthSession?.allowAccountChange === false && RESTRICTED_MC_CHAT_CMD_RE.test(message)) {
+      return res.status(403).json({ ok: false, error: 'Tài khoản thuê bị giới hạn không được gửi lệnh đăng nhập / đổi mật khẩu Minecraft.' });
+    }
 
     try {
       const dispatchResult = await broker.dispatch(worker.workerId, 'chat', { message });
@@ -969,16 +979,17 @@ function createUserApi({
         return res.status(evaluated.status).json(evaluated.payload);
       }
 
+      const safeAuditMsg = redactChatCommandForAudit(message);
       await store.addAudit({
         action: 'BOT_CHAT_SENT',
         targetId: worker.workerId,
         actorId: req.managerAuthSession.username,
-        details: { message: message.slice(0, 100) }
+        details: { message: safeAuditMsg.slice(0, 100) }
       });
 
       return res.json({
         ok: true,
-        message: `Đã gửi tin nhắn tới server: "${message}"`,
+        message: `Đã gửi tin nhắn tới server: "${safeAuditMsg}"`,
         result: evaluated.result
       });
     } catch (error) {
@@ -990,6 +1001,9 @@ function createUserApi({
   router.post(['/bot/:id/auto-chat', '/bot/:id/autoChat'], requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (req.managerAuthSession?.role !== 'admin' && req.managerAuthSession?.allowAccountChange === false) {
+      return res.status(403).json({ ok: false, error: 'Tài khoản của bạn bị hạn chế thay đổi cấu hình lịch Auto Chat của bot.' });
+    }
 
     if (!Array.isArray(req.body?.autoChatSchedules)) {
       return res.status(400).json({ ok: false, error: 'Schedules must be an array.' });
@@ -1009,6 +1023,9 @@ function createUserApi({
   router.post(['/bot/:id/bot-schedules', '/bot/:id/botSchedules'], requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (req.managerAuthSession?.role !== 'admin' && req.managerAuthSession?.allowAccountChange === false) {
+      return res.status(403).json({ ok: false, error: 'Tài khoản của bạn bị hạn chế thay đổi lịch hoạt động Bot.' });
+    }
 
     if (!Array.isArray(req.body?.botSchedules)) {
       return res.status(400).json({ ok: false, error: 'Schedules must be an array.' });
@@ -1034,9 +1051,13 @@ function createUserApi({
     const perm = await checkBotPermissionAsync(req, req.params.id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
 
+    const normId = String(perm.worker.workerId || '').trim().toLowerCase();
     if (registry.botLogsCache) {
-      registry.botLogsCache.set(perm.worker.workerId, []);
+      registry.botLogsCache.set(normId, []);
     }
+    if (registry.botLogRev) registry.botLogRev.set(normId, (registry.botLogRev.get(normId) || 0) + 1);
+    if (registry.botChatLogRev) registry.botChatLogRev.set(normId, (registry.botChatLogRev.get(normId) || 0) + 1);
+    registry.bumpRevision?.(normId);
     return res.json({ ok: true, message: 'Đã xóa nhật ký sự kiện.' });
   });
 
@@ -1097,7 +1118,10 @@ function createUserApi({
 
     const invAction = req.params.invAction;
     try {
-      const dispatchResult = await broker.dispatch(perm.worker.workerId, 'inventory', { action: invAction, ...req.body });
+      const invPayload = (req.body && typeof req.body === 'object' && !Array.isArray(req.body))
+        ? { ...req.body, action: invAction }
+        : { action: invAction };
+      const dispatchResult = await broker.dispatch(perm.worker.workerId, 'inventory', invPayload);
       const evaluated = evaluateCommandDispatch(dispatchResult, `Thao tác ${invAction} kho đồ không thành công`);
       if (!evaluated.success) {
         const errPayload = { ...evaluated.payload };
@@ -1320,6 +1344,9 @@ function createUserApi({
   });
 
   router.post('/bot/:id/tags', requireSession, async (req, res) => {
+    if (req.managerAuthSession?.role !== 'admin') {
+      return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên (ADMIN) mới được chỉnh sửa nhãn bot.' });
+    }
     const perm = await checkBotPermissionAsync(req, req.params.id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
 
@@ -1434,6 +1461,9 @@ function createUserApi({
       session.status = 'active';
       session.inGracePeriod = false;
       session.expiresAtRental = result.expiresAt;
+      if (result.allowAccountChange !== undefined) {
+        session.allowAccountChange = result.allowAccountChange !== false;
+      }
       session._authVerifiedAt = 0;
       store?.invalidateUserCache?.(session.userId, session.username);
 

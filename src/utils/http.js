@@ -36,8 +36,9 @@ function sleepAbortable(ms, signal) {
 }
 
 async function fetchWithRetry(url, options = {}, { maxRetries = 3, initialDelayMs = 400, maxDelayMs = 3000, timeoutMs = 15000, logger = console } = {}) {
+  const attemptsLimit = Math.max(1, Number(maxRetries) || 1);
   let attempt = 0;
-  while (attempt < maxRetries) {
+  while (attempt < attemptsLimit) {
     if (options.signal?.aborted) {
       throw options.signal.reason || Object.assign(new Error('HTTP request aborted'), { name: 'AbortError' });
     }
@@ -68,11 +69,18 @@ async function fetchWithRetry(url, options = {}, { maxRetries = 3, initialDelayM
         signal = controller.signal;
       }
       const res = await fetch(url, { ...options, signal });
-      if (attempt < maxRetries && [408, 429, 500, 502, 503, 504].includes(res.status)) {
+      if (attempt < attemptsLimit && [408, 429, 500, 502, 503, 504].includes(res.status)) {
         if (options.signal?.aborted) return res;
-        const delay = Math.min(maxDelayMs, initialDelayMs * Math.pow(2, attempt - 1)) + Math.floor(Math.random() * 200);
+        let delay = Math.min(maxDelayMs, initialDelayMs * Math.pow(2, attempt - 1)) + Math.floor(Math.random() * 200);
+        if (res.status === 429) {
+          const retryAfter = Number(res.headers?.get?.('retry-after'));
+          if (Number.isFinite(retryAfter) && retryAfter > 0) {
+            delay = Math.min(maxDelayMs, Math.max(delay, Math.round(retryAfter * 1000)));
+          }
+        }
+        await res.body?.cancel?.().catch(() => {});
         if (logger && typeof logger.warn === 'function') {
-          logger.warn(`[HTTP RETRY] HTTP ${res.status} khi gọi ${String(url).split('?')[0]}. Thử lại lần ${attempt}/${maxRetries} sau ${delay}ms...`);
+          logger.warn(`[HTTP RETRY] HTTP ${res.status} khi gọi ${String(url).split('?')[0]}. Thử lại lần ${attempt}/${attemptsLimit} sau ${delay}ms...`);
         }
         await sleepAbortable(delay, options.signal);
         continue;
@@ -84,10 +92,10 @@ async function fetchWithRetry(url, options = {}, { maxRetries = 3, initialDelayM
       }
       const isAbort = err.name === 'AbortError' || err.name === 'TimeoutError' || /timeout|aborted/i.test(err.message);
       const isConnError = /fetch failed|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT/i.test(err.message);
-      if (attempt < maxRetries && (isAbort || isConnError)) {
+      if (attempt < attemptsLimit && (isAbort || isConnError)) {
         const delay = Math.min(maxDelayMs, initialDelayMs * Math.pow(2, attempt - 1)) + Math.floor(Math.random() * 200);
         if (logger && typeof logger.warn === 'function') {
-          logger.warn(`[HTTP RETRY] Lỗi mạng (${err.message}) khi gọi ${String(url).split('?')[0]}. Thử lại lần ${attempt}/${maxRetries} sau ${delay}ms...`);
+          logger.warn(`[HTTP RETRY] Lỗi mạng (${err.message}) khi gọi ${String(url).split('?')[0]}. Thử lại lần ${attempt}/${attemptsLimit} sau ${delay}ms...`);
         }
         await sleepAbortable(delay, options.signal);
         continue;
@@ -104,12 +112,21 @@ async function fetchWithRetry(url, options = {}, { maxRetries = 3, initialDelayM
 
 function createGzipMiddleware({ minLength = 512, level = 5 } = {}) {
   return function gzipMiddleware(req, res, next) {
-    const acceptEncoding = req.headers['accept-encoding'] || '';
+    const acceptEncoding = String(req.headers['accept-encoding'] || '').toLowerCase();
     if (!acceptEncoding.includes('gzip')) return next();
 
     const originalSend = res.send;
     res.send = function (body) {
-      if (!body) return originalSend.call(this, body);
+      if (!body || res.headersSent || req.method === 'HEAD' || res.statusCode === 204 || res.statusCode === 304) {
+        return originalSend.call(this, body);
+      }
+      if (res.getHeader('Content-Encoding')) {
+        return originalSend.call(this, body);
+      }
+      const ct = String(res.getHeader('Content-Type') || '').toLowerCase();
+      if (ct && /^(?:image\/(?!svg\+xml)|video\/|audio\/|font\/|application\/(?:octet-stream|zip|gzip|pdf))/i.test(ct)) {
+        return originalSend.call(this, body);
+      }
       let buffer;
       if (Buffer.isBuffer(body)) {
         buffer = body;
@@ -126,6 +143,12 @@ function createGzipMiddleware({ minLength = 512, level = 5 } = {}) {
         }
       } else {
         return originalSend.call(this, body);
+      }
+
+      if (typeof res.vary === 'function') res.vary('Accept-Encoding');
+      else if (!String(res.getHeader('Vary') || '').toLowerCase().includes('accept-encoding')) {
+        const curVary = res.getHeader('Vary');
+        res.setHeader('Vary', curVary ? `${curVary}, Accept-Encoding` : 'Accept-Encoding');
       }
 
       if (buffer.length >= minLength) {

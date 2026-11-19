@@ -155,7 +155,11 @@ class AccessControl {
       expiresAt,
       planName: String(options.planName || 'Vĩnh viễn').slice(0, 64),
       note: String(options.note || '').slice(0, 300),
-      username: String(options.username || '').slice(0, 64)
+      username: String(options.username || '').slice(0, 64),
+      ...(options.allowAccountChange !== undefined ? { allowAccountChange: Boolean(options.allowAccountChange) } : {}),
+      ...(options.botCount !== undefined ? { botCount: options.botCount } : {}),
+      ...(options.botAliases !== undefined ? { botAliases: options.botAliases } : {}),
+      ...(options.lockReason !== undefined ? { lockReason: String(options.lockReason || '').slice(0, 200) } : {})
     }, actorId);
   }
 

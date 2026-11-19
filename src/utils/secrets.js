@@ -102,12 +102,15 @@ function decryptSecret(record, key, previousKey = null) {
   const iv = Buffer.from(ivPart, 'base64');
   const tag = Buffer.from(tagPart, 'base64');
   const ciphertext = Buffer.from(ciphertextPart, 'base64');
+  if (iv.length !== 12 || tag.length !== 16) {
+    throw new Error('Stored worker credential has invalid GCM IV or authentication tag length.');
+  }
 
   const candidates = getLegacyCredentialKeys(key, previousKey);
   let lastError = null;
   for (const candidate of candidates) {
     try {
-      const decipher = crypto.createDecipheriv('aes-256-gcm', candidate, iv);
+      const decipher = crypto.createDecipheriv('aes-256-gcm', candidate, iv, { authTagLength: 16 });
       decipher.setAuthTag(tag);
       return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
     } catch (err) {
@@ -208,13 +211,13 @@ function hashPassword(password, salt = null) {
   return `scrypt$N=16384,r=8,p=1$${actualSalt}$${derived.toString('hex')}`;
 }
 
-function verifyPassword(password, storedValue) {
+function verifyPassword(password, storedValue, key = null, previousKey = null) {
   const stored = String(storedValue || '').trim();
   const candidate = String(password || '');
   if (!stored || !candidate) return false;
 
   if (isStoredCredentialCiphertext(stored)) {
-    const plain = decryptUserPassword(stored);
+    const plain = decryptUserPassword(stored, key, previousKey);
     return plain !== null && timingSafeStringEquals(candidate, plain);
   }
 
