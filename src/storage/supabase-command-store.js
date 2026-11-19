@@ -994,7 +994,11 @@ class SupabaseCommandStore {
     } catch (_) {}
 
     try {
-      await this.client.from(TABLE).update({ status: 'expired' }).eq('command_id', String(commandId));
+      await this.client
+        .from(TABLE)
+        .update({ status: 'expired' })
+        .eq('command_id', String(commandId))
+        .in('status', ['queued', 'delivered']);
     } catch (_) {}
   }
 

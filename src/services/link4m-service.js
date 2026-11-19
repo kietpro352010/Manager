@@ -403,6 +403,11 @@ class Link4mService {
         );
         if (rpcRes) {
           if (rpcRes.ok) {
+            if (typeof this.store.invalidateUserCache === 'function') {
+              this.store.invalidateUserCache(attempt.userId, member.username);
+            } else if (typeof this.store.invalidateCache === 'function') {
+              this.store.invalidateCache();
+            }
             return {
               replayed: Boolean(rpcRes.replayed),
               rewardHours: rpcRes.addedHours || rpcRes.rewardHours || attempt.rewardHours || 12,
@@ -440,6 +445,12 @@ class Link4mService {
         }, `link4m:${attempt.attemptId}`);
 
         if (!completed) throw new Error('Không thể hoàn tất cộng thời gian thuê.');
+
+        if (typeof this.store.invalidateUserCache === 'function') {
+          this.store.invalidateUserCache(attempt.userId, member.username);
+        } else if (typeof this.store.invalidateCache === 'function') {
+          this.store.invalidateCache();
+        }
 
         if (typeof this.store.addAudit === 'function') {
           await this.store.addAudit({

@@ -10,7 +10,9 @@ const {
 } = require('../panels/renderer');
 const {
   verifyUserPassword,
-  verifyAdminPassword
+  verifyAdminPassword,
+  hashAdminPassword,
+  encryptUserPassword
 } = require('../../utils/secrets');
 
 function isIgnorable(err) {
@@ -184,7 +186,7 @@ async function handlePanelInteraction(interaction, services) {
       if (roleSettings?.guildId) effectiveGuildId = String(roleSettings.guildId).trim();
     } catch (_) {}
   }
-  if (effectiveGuildId && interaction?.guildId && interaction.guildId !== effectiveGuildId) {
+  if (effectiveGuildId && interaction?.guildId !== effectiveGuildId) {
     await safeReply(interaction, {
       content: 'This manager is available only in its configured Discord server.',
       flags: MessageFlags.Ephemeral
@@ -248,7 +250,7 @@ async function handlePanelInteraction(interaction, services) {
       });
     }
 
-    const passMatch = verifyUserPassword(cleanPassword, user.password);
+    const passMatch = verifyUserPassword(cleanPassword, user.password, services.config?.encryptionKey || services.registry?.encryptionKey);
     if (!passMatch) {
       return safeReply(interaction, {
         embeds: [embed('❌ ĐĂNG NHẬP THẤT BẠI', 'Tên đăng nhập hoặc mật khẩu không chính xác.', 0xef4444)]
@@ -259,6 +261,17 @@ async function handlePanelInteraction(interaction, services) {
       return safeReply(interaction, {
         embeds: [embed('⛔ TÀI KHOẢN BỊ KHÓA', 'Tài khoản của bạn đã bị vô hiệu hóa bởi Quản trị viên.', 0xef4444)]
       });
+    }
+
+    // Auto-migrate legacy scrypt$/plaintext user password to reversible AES-256-GCM
+    const encKey = services.config?.encryptionKey || services.registry?.encryptionKey;
+    if (encKey && typeof user.password === 'string' && !user.password.startsWith('enc$') && typeof services.accessStore?.setAccess === 'function') {
+      try {
+        await services.accessStore.setAccess(user.userId || user.username, {
+          ...user,
+          password: encryptUserPassword(cleanPassword, encKey)
+        });
+      } catch (_) {}
     }
 
     resetLoginRateLimit(discordUserId);
@@ -273,6 +286,54 @@ async function handlePanelInteraction(interaction, services) {
           `• **Gói dịch vụ:** ${user.planName || 'Gói tiêu chuẩn'}\n` +
           `• **Hạn sử dụng:** ${user.isPermanent ? 'Vĩnh viễn' : (user.expiresAt ? new Date(user.expiresAt).toLocaleDateString('vi-VN') : '—')}\n\n` +
           `👉 Sử dụng lệnh \`/bots\` để mở bảng điều khiển và theo dõi bot của bạn.`,
+          0x22c55e
+        )
+      ]
+    });
+  }
+
+  // --------------------------------------------------------------------------
+  // A2. MODAL SUBMIT: /admin password (SEC-07: hidden modal input)
+  // --------------------------------------------------------------------------
+  if (interaction.isModalSubmit() && interaction.customId === 'admin_password_modal') {
+    if (interaction.deferred || interaction.replied) return;
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    const linkedUser = await resolveLinkedUser(interaction, services);
+    const isSuperAdmin = linkedUser?.role === 'admin' ||
+      (services?.config?.adminUserId && services.config.adminUserId === discordUserId) ||
+      (services?.accessControl?.adminUserId && services.accessControl.adminUserId === discordUserId) ||
+      interaction.guild?.ownerId === discordUserId;
+
+    if (!isSuperAdmin) {
+      return safeReply(interaction, {
+        embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Chỉ Chủ sở hữu server hoặc SuperAdmin mới có quyền đổi mật khẩu quản trị viên.', 0xef4444)]
+      });
+    }
+
+    const newPassword = String(interaction.fields.getTextInputValue('new_password') || '');
+    if (!newPassword || newPassword.length < 6 || newPassword.length > 256) {
+      return safeReply(interaction, {
+        embeds: [embed('❌ LỖI', 'Mật khẩu quản trị viên phải dài từ 6 đến 256 ký tự.', 0xef4444)]
+      });
+    }
+
+    const hashed = hashAdminPassword(newPassword);
+    if (services.accessStore && typeof services.accessStore.setSetting === 'function') {
+      await services.accessStore.setSetting('admin_credentials', {
+        passwordHash: hashed,
+        updatedAt: new Date().toISOString()
+      });
+    }
+    if (typeof services.registry?.setAdminPassword === 'function') {
+      services.registry.setAdminPassword(hashed);
+    }
+
+    return safeReply(interaction, {
+      embeds: [
+        embed(
+          '✅ ĐỔI MẬT KHẨU ADMIN THÀNH CÔNG',
+          'Đã cập nhật mật khẩu cho tài khoản Quản trị viên Web (`admin`). Bạn có thể dùng mật khẩu mới này để đăng nhập vào Web Dashboard ngay lập tức.',
           0x22c55e
         )
       ]
@@ -390,6 +451,15 @@ async function handlePanelInteraction(interaction, services) {
     try {
       const dispatchRes = await services.broker.dispatch(workerId, action);
       if (dispatchRes?.delivered === true && !dispatchRes?.timedOut && dispatchRes?.result?.ok !== false) {
+        if (typeof services.registry?.updateStatus === 'function') {
+          const currentWorker = (await services.registry.find(workerId).catch(() => null)) || worker;
+          const currentStatus = currentWorker?.status || {};
+          await services.registry.updateStatus(
+            workerId,
+            { ...currentStatus, manuallyStopped: action === 'stop' },
+            action === 'stop' ? 'discord-stop' : 'discord-start'
+          ).catch(() => {});
+        }
         const actionLabels = { start: 'BẬT (START)', stop: 'TẮT (STOP)', restart: 'KHỞI ĐỘNG LẠI (RESTART)' };
         notice = `✅ Đã thực thi lệnh **${actionLabels[action] || action}** thành công cho bot \`${workerId}\`!`;
       } else {

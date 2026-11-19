@@ -33,12 +33,16 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
         return res.status(404).json({ ok: false, error: 'worker_not_found_or_disabled' });
       }
 
-      // Check alerts
+      // Check alerts (resolve human-friendly bot label and pass exact parameter order)
       if (adminNotifier) {
-        if (event.type === 'bot_death') {
-          adminNotifier.notifyBotDeath(req.workerId, event.reason || 'Không rõ nguyên nhân');
-        } else if (event.type === 'low_totem') {
-          adminNotifier.notifyLowTotem(req.workerId, event.count || 0);
+        if (event.type === 'bot_death' || event.type === 'low_totem') {
+          const workerMeta = await registry.find(req.workerId).catch(() => null);
+          const botLabel = workerMeta?.alias || workerMeta?.name || req.workerId;
+          if (event.type === 'bot_death') {
+            adminNotifier.notifyBotDeath(req.workerId, botLabel, event.coords || event.position || event.reason || null);
+          } else if (event.type === 'low_totem') {
+            adminNotifier.notifyLowTotem(req.workerId, botLabel, event.count ?? event.totemCount ?? 0);
+          }
         }
       }
 

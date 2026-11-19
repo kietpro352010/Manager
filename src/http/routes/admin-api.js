@@ -3,13 +3,81 @@
 const crypto = require('node:crypto');
 const express = require('express');
 const {
+  encryptSecret,
   decryptSecret,
   decryptUserPassword,
   hashAdminPassword,
   isStoredCredentialCiphertext
 } = require('../../utils/secrets');
+const { validateSafeBotUrl } = require('../../services/proxy-validation');
 const rawSchema = require('../../storage/schema-sql');
 const SCHEMA_SQL = typeof rawSchema === 'string' ? rawSchema : (rawSchema?.SCHEMA_SQL || '');
+
+const USER_ALLOWED_FIELDS = [
+  'status', 'expiresAt', 'planName', 'note', 'workerIds', 'assignedBotIds',
+  'botCount', 'username', 'password', 'isPermanent', 'botAliases',
+  'allowAccountChange', 'lockReason'
+];
+
+function csvEscapeCell(val) {
+  let str = val === null || val === undefined
+    ? ''
+    : (typeof val === 'object' ? JSON.stringify(val) : String(val));
+  if (/^[=+\-@\t\r]/.test(str)) {
+    str = `'${str}`;
+  }
+  return `"${str.replace(/"/g, '""')}"`;
+}
+
+function validateDiscordWebhookUrl(urlStr) {
+  const raw = String(urlStr || '').trim();
+  if (!raw) return '';
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error('Discord Webhook URL không đúng định dạng.');
+  }
+  const host = parsed.hostname.toLowerCase();
+  const isDiscordHost = host === 'discord.com' || host === 'discordapp.com' || host === 'ptb.discord.com' || host === 'canary.discord.com';
+  if (parsed.protocol !== 'https:' || !isDiscordHost || !parsed.pathname.startsWith('/api/webhooks/')) {
+    throw new Error('Discord Webhook URL phải là liên kết HTTPS hợp lệ từ discord.com/api/webhooks/...');
+  }
+  return raw;
+}
+
+function normalizeWebhookSettings(raw = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  return {
+    enabled: Boolean(src.enabled),
+    discordUrl: String(src.discordUrl || src.webhookUrl || '').trim(),
+    telegramToken: String(src.telegramToken || '').trim(),
+    telegramChatId: String(src.telegramChatId || '').trim(),
+    notifyOnOffline: src.notifyOnOffline !== false,
+    notifyOnRecover: src.notifyOnRecover !== false,
+    notifyOnLowTotem: src.notifyOnLowTotem !== false,
+    notifyOnLowHealth: Boolean(src.notifyOnLowHealth),
+    notifyOnDeath: src.notifyOnDeath !== false,
+    offlineThresholdMinutes: Math.max(1, Math.min(1440, Number(src.offlineThresholdMinutes) || 5))
+  };
+}
+
+function filterWorkersByTag(workers, rawTag, assignedWorkerIds) {
+  const tag = String(rawTag || '').trim().toLowerCase();
+  if (!tag || tag === 'all') return workers;
+  const assignedSet = assignedWorkerIds instanceof Set ? assignedWorkerIds : new Set();
+  if (tag === 'sys:rented') {
+    return workers.filter((w) => assignedSet.has(String(w.workerId).toLowerCase()));
+  }
+  if (tag === 'sys:rentable') {
+    return workers.filter((w) => w.rentable !== false && !assignedSet.has(String(w.workerId).toLowerCase()));
+  }
+  if (tag === 'sys:not-rentable') {
+    return workers.filter((w) => w.rentable === false);
+  }
+  const cleanTag = tag.replace(/^#/, '');
+  return workers.filter((w) => Array.isArray(w.tags) && w.tags.some((t) => String(t).trim().toLowerCase().replace(/^#/, '') === cleanTag));
+}
 
 function safeDecryptBotJson(ciphertext, key) {
   if (!ciphertext || !key) return null;
@@ -73,29 +141,20 @@ function createAdminApi({
           ? [...new Set(user.workerIds.map((workerId) => String(workerId).trim().toLowerCase()).filter(Boolean))]
           : []
       }));
-      const usersById = new Map();
+      // Build ownership map strictly in RAM (eliminates N+1 store.assignedUser() queries!)
+      const ownerByWorkerId = new Map();
       for (const user of users) {
-        for (const key of [user.id, user.userId, user.username]) {
-          if (key) usersById.set(String(key).toLowerCase(), user);
+        for (const wid of user.assignedBotIds) {
+          if (!ownerByWorkerId.has(wid)) {
+            ownerByWorkerId.set(wid, { userId: user.id, username: user.username });
+          }
         }
       }
-      const ownership = await Promise.all(workers.map(async (worker) => {
-        let assignment = typeof store.assignedUser === 'function'
-          ? await store.assignedUser(worker.workerId)
-          : null;
-        if (!assignment?.userId) {
-          const fallbackOwner = users.find((user) => user.assignedBotIds.includes(String(worker.workerId)));
-          if (fallbackOwner) assignment = { userId: fallbackOwner.id, username: fallbackOwner.username };
-        }
-        if (!assignment?.userId) return [worker.workerId, null];
-        const owner = usersById.get(String(assignment.userId).toLowerCase())
-          || usersById.get(String(assignment.username || '').toLowerCase());
-        return [worker.workerId, {
-          userId: owner?.id || assignment.userId,
-          username: owner?.username || assignment.username || String(assignment.userId)
-        }];
-      }));
-      const botOwnership = Object.fromEntries(ownership);
+      const botOwnership = {};
+      for (const worker of workers) {
+        const key = String(worker.workerId).trim().toLowerCase();
+        botOwnership[worker.workerId] = ownerByWorkerId.get(key) || ownerByWorkerId.get(String(worker.botNumber || '')) || null;
+      }
       const availableBots = workers.map((worker) => ({
         id: String(worker.workerId),
         workerId: String(worker.workerId),
@@ -111,6 +170,23 @@ function createAdminApi({
     }
   });
 
+  function sanitizeUserUpdateBody(rawBody) {
+    const src = rawBody && typeof rawBody === 'object' ? rawBody : {};
+    const values = {};
+    for (const k of USER_ALLOWED_FIELDS) {
+      if (src[k] !== undefined) values[k] = src[k];
+    }
+    if (values.workerIds === undefined && values.assignedBotIds !== undefined) {
+      values.workerIds = values.assignedBotIds;
+    }
+    delete values.assignedBotIds;
+    // Never allow mass-assignment of privileged roles via user CRUD
+    if (src.role !== undefined && String(src.role).trim().toLowerCase() === 'user') {
+      values.role = 'user';
+    }
+    return values;
+  }
+
   router.post('/users', async (req, res) => {
     try {
       const { action, userId, values, id, ...rest } = req.body || {};
@@ -120,12 +196,18 @@ function createAdminApi({
         if (!targetUserId) return res.status(400).json({ ok: false, error: 'Thiếu userId cần xóa.' });
         await store.removeAccess(targetUserId);
         if (typeof invalidateUserSessions === 'function') invalidateUserSessions(targetUserId);
-        await store.addAudit({ action: 'ADMIN_DELETE_USER', targetId: targetUserId, actorId: req.managerAuthSession.username });
+        await store.addAudit({
+          action: 'ADMIN_DELETE_USER',
+          targetId: targetUserId,
+          actorId: req.managerAuthSession.username,
+          actorRole: 'admin',
+          actorIp: req.ip || '127.0.0.1'
+        });
         return res.json({ ok: true, message: 'Đã xóa người dùng thành công.' });
       }
 
-      const updateData = values || rest;
-      if (updateData?.username !== undefined) {
+      const updateData = sanitizeUserUpdateBody(values || rest);
+      if (updateData.username !== undefined) {
         const username = String(updateData.username || '').trim().toLowerCase();
         if (!/^[a-z0-9_]{3,32}$/.test(username)) {
           return res.status(400).json({ ok: false, error: 'Tên đăng nhập phải từ 3 đến 32 ký tự, chỉ gồm chữ, số và dấu gạch dưới.' });
@@ -135,15 +217,15 @@ function createAdminApi({
         }
         updateData.username = username;
       }
-      if (updateData?.password !== undefined) {
+      if (updateData.password !== undefined) {
         const password = updateData.password;
         if (typeof password !== 'string' || password.length < 6 || password.length > 256) {
           return res.status(400).json({ ok: false, error: 'Mật khẩu phải dài từ 6 đến 256 ký tự.' });
         }
       }
       if (!targetUserId) {
-        const username = String(updateData?.username || '').trim().toLowerCase();
-        const password = String(updateData?.password || '');
+        const username = String(updateData.username || '').trim().toLowerCase();
+        const password = String(updateData.password || '');
         if (!username || !password) {
           return res.status(400).json({ ok: false, error: 'Tạo tài khoản mới cần username và password.' });
         }
@@ -153,7 +235,7 @@ function createAdminApi({
       }
 
       await store.setAccess(targetUserId, updateData, req.managerAuthSession.username);
-      if (String(updateData?.status || '').trim().toLowerCase() === 'disabled') {
+      if (String(updateData.status || '').trim().toLowerCase() === 'disabled') {
         if (typeof invalidateUserSessions === 'function') invalidateUserSessions(targetUserId);
         if (typeof store.adapter?.revokeUserSessions === 'function') {
           await store.adapter.revokeUserSessions(targetUserId).catch(() => null);
@@ -161,7 +243,14 @@ function createAdminApi({
       }
       const auditDetails = { ...updateData };
       if (auditDetails.password) auditDetails.password = '[REDACTED]';
-      await store.addAudit({ action: 'ADMIN_UPDATE_USER', targetId: targetUserId, actorId: req.managerAuthSession.username, details: auditDetails });
+      await store.addAudit({
+        action: 'ADMIN_UPDATE_USER',
+        targetId: targetUserId,
+        actorId: req.managerAuthSession.username,
+        actorRole: 'admin',
+        actorIp: req.ip || '127.0.0.1',
+        details: auditDetails
+      });
       return res.json({ ok: true, message: 'Đã cập nhật thông tin người dùng.' });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
@@ -174,7 +263,13 @@ function createAdminApi({
       try {
         await store.removeAccess(id);
         if (typeof invalidateUserSessions === 'function') invalidateUserSessions(id);
-        await store.addAudit({ action: 'ADMIN_DELETE_USER', targetId: id, actorId: req.managerAuthSession.username });
+        await store.addAudit({
+          action: 'ADMIN_DELETE_USER',
+          targetId: id,
+          actorId: req.managerAuthSession.username,
+          actorRole: 'admin',
+          actorIp: req.ip || '127.0.0.1'
+        });
         return res.json({ ok: true, message: 'Đã xóa người dùng thành công.' });
       } catch (error) {
         return res.status(500).json({ ok: false, error: error.message });
@@ -184,15 +279,7 @@ function createAdminApi({
     if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
       try {
         const rawBody = req.body?.values || req.body || {};
-        const allowedKeys = [
-          'role', 'status', 'expiresAt', 'planName', 'note', 'workerIds',
-          'botCount', 'username', 'password', 'isPermanent', 'botAliases',
-          'allowAccountChange', 'lockReason'
-        ];
-        const values = {};
-        for (const k of allowedKeys) {
-          if (rawBody[k] !== undefined) values[k] = rawBody[k];
-        }
+        const values = sanitizeUserUpdateBody(rawBody);
 
         if (values.username !== undefined) {
           const username = String(values.username || '').trim().toLowerCase();
@@ -213,7 +300,7 @@ function createAdminApi({
         }
 
         await store.setAccess(id, values, req.managerAuthSession.username);
-        if (String(values?.status || '').trim().toLowerCase() === 'disabled') {
+        if (String(values.status || '').trim().toLowerCase() === 'disabled') {
           if (typeof invalidateUserSessions === 'function') invalidateUserSessions(id);
           if (typeof store.adapter?.revokeUserSessions === 'function') {
             await store.adapter.revokeUserSessions(id).catch(() => null);
@@ -221,7 +308,14 @@ function createAdminApi({
         }
         const auditDetails = { ...values };
         if (auditDetails.password) auditDetails.password = '[REDACTED]';
-        await store.addAudit({ action: 'ADMIN_UPDATE_USER', targetId: id, actorId: req.managerAuthSession.username, details: auditDetails });
+        await store.addAudit({
+          action: 'ADMIN_UPDATE_USER',
+          targetId: id,
+          actorId: req.managerAuthSession.username,
+          actorRole: 'admin',
+          actorIp: req.ip || '127.0.0.1',
+          details: auditDetails
+        });
         return res.json({ ok: true, message: 'Đã cập nhật thông tin người dùng.' });
       } catch (error) {
         return res.status(500).json({ ok: false, error: error.message });
@@ -251,6 +345,16 @@ function createAdminApi({
       if (decrypted === null) {
         return res.status(409).json({ ok: false, code: 'PASSWORD_NOT_REVERSIBLE', error: 'Không thể giải mã mật khẩu đã lưu.' });
       }
+      if (typeof store.addAudit === 'function') {
+        await store.addAudit({
+          action: 'ADMIN_REVEAL_USER_PASSWORD',
+          targetId: user.id || id,
+          actorId: req.managerAuthSession.username,
+          actorRole: 'admin',
+          actorIp: req.ip || '127.0.0.1',
+          details: { username: user.username }
+        }).catch(() => {});
+      }
       return res.json({ ok: true, password: decrypted || '' });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
@@ -260,27 +364,68 @@ function createAdminApi({
   router.post('/users/:id/renew-days', async (req, res) => {
     try {
       const { id } = req.params;
-      const { days, isPermanent } = req.body || {};
+      const body = req.body || {};
+      const isPerm = Boolean(body.isPermanent || body.setPermanent);
+      const fixedDate = body.fixedDate !== undefined && body.fixedDate !== null ? String(body.fixedDate).trim() : '';
+      const planName = body.planName !== undefined && body.planName !== null ? String(body.planName).trim().slice(0, 64) : undefined;
       const access = await store.getAccess(id);
       if (!access) return res.status(404).json({ ok: false, error: 'Không tìm thấy người dùng.' });
 
-      let newExpiry = access.expiresAt;
-      if (isPermanent) {
+      const now = Date.now();
+      let newExpiry = access.expiresAt || null;
+      let nextStatus = access.status === 'disabled' ? 'disabled' : 'active';
+
+      if (isPerm) {
         newExpiry = null;
+        nextStatus = access.status === 'disabled' ? 'disabled' : 'active';
+      } else if (fixedDate) {
+        const parsedMs = Date.parse(fixedDate);
+        if (!Number.isFinite(parsedMs)) {
+          return res.status(400).json({ ok: false, error: 'Ngày hết hạn cố định không hợp lệ.' });
+        }
+        newExpiry = new Date(parsedMs).toISOString();
+        nextStatus = access.status === 'disabled' ? 'disabled' : (parsedMs > now ? 'active' : 'expired');
       } else {
-        const addedDays = Number(days) || 30;
-        const currentMs = access.expiresAt ? Date.parse(access.expiresAt) : Date.now();
-        const baseMs = Math.max(Date.now(), Number.isFinite(currentMs) ? currentMs : Date.now());
-        newExpiry = new Date(baseMs + addedDays * 86400000).toISOString();
+        const addedDays = Number(body.days);
+        if (!Number.isFinite(addedDays) || addedDays === 0 || addedDays < -3650 || addedDays > 3650) {
+          return res.status(400).json({ ok: false, error: 'Số ngày gia hạn phải nằm trong khoảng -3650 đến 3650 (khác 0).' });
+        }
+        const currentMs = access.expiresAt ? Date.parse(access.expiresAt) : NaN;
+        const baseMs = addedDays > 0
+          ? Math.max(now, Number.isFinite(currentMs) ? currentMs : now)
+          : (Number.isFinite(currentMs) ? currentMs : now);
+        const targetMs = baseMs + addedDays * 86400000;
+        newExpiry = new Date(targetMs).toISOString();
+        nextStatus = access.status === 'disabled' ? 'disabled' : (targetMs > now ? 'active' : 'expired');
       }
 
-      await store.setAccess(id, {
-        isPermanent: Boolean(isPermanent),
+      const patch = {
+        isPermanent: isPerm,
         expiresAt: newExpiry,
-        status: 'active'
-      }, req.managerAuthSession.username);
+        status: nextStatus
+      };
+      if (planName) patch.planName = planName;
 
-      return res.json({ ok: true, message: 'Gia hạn người dùng thành công.', expiresAt: newExpiry, isPermanent: Boolean(isPermanent) });
+      await store.setAccess(id, patch, req.managerAuthSession.username);
+      if (typeof store.addAudit === 'function') {
+        await store.addAudit({
+          action: 'ADMIN_RENEW_USER',
+          targetId: id,
+          actorId: req.managerAuthSession.username,
+          actorRole: 'admin',
+          actorIp: req.ip || '127.0.0.1',
+          details: { isPermanent: isPerm, expiresAt: newExpiry, planName: planName || access.planName, status: nextStatus }
+        }).catch(() => {});
+      }
+
+      return res.json({
+        ok: true,
+        message: 'Cập nhật thời hạn người dùng thành công.',
+        expiresAt: newExpiry,
+        isPermanent: isPerm,
+        status: nextStatus,
+        planName: planName || access.planName
+      });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }
@@ -289,22 +434,34 @@ function createAdminApi({
   router.post('/user/:username/add-days', async (req, res) => {
     try {
       const { username } = req.params;
-      const { days } = req.body || {};
-      const addedDays = Number(days) || 30;
-      const allUsers = await store.listAccess();
-      const user = allUsers.find((u) => u.username === username || u.userId === username);
+      const addedDays = Number(req.body?.days);
+      if (!Number.isFinite(addedDays) || addedDays === 0 || addedDays < -3650 || addedDays > 3650) {
+        return res.status(400).json({ ok: false, error: 'Số ngày gia hạn phải nằm trong khoảng -3650 đến 3650 (khác 0).' });
+      }
+      const user = await store.getAccess(username);
       if (!user) return res.status(404).json({ ok: false, error: 'Không tìm thấy người dùng.' });
 
-      const currentMs = user.expiresAt ? Date.parse(user.expiresAt) : Date.now();
-      const baseMs = Math.max(Date.now(), Number.isFinite(currentMs) ? currentMs : Date.now());
-      const newExpiry = new Date(baseMs + addedDays * 86400000).toISOString();
+      const now = Date.now();
+      const currentMs = user.expiresAt ? Date.parse(user.expiresAt) : NaN;
+      const baseMs = addedDays > 0
+        ? Math.max(now, Number.isFinite(currentMs) ? currentMs : now)
+        : (Number.isFinite(currentMs) ? currentMs : now);
+      const targetMs = baseMs + addedDays * 86400000;
+      const newExpiry = new Date(targetMs).toISOString();
+      const nextStatus = user.status === 'disabled' ? 'disabled' : (targetMs > now ? 'active' : 'expired');
 
       await store.setAccess(user.userId, {
+        isPermanent: false,
         expiresAt: newExpiry,
-        status: 'active'
+        status: nextStatus
       }, req.managerAuthSession.username);
 
-      return res.json({ ok: true, message: `Đã cộng thêm ${addedDays} ngày cho người dùng ${username}.`, expiresAt: newExpiry });
+      return res.json({
+        ok: true,
+        message: `Đã cập nhật ${addedDays > 0 ? '+' : ''}${addedDays} ngày cho người dùng ${username}.`,
+        expiresAt: newExpiry,
+        status: nextStatus
+      });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }
@@ -363,6 +520,7 @@ function createAdminApi({
       const added = [];
       const skipped = [];
       const envConfigs = [];
+      let firstSecret = undefined;
 
       for (let i = 0; i < rawUrls.length; i++) {
         const rawUrl = String(rawUrls[i] || '').trim().replace(/\/+$/, '');
@@ -371,6 +529,15 @@ function createAdminApi({
         const isHttpUrl = /^https?:\/\//i.test(rawUrl);
         const provider = explicitProvider || (isHttpUrl ? 'render' : 'wispbyte');
         let slots = 2; // Default dual-slot (1 worker = 2 bot) for Render / host instances
+
+        if (isHttpUrl) {
+          try {
+            await validateSafeBotUrl(rawUrl);
+          } catch (ssrfErr) {
+            skipped.push({ url: rawUrl, slot: 0, reason: ssrfErr.message });
+            continue;
+          }
+        }
 
         // Probe worker /health endpoint if accessible
         if (provider === 'render' && isHttpUrl) {
@@ -423,6 +590,7 @@ function createAdminApi({
               secret: slotSecret
             });
 
+            if (firstSecret === undefined) firstSecret = result.secret;
             clusterBots.push({
               worker: result.worker,
               secret: result.secret,
@@ -457,7 +625,7 @@ function createAdminApi({
         message: `Đã thêm thành công ${added.length} Bot!` + (skipped.length ? ` (Bỏ qua ${skipped.length})` : ''),
         bots: added,
         bot: added[0],
-        secret: added[0]?.secret,
+        secret: firstSecret,
         envConfig: totalEnv,
         skipped
       });
@@ -649,14 +817,16 @@ function createAdminApi({
       if (q) {
         filtered = filtered.filter((log) => {
           const actionStr = String(log.action || '').toLowerCase();
-          const actorStr = String(log.actorId || log.actor || log.user || '').toLowerCase();
-          const targetStr = String(log.target || log.targetId || '').toLowerCase();
+          const labelStr = String(log.actionLabel || '').toLowerCase();
+          const actorStr = String(log.actor?.username || log.actorId || log.actor || log.user || '').toLowerCase();
+          const targetStr = (typeof log.target === 'object' ? JSON.stringify(log.target) : String(log.target || log.targetId || '')).toLowerCase();
           const messageStr = String(log.message || log.msg || '').toLowerCase();
           let detailsStr = '';
           if (log.details) {
             detailsStr = typeof log.details === 'object' ? JSON.stringify(log.details).toLowerCase() : String(log.details).toLowerCase();
           }
           return actionStr.includes(q) ||
+            labelStr.includes(q) ||
             actorStr.includes(q) ||
             targetStr.includes(q) ||
             messageStr.includes(q) ||
@@ -678,9 +848,9 @@ function createAdminApi({
         });
       }
 
-      if (logType) {
+      if (logType && logType !== 'all') {
         filtered = filtered.filter((log) => {
-          const logTypeVal = String(log.logType || log.details?.logType || log.action || '').toLowerCase();
+          const logTypeVal = String(log.logType || log.details?.logType || '').toLowerCase();
           return logTypeVal === logType;
         });
       }
@@ -722,15 +892,20 @@ function createAdminApi({
       const logs = await store.listAudit(1000);
       const format = String(req.query?.format || 'json').toLowerCase();
       if (format === 'csv') {
-        const headers = ['id', 'action', 'target_id', 'actor_id', 'created_at', 'details'];
+        const headers = ['id', 'timestamp', 'log_type', 'category', 'actor', 'role', 'ip', 'action', 'target', 'status', 'details'];
         const rows = logs.map((l) => [
           l.id || '',
+          l.timestamp || l.createdAt || '',
+          l.logType || 'SYSTEM',
+          l.category || 'SYSTEM',
+          l.actor?.username || l.actorId || 'system',
+          l.actor?.role || 'system',
+          l.actor?.ip || '',
           l.action || '',
-          l.targetId || '',
-          l.actorId || '',
-          l.createdAt || '',
-          JSON.stringify(l.details || {}).replace(/"/g, '""')
-        ].map((val) => `"${val}"`).join(','));
+          l.target || l.targetId || '',
+          l.status || 'SUCCESS',
+          l.details || {}
+        ].map(csvEscapeCell).join(','));
         const csv = [headers.join(','), ...rows].join('\n');
         res.setHeader('Content-Type', 'text/csv; charset=utf-8');
         res.setHeader('Content-Disposition', 'attachment; filename="audit_logs.csv"');
@@ -866,8 +1041,12 @@ function createAdminApi({
     });
   });
 
-  router.get('/supabase/schema', (_req, res) => {
-    return res.type('text/plain').send(SCHEMA_SQL);
+  router.get('/supabase/schema', (req, res) => {
+    const accept = String(req.headers?.accept || '').toLowerCase();
+    if (req.query?.format === 'text' || (accept.includes('text/plain') && !accept.includes('application/json'))) {
+      return res.type('text/plain').send(SCHEMA_SQL);
+    }
+    return res.json({ ok: true, sql: SCHEMA_SQL });
   });
 
   router.post('/supabase/upload', async (req, res) => {
@@ -881,8 +1060,10 @@ function createAdminApi({
 
   router.post('/supabase/sync-down', async (_req, res) => {
     try {
+      store?.invalidateCache?.();
+      registry?.store?.invalidateCache?.();
       await registry.load();
-      return res.json({ ok: true, message: 'Đã đồng bộ dữ liệu mới nhất từ Supabase về RAM.' });
+      return res.json({ ok: true, message: 'Đã làm mới cache và đồng bộ dữ liệu mới nhất từ Supabase về RAM.' });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }
@@ -914,20 +1095,49 @@ function createAdminApi({
     }
   });
 
+  async function buildBackupPayload() {
+    const [workers, accessUsers, keys] = await Promise.all([
+      registry.list(),
+      store.listAccess(),
+      entitlementService?.listCodes ? entitlementService.listCodes(500) : []
+    ]);
+    // Preserve encrypted passwords in backups so restore never wipes user login credentials
+    let rawPasswordMap = new Map();
+    if (store?.client && typeof store.client.from === 'function') {
+      try {
+        const { data } = await store.client.from('manager_users').select('id,username,password');
+        if (Array.isArray(data)) {
+          for (const row of data) {
+            if (row?.id && row.password) rawPasswordMap.set(String(row.id), row.password);
+            if (row?.username && row.password) rawPasswordMap.set(String(row.username).toLowerCase(), row.password);
+          }
+        }
+      } catch (_) {}
+    }
+    const usersWithCreds = (Array.isArray(accessUsers) ? accessUsers : []).map((u) => {
+      const pw = rawPasswordMap.get(String(u.userId || u.id || '')) || rawPasswordMap.get(String(u.username || '').toLowerCase());
+      return pw ? { ...u, password: pw } : { ...u };
+    });
+    return {
+      version: 2,
+      registry: workers,
+      users: usersWithCreds,
+      keys: Array.isArray(keys) ? keys : [],
+      timestamp: new Date().toISOString()
+    };
+  }
+
   router.post('/backups/create', async (req, res) => {
     try {
       const name = 'backup-' + new Date().toISOString().slice(0, 19).replace(/:/g, '-') + '.json';
-      const payload = {
-        registry: await registry.list(),
-        users: await store.listAccess(),
-        keys: await entitlementService.listCodes(500),
-        timestamp: new Date().toISOString()
-      };
+      const payload = await buildBackupPayload();
       await store.saveBackup(name, payload);
       await store.addAudit({
         action: 'ADMIN_CREATE_BACKUP',
         actorId: req.managerAuthSession.username,
-        details: { filename: name }
+        actorRole: 'admin',
+        actorIp: req.ip || '127.0.0.1',
+        details: { filename: name, users: payload.users.length, workers: payload.registry.length, keys: payload.keys.length }
       });
       return res.json({ ok: true, message: 'Đã tạo bản sao lưu thành công.', filename: name, backup: { filename: name } });
     } catch (error) {
@@ -941,11 +1151,29 @@ function createAdminApi({
       const backup = await store.fetchBackupPayload(filename);
       if (!backup) return res.status(404).json({ ok: false, error: 'Không tìm thấy bản sao lưu.' });
 
-      // 1. Restore registry
+      // Create automatic safety backup before mutating live state (M-07a)
+      if (typeof store.saveBackup === 'function') {
+        try {
+          const safetyName = 'pre-restore-' + new Date().toISOString().slice(0, 19).replace(/:/g, '-') + '.json';
+          const currentPayload = await buildBackupPayload();
+          await store.saveBackup(safetyName, currentPayload);
+        } catch (safetyErr) {
+          logger?.warn?.('backup_pre_restore_snapshot_failed', { error: safetyErr?.message });
+        }
+      }
+
+      const summary = { workersRestored: 0, usersRestored: 0, keysRestored: 0, warnings: [] };
+
+      // 1. Restore registry (idempotent: updates existing or recreates deleted workers)
       if (Array.isArray(backup.registry)) {
         for (const bot of backup.registry) {
           if (bot?.workerId) {
-            await registry.saveConfig(bot.workerId, bot);
+            try {
+              await registry.saveConfig(bot.workerId, bot);
+              summary.workersRestored += 1;
+            } catch (botErr) {
+              summary.warnings.push(`worker:${bot.workerId}: ${botErr.message}`);
+            }
           }
         }
       } else if (backup.registry && typeof registry.saveConfig === 'function') {
@@ -957,34 +1185,71 @@ function createAdminApi({
         for (const u of backup.users) {
           const userId = u.userId || u.id || u.username;
           if (userId) {
-            if (typeof store.setAccess === 'function') {
-              await store.setAccess(userId, u, 'backup-restore');
-            } else if (typeof store.updateUser === 'function') {
-              await store.updateUser(userId, u);
-            } else if (typeof store.createUser === 'function') {
-              await store.createUser(u);
+            try {
+              if (typeof store.setAccess === 'function') {
+                await store.setAccess(userId, u, 'backup-restore');
+              } else if (typeof store.updateUser === 'function') {
+                await store.updateUser(userId, u);
+              } else if (typeof store.createUser === 'function') {
+                await store.createUser(u);
+              }
+              summary.usersRestored += 1;
+            } catch (userErr) {
+              summary.warnings.push(`user:${userId}: ${userErr.message}`);
             }
           }
         }
       }
 
-      // 3. Restore keys
+      // 3. Restore keys idempotently (skip duplicates cleanly instead of aborting)
       if (Array.isArray(backup.keys)) {
         for (const k of backup.keys) {
-          if (typeof store.createKey === 'function') {
-            await store.createKey(k);
-          } else if (store.client) {
-            await store.client.from('manager_keys').upsert(k);
+          try {
+            if (store.client && typeof store.client.from === 'function') {
+              const keyId = k.keyId || k.id || `key_${crypto.randomUUID()}`;
+              const row = {
+                id: keyId,
+                key_id: keyId,
+                code: k.code || k.key || k.keyCode || '',
+                code_hash: k.codeHash || k.code_hash || '',
+                code_suffix: k.codeSuffix || k.code_suffix || '',
+                status: k.status || 'unused',
+                days: Number(k.days ?? 30),
+                is_permanent: Boolean(k.isPermanent ?? k.is_permanent),
+                bot_count: Number(k.botCount ?? k.bot_count ?? 1),
+                worker_ids: Array.isArray(k.workerIds || k.worker_ids) ? (k.workerIds || k.worker_ids) : [],
+                plan_name: k.planName || k.plan_name || 'Standard',
+                max_uses: Number(k.maxUses ?? k.max_uses ?? 1),
+                used_count: Number(k.usedCount ?? k.used_count ?? 0),
+                used_users: Array.isArray(k.usedUsers || k.used_users) ? (k.usedUsers || k.used_users) : [],
+                expires_at: k.expiresAt || k.expires_at || null
+              };
+              const { error } = await store.client.from('manager_keys').upsert(row, { onConflict: 'key_id' });
+              if (error && error.code !== '23505') throw error;
+              summary.keysRestored += 1;
+            } else if (typeof store.createKey === 'function') {
+              await store.createKey(k);
+              summary.keysRestored += 1;
+            }
+          } catch (keyErr) {
+            if (keyErr?.code !== '23505') {
+              summary.warnings.push(`key:${k.keyId || k.id || '?'}: ${keyErr.message}`);
+            }
           }
         }
       }
 
+      store?.invalidateCache?.();
+      registry?.store?.invalidateCache?.();
+
       await store.addAudit({
         action: 'ADMIN_RESTORE_BACKUP',
         actorId: req.managerAuthSession.username,
-        details: { filename }
+        actorRole: 'admin',
+        actorIp: req.ip || '127.0.0.1',
+        details: { filename, ...summary }
       });
-      return res.json({ ok: true, message: 'Đã khôi phục dữ liệu từ bản sao lưu.' });
+      return res.json({ ok: true, message: 'Đã khôi phục dữ liệu từ bản sao lưu.', summary });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }
@@ -1022,17 +1287,50 @@ function createAdminApi({
     }
   });
 
-  // 7. FLEET BULK CONTROLS
+  async function getAssignedWorkerIdSet() {
+    const set = new Set();
+    try {
+      if (typeof store?.listAccess === 'function') {
+        const users = await store.listAccess();
+        if (Array.isArray(users)) {
+          for (const u of users) {
+            const ids = Array.isArray(u.workerIds) ? u.workerIds : (Array.isArray(u.assignedBotIds) ? u.assignedBotIds : []);
+            for (const id of ids) {
+              const clean = String(id || '').trim().toLowerCase();
+              if (clean) set.add(clean);
+            }
+          }
+        }
+      }
+    } catch (_) {}
+    return set;
+  }
+
+  // 7. FLEET BULK CONTROLS (F-05: supports tag filter & unpacked settings)
   router.post('/all/send', async (req, res) => {
     const message = String(req.body?.text || req.body?.message || '').trim();
     if (!message) return res.status(400).json({ ok: false, error: 'Tin nhắn không được để trống.' });
+    const tag = req.body?.tag || '';
 
     try {
-      const workers = (await registry.list()).filter((w) => w.status?.state === 'online');
-      await Promise.allSettled(
-        workers.map((w) => broker.dispatch(w.workerId, 'chat', { message }))
+      const [allWorkers, assignedSet] = await Promise.all([
+        registry.list(),
+        tag ? getAssignedWorkerIdSet() : Promise.resolve(new Set())
+      ]);
+      const matched = filterWorkersByTag(allWorkers, tag, assignedSet);
+      const onlineTargets = matched.filter((w) => w.status?.state === 'online');
+      const results = await Promise.allSettled(
+        onlineTargets.map((w) => broker.dispatch(w.workerId, 'chat', { message }))
       );
-      return res.json({ ok: true, message: `Đã phát tin nhắn tới ${workers.length} bot đang online.` });
+      const okCount = results.filter((r) => r.status === 'fulfilled' && r.value?.delivered !== false && r.value?.result?.ok !== false).length;
+      const failedCount = onlineTargets.length - okCount;
+      return res.json({
+        ok: true,
+        total: onlineTargets.length,
+        okCount,
+        failedCount,
+        message: `Đã phát tin nhắn tới ${okCount}/${onlineTargets.length} bot đang online.`
+      });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }
@@ -1040,12 +1338,43 @@ function createAdminApi({
 
   router.post('/all/settings', async (req, res) => {
     try {
-      const patch = req.body || {};
-      const workers = await registry.list();
-      for (const worker of workers) {
-        await registry.saveConfig(worker.workerId, { ...worker, ...patch });
+      const body = req.body || {};
+      const tag = body.tag || '';
+      const rawSettings = (body.settings && typeof body.settings === 'object' && !Array.isArray(body.settings))
+        ? body.settings
+        : body;
+      const settingsPatch = {};
+      for (const boolKey of ['ecoMode', 'autoTotem', 'antiHungry', 'autoReconnect', 'antiAfkKick', 'rentable']) {
+        if (rawSettings[boolKey] !== undefined) settingsPatch[boolKey] = Boolean(rawSettings[boolKey]);
       }
-      return res.json({ ok: true, message: `Đã áp dụng cài đặt hàng loạt cho ${workers.length} bot.` });
+      if (rawSettings.spawnCommands !== undefined) settingsPatch.spawnCommands = String(rawSettings.spawnCommands || '').slice(0, 1000);
+      if (Array.isArray(body.autoChatSchedules)) settingsPatch.autoChatSchedules = body.autoChatSchedules;
+      else if (Array.isArray(rawSettings.autoChatSchedules)) settingsPatch.autoChatSchedules = rawSettings.autoChatSchedules;
+      if (Array.isArray(body.botSchedules)) settingsPatch.botSchedules = body.botSchedules;
+      else if (Array.isArray(rawSettings.botSchedules)) settingsPatch.botSchedules = rawSettings.botSchedules;
+
+      const [allWorkers, assignedSet] = await Promise.all([
+        registry.list(),
+        tag ? getAssignedWorkerIdSet() : Promise.resolve(new Set())
+      ]);
+      const targets = filterWorkersByTag(allWorkers, tag, assignedSet);
+      let okCount = 0;
+      let failedCount = 0;
+      for (const worker of targets) {
+        try {
+          await registry.updateSettings(worker.workerId, settingsPatch);
+          okCount += 1;
+        } catch (_) {
+          failedCount += 1;
+        }
+      }
+      return res.json({
+        ok: true,
+        total: targets.length,
+        okCount,
+        failedCount,
+        message: `Đã áp dụng cài đặt hàng loạt cho ${okCount}/${targets.length} bot.`
+      });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }
@@ -1076,55 +1405,182 @@ function createAdminApi({
     }
   });
 
-  // 8. ANNOUNCEMENT
+  // 8. ANNOUNCEMENT (F-03: persist & return full structured object)
   router.post('/announcement', async (req, res) => {
     try {
-      const announcement = String(req.body?.announcement || req.body?.message || '').trim();
-      store.cachedAnnouncement = announcement;
+      const body = req.body || {};
+      const title = String(body.title || '').trim().slice(0, 120);
+      const content = String(body.content ?? body.announcement ?? body.message ?? '').trim().slice(0, 2000);
+      const modeRaw = String(body.mode || 'banner').trim().toLowerCase();
+      const mode = ['banner', 'modal', 'toast'].includes(modeRaw) ? modeRaw : 'banner';
+      const enabled = body.enabled !== undefined ? Boolean(body.enabled) : Boolean(content || title);
+      const startDate = body.startDate ? String(body.startDate).trim().slice(0, 64) : '';
+      const endDate = body.endDate ? String(body.endDate).trim().slice(0, 64) : '';
+      const updatedAt = new Date().toISOString();
+      const record = {
+        id: String(body.id || `ann_${Date.now()}`),
+        enabled,
+        title,
+        content,
+        mode,
+        startDate,
+        endDate,
+        updatedAt
+      };
+      store.cachedAnnouncement = record;
       if (store && typeof store.setSetting === 'function') {
-        await store.setSetting('system_announcement', { message: announcement, updatedAt: new Date().toISOString() });
+        await store.setSetting('system_announcement', record);
       }
-      return res.json({ ok: true, message: 'Đã cập nhật thông báo hệ thống.', announcement });
+      return res.json({ ok: true, message: 'Đã cập nhật thông báo hệ thống.', announcement: record });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }
   });
 
-  // 9. WEBHOOK
-  router.get('/webhook', async (_req, res) => {
-    return res.json({
-      ok: true,
-      webhookUrl: config.discordWebhookUrl || ''
+  // 9. WEBHOOK (F-04 & M-09: never mutate frozen config; persist encrypted secrets in manager_settings)
+  async function loadWebhookSettings() {
+    let saved = null;
+    if (typeof store?.getSetting === 'function') {
+      saved = await store.getSetting('webhook_settings').catch(() => null);
+    }
+    const base = normalizeWebhookSettings({
+      discordUrl: config?.discordWebhookUrl || '',
+      telegramToken: config?.telegramBotToken || '',
+      telegramChatId: config?.telegramChatId || '',
+      ...(saved && typeof saved === 'object' ? saved : {})
     });
+    const encKey = registry?.encryptionKey || config?.encryptionKey;
+    if (saved?.discordUrlCiphertext && encKey) {
+      try { base.discordUrl = decryptSecret(saved.discordUrlCiphertext, encKey) || base.discordUrl; } catch (_) {}
+    }
+    if (saved?.telegramTokenCiphertext && encKey) {
+      try { base.telegramToken = decryptSecret(saved.telegramTokenCiphertext, encKey) || base.telegramToken; } catch (_) {}
+    }
+    return base;
+  }
+
+  router.get('/webhook', async (_req, res) => {
+    try {
+      const webhook = await loadWebhookSettings();
+      return res.json({
+        ok: true,
+        webhook,
+        webhookUrl: webhook.discordUrl
+      });
+    } catch (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
   });
 
   router.post('/webhook', async (req, res) => {
     try {
-      const webhookUrl = String(req.body?.webhookUrl || '').trim();
-      config.discordWebhookUrl = webhookUrl;
-      return res.json({ ok: true, message: 'Đã lưu webhook Discord thành công.', webhookUrl });
+      const incoming = req.body?.webhook && typeof req.body.webhook === 'object' ? req.body.webhook : (req.body || {});
+      const normalized = normalizeWebhookSettings(incoming);
+      if (normalized.discordUrl) {
+        normalized.discordUrl = validateDiscordWebhookUrl(normalized.discordUrl);
+      }
+      const encKey = registry?.encryptionKey || config?.encryptionKey;
+      const toPersist = {
+        enabled: normalized.enabled,
+        discordUrl: encKey ? '' : normalized.discordUrl,
+        discordUrlCiphertext: normalized.discordUrl && encKey ? encryptSecret(normalized.discordUrl, encKey) : null,
+        telegramToken: encKey ? '' : normalized.telegramToken,
+        telegramTokenCiphertext: normalized.telegramToken && encKey ? encryptSecret(normalized.telegramToken, encKey) : null,
+        telegramChatId: normalized.telegramChatId,
+        notifyOnOffline: normalized.notifyOnOffline,
+        notifyOnRecover: normalized.notifyOnRecover,
+        notifyOnLowTotem: normalized.notifyOnLowTotem,
+        notifyOnLowHealth: normalized.notifyOnLowHealth,
+        notifyOnDeath: normalized.notifyOnDeath,
+        offlineThresholdMinutes: normalized.offlineThresholdMinutes,
+        updatedAt: new Date().toISOString()
+      };
+      if (typeof store?.setSetting === 'function') {
+        await store.setSetting('webhook_settings', toPersist);
+      }
+      if (adminNotifier && typeof adminNotifier.configureWebhook === 'function') {
+        adminNotifier.configureWebhook(normalized);
+      } else if (adminNotifier && typeof adminNotifier.setTelegramConfig === 'function') {
+        adminNotifier.setTelegramConfig(normalized.telegramToken, normalized.telegramChatId);
+      }
+      return res.json({
+        ok: true,
+        message: 'Đã lưu cấu hình Webhook thông báo thành công.',
+        webhook: normalized,
+        webhookUrl: normalized.discordUrl
+      });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      const status = /Webhook URL|không đúng định dạng|HTTPS/i.test(error.message) ? 400 : 500;
+      return res.status(status).json({ ok: false, error: error.message });
     }
   });
 
-  router.post('/webhook/test', async (_req, res) => {
+  router.post('/webhook/test', async (req, res) => {
     try {
-      if (adminNotifier && typeof adminNotifier.sendAlert === 'function') {
+      const saved = await loadWebhookSettings();
+      const incoming = req.body?.webhook && typeof req.body.webhook === 'object' ? req.body.webhook : (req.body || {});
+      const target = normalizeWebhookSettings({
+        ...saved,
+        ...(incoming.discordUrl !== undefined || incoming.webhookUrl !== undefined ? { discordUrl: incoming.discordUrl ?? incoming.webhookUrl } : {}),
+        ...(incoming.telegramToken !== undefined ? { telegramToken: incoming.telegramToken } : {}),
+        ...(incoming.telegramChatId !== undefined ? { telegramChatId: incoming.telegramChatId } : {})
+      });
+      if (target.discordUrl) {
+        target.discordUrl = validateDiscordWebhookUrl(target.discordUrl);
+      }
+
+      const deliveredChannels = [];
+      if (target.discordUrl) {
+        const resp = await fetch(target.discordUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            content: '🔔 **KingMC Manager**: Kiểm tra kết nối Discord Webhook thành công!'
+          }),
+          signal: AbortSignal.timeout(8000)
+        });
+        if (!resp.ok) {
+          throw new Error(`Discord Webhook trả về HTTP ${resp.status}.`);
+        }
+        deliveredChannels.push('Discord Webhook');
+      }
+      if (target.telegramToken && target.telegramChatId) {
+        const resp = await fetch(`https://api.telegram.org/bot${encodeURIComponent(target.telegramToken)}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: target.telegramChatId,
+            text: '🔔 <b>KingMC Manager</b>: Kiểm tra kết nối Telegram thành công!',
+            parse_mode: 'HTML'
+          }),
+          signal: AbortSignal.timeout(8000)
+        });
+        if (!resp.ok) {
+          throw new Error(`Telegram API trả về HTTP ${resp.status}.`);
+        }
+        deliveredChannels.push('Telegram');
+      }
+      if (deliveredChannels.length === 0 && adminNotifier && typeof adminNotifier.sendAlert === 'function') {
         await adminNotifier.sendAlert({
           source: 'KingMC Manager',
           event: 'webhook_test',
-          message: '🔔 Đây là tin nhắn kiểm tra kết nối Webhook Discord từ KingMC Manager.',
+          message: '🔔 Đây là tin nhắn kiểm tra kết nối thông báo từ KingMC Manager.',
           level: 'info'
         });
+        deliveredChannels.push('Admin Notifier');
       }
-      return res.json({ ok: true, message: 'Đã gửi tin nhắn test tới Discord Webhook!' });
+      return res.json({
+        ok: true,
+        channels: deliveredChannels,
+        message: `Đã gửi tin nhắn kiểm tra thành công tới: ${deliveredChannels.join(', ') || 'hệ thống thông báo'}!`
+      });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      const status = /Webhook URL|HTTPS|định dạng/i.test(error.message) ? 400 : 500;
+      return res.status(status).json({ ok: false, error: error.message });
     }
   });
 
-  // 10. SYSTEM RUNTIME SETTINGS & ADMIN CREDENTIALS
+  // 10. SYSTEM RUNTIME SETTINGS & ADMIN CREDENTIALS (M-09: never mutate frozen config!)
   router.get('/settings/system', async (_req, res) => {
     try {
       const defaultSettings = {
@@ -1163,10 +1619,18 @@ function createAdminApi({
 
   router.post('/settings/system', async (req, res) => {
     try {
-      const patch = req.body || {};
-      if (patch.publicBaseUrl !== undefined) config.publicBaseUrl = String(patch.publicBaseUrl).trim();
-      if (patch.trialGiftEnabled !== undefined) config.trialGiftEnabled = Boolean(patch.trialGiftEnabled);
-      if (patch.trialDays !== undefined) config.trialDays = Number(patch.trialDays) || 3;
+      const rawPatch = req.body || {};
+      const patch = {};
+      if (rawPatch.publicBaseUrl !== undefined) patch.publicBaseUrl = String(rawPatch.publicBaseUrl || '').trim().slice(0, 512);
+      if (rawPatch.trialGiftEnabled !== undefined) patch.trialGiftEnabled = Boolean(rawPatch.trialGiftEnabled);
+      if (rawPatch.trialDays !== undefined) {
+        const daysNum = Number(rawPatch.trialDays);
+        if (!Number.isInteger(daysNum) || daysNum < 1 || daysNum > 365) {
+          return res.status(400).json({ ok: false, error: 'Số ngày dùng thử phải từ 1 đến 365.' });
+        }
+        patch.trialDays = daysNum;
+      }
+      if (rawPatch.wispbyteEnabled !== undefined) patch.wispbyteEnabled = Boolean(rawPatch.wispbyteEnabled);
 
       let currentSettings = {};
       if (typeof store.getSetting === 'function') {
@@ -1191,13 +1655,6 @@ function createAdminApi({
         ...currentSettings,
         ...patch
       };
-
-      if (patch.trialGiftEnabled !== undefined) {
-        mergedSettings.trialGiftEnabled = Boolean(patch.trialGiftEnabled);
-      }
-      if (patch.trialDays !== undefined) {
-        mergedSettings.trialDays = Number(patch.trialDays) || 3;
-      }
 
       if (typeof store.setSetting === 'function') {
         await store.setSetting('system_settings', mergedSettings);
@@ -1260,9 +1717,16 @@ function createAdminApi({
     return results;
   }
 
-  router.get('/admin/credentials', async (_req, res) => {
+  router.get('/admin/credentials', async (req, res) => {
     try {
       const bots = await listAllBotCredentials();
+      await store.addAudit({
+        action: 'ADMIN_VIEW_BOT_CREDENTIALS',
+        actorId: req.managerAuthSession?.username || 'admin',
+        actorRole: 'admin',
+        actorIp: req.ip || '127.0.0.1',
+        details: { method: 'GET', botCount: bots.length }
+      }).catch(() => null);
       return res.json({ ok: true, bots });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
@@ -1274,6 +1738,13 @@ function createAdminApi({
       const body = req.body || {};
       if (!Object.prototype.hasOwnProperty.call(body, 'password')) {
         const bots = await listAllBotCredentials();
+        await store.addAudit({
+          action: 'ADMIN_VIEW_BOT_CREDENTIALS',
+          actorId: req.managerAuthSession?.username || 'admin',
+          actorRole: 'admin',
+          actorIp: req.ip || '127.0.0.1',
+          details: { method: 'POST', botCount: bots.length }
+        }).catch(() => null);
         return res.json({ ok: true, bots });
       }
       const { password } = body;

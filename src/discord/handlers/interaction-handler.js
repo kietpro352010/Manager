@@ -156,9 +156,15 @@ function attachInteractionHandler(client, { config, services, logger }) {
         const command = commandMap.get(interaction.commandName);
         if (!command) return;
 
-        // Commands that open modals (e.g. /login) MUST NOT be deferred!
-        if (command.skipDefer) {
-          return await command.execute(interaction, services);
+        // Commands that open modals (e.g. /login, /admin password without inline option) MUST NOT be deferred!
+        const shouldSkip = Boolean(command.skipDefer)
+          || (typeof command.shouldSkipDefer === 'function' && command.shouldSkipDefer(interaction));
+        if (shouldSkip) {
+          const message = await command.execute(interaction, services);
+          if (message && !interaction.replied && !interaction.deferred) {
+            await safeEditReply(interaction, { ...commandReply(message), allowedMentions: { parse: [] }, ephemeral: true });
+          }
+          return;
         }
 
         // SLA Guard < 1200ms: Acknowledge immediately to prevent Discord's 3-second timeout

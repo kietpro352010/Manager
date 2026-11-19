@@ -158,7 +158,8 @@ function renderBotDetail({ user, worker, notice = '', isExecuting = false }) {
 
   const state = getWorkerState(worker);
   const botName = safe(worker.name || `BOT ${padId(worker.botNumber || 1)}`);
-  const fullBotId = safe(worker.workerId || worker.id);
+  const rawWorkerId = String(worker.workerId || worker.id || '');
+  const fullBotId = safe(rawWorkerId);
   const mcUsername = safe(worker.status?.username || worker.settings?.account?.username || 'Chưa thiết lập');
   const pingMs = Number(worker.status?.pingMs);
   const ping = state.isOnline && Number.isFinite(pingMs) ? `${pingMs} ms` : '—';
@@ -187,28 +188,15 @@ function renderBotDetail({ user, worker, notice = '', isExecuting = false }) {
               `> **Username:** \`${mcUsername}\`\n` +
               `> **Server:** \`${server}\`\n` +
               `> **Trạng thái:** ${state.emoji} **${state.label}**\n` +
-              `> **Ping:** \`${ping}\`\n` +
-              `> **TPS:** \`${tps}\`\n` +
+              `> **Ping:** \`${ping}\` · **TPS:** \`${tps}\`\n` +
               `> **Location:** \`${safe(location, 180)}\`\n` +
-              `> **Uptime:** \`${uptime}\`\n` +
-              `> **Reconnects:** \`${reconnects}\`\n\n` +
+              `> **Uptime:** \`${uptime}\` · **Reconnects:** \`${reconnects}\`\n\n` +
               'Thông tin nhanh và thao tác bot ở các nút bên dưới.';
 
   const detailEmbed = embed(
     `${state.emoji} ${botName.toUpperCase()} — CHI TIẾT BOT`,
     descText,
     state.color
-  );
-  detailEmbed.addFields(
-    { name: '🆔 Bot ID', value: '`' + fullBotId + '`', inline: true },
-    { name: '👤 Username', value: '`' + mcUsername + '`', inline: true },
-    { name: '🌐 Server', value: '`' + server + '`', inline: true },
-    { name: '📡 Trạng thái', value: `${state.emoji} **${state.label}**`, inline: true },
-    { name: '🏓 Ping', value: '`' + ping + '`', inline: true },
-    { name: '⚡ TPS', value: '`' + tps + '`', inline: true },
-    { name: '📍 Location', value: '`' + safe(location, 180) + '`', inline: false },
-    { name: '⏱ Uptime', value: '`' + uptime + '`', inline: true },
-    { name: '🔄 Reconnect', value: '`' + reconnects + '`', inline: true }
   );
   if (user?.role === 'admin') {
     detailEmbed.addFields({ name: '🖥️ Host / Nền tảng', value: '`' + provider + '`', inline: true });
@@ -227,13 +215,13 @@ function renderBotDetail({ user, worker, notice = '', isExecuting = false }) {
   const disableRestart = (!state.isOnline && state.rawState !== 'error') || state.isBusy || isExecuting;
 
   const controlRow = new ActionRowBuilder().addComponents(
-    button('BẬT (START)', `bot:start:${fullBotId}`, ButtonStyle.Success, disableStart, '▶️'),
-    button('TẮT (STOP)', `bot:stop:${fullBotId}`, ButtonStyle.Danger, disableStop, '⏹️'),
-    button('KHỞI ĐỘNG LẠI', `bot:restart:${fullBotId}`, ButtonStyle.Primary, disableRestart, '🔄')
+    button('BẬT (START)', `bot:start:${rawWorkerId}`, ButtonStyle.Success, disableStart, '▶️'),
+    button('TẮT (STOP)', `bot:stop:${rawWorkerId}`, ButtonStyle.Danger, disableStop, '⏹️'),
+    button('KHỞI ĐỘNG LẠI', `bot:restart:${rawWorkerId}`, ButtonStyle.Primary, disableRestart, '🔄')
   );
 
   const navRow = new ActionRowBuilder().addComponents(
-    button('Làm mới', `bot:refresh:${fullBotId}`, ButtonStyle.Secondary, isExecuting, '🔄'),
+    button('Làm mới', `bot:refresh:${rawWorkerId}`, ButtonStyle.Secondary, isExecuting, '🔄'),
     button('Quay lại danh sách', 'bots:list', ButtonStyle.Secondary, false, '◀')
   );
 
@@ -357,6 +345,24 @@ function buildLoginModal() {
   return modal;
 }
 
+function buildAdminPasswordModal() {
+  const modal = new ModalBuilder()
+    .setCustomId('admin_password_modal')
+    .setTitle('Đổi mật khẩu Quản trị viên (Admin)');
+
+  const passwordInput = new TextInputBuilder()
+    .setCustomId('new_password')
+    .setLabel('Mật khẩu quản trị mới (6–128 ký tự)')
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder('Nhập mật khẩu mới (sẽ được ẩn và mã hóa)')
+    .setRequired(true)
+    .setMinLength(6)
+    .setMaxLength(128);
+
+  modal.addComponents(new ActionRowBuilder().addComponents(passwordInput));
+  return modal;
+}
+
 // Backwards-compatible botDashboard adapter for cross-engine tests and legacy callers
 async function botDashboard(services, userId, role, notice = '') {
   let workers = [];
@@ -374,7 +380,8 @@ async function botDashboard(services, userId, role, notice = '') {
 
 function renderBotLogs({ user, worker, logs = [] }) {
   const safeLogs = Array.isArray(logs) ? logs : [];
-  const fullBotId = safe(worker?.workerId || worker?.id || 'Toàn hệ thống');
+  const rawWorkerId = String(worker?.workerId || worker?.id || '');
+  const fullBotId = safe(rawWorkerId || 'Toàn hệ thống');
   const botName = safe(worker?.name || (worker?.botNumber ? `BOT ${padId(worker.botNumber)}` : fullBotId));
 
   const sanitize = (text) => {
@@ -414,11 +421,11 @@ function renderBotLogs({ user, worker, logs = [] }) {
   );
 
   const components = [];
-  if (worker?.workerId || worker?.id) {
+  if (rawWorkerId) {
     components.push(
       new ActionRowBuilder().addComponents(
-        button('Làm mới log', `bot:logs:${fullBotId}`, ButtonStyle.Secondary, false, '🔄'),
-        button('Chi tiết bot', `bot:detail:${fullBotId}`, ButtonStyle.Primary, false, 'ℹ️'),
+        button('Làm mới', `bot:refresh:${rawWorkerId}`, ButtonStyle.Secondary, false, '🔄'),
+        button('Chi tiết bot', `bot:view:${rawWorkerId}`, ButtonStyle.Primary, false, 'ℹ️'),
         button('Quay lại danh sách', 'bots:list', ButtonStyle.Secondary, false, '◀')
       )
     );
@@ -437,6 +444,7 @@ module.exports = {
   renderAdminBots,
   renderBotLogs,
   buildLoginModal,
+  buildAdminPasswordModal,
   getWorkerState,
   uptimeText,
   padId,

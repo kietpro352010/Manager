@@ -2,7 +2,7 @@
 
 const crypto = require('node:crypto');
 const AsyncKeyLock = require('./async-key-lock');
-const { isLocalOrPrivateHost } = require('./proxy-validation');
+const { isLocalOrPrivateHost, validateProxyUrl } = require('./proxy-validation');
 const { encryptSecret, decryptSecret, generateWorkerSecret } = require('../utils/secrets');
 const { extractChatMessage } = require('../utils/text-format');
 
@@ -134,9 +134,11 @@ function validateWorkerStatus(rawStatus, source = 'worker') {
   } else if (status.currentWindow && typeof status.currentWindow === 'object' && !Array.isArray(status.currentWindow)) {
     const rawWin = status.currentWindow;
     sanitizedWindow = {
+      ...(rawWin.id !== undefined && rawWin.id !== null ? { id: asInteger(rawWin.id, 0, 1000000) ?? String(rawWin.id).slice(0, 32) } : {}),
       title: String(rawWin.title || '').slice(0, 160),
       type: String(rawWin.type || '').slice(0, 64),
       revision: asInteger(rawWin.revision, 0) ?? 0,
+      ...(rawWin.totalSlots !== undefined && rawWin.totalSlots !== null ? { totalSlots: asInteger(rawWin.totalSlots, 0, 256) ?? 0 } : {}),
       slots: Array.isArray(rawWin.slots)
         ? rawWin.slots.slice(0, 90).map(sanitizeItemEntry)
         : []
@@ -147,6 +149,9 @@ function validateWorkerStatus(rawStatus, source = 'worker') {
     state,
     online: Boolean(status.online ?? status.connected),
     username: String(status.username || '').slice(0, 64),
+    connectedAt: status.connectedAt && !Number.isNaN(new Date(status.connectedAt).getTime())
+      ? new Date(status.connectedAt).toISOString()
+      : null,
     uptimeSeconds: asInteger(status.uptimeSeconds, 0),
     pingMs: asNumber(status.pingMs, 0, 600000),
     managerLatencyMs: asNumber(status.managerLatencyMs, 0, 600000),
@@ -203,7 +208,17 @@ class WorkerRegistry {
     this.lastDbStatusPersistAt = new Map(); // botId -> ms (coalesce redundant DB status writes)
     this.lastDbStatusFingerprint = new Map(); // botId -> string (state signature)
     this.workerStateRev = new Map(); // botId -> integer revision counter
+    this.botLogRev = new Map(); // botId -> integer log revision counter
+    this.botChatLogRev = new Map(); // botId -> integer chat log revision counter
     this.statusLock = new AsyncKeyLock();
+  }
+
+  getLogRevisions(workerId) {
+    const id = String(workerId || '').trim().toLowerCase();
+    return {
+      logRevision: this.botLogRev.get(id) || 0,
+      chatLogRevision: this.botChatLogRev.get(id) || 0
+    };
   }
 
   bumpRevision(workerId) {
@@ -271,6 +286,14 @@ class WorkerRegistry {
         this.secretCache.delete(botId);
       }
     }
+    if (this.summaryRequestSeq.size > 500) {
+      for (const botId of this.summaryRequestSeq.keys()) {
+        if (!this.summaryCache.has(botId) && !this.liveHeartbeats.has(botId)) {
+          this.summaryRequestSeq.delete(botId);
+          this.summaryLastAppliedSeq.delete(botId);
+        }
+      }
+    }
   }
 
   async add({ workerId, name, provider, serviceUrl = '', serviceId = '', secret: customSecret }) {
@@ -336,7 +359,11 @@ class WorkerRegistry {
     if (removed) {
       await this.accessStore?.removeWorkerAssignments?.(id);
       this.summaryCache.delete(id);
+      this.summaryRequestSeq.delete(id);
+      this.summaryLastAppliedSeq.delete(id);
       this.botLogsCache.delete(id);
+      this.botLogRev.delete(id);
+      this.botChatLogRev.delete(id);
       this.secretCache.delete(id);
       this.liveHeartbeats.delete(id);
       this.lastDbStatusPersistAt.delete(id);
@@ -631,8 +658,13 @@ class WorkerRegistry {
       if (safeStatus.lastStateAt && existing.status?.lastStateAt) {
         if (safeStatus.lastStateAt.getTime() < new Date(existing.status.lastStateAt).getTime()) {
           this.liveHeartbeats.set(id, managerNow);
-          const refreshed = await this.store.update(id, { lastHeartbeat: managerNow });
-          return this.publicView(refreshed || { ...existing, lastHeartbeat: managerNow });
+          const lastPersistAt = this.lastDbStatusPersistAt.get(id) || 0;
+          if (Date.now() - lastPersistAt >= 60000) {
+            const refreshed = await this.store.update(id, { lastHeartbeat: managerNow }, { returning: false });
+            this.lastDbStatusPersistAt.set(id, Date.now());
+            return this.publicView(refreshed || { ...existing, lastHeartbeat: managerNow });
+          }
+          return this.publicView({ ...existing, lastHeartbeat: managerNow });
         }
       }
 
@@ -735,6 +767,10 @@ class WorkerRegistry {
     logs.push(safeEvent);
     if (logs.length > MAX_LOGS_PER_BOT) logs.shift();
     this.botLogsCache.set(id, logs);
+    this.botLogRev.set(id, (this.botLogRev.get(id) || 0) + 1);
+    if (safeEvent.type === 'chat' || safeEvent.type === 'message') {
+      this.botChatLogRev.set(id, (this.botChatLogRev.get(id) || 0) + 1);
+    }
     this.bumpRevision(id);
 
     // High-frequency ephemeral chat messages stay in RAM buffer to protect Supabase storage & Log Ingestion
@@ -768,7 +804,15 @@ class WorkerRegistry {
     safe.settings = {
       afkMode: 'still',
       proxyEnabled: settings.proxyManaged ? Boolean(settings.proxyCiphertext) : Boolean(record.status?.proxyEnabled),
-      credentialsConfigured: Boolean(settings.mcCredentialsCiphertext)
+      credentialsConfigured: Boolean(settings.mcCredentialsCiphertext),
+      ecoMode: settings.ecoMode !== false,
+      autoTotem: settings.autoTotem !== false,
+      antiHungry: settings.antiHungry !== false,
+      autoReconnect: settings.autoReconnect !== false,
+      antiAfkKick: settings.antiAfkKick !== false,
+      spawnCommands: settings.spawnCommands || '',
+      autoChatSchedules: Array.isArray(settings.autoChatSchedules) ? settings.autoChatSchedules : [],
+      botSchedules: Array.isArray(settings.botSchedules) ? settings.botSchedules : []
     };
     safe.reachable = Boolean(record.lastHeartbeat && Date.now() - new Date(record.lastHeartbeat).getTime() <= 120000);
     return safe;
@@ -827,9 +871,13 @@ class WorkerRegistry {
     return { username: name, credentialsConfigured: true };
   }
 
-  async updateSettings(workerId, patch = {}) {
+  async updateSettings(workerId, rawPatch = {}) {
     const worker = await this.find(workerId);
     if (!worker) throw new Error('Worker is not registered.');
+    const nested = (rawPatch && typeof rawPatch.settings === 'object' && !Array.isArray(rawPatch.settings))
+      ? rawPatch.settings
+      : {};
+    const patch = { ...nested, ...(rawPatch || {}) };
     const next = {};
     const recordPatch = {};
     if (Object.hasOwn(patch, 'alias')) {
@@ -858,8 +906,52 @@ class WorkerRegistry {
       next.afkManaged = true;
     }
     if (Object.hasOwn(patch, 'afkManaged')) next.afkManaged = Boolean(patch.afkManaged);
+
+    // Core bot gameplay/automation settings (F-08)
+    for (const boolKey of ['ecoMode', 'autoTotem', 'antiHungry', 'autoReconnect', 'antiAfkKick']) {
+      if (Object.hasOwn(patch, boolKey) && patch[boolKey] !== undefined) {
+        next[boolKey] = Boolean(patch[boolKey]);
+      }
+    }
+    if (Object.hasOwn(patch, 'spawnCommands') && patch.spawnCommands !== undefined) {
+      next.spawnCommands = String(patch.spawnCommands || '').slice(0, 1000);
+    }
+    if (Object.hasOwn(patch, 'autoChatSchedules')) {
+      if (!Array.isArray(patch.autoChatSchedules)) {
+        throw new Error('autoChatSchedules must be an array.');
+      }
+      next.autoChatSchedules = patch.autoChatSchedules.slice(0, 20).map((item) => {
+        const s = item && typeof item === 'object' ? item : {};
+        return {
+          id: String(s.id || crypto.randomUUID().slice(0, 8)).slice(0, 32),
+          enabled: s.enabled !== false,
+          message: String(s.message || s.text || '').trim().slice(0, 256),
+          intervalSeconds: Math.max(10, Math.min(86400, Number(s.intervalSeconds ?? s.intervalSec ?? s.interval ?? 300) || 300)),
+          time: s.time ? String(s.time).slice(0, 16) : ''
+        };
+      }).filter((item) => item.message.length > 0);
+    }
+    if (Object.hasOwn(patch, 'botSchedules')) {
+      if (!Array.isArray(patch.botSchedules)) {
+        throw new Error('botSchedules must be an array.');
+      }
+      next.botSchedules = patch.botSchedules.slice(0, 20).map((item) => {
+        const s = item && typeof item === 'object' ? item : {};
+        const act = String(s.action || 'start').trim().toLowerCase();
+        return {
+          id: String(s.id || crypto.randomUUID().slice(0, 8)).slice(0, 32),
+          enabled: s.enabled !== false,
+          action: ['start', 'stop', 'restart', 'reconnect', 'chat'].includes(act) ? act : 'start',
+          time: String(s.time || '00:00').trim().slice(0, 16),
+          days: Array.isArray(s.days) ? s.days.map((d) => Number(d)).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6) : [0, 1, 2, 3, 4, 5, 6],
+          message: s.message ? String(s.message).trim().slice(0, 256) : ''
+        };
+      });
+    }
+
     if (Object.hasOwn(patch, 'proxyUrl') || Object.hasOwn(patch, 'proxy')) {
-      const raw = String(patch.proxyUrl || patch.proxy || '').trim();
+      const rawVal = Object.hasOwn(patch, 'proxyUrl') ? patch.proxyUrl : patch.proxy;
+      const raw = (rawVal === null || rawVal === undefined) ? '' : String(rawVal).trim();
       if (raw) {
         let url;
         try {
@@ -867,7 +959,7 @@ class WorkerRegistry {
         } catch {
           throw new Error('Proxy must be a valid SOCKS5 URL.');
         }
-        let port = Number(url.port);
+        const port = Number(url.port);
         let username = '';
         let password = '';
         try {
@@ -882,6 +974,7 @@ class WorkerRegistry {
           throw new Error('Proxy must use socks5://host:port with optional username and password.');
         }
         if (isLocalOrPrivateHost(url.hostname)) throw new Error('Proxy cannot target a local or private network address.');
+        await validateProxyUrl(raw);
         next.proxyCiphertext = encryptSecret(raw, this.encryptionKey);
       } else {
         next.proxyCiphertext = null;
@@ -890,34 +983,19 @@ class WorkerRegistry {
     }
     if (Object.hasOwn(patch, 'proxyManaged')) next.proxyManaged = Boolean(patch.proxyManaged);
     if (Object.hasOwn(patch, 'serverHost') && patch.serverHost) {
-      const serverHost = String(patch.serverHost).trim();
-      next.serverHost = serverHost;
-      if (typeof this.store.update === 'function') {
-        await this.store.update(worker.workerId, { serverHost });
-      }
+      next.serverHost = String(patch.serverHost).trim().slice(0, 128);
     }
     if (Object.hasOwn(patch, 'serverPort') && patch.serverPort) {
       const serverPort = Number(patch.serverPort);
       if (Number.isInteger(serverPort) && serverPort > 0 && serverPort <= 65535) {
         next.serverPort = serverPort;
-        if (typeof this.store.update === 'function') {
-          await this.store.update(worker.workerId, { serverPort });
-        }
       }
     }
     if (Object.hasOwn(patch, 'version') && patch.version) {
-      const version = String(patch.version).trim();
-      next.version = version;
-      if (typeof this.store.update === 'function') {
-        await this.store.update(worker.workerId, { version });
-      }
+      next.version = String(patch.version).trim().slice(0, 32);
     }
     if (Object.hasOwn(patch, 'username') && patch.username) {
-      const username = String(patch.username).trim();
-      next.username = username;
-      if (typeof this.store.update === 'function') {
-        await this.store.update(worker.workerId, { username });
-      }
+      next.username = String(patch.username).trim().slice(0, 64);
     }
     if (Object.keys(recordPatch).length > 0) {
       await this.store.update(worker.workerId, recordPatch);
@@ -927,13 +1005,24 @@ class WorkerRegistry {
           ? await this.store.patchSettings(worker.workerId, next)
           : await this.store.update(worker.workerId, { settings: { ...(worker.settings || {}), ...next } }))
       : worker.settings;
+    if (Object.keys(next).length > 0 || Object.keys(recordPatch).length > 0) {
+      this.bumpRevision(worker.workerId);
+    }
     return {
       afkMode: 'still',
       proxyEnabled: Boolean(updated?.proxyCiphertext || next.proxyCiphertext),
       alias: next.alias ?? worker.alias ?? worker.name,
       tags: next.tags ?? worker.tags ?? [],
       rentable: next.rentable ?? worker.rentable !== false,
-      serviceUrl: recordPatch.serviceUrl ?? worker.serviceUrl
+      serviceUrl: recordPatch.serviceUrl ?? worker.serviceUrl,
+      ecoMode: (next.ecoMode ?? worker.settings?.ecoMode) !== false,
+      autoTotem: (next.autoTotem ?? worker.settings?.autoTotem) !== false,
+      antiHungry: (next.antiHungry ?? worker.settings?.antiHungry) !== false,
+      autoReconnect: (next.autoReconnect ?? worker.settings?.autoReconnect) !== false,
+      antiAfkKick: (next.antiAfkKick ?? worker.settings?.antiAfkKick) !== false,
+      spawnCommands: next.spawnCommands ?? worker.settings?.spawnCommands ?? '',
+      autoChatSchedules: next.autoChatSchedules ?? worker.settings?.autoChatSchedules ?? [],
+      botSchedules: next.botSchedules ?? worker.settings?.botSchedules ?? []
     };
   }
 
@@ -973,7 +1062,21 @@ class WorkerRegistry {
     return this.updateSettings(workerId, { proxyUrl: proxy });
   }
 
-  async saveConfig(workerId, config) {
+  async saveConfig(workerId, config = {}) {
+    const existing = await this.find(workerId);
+    if (!existing) {
+      const added = await this.add({
+        workerId,
+        name: config.name || config.alias,
+        provider: config.provider || 'wispbyte',
+        serviceUrl: config.serviceUrl || config.url || '',
+        serviceId: config.renderServiceId || config.serviceId || ''
+      });
+      if (config.settings || config.tags || config.alias || config.rentable !== undefined) {
+        await this.updateSettings(added.worker.workerId, config);
+      }
+      return added.worker;
+    }
     return this.updateSettings(workerId, config);
   }
 
@@ -986,6 +1089,9 @@ class WorkerRegistry {
   }
 
   async load() {
+    if (typeof this.store?.invalidateCache === 'function') {
+      this.store.invalidateCache();
+    }
     return this.list();
   }
 

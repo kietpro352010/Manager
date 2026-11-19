@@ -1,9 +1,118 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const net = require('node:net');
 const express = require('express');
 const { validateProxyUrl } = require('../../services/proxy-validation');
 const { decryptSecret } = require('../../utils/secrets');
+
+function parseProxyInputToUrl(rawInput, { ignoreEnabledFlag = false } = {}) {
+  if (rawInput === null || rawInput === undefined || rawInput === '') return '';
+  if (typeof rawInput === 'string') return rawInput.trim();
+  if (typeof rawInput === 'object' && !Array.isArray(rawInput)) {
+    if (!ignoreEnabledFlag && rawInput.enabled === false) return '';
+    if (typeof rawInput.url === 'string' && rawInput.url.trim()) return rawInput.url.trim();
+    const protocol = String(rawInput.protocol || 'socks5').trim().toLowerCase().replace(/:$/, '');
+    if (protocol !== 'socks5') {
+      throw new Error('Hiện tại Worker chỉ hỗ trợ giao thức socks5.');
+    }
+    const host = String(rawInput.host || '').trim().replace(/^\[|\]$/g, '');
+    const port = Number(rawInput.port);
+    if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error('Vui lòng nhập Host và Port (1–65535) hợp lệ cho Proxy.');
+    }
+    const username = String(rawInput.username || '').trim();
+    const password = String(rawInput.password || '');
+    const authPart = username
+      ? `${encodeURIComponent(username)}${password ? ':' + encodeURIComponent(password) : ''}@`
+      : '';
+    const hostPart = host.includes(':') ? `[${host}]` : host;
+    return `socks5://${authPart}${hostPart}:${port}`;
+  }
+  throw new Error('Định dạng cấu hình Proxy không hợp lệ.');
+}
+
+function parseProxyUrlToObject(proxyUrl) {
+  const raw = String(proxyUrl || '').trim();
+  if (!raw) {
+    return { enabled: false, protocol: 'socks5', host: '', port: '', username: '', password: '' };
+  }
+  try {
+    const parsed = new URL(raw);
+    return {
+      enabled: true,
+      protocol: parsed.protocol.replace(/:$/, '') || 'socks5',
+      host: parsed.hostname.replace(/^\[|\]$/g, ''),
+      port: Number(parsed.port) || '',
+      username: decodeURIComponent(parsed.username || ''),
+      password: decodeURIComponent(parsed.password || ''),
+      url: raw
+    };
+  } catch (_) {
+    return { enabled: true, protocol: 'socks5', host: '', port: '', username: '', password: '', url: raw };
+  }
+}
+
+function probeProxyTcpLatency(proxyUrl, timeoutMs = 3500) {
+  return new Promise((resolve) => {
+    let parsed;
+    try {
+      parsed = new URL(proxyUrl);
+    } catch {
+      return resolve({ ok: false, latencyMs: null, error: 'URL Proxy không hợp lệ.' });
+    }
+    const host = parsed.hostname.replace(/^\[|\]$/g, '');
+    const port = Number(parsed.port);
+    const startedAt = Date.now();
+    let settled = false;
+    const socket = net.createConnection({ host, port });
+
+    const done = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { socket.destroy(); } catch (_) {}
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => {
+      done({ ok: false, latencyMs: null, error: `Kết nối quá thời gian chờ (${timeoutMs}ms)` });
+    }, timeoutMs);
+    timer.unref?.();
+
+    socket.once('connect', () => {
+      done({ ok: true, latencyMs: Math.max(1, Date.now() - startedAt), error: null });
+    });
+    socket.once('error', (err) => {
+      done({ ok: false, latencyMs: null, error: err?.code || err?.message || 'connection_failed' });
+    });
+  });
+}
+
+function normalizeAnnouncementValue(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'string') {
+    const text = raw.trim();
+    if (!text) return null;
+    return { id: 'legacy', enabled: true, title: 'Thông báo hệ thống', content: text, mode: 'banner', startDate: '', endDate: '' };
+  }
+  if (typeof raw === 'object') {
+    const content = String(raw.content ?? raw.message ?? '').trim();
+    const title = String(raw.title || '').trim();
+    const enabled = raw.enabled !== undefined ? Boolean(raw.enabled) : Boolean(content || title);
+    return {
+      id: String(raw.id || raw.updatedAt || 'sys_ann'),
+      enabled,
+      title,
+      content,
+      mode: ['banner', 'modal', 'toast'].includes(String(raw.mode || '').toLowerCase()) ? String(raw.mode).toLowerCase() : 'banner',
+      startDate: raw.startDate ? String(raw.startDate) : '',
+      endDate: raw.endDate ? String(raw.endDate) : '',
+      updatedAt: raw.updatedAt || null
+    };
+  }
+  return null;
+}
 
 function safeDecryptJson(ciphertext, key) {
   if (!ciphertext || !key) return null;
@@ -72,9 +181,42 @@ function createUserApi({
   broker,
   fleetOperations,
   config,
-  logger
+  logger,
+  invalidateUserSessions
 }) {
   const router = express.Router();
+  const verifyRateLimiter = new Map();
+  let publicBootstrapCache = null;
+
+  function checkVerifyRateLimit(ip) {
+    const now = Date.now();
+    const key = String(ip || 'unknown');
+    let entry = verifyRateLimiter.get(key);
+    if (!entry || now > entry.resetAt) {
+      if (verifyRateLimiter.size > 1000) verifyRateLimiter.clear();
+      entry = { count: 0, resetAt: now + 60000 };
+    }
+    entry.count += 1;
+    verifyRateLimiter.set(key, entry);
+    return entry.count <= 20;
+  }
+
+  function resolveAdminProxyObject(worker) {
+    if (!worker) return parseProxyUrlToObject('');
+    if (worker.settings?.proxyCiphertext && registry.encryptionKey) {
+      try {
+        const decrypted = decryptSecret(worker.settings.proxyCiphertext, registry.encryptionKey);
+        if (decrypted) return parseProxyUrlToObject(decrypted);
+      } catch (_) {}
+    }
+    if (typeof worker.proxy === 'string' && worker.proxy.trim()) {
+      return parseProxyUrlToObject(worker.proxy);
+    }
+    if (worker.proxy && typeof worker.proxy === 'object') {
+      return worker.proxy;
+    }
+    return parseProxyUrlToObject('');
+  }
 
   // Helper: Resolve worker by workerId (string) or botNumber (number/string)
   async function resolveWorker(targetId) {
@@ -269,6 +411,9 @@ function createUserApi({
       serverTps: typeof worker.status?.tps === 'number' ? worker.status.tps : null,
       uptime: worker.status?.uptimeSeconds ?? worker.status?.uptime ?? 0,
       uptimeSeconds: worker.status?.uptimeSeconds ?? worker.status?.uptime ?? 0,
+      connectedAt: worker.status?.connectedAt || (isOnline && Number(worker.status?.uptimeSeconds) > 0
+        ? new Date(Date.now() - Number(worker.status.uptimeSeconds) * 1000).toISOString()
+        : null),
       reconnectAttempts: worker.status?.reconnectAttempts ?? 0,
       reconnectCount: worker.status?.reconnectCount ?? 0,
       lastSeen: worker.lastHeartbeat || null,
@@ -370,9 +515,27 @@ function createUserApi({
         assignedBotIds: Array.isArray(session.assignedBotIds) ? session.assignedBotIds : [],
         inGracePeriod: Boolean(session.inGracePeriod)
       };
+      // Compute stable signature excluding per-second volatile fields (lastSeen, raw uptimeSeconds, connectedAt)
+      const sigBots = payload.map((b) => {
+        const copy = { ...b };
+        delete copy.lastSeen;
+        delete copy.connectedAt;
+        copy.uptime = Math.floor(Number(copy.uptime || 0) / 60);
+        copy.uptimeSeconds = copy.uptime;
+        copy.ping = Math.round(Number(copy.ping || 0) / 25) * 25;
+        if (copy.summary && typeof copy.summary === 'object') {
+          const sCopy = { ...copy.summary };
+          delete sCopy.updatedAt;
+          delete sCopy.lastStateAt;
+          delete sCopy.uptimeSeconds;
+          delete sCopy.connectedAt;
+          copy.summary = sCopy;
+        }
+        return copy;
+      });
       const sig = crypto
         .createHash('sha1')
-        .update(JSON.stringify({ bots: payload, currentUser: currentUserSnapshot }))
+        .update(JSON.stringify({ bots: sigBots, currentUser: currentUserSnapshot }))
         .digest('hex')
         .slice(0, 16);
 
@@ -424,15 +587,7 @@ function createUserApi({
       return res.status(400).json({ ok: false, error: 'Danh sách thứ tự bot không hợp lệ (phải là mảng chuỗi ID không rỗng).' });
     }
 
-    const assigned = Array.isArray(session?.assignedBotIds) ? session.assignedBotIds.map(String) : [];
-
-    // Verify all submitted bot IDs belong to session.assignedBotIds
-    const unauthorized = rawOrder.some((id) => !assigned.includes(String(id)));
-    if (unauthorized) {
-      return res.status(403).json({ ok: false, error: 'Chứa bot ID không thuộc quyền quản lý của bạn.' });
-    }
-
-    const updatedOrder = rawOrder.map(String);
+    const updatedOrder = rawOrder.map((id) => String(id).trim());
 
     try {
       if (session?.role === 'admin') {
@@ -446,6 +601,19 @@ function createUserApi({
         }
         await store.setSetting('bot_display_order', updatedOrder);
         return res.json({ ok: true, message: 'Đã lưu thứ tự bot.', order: updatedOrder });
+      }
+
+      const assigned = Array.isArray(session?.assignedBotIds) ? session.assignedBotIds.map((id) => String(id).trim()).filter(Boolean) : [];
+      const uniqueAssigned = new Set(assigned);
+      const uniqueOrder = new Set(updatedOrder);
+
+      // Verify submitted bot IDs are an exact permutation of session.assignedBotIds (no unauthorized, duplicate, or dropped bots)
+      const unauthorized = updatedOrder.some((id) => !uniqueAssigned.has(id));
+      if (unauthorized) {
+        return res.status(403).json({ ok: false, error: 'Chứa bot ID không thuộc quyền quản lý của bạn.' });
+      }
+      if (uniqueOrder.size !== updatedOrder.length || uniqueOrder.size !== uniqueAssigned.size) {
+        return res.status(400).json({ ok: false, error: 'Danh sách sắp xếp phải chứa đầy đủ và không trùng lặp tất cả các bot được gán cho bạn.' });
       }
 
       const userId = session.userId || session.id || session.username;
@@ -465,9 +633,19 @@ function createUserApi({
 
   // 3. GET SYSTEM ANNOUNCEMENT
   router.get('/announcement', requireSession, async (_req, res) => {
+    let rawAnnouncement = store?.cachedAnnouncement;
+    if (rawAnnouncement === undefined && typeof store?.getSetting === 'function') {
+      try {
+        rawAnnouncement = await store.getSetting('system_announcement');
+        store.cachedAnnouncement = rawAnnouncement || null;
+      } catch (_) {
+        rawAnnouncement = null;
+      }
+    }
+    const announcement = normalizeAnnouncementValue(rawAnnouncement);
     return res.json({
       ok: true,
-      announcement: store.cachedAnnouncement || ''
+      announcement: announcement && announcement.enabled ? announcement : (announcement || null)
     });
   });
 
@@ -516,17 +694,25 @@ function createUserApi({
       antiHungry: worker.settings?.antiHungry !== false,
       autoReconnect: worker.settings?.autoReconnect !== false,
       antiAfkKick: worker.settings?.antiAfkKick !== false,
-      spawnCommands: worker.settings?.spawnCommands || '',
-      proxy: session.role === 'admin' ? (worker.proxy || null) : { enabled: Boolean(worker.settings?.proxyManaged && worker.settings?.proxyCiphertext) },
+      spawnCommands: canRevealMcAccount ? (worker.settings?.spawnCommands || '') : (worker.settings?.spawnCommands ? '********' : ''),
+      proxy: session.role === 'admin'
+        ? resolveAdminProxyObject(worker)
+        : { enabled: Boolean(worker.settings?.proxyManaged && worker.settings?.proxyCiphertext) },
       ...(canRevealMcAccount ? {
         mcUsername: decryptedCreds?.username || getBotUsername(worker) || '',
         mcPassword: decryptedCreds?.password || ''
       } : {})
     };
 
+    const logRevs = typeof registry.getLogRevisions === 'function'
+      ? registry.getLogRevisions(worker.workerId)
+      : { logRevision: logs.length, chatLogRevision: logs.length };
+
     return res.json({
       ok: true,
       rev,
+      logRevision: logRevs.logRevision,
+      chatLogRevision: logRevs.chatLogRevision,
       bot: safeBot,
       inventory,
       settings,
@@ -583,8 +769,10 @@ function createUserApi({
         antiHungry: worker.settings?.antiHungry !== false,
         autoReconnect: worker.settings?.autoReconnect !== false,
         antiAfkKick: worker.settings?.antiAfkKick !== false,
-        spawnCommands: worker.settings?.spawnCommands || '',
-        proxy: worker.proxy || null,
+        spawnCommands: canRevealMcAccount ? (worker.settings?.spawnCommands || '') : (worker.settings?.spawnCommands ? '********' : ''),
+        proxy: session.role === 'admin'
+          ? resolveAdminProxyObject(worker)
+          : { enabled: Boolean(worker.settings?.proxyManaged && worker.settings?.proxyCiphertext) },
         ...(canRevealMcAccount ? {
           mcUsername: decryptedCreds?.username || getBotUsername(worker) || '',
           mcPassword: decryptedCreds?.password || ''
@@ -791,9 +979,21 @@ function createUserApi({
       const dispatchResult = await broker.dispatch(perm.worker.workerId, 'window_click', req.body || {});
       const evaluated = evaluateCommandDispatch(dispatchResult, 'Thao tác click giao diện không thành công');
       if (!evaluated.success) {
-        return res.status(evaluated.status).json(evaluated.payload);
+        const errPayload = { ...evaluated.payload };
+        if (evaluated.payload?.result?.inventory) errPayload.inventory = evaluated.payload.result.inventory;
+        if (evaluated.payload?.result && Object.prototype.hasOwnProperty.call(evaluated.payload.result, 'currentWindow')) {
+          errPayload.currentWindow = evaluated.payload.result.currentWindow;
+        }
+        return res.status(evaluated.status).json(errPayload);
       }
-      return res.json({ ok: true, message: 'Đã gửi thao tác click giao diện.', result: evaluated.result });
+      const r = evaluated.result || {};
+      return res.json({
+        ok: true,
+        message: 'Đã gửi thao tác click giao diện.',
+        ...(r.inventory ? { inventory: r.inventory } : {}),
+        ...(Object.prototype.hasOwnProperty.call(r, 'currentWindow') ? { currentWindow: r.currentWindow } : {}),
+        result: evaluated.result
+      });
     } catch (error) {
       return commandErrorResponse(res, error);
     }
@@ -809,7 +1009,12 @@ function createUserApi({
       if (!evaluated.success) {
         return res.status(evaluated.status).json(evaluated.payload);
       }
-      return res.json({ ok: true, message: 'Đã gửi thao tác đóng giao diện.', result: evaluated.result });
+      return res.json({
+        ok: true,
+        message: 'Đã gửi thao tác đóng giao diện.',
+        currentWindow: null,
+        result: evaluated.result
+      });
     } catch (error) {
       return commandErrorResponse(res, error);
     }
@@ -825,54 +1030,104 @@ function createUserApi({
       const dispatchResult = await broker.dispatch(perm.worker.workerId, 'inventory', { action: invAction, ...req.body });
       const evaluated = evaluateCommandDispatch(dispatchResult, `Thao tác ${invAction} kho đồ không thành công`);
       if (!evaluated.success) {
-        return res.status(evaluated.status).json(evaluated.payload);
+        const errPayload = { ...evaluated.payload };
+        if (evaluated.payload?.result?.inventory) {
+          errPayload.inventory = evaluated.payload.result.inventory;
+        }
+        return res.status(evaluated.status).json(errPayload);
       }
-      return res.json({ ok: true, message: `Đã thực hiện thao tác ${invAction} kho đồ.`, result: evaluated.result });
+      const r = evaluated.result || {};
+      return res.json({
+        ok: true,
+        message: `Đã thực hiện thao tác ${invAction} kho đồ.`,
+        ...(r.inventory ? { inventory: r.inventory } : {}),
+        ...(r.unequippedToSlot !== undefined ? { unequippedToSlot: r.unequippedToSlot } : {}),
+        result: evaluated.result
+      });
     } catch (error) {
       return commandErrorResponse(res, error);
     }
   });
 
-  // 13. PROXY TEST & SETTINGS
+  // 13. PROXY TEST & SETTINGS (ADMIN-ONLY, SEC-02 & F-09)
   router.post('/bot/:id/proxy/test', requireSession, async (req, res) => {
+    if (req.managerAuthSession?.role !== 'admin') {
+      return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên (ADMIN) mới được kiểm tra cấu hình Proxy.' });
+    }
     const perm = await checkBotPermissionAsync(req, req.params.id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
 
-    const proxyUrl = String(req.body?.proxy || req.body?.proxyUrl || '').trim();
-    if (proxyUrl) {
-      try {
-        await validateProxyUrl(proxyUrl);
-      } catch (validationErr) {
-        return res.status(400).json({ ok: false, error: 'Proxy không hợp lệ: ' + validationErr.message });
+    let proxyUrl = '';
+    try {
+      const rawProxy = req.body?.proxy !== undefined ? req.body.proxy : req.body?.proxyUrl;
+      proxyUrl = parseProxyInputToUrl(rawProxy, { ignoreEnabledFlag: true });
+      if (!proxyUrl) {
+        return res.status(400).json({ ok: false, error: 'Vui lòng nhập đầy đủ Host và Port Proxy.' });
       }
+      await validateProxyUrl(proxyUrl);
+    } catch (validationErr) {
+      return res.status(400).json({ ok: false, error: 'Proxy không hợp lệ: ' + validationErr.message });
     }
-    return res.json({ ok: true, message: 'Proxy hợp lệ và sẵn sàng kết nối.' });
+
+    if (req.body?.skipTcpProbe === true) {
+      return res.json({ ok: true, latencyMs: 0, message: 'Cấu hình Proxy hợp lệ.' });
+    }
+    const probe = await probeProxyTcpLatency(proxyUrl, 3500);
+    if (!probe.ok) {
+      return res.status(400).json({ ok: false, latencyMs: null, error: `Không thể kết nối tới Proxy (${probe.error}).` });
+    }
+    return res.json({
+      ok: true,
+      latencyMs: probe.latencyMs,
+      message: `Kết nối Proxy thành công! Độ trễ TCP: ${probe.latencyMs}ms.`
+    });
   });
 
   router.get('/bot/:id/proxy', requireSession, async (req, res) => {
+    if (req.managerAuthSession?.role !== 'admin') {
+      return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên (ADMIN) mới được xem cấu hình Proxy.' });
+    }
     const perm = await checkBotPermissionAsync(req, req.params.id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
 
-    const worker = perm.worker;
-    return res.json({ ok: true, proxy: worker?.proxy || null });
+    return res.json({ ok: true, proxy: resolveAdminProxyObject(perm.worker) });
   });
 
   router.post('/bot/:id/proxy', requireSession, async (req, res) => {
+    if (req.managerAuthSession?.role !== 'admin') {
+      return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên (ADMIN) mới được thay đổi cấu hình Proxy.' });
+    }
     const perm = await checkBotPermissionAsync(req, req.params.id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
 
-    const proxyUrl = String(req.body?.proxy || req.body?.proxyUrl || '').trim();
-    if (proxyUrl) {
-      try {
+    let proxyUrl = '';
+    try {
+      const rawProxy = req.body?.proxy !== undefined ? req.body.proxy : req.body?.proxyUrl;
+      proxyUrl = parseProxyInputToUrl(rawProxy);
+      if (proxyUrl) {
         await validateProxyUrl(proxyUrl);
-      } catch (validationErr) {
-        return res.status(400).json({ ok: false, error: 'Proxy không hợp lệ hoặc bị từ chối: ' + validationErr.message });
       }
+    } catch (validationErr) {
+      return res.status(400).json({ ok: false, error: 'Proxy không hợp lệ hoặc bị từ chối: ' + validationErr.message });
     }
 
     try {
       await registry.updateProxy(perm.worker.workerId, proxyUrl || null);
-      return res.json({ ok: true, message: 'Đã cập nhật proxy cho bot.' });
+      if (store && typeof store.addAudit === 'function') {
+        await store.addAudit({
+          action: 'ADMIN_UPDATE_BOT_PROXY',
+          targetId: perm.worker.workerId,
+          actorId: req.managerAuthSession.username,
+          actorRole: 'admin',
+          actorIp: req.ip || '127.0.0.1',
+          details: { enabled: Boolean(proxyUrl) }
+        }).catch(() => {});
+      }
+      return res.json({
+        ok: true,
+        proxy: parseProxyUrlToObject(proxyUrl),
+        message: proxyUrl ? 'Đã lưu cấu hình Proxy cho bot.' : 'Đã tắt Proxy cho bot.'
+      });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }
@@ -883,36 +1138,72 @@ function createUserApi({
     const perm = await checkBotPermissionAsync(req, req.params.id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
 
-    if (req.managerAuthSession.role !== 'admin' && req.managerAuthSession.allowAccountChange === false) {
+    const isAdmin = req.managerAuthSession.role === 'admin';
+    if (!isAdmin && req.managerAuthSession.allowAccountChange === false) {
       return res.status(403).json({ ok: false, error: 'Gói dịch vụ của bạn không cho phép tự đổi cài đặt bot.' });
     }
 
     try {
-      const patch = req.body || {};
+      const rawPatch = req.body || {};
+      const nested = (rawPatch.settings && typeof rawPatch.settings === 'object' && !Array.isArray(rawPatch.settings))
+        ? rawPatch.settings
+        : {};
+      const patch = { ...nested, ...rawPatch };
       const worker = perm.worker;
 
       const settingsPatch = {};
       if (patch.alias !== undefined) settingsPatch.alias = String(patch.alias).trim().slice(0, 32);
-      if (patch.proxy !== undefined && patch.proxy !== null) settingsPatch.proxyUrl = patch.proxy;
-      else if (patch.proxyUrl !== undefined && patch.proxyUrl !== null) settingsPatch.proxyUrl = patch.proxyUrl;
+      for (const boolKey of ['ecoMode', 'autoTotem', 'antiHungry', 'autoReconnect', 'antiAfkKick']) {
+        if (patch[boolKey] !== undefined) settingsPatch[boolKey] = Boolean(patch[boolKey]);
+      }
+      if (patch.spawnCommands !== undefined) settingsPatch.spawnCommands = String(patch.spawnCommands || '').slice(0, 1000);
+      if (Array.isArray(patch.autoChatSchedules)) settingsPatch.autoChatSchedules = patch.autoChatSchedules;
+      if (Array.isArray(patch.botSchedules)) settingsPatch.botSchedules = patch.botSchedules;
+
+      if (patch.proxy !== undefined || patch.proxyUrl !== undefined) {
+        if (!isAdmin) {
+          return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên (ADMIN) mới được thay đổi cấu hình Proxy.' });
+        }
+        const rawProxy = patch.proxy !== undefined ? patch.proxy : patch.proxyUrl;
+        const parsedProxyUrl = parseProxyInputToUrl(rawProxy);
+        if (parsedProxyUrl) {
+          await validateProxyUrl(parsedProxyUrl);
+        }
+        settingsPatch.proxyUrl = parsedProxyUrl || null;
+      }
+
       if (patch.serverHost !== undefined) settingsPatch.serverHost = String(patch.serverHost).trim();
       if (patch.serverPort !== undefined) settingsPatch.serverPort = Number(patch.serverPort);
       if (patch.version !== undefined) settingsPatch.version = String(patch.version).trim();
       if (patch.username !== undefined) settingsPatch.username = String(patch.username).trim();
 
-      await registry.updateSettings(worker.workerId, settingsPatch);
+      const savedSettings = await registry.updateSettings(worker.workerId, settingsPatch);
       const updatedWorker = await registry.find(worker.workerId);
 
       await store.addAudit({
         action: 'BOT_SETTINGS_UPDATED',
         targetId: worker.workerId,
         actorId: req.managerAuthSession.username,
-        details: { username: updatedWorker?.username || worker.username, host: updatedWorker?.serverHost || worker.serverHost }
+        actorRole: req.managerAuthSession.role,
+        actorIp: req.ip || '127.0.0.1',
+        details: {
+          ecoMode: savedSettings.ecoMode,
+          autoTotem: savedSettings.autoTotem,
+          antiHungry: savedSettings.antiHungry,
+          autoReconnect: savedSettings.autoReconnect,
+          antiAfkKick: savedSettings.antiAfkKick
+        }
       });
 
-      return res.json({ ok: true, message: 'Đã cập nhật cài đặt bot thành công.', bot: sanitizeBotForSession(updatedWorker || worker, req.managerAuthSession) });
+      return res.json({
+        ok: true,
+        message: 'Đã cập nhật cài đặt bot thành công.',
+        settings: savedSettings,
+        bot: sanitizeBotForSession(updatedWorker || worker, req.managerAuthSession)
+      });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      const status = /Proxy|không hợp lệ|array/i.test(error.message) ? 400 : 500;
+      return res.status(status).json({ ok: false, error: error.message });
     }
   });
 
@@ -1137,16 +1428,23 @@ function createUserApi({
 
   router.post(['/rewards/link4m/verify', '/verify'], async (req, res) => {
     try {
-      const rawToken = req.body?.token;
-      const rawAttempt = req.body?.attemptId || req.body?.attempt;
-      const token = rawToken ? decodeURIComponent(rawToken) : null;
-      const attemptId = rawAttempt ? decodeURIComponent(rawAttempt) : null;
+      const clientIp = req.ip || req.socket?.remoteAddress || '127.0.0.1';
+      if (!checkVerifyRateLimit(clientIp)) {
+        return res.status(429).json({ ok: false, error: 'Thao tác quá nhanh. Vui lòng thử lại sau 1 phút.' });
+      }
+      const token = typeof req.body?.token === 'string' ? req.body.token.trim() : null;
+      const attemptId = typeof (req.body?.attemptId || req.body?.attempt) === 'string'
+        ? String(req.body.attemptId || req.body.attempt).trim()
+        : null;
 
       if (!token && !attemptId) {
         return res.status(400).json({ ok: false, error: 'Thiếu token hoặc mã phiên xác nhận.' });
       }
 
       const result = await link4mService.verifyAndClaimReward(token, attemptId);
+      if (req.managerAuthSession?.userId && typeof invalidateUserSessions === 'function') {
+        req.managerAuthSession._authVerifiedAt = 0;
+      }
       return res.json(result);
     } catch (error) {
       return res.status(400).json({ ok: false, error: error.message });
@@ -1183,28 +1481,65 @@ function createUserApi({
     }
   });
 
-  // 19. PUBLIC SYSTEM INFO
-  router.get(['/public/system-info', '/system-info'], async (_req, res) => {
-    const memory = process.memoryUsage();
-    const bots = await registry.list();
+  async function buildPublicSystemInfo() {
+    const [bots, persistedSys] = await Promise.all([
+      registry.list(),
+      typeof store?.getSetting === 'function' ? store.getSetting('system_settings').catch(() => null) : null
+    ]);
     const onlineCount = bots.filter((b) => b.status?.state === 'online').length;
+    const trialGiftEnabled = persistedSys?.trialGiftEnabled !== undefined
+      ? Boolean(persistedSys.trialGiftEnabled)
+      : Boolean(config?.trialGiftEnabled ?? false);
+    const trialDays = Number(persistedSys?.trialDays || config?.trialDays || 1);
 
-    return res.json({
+    return {
       ok: true,
       service: 'KingMC AFK Bot Cloud 24/7',
       version: '11.8-Modular-Enterprise',
       uptime: Math.floor(process.uptime()),
       totalBots: bots.length,
       onlineBots: onlineCount,
-      trialGiftEnabled: Boolean(config?.trialGiftEnabled ?? false),
-      trialDays: Number(config?.trialDays || 1),
-      memory: {
-        rssMb: Math.round(memory.rss / (1024 * 1024)),
-        heapUsedMb: Math.round(memory.heapUsed / (1024 * 1024)),
-        heapTotalMb: Math.round(memory.heapTotal / (1024 * 1024))
-      },
+      trialGiftEnabled,
+      trialDays,
       time: new Date().toISOString()
-    });
+    };
+  }
+
+  // 19. PUBLIC SYSTEM INFO & COMBINED BOOTSTRAP (BW-01, SEC-05)
+  router.get(['/public/system-info', '/system-info'], async (_req, res) => {
+    try {
+      return res.json(await buildPublicSystemInfo());
+    } catch (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+  });
+
+  router.get(['/public/bootstrap', '/bootstrap'], async (_req, res) => {
+    try {
+      const now = Date.now();
+      if (publicBootstrapCache && (now - publicBootstrapCache.at < 10000)) {
+        return res.json(publicBootstrapCache.payload);
+      }
+      const sysInfo = await buildPublicSystemInfo();
+      const payload = {
+        ok: true,
+        systemInfo: sysInfo,
+        loginConfig: {
+          ok: true,
+          trialGiftEnabled: sysInfo.trialGiftEnabled,
+          trialDays: sysInfo.trialDays
+        },
+        health: {
+          ok: true,
+          status: 'healthy',
+          uptime: sysInfo.uptime
+        }
+      };
+      publicBootstrapCache = { at: now, payload };
+      return res.json(payload);
+    } catch (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
   });
 
   return router;

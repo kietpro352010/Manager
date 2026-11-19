@@ -48,6 +48,16 @@ class AdminNotifier {
     this.adminUserId = String(adminUserId || '').trim();
     this.telegramBotToken = String(telegramBotToken || process.env.TELEGRAM_BOT_TOKEN || '').trim();
     this.telegramChatId = String(telegramChatId || process.env.TELEGRAM_CHAT_ID || '').trim();
+    this.discordWebhookUrl = String(process.env.DISCORD_WEBHOOK_URL || '').trim();
+    this.webhookEnabled = true;
+    this.webhookRules = {
+      notifyOnOffline: true,
+      notifyOnRecover: true,
+      notifyOnLowTotem: true,
+      notifyOnLowHealth: true,
+      notifyOnDeath: true,
+      offlineThresholdMinutes: 5
+    };
     this.logger = logger;
     this.alertCache = new Map();
     this.cooldownMs = 60000; // 1 minute deduplication cooldown
@@ -91,6 +101,43 @@ class AdminNotifier {
     this.telegramChatId = String(chatId || '').trim();
   }
 
+  configureWebhook(webhookCfg = {}) {
+    if (!webhookCfg || typeof webhookCfg !== 'object') return;
+    if (webhookCfg.discordUrl !== undefined || webhookCfg.webhookUrl !== undefined) {
+      this.discordWebhookUrl = String(webhookCfg.discordUrl ?? webhookCfg.webhookUrl ?? '').trim();
+    }
+    if (webhookCfg.enabled !== undefined) {
+      this.webhookEnabled = Boolean(webhookCfg.enabled);
+    }
+    if (webhookCfg.telegramToken !== undefined || webhookCfg.telegramChatId !== undefined) {
+      this.setTelegramConfig(
+        webhookCfg.telegramToken !== undefined ? webhookCfg.telegramToken : this.telegramBotToken,
+        webhookCfg.telegramChatId !== undefined ? webhookCfg.telegramChatId : this.telegramChatId
+      );
+    }
+    this.webhookRules = {
+      ...this.webhookRules,
+      ...(webhookCfg.notifyOnOffline !== undefined ? { notifyOnOffline: Boolean(webhookCfg.notifyOnOffline) } : {}),
+      ...(webhookCfg.notifyOnRecover !== undefined ? { notifyOnRecover: Boolean(webhookCfg.notifyOnRecover) } : {}),
+      ...(webhookCfg.notifyOnLowTotem !== undefined ? { notifyOnLowTotem: Boolean(webhookCfg.notifyOnLowTotem) } : {}),
+      ...(webhookCfg.notifyOnLowHealth !== undefined ? { notifyOnLowHealth: Boolean(webhookCfg.notifyOnLowHealth) } : {}),
+      ...(webhookCfg.notifyOnDeath !== undefined ? { notifyOnDeath: Boolean(webhookCfg.notifyOnDeath) } : {}),
+      ...(webhookCfg.offlineThresholdMinutes !== undefined && Number.isFinite(Number(webhookCfg.offlineThresholdMinutes))
+        ? { offlineThresholdMinutes: Math.max(1, Math.min(1440, Math.round(Number(webhookCfg.offlineThresholdMinutes)))) }
+        : {})
+    };
+  }
+
+  shouldNotifyEvent(event) {
+    if (!this.webhookEnabled) return false;
+    if (event === 'bot_offline_warning') return this.webhookRules.notifyOnOffline !== false;
+    if (event === 'bot_recovered') return this.webhookRules.notifyOnRecover !== false;
+    if (event === 'low_totem_warning') return this.webhookRules.notifyOnLowTotem !== false;
+    if (event === 'low_health_warning') return this.webhookRules.notifyOnLowHealth !== false;
+    if (event === 'bot_death_alert') return this.webhookRules.notifyOnDeath !== false;
+    return true;
+  }
+
   async sendAlert({ source = 'Manager', event = 'error', message = '', error = null, details = {}, level = 'error' } = {}) {
     // Filter out ordinary in-game events
     const filterHaystack = `${event} ${message} ${details?.lastKickReason || ''} ${details?.state || ''}`.toLowerCase();
@@ -128,6 +175,7 @@ class AdminNotifier {
     this.alertTimestamps = this.alertTimestamps.filter((t) => now - t < this.rateLimitWindowMs);
 
     if (this.alertTimestamps.length >= this.maxAlertsPerWindow) {
+      if (this.throttledBuffer.length >= 200) this.throttledBuffer.shift();
       this.throttledBuffer.push({ source, event, message: `${message}${repeatNote}`, error, details, level, timestamp: now });
 
       if (!this.rateLimitNoticeEmitted) {
@@ -247,7 +295,11 @@ class AdminNotifier {
       while (this.queue.length > 0) {
         const queueEntry = this.queue.shift();
         const item = queueEntry.item || queueEntry;
-        const channels = queueEntry.channels || ['dm', 'telegram'];
+        const defaultChannels = ['dm', 'telegram'];
+        if (this.discordWebhookUrl && this.webhookEnabled !== false) {
+          defaultChannels.push('webhook');
+        }
+        const channels = queueEntry.channels || defaultChannels;
         const retries = queueEntry.retries || 0;
 
         this.sentAlerts.push(item);
@@ -272,6 +324,15 @@ class AdminNotifier {
           } catch (err) {
             this.logger?.warn?.('telegram_alert_dispatch_failed', { error: err.message });
             failedChannels.push('telegram');
+          }
+        }
+
+        if (channels.includes('webhook')) {
+          try {
+            await this.dispatchDiscordWebhook(item);
+          } catch (err) {
+            this.logger?.warn?.('discord_webhook_dispatch_failed', { error: err.message });
+            failedChannels.push('webhook');
           }
         }
 
@@ -495,10 +556,65 @@ class AdminNotifier {
     return res;
   }
 
+  async dispatchDiscordWebhook(item) {
+    if (!this.discordWebhookUrl || this.webhookEnabled === false) return;
+    const { source, event, message, details, level, isBatch, batchCount, items } = item;
+    const color = level === 'error' ? 0xef4444 : level === 'warn' ? 0xf59e0b : 0x3b82f6;
+    const icon = level === 'error' ? '🚨' : level === 'warn' ? '⚠️' : 'ℹ️';
+
+    let embedPayload;
+    if (isBatch && Array.isArray(items)) {
+      const lines = items.slice(0, 10).map((it, idx) => {
+        const itemIcon = it.level === 'error' ? '🚨' : it.level === 'warn' ? '⚠️' : 'ℹ️';
+        return `${idx + 1}. ${itemIcon} **[${it.source}]** \`${it.event}\`: ${redactSensitiveText(String(it.message)).slice(0, 80)}`;
+      });
+      if (items.length > 10) lines.push(`*...và ${items.length - 10} cảnh báo khác.*`);
+      embedPayload = {
+        color,
+        title: `${icon} [BÁO ĐỘNG HỆ THỐNG] Tổng hợp ${batchCount} sự cố dồn dập`,
+        description: lines.join('\n').slice(0, 3900),
+        timestamp: new Date().toISOString()
+      };
+    } else {
+      const safeDetails = redactSensitiveObject(details);
+      const fields = [];
+      if (safeDetails && typeof safeDetails === 'object') {
+        const lines = [];
+        for (const [k, v] of Object.entries(safeDetails)) {
+          if (v !== undefined && v !== null && v !== '') {
+            lines.push(`• **${k}:** \`${String(v).slice(0, 120)}\``);
+          }
+        }
+        if (lines.length > 0) {
+          fields.push({ name: 'Chi tiết', value: lines.slice(0, 8).join('\n').slice(0, 1024), inline: false });
+        }
+      }
+      embedPayload = {
+        color,
+        title: `${icon} [${String(source || 'Manager').toUpperCase()}] ${String(event || 'alert')}`.slice(0, 250),
+        description: redactSensitiveText(message || 'Cảnh báo hệ thống.').slice(0, 3900),
+        fields,
+        timestamp: new Date().toISOString()
+      };
+    }
+
+    const res = await fetch(this.discordWebhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ embeds: [embedPayload] }),
+      signal: AbortSignal.timeout(8000)
+    });
+    if (!res.ok) {
+      throw new Error(`Discord Webhook responded with HTTP ${res.status}`);
+    }
+    return res;
+  }
+
   // --------------------------------------------------------------------------
   // IN-GAME SURVIVAL NOTIFICATION SHORTCUTS
   // --------------------------------------------------------------------------
   notifyOfflineBot(botId, botName, offlineMinutes = 5) {
+    if (!this.shouldNotifyEvent('bot_offline_warning')) return;
     return this.sendAlert({
       source: 'BotWorker Fleet',
       event: 'bot_offline_warning',
@@ -508,28 +624,52 @@ class AdminNotifier {
     });
   }
 
-  notifyLowTotem(botId, botName, totemCount) {
+  notifyLowTotem(botId, botNameOrCount, totemCount) {
+    if (!this.shouldNotifyEvent('low_totem_warning')) return;
+    let botName = botNameOrCount;
+    let count = totemCount;
+    if (count === undefined && typeof botNameOrCount === 'number') {
+      count = botNameOrCount;
+      botName = botId;
+    }
+    const safeCount = Number.isFinite(Number(count)) ? Number(count) : 0;
     return this.sendAlert({
       source: 'KingMC Game Survival',
       event: 'low_totem_warning',
-      message: `Bot **${botName || botId}** (#${botId}) sắp cạn Totem! Hiện chỉ còn **${totemCount}** cái!`,
-      details: { botId, botName, totemCount },
+      message: `Bot **${botName || botId}** (#${botId}) sắp cạn Totem! Hiện chỉ còn **${safeCount}** cái!`,
+      details: { botId, botName: botName || botId, totemCount: safeCount },
       level: 'warn'
     });
   }
 
-  notifyBotDeath(botId, botName, deathCoords) {
-    const coordsStr = deathCoords ? `X:${deathCoords.x}, Y:${deathCoords.y}, Z:${deathCoords.z}` : 'Không rõ';
+  notifyBotDeath(botId, botNameOrCoords, deathCoords) {
+    if (!this.shouldNotifyEvent('bot_death_alert')) return;
+    let botName = botNameOrCoords;
+    let coords = deathCoords;
+    if (coords === undefined && botNameOrCoords !== undefined && typeof botNameOrCoords !== 'string') {
+      coords = botNameOrCoords;
+      botName = botId;
+    }
+    let coordsStr = 'Không rõ';
+    if (coords && typeof coords === 'object' && (coords.x !== undefined || coords.y !== undefined || coords.z !== undefined)) {
+      const rx = Number.isFinite(Number(coords.x)) ? Math.round(Number(coords.x)) : '?';
+      const ry = Number.isFinite(Number(coords.y)) ? Math.round(Number(coords.y)) : '?';
+      const rz = Number.isFinite(Number(coords.z)) ? Math.round(Number(coords.z)) : '?';
+      coordsStr = `X:${rx}, Y:${ry}, Z:${rz}`;
+    } else if (typeof coords === 'string' && coords.trim()) {
+      coordsStr = coords.trim();
+    }
     return this.sendAlert({
       source: 'KingMC Game Survival',
       event: 'bot_death_alert',
-      message: `Bot **${botName || botId}** (#${botId}) đã bị tiêu diệt tại tọa độ: \`${coordsStr}\`!`,
-      details: { botId, botName, deathCoords: coordsStr },
+      message: `Bot **${botName || botId}** (#${botId}) đã bị tiêu diệt (${coordsStr})!`,
+      details: { botId, botName: botName || botId, deathCoords: coordsStr },
       level: 'error'
     });
   }
 
   notifyBotRecovered(botId, botName) {
+    if (!this.shouldNotifyEvent('bot_recovered')) return;
     return this.sendAlert({
       source: 'BotWorker Fleet',
       event: 'bot_recovered',
@@ -548,6 +688,15 @@ class AdminNotifier {
           originalError(event, fields);
           try {
             const strEvent = String(event || '').toLowerCase();
+            // Prevent recursive self-alerting when notifier dispatch itself logs errors
+            if (
+              strEvent.startsWith('admin_alert_') ||
+              strEvent.startsWith('admin_dm_') ||
+              strEvent.startsWith('telegram_alert_') ||
+              strEvent.startsWith('discord_webhook_')
+            ) {
+              return;
+            }
             const strMsg = String(fields?.message || fields?.error || '').toLowerCase();
             let source = fields?.source;
             if (!source) {

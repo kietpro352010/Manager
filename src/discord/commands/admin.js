@@ -1,7 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder } = require('discord.js');
-const { renderAdminStatus, renderAdminBots, embed } = require('../panels/renderer');
+const { renderAdminStatus, renderAdminBots, buildAdminPasswordModal, embed } = require('../panels/renderer');
 const { resolveLinkedUser } = require('../handlers/panel-handler');
 
 function checkUserAdmin(interaction, services, user) {
@@ -29,8 +29,16 @@ const definition = new SlashCommandBuilder()
   )
   .addSubcommand((cmd) =>
     cmd.setName('password').setDescription('Thiết lập hoặc đổi mật khẩu Web cho tài khoản Quản trị viên (admin)')
-      .addStringOption((opt) => opt.setName('new_password').setDescription('Mật khẩu quản trị mới (6–256 ký tự)').setMaxLength(256).setRequired(true))
+      .addStringOption((opt) => opt.setName('new_password').setDescription('Tùy chọn (khuyến nghị bỏ trống để nhập an toàn qua biểu mẫu ẩn)').setMaxLength(256).setRequired(false))
   );
+
+function shouldSkipDefer(interaction) {
+  try {
+    return interaction?.options?.getSubcommand?.(false) === 'password' && !interaction?.options?.getString?.('new_password');
+  } catch (_) {
+    return false;
+  }
+}
 
 async function execute(interaction, services) {
   const user = (services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function')
@@ -121,7 +129,16 @@ async function execute(interaction, services) {
     }
 
     const newPassword = interaction.options.getString('new_password');
-    if (!newPassword || newPassword.length < 6 || newPassword.length > 256) {
+    if (!newPassword) {
+      if (typeof interaction.showModal === 'function' && !interaction.deferred && !interaction.replied) {
+        await interaction.showModal(buildAdminPasswordModal());
+        return null;
+      }
+      return {
+        embeds: [embed('❌ LỖI', 'Mật khẩu quản trị viên phải dài từ 6 đến 256 ký tự.', 0xef4444)]
+      };
+    }
+    if (newPassword.length < 6 || newPassword.length > 256) {
       return {
         embeds: [embed('❌ LỖI', 'Mật khẩu quản trị viên phải dài từ 6 đến 256 ký tự.', 0xef4444)]
       };
@@ -280,5 +297,6 @@ async function execute(interaction, services) {
 
 module.exports = {
   data: definition,
-  execute
+  execute,
+  shouldSkipDefer
 };
