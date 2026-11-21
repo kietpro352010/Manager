@@ -256,6 +256,7 @@ function renderAdminStatus({ stats, systemInfo, notice = '' }) {
 
   const btnRow = new ActionRowBuilder().addComponents(
     button('Xem tất cả Bot', 'admin:bots:0', ButtonStyle.Primary, false, '🤖'),
+    button('Wispbyte KeepAlive', 'wispbyte:list', ButtonStyle.Secondary, false, '🛰️'),
     button('Làm mới', 'admin:status:refresh', ButtonStyle.Secondary, false, '🔄')
   );
 
@@ -442,12 +443,110 @@ function renderBotLogs({ user, worker, logs = [] }) {
   };
 }
 
+function maskCookieDisplay(cookie) {
+  if (!cookie || typeof cookie !== 'string') return '—';
+  if (cookie.length <= 8) return '********';
+  return cookie.slice(0, 4) + '****' + cookie.slice(-4);
+}
+
+function renderWispbyteList({ accounts = [], notice = '' }) {
+  let desc = `### 🛰️ DANH SÁCH TÀI KHOẢN WISPBYTE AUTO-KEEPALIVE\n` +
+             `Hệ thống tự động truy cập Client Panel **24h/lần** để duy trì quy tắc 14 ngày của Wispbyte.\n\n`;
+
+  if (notice) desc += `${notice}\n\n`;
+
+  if (!Array.isArray(accounts) || accounts.length === 0) {
+    desc += `ℹ️ *Chưa có tài khoản Wispbyte nào được cấu hình trong hệ thống.*\n\n` +
+            `**Hướng dẫn thêm tài khoản:**\n` +
+            `Dùng lệnh: \`/wispbyte add id:<id> cookie:<chuỗi_cookie> [name:<tên>] [panel_url:<url>]\`\n\n` +
+            `> 💡 *Lấy chuỗi cookie từ Request Header \`Cookie:\` khi đăng nhập https://wispbyte.com/client trên trình duyệt.*`;
+  } else {
+    desc += `Tổng số tài khoản: **${accounts.length}**\n\n`;
+    accounts.forEach((acc, idx) => {
+      const isOk = acc.lastStatus === 'ok';
+      const isExpired = acc.lastStatus === 'expired';
+      const icon = isOk ? '🟢' : (isExpired ? '🔴' : '⚪');
+      const statusLabel = isOk ? 'Hoạt động (OK)' : (isExpired ? 'Hết hạn Cookie' : 'Chưa chạy');
+      const lastPing = acc.lastPingAt
+        ? new Date(acc.lastPingAt).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })
+        : 'Chưa có';
+      const renewCount = acc.renewCount || 0;
+      const maskedCookie = maskCookieDisplay(acc.cookie);
+      const panelUrl = acc.panelUrl || 'https://wispbyte.com/client';
+
+      desc += `**${idx + 1}. ${icon} ${safe(acc.name || acc.id)}** (\`${acc.id}\`)\n` +
+              `> • Trạng thái: **${statusLabel}** | Lần giữ hạn: **${renewCount}** lần\n` +
+              `> • Truy cập cuối: \`${lastPing}\`\n` +
+              `> • Panel: \`${panelUrl}\` | Cookie: \`${maskedCookie}\`\n`;
+      if (acc.lastMessage && acc.lastMessage !== 'Saved, ready for ping' && acc.lastMessage !== '—') {
+        desc += `> • Ghi chú: *${safe(acc.lastMessage, 120)}*\n`;
+      }
+      desc += `\n`;
+    });
+    desc += `> 💡 *Dùng nút bên dưới hoặc lệnh \`/wispbyte check\` để kích hoạt truy cập Client Panel ngay lập tức.*`;
+  }
+
+  const wispEmbed = embed('QUẢN LÝ ĐA TÀI KHOẢN WISPBYTE — ADMIN', desc, COLOR_BRAND);
+
+  const btnRow = new ActionRowBuilder().addComponents(
+    button('Kiểm tra / Gia hạn ngay', 'wispbyte:check', ButtonStyle.Primary, false, '🔄'),
+    button('Làm mới danh sách', 'wispbyte:list', ButtonStyle.Secondary, false, '📋'),
+    button('Tổng quan Admin', 'admin:status', ButtonStyle.Secondary, false, '🛡️')
+  );
+
+  return { embeds: [wispEmbed], components: [btnRow] };
+}
+
+function renderWispbyteCheckResult({ results = [], total = 0, okCount = 0, expiredCount = 0, errorCount = 0, notice = '' }) {
+  const allOk = okCount === total && total > 0;
+  const statusColor = allOk ? COLOR_ONLINE : (expiredCount > 0 ? COLOR_OFFLINE : COLOR_WARN);
+
+  let desc = `### 🛰️ KẾT QUẢ TRUY CẬP CLIENT PANEL WISPBYTE\n\n`;
+  if (notice) desc += `${notice}\n\n`;
+
+  desc += `• **Tổng số tài khoản:** \`${total}\`\n` +
+          `• **Thành công:** **${okCount}** ✅\n` +
+          `• **Hết hạn / Lỗi:** **${(expiredCount || 0) + (errorCount || 0)}** ⚠️\n\n`;
+
+  if (Array.isArray(results) && results.length > 0) {
+    results.forEach((r, idx) => {
+      const icon = r.success ? '🟢' : (r.status === 'expired' ? '🔴' : '🟡');
+      desc += `**${idx + 1}. ${icon} ${safe(r.name || r.id)}** (\`${r.id}\`)\n` +
+              `> • Trạng thái: ${r.success ? '**OK**' : `**${(r.status || 'ERROR').toUpperCase()}**`}\n` +
+              `> • Chi tiết: *${safe(r.message || '—', 160)}*\n` +
+              `> • Tổng lần giữ hạn: **${r.renewCount || 0}**\n\n`;
+    });
+  } else {
+    desc += `ℹ️ *Chưa có tài khoản Wispbyte nào được cấu hình trong hệ thống.*\n\n`;
+  }
+
+  if (expiredCount > 0) {
+    desc += `⚠️ **CẢNH BÁO:** Phát hiện **${expiredCount}** tài khoản bị hết hạn Cookie!\n` +
+            `Vui lòng lấy Cookie mới từ trình duyệt và cập nhật lại bằng:\n` +
+            `\`/wispbyte add id:<id> cookie:<cookie_mới>\`\n\n`;
+  }
+
+  desc += `*Hệ thống tự động lặp lại kiểm tra mỗi 24 giờ.*`;
+
+  const checkEmbed = embed('KẾT QUẢ GIA HẠN WISPBYTE — ADMIN', desc, statusColor);
+
+  const btnRow = new ActionRowBuilder().addComponents(
+    button('Kiểm tra lại', 'wispbyte:check', ButtonStyle.Primary, false, '🔄'),
+    button('Xem danh sách tài khoản', 'wispbyte:list', ButtonStyle.Secondary, false, '📋'),
+    button('Tổng quan Admin', 'admin:status', ButtonStyle.Secondary, false, '🛡️')
+  );
+
+  return { embeds: [checkEmbed], components: [btnRow] };
+}
+
 module.exports = {
   renderBotsList,
   renderBotDetail,
   renderAdminStatus,
   renderAdminBots,
   renderBotLogs,
+  renderWispbyteList,
+  renderWispbyteCheckResult,
   buildLoginModal,
   buildAdminPasswordModal,
   getWorkerState,

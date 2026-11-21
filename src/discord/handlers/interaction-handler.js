@@ -171,7 +171,7 @@ function attachInteractionHandler(client, { config, services, logger }) {
         await safeDeferReply(interaction, { ephemeral: true });
 
         // Admin command authorization check
-        if (interaction.commandName === 'admin') {
+        if (interaction.commandName === 'admin' || interaction.commandName === 'wispbyte') {
           const user = (services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function')
             ? await resolveLinkedUser(interaction, services)
             : null;

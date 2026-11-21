@@ -15,7 +15,9 @@ async function execute() {
     `• \`/login\`: Mở biểu mẫu đăng nhập tài khoản Web Manager bằng Username & Mật khẩu.\n` +
     `• \`/logout\`: Đăng xuất và hủy liên kết tài khoản Discord hiện tại.\n` +
     `• \`/bots\`: Mở bảng điều khiển chính danh sách bot bạn sở hữu.\n` +
-    `• \`/help\`: Hiển thị bảng hướng dẫn này.\n\n` +
+    `• \`/help\`: Hiển thị bảng hướng dẫn này.\n` +
+    `• \`/admin\`: (Admin) Bảng điều khiển Enterprise & quản trị hệ thống.\n` +
+    `• \`/wispbyte\`: (Admin) Quản lý đa tài khoản Wispbyte và tự động giữ hạn 14 ngày Client Panel.\n\n` +
     `### 🎮 THEO DÕI VÀ ĐIỀU KHIỂN BOT\n` +
     `Gọi \`/bots\`, chọn nút có tên bot để xem Username, Server, Ping, TPS, vị trí, Uptime và số lần kết nối lại:\n` +
     `• **BẬT (START):** Khởi chạy phiên AFK kết nối máy chủ KingMC.\n` +

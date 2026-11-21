@@ -6,6 +6,8 @@ const {
   renderBotDetail,
   renderAdminStatus,
   renderAdminBots,
+  renderWispbyteList,
+  renderWispbyteCheckResult,
   getWorkerState,
   embed
 } = require('../panels/renderer');
@@ -581,6 +583,40 @@ async function handlePanelInteraction(interaction, services) {
       const page = Number(customId.split(':')[2]) || 0;
       const allWorkers = await services.registry.list();
       const view = renderAdminBots({ workers: allWorkers, page });
+      return safeUpdate(interaction, view);
+    }
+  }
+
+  // 7. Wispbyte Panel Interactions
+  if (customId.startsWith('wispbyte:')) {
+    if (user.role !== 'admin') {
+      return safeUpdate(interaction, {
+        embeds: [embed('⛔ TỪ CHỐI QUYỀN HẠN', 'Hành động này chỉ dành cho Quản trị viên.', 0xef4444)]
+      });
+    }
+
+    const manager = services?.wispbyteKeepAlive;
+    if (!manager) {
+      return safeUpdate(interaction, {
+        embeds: [embed('❌ LỖI', 'Dịch vụ WispbyteKeepAlive không khả dụng.', 0xef4444)]
+      });
+    }
+
+    if (customId === 'wispbyte:check') {
+      const res = await manager.checkAll({ notifyDiscord: false });
+      const view = renderWispbyteCheckResult({
+        results: res.results || [],
+        total: res.total || 0,
+        okCount: res.okCount || 0,
+        expiredCount: res.expiredCount || 0,
+        errorCount: (res.results || []).filter((r) => !r.success && r.status !== 'expired').length
+      });
+      return safeUpdate(interaction, view);
+    }
+
+    if (customId === 'wispbyte:list') {
+      const accounts = await manager.getAccounts();
+      const view = renderWispbyteList({ accounts });
       return safeUpdate(interaction, view);
     }
   }
