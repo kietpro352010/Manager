@@ -149,6 +149,9 @@ function createAdminApi({
         ...user,
         id: String(user.userId || user.id || ''),
         discordUserId: String(user.discordUserId || user.discord_user_id || ''),
+        lastLoginIp: String(user.lastLoginIp || user.last_login_ip || user.registrationIp || user.registration_ip || ''),
+        lastLoginAt: user.lastLoginAt || user.last_login_at || null,
+        registrationIp: String(user.registrationIp || user.registration_ip || ''),
         assignedBotIds: Array.isArray(user.workerIds)
           ? [...new Set(user.workerIds.map((workerId) => String(workerId).trim().toLowerCase()).filter(Boolean))]
           : []
@@ -167,15 +170,19 @@ function createAdminApi({
         const key = String(worker.workerId).trim().toLowerCase();
         botOwnership[worker.workerId] = ownerByWorkerId.get(key) || ownerByWorkerId.get(String(worker.botNumber || '')) || null;
       }
-      const availableBots = workers.map((worker) => ({
-        id: String(worker.workerId),
-        workerId: String(worker.workerId),
-        botNumber: worker.botNumber,
-        label: worker.alias || worker.name || `Bot #${worker.botNumber || worker.workerId}`,
-        enabled: worker.enabled !== false,
-        rentable: worker.rentable !== false,
-        currentOwner: botOwnership[worker.workerId] || null
-      }));
+      const availableBots = workers.map((worker) => {
+        const mcUser = worker.status?.username || worker.settings?.account?.username || worker.settings?.username || '';
+        return {
+          id: String(worker.workerId),
+          workerId: String(worker.workerId),
+          botNumber: worker.botNumber,
+          label: worker.alias || worker.name || `Bot #${worker.botNumber || worker.workerId}`,
+          botMinecraftUser: String(mcUser || ''),
+          enabled: worker.enabled !== false,
+          rentable: worker.rentable !== false,
+          currentOwner: botOwnership[worker.workerId] || null
+        };
+      });
       return res.json({ ok: true, users, availableBots, botOwnership });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });

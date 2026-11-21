@@ -82,6 +82,9 @@ ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS device_fingerprint tex
 ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS registration_user_agent text;
 CREATE INDEX IF NOT EXISTS idx_users_reg_ip ON public.manager_users(registration_ip);
 CREATE INDEX IF NOT EXISTS idx_users_fingerprint ON public.manager_users(device_fingerprint);
+ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS last_login_ip text;
+ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS last_login_at timestamptz;
+CREATE INDEX IF NOT EXISTS idx_users_last_login_ip ON public.manager_users(last_login_ip);
 
 CREATE TABLE IF NOT EXISTS public.manager_assignments (
   worker_id text PRIMARY KEY,

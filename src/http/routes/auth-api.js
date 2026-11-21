@@ -798,6 +798,12 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         store.invalidateUserCache(userId, cleanUsername);
       }
 
+      if (typeof store.recordUserLogin === 'function') {
+        store.recordUserLogin(userId, clientIp).catch(() => {});
+      } else if (typeof store.setAccess === 'function') {
+        store.setAccess(userId, { lastLoginIp: clientIp, lastLoginAt: new Date().toISOString() }, 'system-login').catch(() => {});
+      }
+
       await store.addAudit({
         action: 'AUTH_USER_LOGIN',
         targetId: userId,

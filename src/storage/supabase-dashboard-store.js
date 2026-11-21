@@ -34,7 +34,9 @@ const USER_LIST_ACCESS_COLUMNS = [
   'id', 'username', 'role', 'status', 'is_permanent', 'expires_at',
   'plan_name', 'note', 'allow_account_change', 'lock_reason',
   'bot_count', 'bot_aliases', 'assigned_bot_ids',
-  'registration_ip', 'device_fingerprint', 'discord_user_id', 'created_at', 'updated_at'
+  'registration_ip', 'device_fingerprint', 'discord_user_id',
+  'last_login_ip', 'last_login_at',
+  'created_at', 'updated_at'
 ].join(',');
 
 const ACCESS_FIELDS = {
@@ -412,7 +414,16 @@ class SupabaseDashboardStore {
 
     // 1. Thử đọc từ manager_users
     try {
-      const { data: users, error } = await this.client.from(USERS).select(USER_LIST_ACCESS_COLUMNS).order('created_at', { ascending: false });
+      let { data: users, error } = await this.client.from(USERS).select(USER_LIST_ACCESS_COLUMNS).order('created_at', { ascending: false });
+      if (error && isMissingSchemaError(error)) {
+        // Fallback without last_login_ip / last_login_at if columns do not exist yet on target schema
+        const fallbackCols = USER_LIST_ACCESS_COLUMNS.split(',').filter(c => !['last_login_ip', 'last_login_at'].includes(c.trim())).join(',');
+        const fallbackRes = await this.client.from(USERS).select(fallbackCols).order('created_at', { ascending: false });
+        if (!fallbackRes.error && Array.isArray(fallbackRes.data)) {
+          users = fallbackRes.data;
+          error = null;
+        }
+      }
       if (!error && Array.isArray(users) && users.length > 0) {
         const result = users.map((u) => {
           const uNameLower = String(u.username || '').trim().toLowerCase();
@@ -434,6 +445,8 @@ class SupabaseDashboardStore {
             registrationIp: u.registration_ip || '',
             deviceFingerprint: u.device_fingerprint || '',
             discordUserId: dId,
+            lastLoginIp: u.last_login_ip || u.registration_ip || '',
+            lastLoginAt: u.last_login_at || null,
             workerIds: Array.isArray(u.assigned_bot_ids) ? u.assigned_bot_ids.map(String) : [],
             createdAt: u.created_at,
             updatedAt: u.updated_at
@@ -536,6 +549,12 @@ class SupabaseDashboardStore {
       if (fields.registrationUserAgent !== undefined || existingUser?.registration_user_agent !== undefined) {
         userRow.registration_user_agent = fields.registrationUserAgent !== undefined ? (fields.registrationUserAgent || null) : (existingUser?.registration_user_agent || null);
       }
+      if (fields.lastLoginIp !== undefined || fields.last_login_ip !== undefined || existingUser?.last_login_ip !== undefined) {
+        userRow.last_login_ip = (fields.lastLoginIp || fields.last_login_ip || existingUser?.last_login_ip || null);
+      }
+      if (fields.lastLoginAt !== undefined || fields.last_login_at !== undefined || existingUser?.last_login_at !== undefined) {
+        userRow.last_login_at = (fields.lastLoginAt || fields.last_login_at || existingUser?.last_login_at || null);
+      }
       if (fields.isTrial !== undefined || existingUser?.is_trial !== undefined) {
         userRow.is_trial = fields.isTrial !== undefined ? Boolean(fields.isTrial) : Boolean(existingUser?.is_trial);
       }
@@ -552,7 +571,8 @@ class SupabaseDashboardStore {
       }
       const directOnlyFields = [
         'password', 'isTrial', 'trialBotId', 'registrationIp',
-        'deviceFingerprint', 'registrationUserAgent', 'botCount'
+        'deviceFingerprint', 'registrationUserAgent', 'botCount',
+        'lastLoginIp', 'lastLoginAt'
       ];
       const requiresDirectWrite = directOnlyFields.some((field) => fields[field] !== undefined)
         || Boolean(fields.username && existingUser?.username
@@ -1257,6 +1277,31 @@ class SupabaseDashboardStore {
         };
       }
     });
+  }
+
+  async recordUserLogin(identifier, clientIp) {
+    if (!identifier || !clientIp) return;
+    const cleanId = String(identifier).trim();
+    const cleanIp = String(clientIp).trim();
+    const nowIso = new Date().toISOString();
+    this.invalidateCache();
+    try {
+      if (this.client) {
+        const { error } = await this.client.from(USERS).update({
+          last_login_ip: cleanIp,
+          last_login_at: nowIso
+        }).or(`id.eq.${cleanId},username.eq.${cleanId.toLowerCase()}`);
+        if (error && !isMissingSchemaError(error)) {
+          if (this.logger?.warn) {
+            this.logger.warn('Failed to update last_login_ip', { identifier: cleanId, ip: cleanIp, error: error.message });
+          }
+        }
+      }
+    } catch (err) {
+      if (this.logger?.warn) {
+        this.logger.warn('Exception updating last_login_ip', { identifier: cleanId, ip: cleanIp, error: err.message });
+      }
+    }
   }
 
   async _querySingleOptional(table, column, value) {

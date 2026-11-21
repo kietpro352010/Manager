@@ -52,25 +52,40 @@ function isPrivateOrLoopbackIp(ip) {
 }
 
 function resolveClientIp(req) {
+  // 1. Cloudflare connecting IP is the highest fidelity when present behind Cloudflare
+  const cfIp = req?.headers?.['cf-connecting-ip'];
+  if (cfIp) {
+    const clean = String(cfIp).replace(/^::ffff:/, '').trim();
+    if (net.isIP(clean)) return clean;
+  }
+
+  // 2. X-Real-IP (standard reverse proxy)
+  const realIp = req?.headers?.['x-real-ip'];
+  if (realIp) {
+    const clean = String(realIp).replace(/^::ffff:/, '').trim();
+    if (net.isIP(clean)) return clean;
+  }
+
+  // 3. X-Forwarded-For (client is first in comma-separated chain)
+  const xff = req?.headers?.['x-forwarded-for'];
+  if (xff) {
+    const first = String(xff).split(',')[0].replace(/^::ffff:/, '').trim();
+    if (net.isIP(first)) return first;
+  }
+
+  // 4. Express req.ip
   if (req?.ip && typeof req.ip === 'string') {
     const clean = req.ip.replace(/^::ffff:/, '').trim();
     if (net.isIP(clean)) return clean;
   }
-  const socketIpRaw = req?.socket?.remoteAddress;
-  const socketIp = typeof socketIpRaw === 'string' ? socketIpRaw.replace(/^::ffff:/, '').trim() : '';
-  const isTrustedProxy = isPrivateOrLoopbackIp(socketIp);
 
-  if (isTrustedProxy) {
-    const rawHeader = req?.headers?.['cf-connecting-ip'] ||
-      req?.headers?.['x-real-ip'] ||
-      (req?.headers?.['x-forwarded-for'] ? String(req.headers['x-forwarded-for']).split(',')[0].trim() : '');
-    if (rawHeader) {
-      const cleanHeaderIp = String(rawHeader).replace(/^::ffff:/, '').trim();
-      if (net.isIP(cleanHeaderIp)) return cleanHeaderIp;
-    }
+  // 5. Socket remoteAddress
+  const socketIpRaw = req?.socket?.remoteAddress;
+  if (typeof socketIpRaw === 'string') {
+    const clean = socketIpRaw.replace(/^::ffff:/, '').trim();
+    if (net.isIP(clean)) return clean;
   }
 
-  if (socketIp && net.isIP(socketIp)) return socketIp;
   return '127.0.0.1';
 }
 

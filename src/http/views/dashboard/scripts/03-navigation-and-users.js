@@ -755,6 +755,16 @@ function renderUserTable() {
         '</div>'
       : '<div style="font-size:10px;color:#64748b;margin-top:2px;">💬 Discord: <span style="font-style:italic;">Chưa liên kết</span></div>';
 
+    const activeLoginIp = String(u.lastLoginIp || u.last_login_ip || u.registrationIp || u.registration_ip || '').trim();
+    const regIp = String(u.registrationIp || u.registration_ip || '').trim();
+    const ipDisplay = activeLoginIp
+      ? '<div style="font-size:10.5px;color:var(--muted);margin-top:2.5px;display:flex;align-items:center;gap:4px;flex-wrap:wrap;">' +
+          '<span>🌐 IP Đăng nhập:</span> ' +
+          '<span style="font-family:var(--font-mono);color:#38bdf8;font-weight:700;">' + escapeHtml(activeLoginIp) + '</span>' +
+          (regIp && regIp !== activeLoginIp ? '<span style="font-size:9.5px;color:#64748b;" title="IP đăng ký ban đầu">(ĐK: ' + escapeHtml(regIp) + ')</span>' : '') +
+        '</div>'
+      : '<div style="font-size:10px;color:#64748b;margin-top:2px;">🌐 IP: <span style="font-style:italic;">Chưa đăng nhập</span></div>';
+
     const userCol = '<div>' +
       '<div style="display:flex;align-items:center;gap:6px;">' +
         '<strong style="font-size:13.5px;color:#fff;">' + (isAdmin ? '👑' : '👤') + ' ' + escapeHtml(u.username) + '</strong>' +
@@ -763,9 +773,7 @@ function renderUserTable() {
       (u.note ? '<div style="font-size:11px;color:var(--muted);margin-top:2px;">📝 ' + escapeHtml(u.note) + '</div>' : '') +
       (u.planName ? '<div style="font-size:11px;color:#38bdf8;margin-top:1px;font-weight:700;">' + escapeHtml(u.planName) + '</div>' : '') +
       discordBadge +
-      (u.registrationIp || u.registration_ip
-        ? '<div style="font-size:10.5px;color:var(--muted);margin-top:2px;">🌐 IP: <span style="font-family:var(--font-mono);color:#38bdf8;">' + escapeHtml(u.registrationIp || u.registration_ip) + '</span></div>'
-        : '') +
+      ipDisplay +
       (u.deviceFingerprint || u.device_fingerprint
         ? '<div style="font-size:10px;color:var(--muted);margin-top:1px;">📱 FP: <span style="font-family:var(--font-mono);color:#a78bfa;">' + escapeHtml(u.deviceFingerprint || u.device_fingerprint) + '</span></div>'
         : '') +
@@ -842,7 +850,11 @@ function renderUserTable() {
           const workerId = String(id);
           const b = userManagementAvailableBots.find(x => String(x.workerId||x.id) === workerId);
           const name = b ? b.label : ('Bot #' + workerId);
-          return '<span class="badge-tag" style="background:rgba(56,189,248,0.15);color:#38bdf8;padding:2px 6px;border-radius:4px;margin:2px;display:inline-block;font-size:11px;font-weight:700;">🤖 ' + escapeHtml(name) + '</span>';
+          const mcUser = b ? (b.botMinecraftUser || b.username || '') : '';
+          const mcUserBadge = mcUser
+            ? '<span style="font-family:var(--font-mono);font-size:10px;color:#cbd5e1;background:rgba(255,255,255,0.08);padding:1px 5px;border-radius:3px;margin-left:4px;border:1px solid rgba(255,255,255,0.12);" title="Tên tài khoản Minecraft của Bot">IGN: ' + escapeHtml(mcUser) + '</span>'
+            : '';
+          return '<span class="badge-tag" style="background:rgba(56,189,248,0.15);color:#38bdf8;padding:2px 6px;border-radius:4px;margin:2px;display:inline-flex;align-items:center;font-size:11px;font-weight:700;">🤖 ' + escapeHtml(name) + mcUserBadge + '</span>';
         }).join('')
       : '<span style="color:var(--muted);font-style:italic;font-size:11.5px;">Chưa gán bot nào</span>';
 
