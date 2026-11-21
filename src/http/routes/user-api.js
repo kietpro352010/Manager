@@ -457,7 +457,7 @@ function createUserApi({
       online: isOnline,
       lastKickReason: worker.status?.lastKickReason || '',
       lastError: worker.status?.lastError || '',
-      server: worker.status?.server || worker.serverHost || 'mc.kingmc.vn',
+      server: worker.status?.server || worker.status?.serverHost || worker.settings?.serverHost || worker.serverHost || worker.server || 'kingmc.vn',
       dimension: worker.status?.dimension || 'unknown',
       locationState: worker.status?.locationState || 'unknown',
       health: worker.status?.health ?? 20,

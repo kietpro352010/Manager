@@ -170,7 +170,14 @@ function renderBotDetail({ user, worker, notice = '', isExecuting = false }) {
     : '—';
   const uptime = state.isOnline ? uptimeText(worker.status?.uptimeSeconds) : '—';
   const reconnects = worker.status?.reconnectCount || worker.status?.reconnectAttempts || 0;
-  const server = safe(worker.status?.server || worker.serverHost || 'mc.kingmc.vn');
+  const server = safe(
+    worker.status?.server ||
+    worker.status?.serverHost ||
+    worker.settings?.serverHost ||
+    worker.serverHost ||
+    worker.server ||
+    'kingmc.vn'
+  );
   const provider = safe(worker.provider || 'wispbyte').toUpperCase();
   const position = worker.status?.position;
   const hasPosition = position &&

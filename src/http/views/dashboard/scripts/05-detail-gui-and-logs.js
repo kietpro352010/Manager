@@ -30,7 +30,7 @@ function detailStatusHtml() {
   document.getElementById('detailTitle').textContent = detailTitle;
   document.getElementById('detailBotId').textContent = detailBot.workerId || detailBot.id || selectedBotId || '-';
   document.getElementById('detailUsername').textContent=detailBot.username||'Chưa đặt';
-  document.getElementById('detailServer').textContent=detailBot.server||'mc.kingmc.vn';
+  document.getElementById('detailServer').textContent = detailBot.server || detailBot.serverHost || 'kingmc.vn';
   const pingEl = document.getElementById('detailPing');
   const pingRaw = detailBot.ping;
 

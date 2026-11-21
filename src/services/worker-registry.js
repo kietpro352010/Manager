@@ -178,6 +178,8 @@ function validateWorkerStatus(rawStatus, source = 'worker') {
     goldenAppleCount: asInteger(status.goldenAppleCount, 0, 1000),
     position,
     dimension: String(status.dimension || '').slice(0, 40),
+    serverHost: String(status.serverHost || status.server || '').trim().slice(0, 128) || null,
+    server: String(status.server || status.serverHost || '').trim().slice(0, 128) || null,
     lastStateAt: status.lastStateAt && !Number.isNaN(new Date(status.lastStateAt).getTime())
       ? new Date(status.lastStateAt)
       : null,
@@ -842,6 +844,8 @@ class WorkerRegistry {
       botSchedules: Array.isArray(settings.botSchedules) ? settings.botSchedules : []
     };
     safe.reachable = Boolean(record.lastHeartbeat && Date.now() - new Date(record.lastHeartbeat).getTime() <= 120000);
+    safe.serverHost = record.status?.serverHost || record.status?.server || settings.serverHost || record.serverHost || 'kingmc.vn';
+    safe.server = safe.serverHost;
     return safe;
   }
 
