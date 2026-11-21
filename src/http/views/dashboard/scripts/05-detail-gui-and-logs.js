@@ -93,24 +93,31 @@ function detailStatusHtml() {
   const dimensionEl = document.getElementById('detailDimension');
 
   if (dimensionEl) {
-    const rawDim = String(detailBot.dimension || '').trim();
-    const dimension = rawDim ? rawDim.replace(/^minecraft:/, '') : '';
-    const location = String(detailBot.locationState || '')
-      .trim()
-      .toLowerCase();
-
-    const locationLabels = {
-      login: 'LOGIN',
-      lobby: 'LOBBY',
-      other: 'INGAME'
-    };
-
-    const locationLabel = locationLabels[location] || (location && location !== 'unknown' ? location.toUpperCase() : '');
-
-    dimensionEl.textContent = [
-      dimension || 'Không xác định',
-      locationLabel
-    ].filter(Boolean).join(' • ');
+    const locState = String(detailBot.locationState || detailBot.locationKind || '').trim().toLowerCase();
+    let placeName = '';
+    if (locState === 'login') {
+      placeName = 'Login';
+    } else if (locState === 'lobby') {
+      placeName = 'Sảnh';
+    } else {
+      let rawDim = detailBot.dimension;
+      if (typeof rawDim === 'object' && rawDim !== null) {
+        rawDim = rawDim.name || rawDim.effects || rawDim.id || '';
+      }
+      const dim = String(rawDim || '').trim().replace(/^minecraft:/i, '').toLowerCase();
+      if (dim === 'the_nether' || dim === 'nether') {
+        placeName = 'Nether';
+      } else if (dim === 'the_end' || dim === 'end') {
+        placeName = 'The End';
+      } else if (dim === 'overworld' || dim === 'world') {
+        placeName = 'World';
+      } else if (dim) {
+        placeName = dim.charAt(0).toUpperCase() + dim.slice(1);
+      } else if (locState) {
+        placeName = locState.charAt(0).toUpperCase() + locState.slice(1);
+      }
+    }
+    dimensionEl.textContent = placeName || '--';
   }
   const rawDetailIp = String(detailBot.ipAddress || '').trim();
   const isDetailLoopback = rawDetailIp === '127.0.0.1' || rawDetailIp === 'localhost' || rawDetailIp === '0.0.0.0' || rawDetailIp === '::1';

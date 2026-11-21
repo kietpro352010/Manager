@@ -178,11 +178,32 @@ function renderBotDetail({ user, worker, notice = '', isExecuting = false }) {
   const coordinates = hasPosition
     ? `X: ${Math.round(Number(position.x))}, Y: ${Math.round(Number(position.y))}, Z: ${Math.round(Number(position.z))}`
     : '';
-  const rawDimension = String(worker.status?.dimension || '').replace(/^minecraft:/i, '').trim();
-  const locationStates = { login: 'Đang đăng nhập', lobby: 'Sảnh', other: 'Trong game' };
-  const rawLocationState = String(worker.status?.locationState || '').trim().toLowerCase();
-  const locationState = locationStates[rawLocationState] || '';
-  const location = [coordinates, rawDimension, locationState].filter(Boolean).join(' · ') || 'Chưa có dữ liệu vị trí';
+
+  const locState = String(worker.status?.locationState || worker.status?.locationKind || '').trim().toLowerCase();
+  let placeName = '';
+  if (locState === 'login') {
+    placeName = 'Login';
+  } else if (locState === 'lobby') {
+    placeName = 'Sảnh';
+  } else {
+    let rawDim = worker.status?.dimension;
+    if (typeof rawDim === 'object' && rawDim !== null) {
+      rawDim = rawDim.name || rawDim.effects || rawDim.id || '';
+    }
+    const dim = String(rawDim || '').trim().replace(/^minecraft:/i, '').toLowerCase();
+    if (dim === 'the_nether' || dim === 'nether') {
+      placeName = 'Nether';
+    } else if (dim === 'the_end' || dim === 'end') {
+      placeName = 'The End';
+    } else if (dim === 'overworld' || dim === 'world') {
+      placeName = 'World';
+    } else if (dim) {
+      placeName = dim.charAt(0).toUpperCase() + dim.slice(1);
+    } else if (locState) {
+      placeName = locState.charAt(0).toUpperCase() + locState.slice(1);
+    }
+  }
+  const location = [coordinates, placeName].filter(Boolean).join(' · ') || 'Chưa có dữ liệu vị trí';
 
   let descText = notice ? `${notice}\n\n` : '';
   descText += `> **Bot ID:** \`${fullBotId}\`\n` +
@@ -334,7 +355,7 @@ function buildLoginModal() {
     .setCustomId('login_password')
     .setLabel('Mật khẩu (Password)')
     .setStyle(TextInputStyle.Short)
-    .setPlaceholder('Nhập mật khẩu của bạn')
+    .setPlaceholder('Mật khẩu Minecraft bot')
     .setRequired(true)
     .setMinLength(6)
     .setMaxLength(128);
