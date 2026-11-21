@@ -1693,8 +1693,11 @@ async function submitChangePassword(event) {
     if (!res.ok) {
       throw new Error(res.data?.error || 'Không thể đổi mật khẩu.');
     }
-    showToast('✅ ' + (res.data?.message || 'Đổi mật khẩu thành công!'));
+    showToast('✅ ' + (res.data?.message || 'Đổi mật khẩu thành công! Vui lòng đăng nhập lại.'), 'success', 3000);
     closeChangePasswordModal();
+    setTimeout(() => {
+      logout();
+    }, 1500);
   } catch (err) {
     if (alertEl) {
       alertEl.className = 'login-alert error';

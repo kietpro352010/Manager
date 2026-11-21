@@ -1104,8 +1104,8 @@ async function refreshDetail(force=false) {
       }
     } catch(err) {
       if(!isCurrentRequest()) return;
-      if(err && err.status===404){
-        showToast('Bot này không còn tồn tại trong Manager.');
+      if(err && (err.status===403 || err.status===401 || err.status===404)){
+        showToast(err.data?.error || (err.status===404 ? 'Bot này không còn tồn tại trong Manager.' : 'Bạn không có quyền quản lý bot này.'), 'warning', 4000);
         goHome();
         return;
       }
@@ -1349,26 +1349,8 @@ function itemLabel(item) {
 let selectedDetailMoveSlot = null;
 
 function updateDetailTouchHint() {
-  let hintEl = document.getElementById('detailTouchHint');
-  if (!hintEl) {
-    const invGrid = document.getElementById('detailInventory');
-    if (invGrid && invGrid.parentNode) {
-      hintEl = document.createElement('div');
-      hintEl.id = 'detailTouchHint';
-      hintEl.className = 'touch-move-hint';
-      invGrid.parentNode.insertBefore(hintEl, invGrid);
-    }
-  }
-  if (!hintEl) return;
-  if (selectedDetailMoveSlot === null) {
-    hintEl.style.display = 'none';
-    hintEl.innerHTML = '';
-  } else {
-    const item = detailInventory?.slots?.[String(selectedDetailMoveSlot)];
-    const label = item ? itemLabel(item) : 'ô #' + selectedDetailMoveSlot;
-    hintEl.style.display = 'flex';
-    hintEl.innerHTML = '<span>⚡ Đang chọn <strong>' + escapeHtml(label) + '</strong>. Chạm ô khác để chuyển, chạm ô Trang bị để mặc, hoặc chạm vùng Vứt đồ.</span><button type="button" class="small" onclick="cancelDetailSlotSelection(event)" style="padding:2px 8px;margin-left:8px;">Hủy</button>';
-  }
+  const hintEl = document.getElementById('detailTouchHint');
+  if (hintEl) hintEl.remove();
 }
 
 function cancelDetailSlotSelection(e) {
@@ -1377,61 +1359,29 @@ function cancelDetailSlotSelection(e) {
   document.querySelectorAll('#detailPage .inventory-slot.selected-for-move, #detailPage .equipment-slot.selected-for-move').forEach(function(el) {
     el.classList.remove('selected-for-move');
   });
-  updateDetailTouchHint();
+  const hintEl = document.getElementById('detailTouchHint');
+  if (hintEl) hintEl.remove();
 }
 
 function handleDetailSlotClick(slot, item, e) {
-  if (selectedDetailMoveSlot === null) {
-    if (!item) {
-      if (slot >= 36 && slot <= 44) selectDetailHotbar(slot - 36);
-      return;
-    }
-    selectedDetailMoveSlot = slot;
-    document.querySelectorAll('#detailPage .inventory-slot.selected-for-move, #detailPage .equipment-slot.selected-for-move').forEach(function(el) {
-      el.classList.remove('selected-for-move');
+  if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+  // Chọn các item hoặc ô trống ở hot bar (slots 36-44, tương ứng hotbar 0-8) thì lập tức chuyển tay sang ô đó
+  if (slot >= 36 && slot <= 44) {
+    const hotbarIndex = slot - 36;
+    void selectDetailHotbar(hotbarIndex);
+    document.querySelectorAll('#detailHotbar .inventory-slot').forEach(function(el, idx) {
+      el.classList.toggle('selected', idx === hotbarIndex);
     });
-    const targetEl = document.querySelector('#detailPage .inventory-slot[data-slot="' + slot + '"]');
-    if (targetEl) targetEl.classList.add('selected-for-move');
-    if (slot >= 36 && slot <= 44) selectDetailHotbar(slot - 36);
-    updateDetailTouchHint();
     return;
   }
-
-  if (selectedDetailMoveSlot === slot) {
-    cancelDetailSlotSelection(e);
-    return;
-  }
-
-  const fromSlot = selectedDetailMoveSlot;
-  cancelDetailSlotSelection(e);
-  void moveDetailItem(fromSlot, slot);
 }
 
 function handleDetailEquipmentClick(dest) {
-  if (selectedDetailMoveSlot !== null) {
-    const fromSlot = selectedDetailMoveSlot;
-    cancelDetailSlotSelection();
-    void equipDetailItem(fromSlot, dest);
-  }
+  // Thao tác trang bị được thực hiện bằng cách Kéo - Thả vào ô trang bị
 }
 
 async function handleDetailDropZoneClick() {
-  if (selectedDetailMoveSlot !== null) {
-    const fromSlot = selectedDetailMoveSlot;
-    cancelDetailSlotSelection();
-    if (detailInventoryBusy || !detailInventory) return;
-    detailInventoryBusy = true;
-    try {
-      const result = await detailPost('/inventory/drop', { sourceSlot: fromSlot, revision: detailInventory.revision });
-      if (result.data?.inventory) { detailInventory = result.data.inventory; renderDetailInventory(); }
-      showToast(result.data?.message || result.data?.error || 'Đã xử lý.');
-      if (!result.ok) await refreshDetail(true);
-    } catch (err) {
-      showToast(err.message || 'Lỗi khi vứt vật phẩm.', 'error');
-    } finally {
-      detailInventoryBusy = false;
-    }
-  }
+  // Thao tác vứt đồ được thực hiện bằng cách Kéo - Thả vào ô vứt đồ
 }
 
 function getMinecraftItemIconUrl(itemName) {

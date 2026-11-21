@@ -593,18 +593,29 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       const adminUsername = String(config.adminUsername || 'admin').trim();
       if (cleanUsername.toLowerCase() === adminUsername.toLowerCase()) {
         const cachedAdminPass = registry.getAdminPassword();
-        const storedAdminPass = cachedAdminPass || config.adminPassword;
-        if (!storedAdminPass) {
+        let isMatch = false;
+        let matchedFromEnv = false;
+
+        if (cachedAdminPass && verifyAdminPassword(cleanPassword, cachedAdminPass)) {
+          isMatch = true;
+        }
+
+        if (!isMatch && config.adminPassword && verifyAdminPassword(cleanPassword, config.adminPassword)) {
+          isMatch = true;
+          matchedFromEnv = true;
+        }
+
+        if (!cachedAdminPass && !config.adminPassword) {
           return res.status(400).json({
             ok: false,
             error: 'Mật khẩu khởi tạo Quản trị viên chưa được thiết lập. Vui lòng đặt ADMIN_PASSWORD hoặc dùng lệnh Discord /admin password.'
           });
         }
-        if (!verifyAdminPassword(cleanPassword, storedAdminPass)) {
+        if (!isMatch) {
           recordFailedAttempt(clientIp, cleanUsername);
           return res.status(401).json({ ok: false, error: 'Tên đăng nhập hoặc mật khẩu quản trị viên không chính xác.' });
         }
-        if (!cachedAdminPass && config.adminPassword && typeof store?.setSetting === 'function') {
+        if ((matchedFromEnv || !cachedAdminPass) && typeof store?.setSetting === 'function') {
           const passwordHash = hashAdminPassword(cleanPassword);
           await store.setSetting('admin_credentials', { passwordHash, updatedAt: new Date().toISOString() });
           registry.setAdminPassword(passwordHash);
@@ -916,8 +927,10 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       }
 
       if (session.role === 'admin') {
-        const storedAdminPass = registry.getAdminPassword() || config.adminPassword;
-        if (!verifyAdminPassword(currentPassword, storedAdminPass)) {
+        const cachedAdminPass = registry.getAdminPassword();
+        const isMatch = (cachedAdminPass && verifyAdminPassword(currentPassword, cachedAdminPass)) ||
+          (config.adminPassword && verifyAdminPassword(currentPassword, config.adminPassword));
+        if (!isMatch) {
           return res.status(401).json({ ok: false, error: 'Mật khẩu hiện tại của Quản trị viên không chính xác.' });
         }
         const hashed = hashAdminPassword(newPassword);

@@ -53,15 +53,8 @@ function renderDetailInventory(){
   const hotBox=document.getElementById('detailHotbar');hotBox.innerHTML='';
   const selected=Number(detailInventory.selectedHotbar??detailInventory.selectedSlot??0);
   for(let slot=36;slot<=44;slot++) hotBox.appendChild(createDetailSlot(slots[String(slot)]||null,slot,slot-36===selected));
-  if (selectedDetailMoveSlot !== null) {
-    if (slots[String(selectedDetailMoveSlot)]) {
-      const selEl = document.querySelector('#detailPage .inventory-slot[data-slot="' + selectedDetailMoveSlot + '"]');
-      if (selEl) selEl.classList.add('selected-for-move');
-      updateDetailTouchHint();
-    } else {
-      cancelDetailSlotSelection();
-    }
-  }
+  const hintEl = document.getElementById('detailTouchHint');
+  if (hintEl) hintEl.remove();
 }
 
 function allowDrop(event){
@@ -116,7 +109,16 @@ async function moveDetailItem(sourceSlot,destSlot){
   if(detailInventoryBusy||!detailInventory) return;
   detailInventoryBusy=true;
   try{
-    const result=await detailPost('/inventory/move',{sourceSlot,destSlot,revision:detailInventory.revision});
+    let result=await detailPost('/inventory/move',{sourceSlot,destSlot,revision:detailInventory.revision});
+    if(!result.ok && (result.status === 409 || String(result.data?.error || '').includes('revision_mismatch'))){
+      if(result.data?.inventory){
+        detailInventory=result.data.inventory;
+        renderDetailInventory();
+      } else {
+        await refreshDetail(true);
+      }
+      result=await detailPost('/inventory/move',{sourceSlot,destSlot,revision:detailInventory?.revision});
+    }
     if(result.data?.inventory){detailInventory=result.data.inventory;renderDetailInventory();}
     if(!result.ok){showToast(result.data?.error||'Di chuyển thất bại.');await refreshDetail(true);return;}
     showToast(result.data?.message||'Đã di chuyển item.');
@@ -133,9 +135,18 @@ async function dropDetailItemToWorld(event){
   if(detailInventoryBusy||!detailInventory) return;
   detailInventoryBusy=true;
   try{
-    const result=await detailPost('/inventory/drop',{sourceSlot:source,revision:detailInventory.revision});
+    let result=await detailPost('/inventory/drop',{sourceSlot:source,revision:detailInventory.revision});
+    if(!result.ok && (result.status === 409 || String(result.data?.error || '').includes('revision_mismatch'))){
+      if(result.data?.inventory){
+        detailInventory=result.data.inventory;
+        renderDetailInventory();
+      } else {
+        await refreshDetail(true);
+      }
+      result=await detailPost('/inventory/drop',{sourceSlot:source,revision:detailInventory?.revision});
+    }
     if(result.data?.inventory){detailInventory=result.data.inventory;renderDetailInventory();}
-    showToast(result.data?.message||result.data?.error||'Đã xử lý.');
+    showToast(result.data?.message||result.data?.error||'Đã vứt item.');
     if(!result.ok) await refreshDetail(true);
   } finally {detailInventoryBusy=false;}
 }
@@ -153,9 +164,18 @@ async function equipDetailItem(sourceSlot,destination){
   if(detailInventoryBusy||!detailInventory)return;
   detailInventoryBusy=true;
   try{
-    const result=await detailPost('/inventory/equip',{sourceSlot,destination,revision:detailInventory.revision});
+    let result=await detailPost('/inventory/equip',{sourceSlot,destination,revision:detailInventory.revision});
+    if(!result.ok && (result.status === 409 || String(result.data?.error || '').includes('revision_mismatch'))){
+      if(result.data?.inventory){
+        detailInventory=result.data.inventory;
+        renderDetailInventory();
+      } else {
+        await refreshDetail(true);
+      }
+      result=await detailPost('/inventory/equip',{sourceSlot,destination,revision:detailInventory?.revision});
+    }
     if(result.data?.inventory){detailInventory=result.data.inventory;renderDetailInventory();}
-    showToast(result.data?.message||result.data?.error||'Đã xử lý.');
+    showToast(result.data?.message||result.data?.error||'Đã trang bị item.');
     if(!result.ok) await refreshDetail(true);
   } finally {detailInventoryBusy=false;}
 }
@@ -163,19 +183,27 @@ async function unequipDetail(destination){
   if(detailInventoryBusy||!detailInventory)return;
   detailInventoryBusy=true;
   try{
-    const result=await detailPost('/inventory/unequip',{destination,revision:detailInventory.revision});
+    let result=await detailPost('/inventory/unequip',{destination,revision:detailInventory.revision});
+    if(!result.ok && (result.status === 409 || String(result.data?.error || '').includes('revision_mismatch'))){
+      if(result.data?.inventory){
+        detailInventory=result.data.inventory;
+        renderDetailInventory();
+      } else {
+        await refreshDetail(true);
+      }
+      result=await detailPost('/inventory/unequip',{destination,revision:detailInventory?.revision});
+    }
     if(result.data?.inventory){detailInventory=result.data.inventory;renderDetailInventory();}
-    showToast(result.data?.message||result.data?.error||'Đã xử lý.');
+    showToast(result.data?.message||result.data?.error||'Đã tháo trang bị.');
     if(!result.ok) await refreshDetail(true);
   } finally {detailInventoryBusy=false;}
 }
 async function selectDetailHotbar(slot){
-  if(detailInventoryBusy||!detailInventory)return;
+  if(detailInventoryBusy)return;
   detailInventoryBusy=true;
   try{
-    const result=await detailPost('/inventory/select',{slot,revision:detailInventory.revision});
+    const result=await detailPost('/inventory/select',{slot});
     if(result.data?.inventory){detailInventory=result.data.inventory;renderDetailInventory();}
-    showToast(result.data?.message||result.data?.error||'Đã xử lý.');
     if(!result.ok) await refreshDetail(true);
   } finally {detailInventoryBusy=false;}
 }

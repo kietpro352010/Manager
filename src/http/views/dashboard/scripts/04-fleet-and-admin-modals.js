@@ -1406,6 +1406,11 @@ function openBot(id) {
   const requestedId=String(id);
   const selected=bots.find(item=>String(item.workerId||item.id)===requestedId)
     || bots.find(item=>String(item.botNumber)===requestedId);
+  if (!selected && currentUser && currentUser.role !== 'admin') {
+    showToast('⚠️ Bạn không có quyền quản lý bot này.', 'warning', 4000);
+    goHome();
+    return;
+  }
   selectedBotId=String(selected?.workerId||selected?.id||id);
   invalidateDetailReads();
   cancelDetailSlotSelection();
@@ -1451,7 +1456,10 @@ function goHome() {
   const url=new URL(window.location.href);
   url.searchParams.delete('bot');
   url.searchParams.delete('botUrl');
-  history.pushState({},'',url.pathname+url.search);
+  url.searchParams.delete('botId');
+  url.searchParams.delete('id');
+  const newSearch = url.searchParams.toString();
+  history.replaceState({}, '', url.pathname + (newSearch ? '?' + newSearch : ''));
   document.getElementById('detailPage').classList.add('hidden');
   document.getElementById('homePage').classList.remove('hidden');
   renderHome();
@@ -1499,8 +1507,23 @@ lastPositionHistoryFetchedAt=0;
           document.getElementById('homePage').classList.remove('hidden');
           return false;
         }
+        // If registry was loaded successfully and the bot is not in the allowed list:
+        // Unauthorized or non-existent bot -> Roll back to dashboard URL and homePage
+        if (result && result.ok) {
+          selectedBotId=null;
+          url.searchParams.delete('bot');
+          url.searchParams.delete('botUrl');
+          url.searchParams.delete('botId');
+          url.searchParams.delete('id');
+          const newSearch = url.searchParams.toString();
+          history.replaceState({}, '', url.pathname + (newSearch ? '?' + newSearch : ''));
+          document.getElementById('detailPage').classList.add('hidden');
+          document.getElementById('homePage').classList.remove('hidden');
+          showToast('⚠️ Bạn không có quyền quản lý bot này.', 'warning', 4000);
+          return false;
+        }
       }catch(_) {
-        // Keep legacy numeric fallback only when the identity lookup itself failed.
+        // Keep legacy numeric fallback only when the identity lookup itself failed (e.g. network/offline error).
       }
     }
 
