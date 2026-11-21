@@ -930,8 +930,7 @@ REVOKE ALL ON TABLE public.manager_session_revocations FROM PUBLIC, anon, authen
 GRANT SELECT ON TABLE public.manager_user_state, public.manager_session_revocations, public.manager_users_write_transactions, public.manager_key_usage_transactions, public.bot_log_clear_cutoffs TO service_role;
 -- Force every service-role user write through the revision-checked RPCs below.
 -- This makes stale legacy snapshot upserts fail closed during mixed-version deploys.
-REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE public.manager_users FROM service_role;
-GRANT SELECT ON TABLE public.manager_users TO service_role;
+GRANT ALL ON TABLE public.manager_users TO service_role;
 
 CREATE OR REPLACE FUNCTION public.bump_manager_users_revision()
 RETURNS trigger
