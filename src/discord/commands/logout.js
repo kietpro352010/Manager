@@ -11,11 +11,29 @@ async function execute(interaction, services) {
   const discordUserId = interaction.user?.id;
   await services.accessStore.unlinkDiscord(discordUserId);
 
+  let roleNote = '';
+  if (services) {
+    const { getEffectiveRoleIds, removeMemberRole } = require('../handlers/panel-handler');
+    const { adminRoleId, userRoleId } = await getEffectiveRoleIds(services);
+    const removed = [];
+    if (userRoleId) {
+      const ok = await removeMemberRole(interaction, userRoleId);
+      if (ok) removed.push(`<@&${userRoleId}>`);
+    }
+    if (adminRoleId) {
+      const ok = await removeMemberRole(interaction, adminRoleId);
+      if (ok) removed.push(`<@&${adminRoleId}>`);
+    }
+    if (removed.length > 0) {
+      roleNote = `\n\n🛡️ Đã thu hồi Role: ${removed.join(', ')}`;
+    }
+  }
+
   return {
     embeds: [
       embed(
         '🚪 ĐÃ ĐĂNG XUẤT',
-        'Tài khoản Discord của bạn đã được hủy liên kết khỏi Web Manager thành công.\n\nBạn có thể sử dụng lại lệnh `/login` bất kỳ lúc nào để đăng nhập lại.',
+        `Tài khoản Discord của bạn đã được hủy liên kết khỏi Web Manager thành công.${roleNote}\n\nBạn có thể sử dụng lại lệnh \`/login\` bất kỳ lúc nào để đăng nhập lại và nhận lại Role.`,
         0x0ea5e9
       )
     ]

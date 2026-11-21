@@ -124,6 +124,105 @@ setInterval(() => {
 }, 10 * 60 * 1000).unref();
 
 // Resolve authenticated user & verify admin
+async function getEffectiveRoleIds(services) {
+  let adminRoleId = services?.accessControl?.adminRoleId || services?.config?.adminRoleId || '';
+  let userRoleId = services?.accessControl?.userRoleId || services?.config?.userRoleId || '';
+  if (!adminRoleId || !userRoleId) {
+    try {
+      const stored = await services?.accessStore?.getSetting?.('discord_access');
+      if (stored) {
+        if (!adminRoleId && stored.adminRoleId) adminRoleId = String(stored.adminRoleId).trim();
+        if (!userRoleId && stored.userRoleId) userRoleId = String(stored.userRoleId).trim();
+      }
+    } catch (_) {}
+  }
+  return { adminRoleId, userRoleId };
+}
+
+async function addMemberRole(interaction, roleId) {
+  if (!interaction?.guild || !roleId) return false;
+  try {
+    let member = interaction.member;
+    if (!member?.roles?.add && interaction.guild.members?.fetch) {
+      member = await interaction.guild.members.fetch(interaction.user?.id).catch(() => null);
+    }
+    if (member?.roles?.add) {
+      await member.roles.add(roleId);
+      return true;
+    }
+  } catch (err) {
+    console.warn(`[DISCORD] Không thể cấp role ${roleId}:`, err.message);
+  }
+  return false;
+}
+
+async function removeMemberRole(interaction, roleId) {
+  if (!interaction?.guild || !roleId) return false;
+  try {
+    let member = interaction.member;
+    if (!member?.roles?.remove && interaction.guild.members?.fetch) {
+      member = await interaction.guild.members.fetch(interaction.user?.id).catch(() => null);
+    }
+    if (member?.roles?.remove) {
+      await member.roles.remove(roleId);
+      return true;
+    }
+  } catch (err) {
+    console.warn(`[DISCORD] Không thể gỡ role ${roleId}:`, err.message);
+  }
+  return false;
+}
+
+async function hasAuthorizedRole(interaction, services) {
+  const userId = interaction?.user?.id;
+  if (!userId) return false;
+
+  // 1. Server Owner is always authorized
+  const ownerId = interaction.guild?.ownerId;
+  if (ownerId && ownerId === userId) return true;
+
+  // 2. Discord Administrator permission is always authorized
+  try {
+    if (interaction?.memberPermissions?.has?.('Administrator') || interaction?.memberPermissions?.has?.(8n)) {
+      return true;
+    }
+  } catch (_) {}
+  try {
+    if (typeof interaction?.member?.permissions?.has === 'function') {
+      if (interaction.member.permissions.has('Administrator') || interaction.member.permissions.has(8n)) {
+        return true;
+      }
+    } else if (interaction?.member?.permissions && (BigInt(interaction.member.permissions) & 8n)) {
+      return true;
+    }
+  } catch (_) {}
+
+  // 3. Configured Admin User ID
+  if (services?.config?.adminUserId && services.config.adminUserId === userId) return true;
+  if (services?.accessControl?.adminUserId && services.accessControl.adminUserId === userId) return true;
+
+  // 4. Resolve configured role IDs
+  const { adminRoleId, userRoleId } = await getEffectiveRoleIds(services);
+
+  // If neither role is configured yet, allow interactions (initial unconfigured setup state)
+  if (!adminRoleId && !userRoleId) return true;
+
+  // 5. Check member roles
+  let member = interaction?.member;
+  if (!member?.roles?.cache && !Array.isArray(member?.roles) && interaction.guild?.members?.fetch) {
+    member = await interaction.guild.members.fetch(userId).catch(() => null);
+  }
+  const memberRoles = Array.isArray(member?.roles)
+    ? member.roles.map(String)
+    : member?.roles?.cache ? [...member.roles.cache.keys()].map(String) : [];
+
+  if (adminRoleId && memberRoles.includes(String(adminRoleId))) return true;
+  if (userRoleId && memberRoles.includes(String(userRoleId))) return true;
+
+  return false;
+}
+
+// Resolve authenticated user & verify admin
 async function resolveLinkedUser(interaction, services) {
   const discordUserId = interaction.user?.id;
   if (!discordUserId) return null;
@@ -257,13 +356,23 @@ async function handlePanelInteraction(interaction, services) {
         resetLoginRateLimit(discordUserId);
         await services.accessStore.linkDiscord(discordUserId, 'admin', 'admin');
 
+        const { adminRoleId, userRoleId } = await getEffectiveRoleIds(services);
+        let roleInfo = '';
+        if (adminRoleId) {
+          const added = await addMemberRole(interaction, adminRoleId);
+          if (userRoleId) await addMemberRole(interaction, userRoleId).catch(() => null);
+          roleInfo = added
+            ? `\n• **Role Discord:** <@&${adminRoleId}> (Đã cấp)`
+            : `\n• **Role Discord:** <@&${adminRoleId}> *(Bot chưa đủ quyền gán role)*`;
+        }
+
         return safeReply(interaction, {
           embeds: [
             embed(
               '✅ ĐĂNG NHẬP THÀNH CÔNG',
               `Đã liên kết Discord với tài khoản **Quản trị viên (ADMIN)**.\n\n` +
               `• **Tài khoản:** \`${cleanUsername}\`\n` +
-              `• **Phân quyền:** \`Enterprise Administrator\`\n\n` +
+              `• **Phân quyền:** \`Enterprise Administrator\`${roleInfo}\n\n` +
               `Dùng lệnh \`/bots\` để quản lý hoặc \`/admin status\` để xem tình trạng hệ thống.`,
               0x22c55e
             )
@@ -309,6 +418,16 @@ async function handlePanelInteraction(interaction, services) {
     resetLoginRateLimit(discordUserId);
     await services.accessStore.linkDiscord(discordUserId, user.username, user.id || user.userId || user.username);
 
+    const { adminRoleId, userRoleId } = await getEffectiveRoleIds(services);
+    const targetRoleId = user.role === 'admin' ? (adminRoleId || userRoleId) : userRoleId;
+    let roleInfo = '';
+    if (targetRoleId) {
+      const added = await addMemberRole(interaction, targetRoleId);
+      roleInfo = added
+        ? `\n• **Role Discord:** <@&${targetRoleId}> (Đã cấp)`
+        : `\n• **Role Discord:** <@&${targetRoleId}> *(Bot chưa đủ quyền gán role)*`;
+    }
+
     return safeReply(interaction, {
       embeds: [
         embed(
@@ -316,7 +435,7 @@ async function handlePanelInteraction(interaction, services) {
           `Đã liên kết tài khoản Discord <@${discordUserId}> với Web Manager.\n\n` +
           `• **Tài khoản Web:** **${user.username}**\n` +
           `• **Gói dịch vụ:** ${user.planName || 'Gói tiêu chuẩn'}\n` +
-          `• **Hạn sử dụng:** ${user.isPermanent ? 'Vĩnh viễn' : (user.expiresAt ? new Date(user.expiresAt).toLocaleDateString('vi-VN') : '—')}\n\n` +
+          `• **Hạn sử dụng:** ${user.isPermanent ? 'Vĩnh viễn' : (user.expiresAt ? new Date(user.expiresAt).toLocaleDateString('vi-VN') : '—')}${roleInfo}\n\n` +
           `👉 Sử dụng lệnh \`/bots\` để mở bảng điều khiển và theo dõi bot của bạn.`,
           0x22c55e
         )
@@ -409,6 +528,7 @@ async function handlePanelInteraction(interaction, services) {
     );
     return safeUpdate(interaction, { embeds: [errorEmbed], components: [] });
   }
+
 
   if (user.role !== 'admin') {
     const normalizedUser = { ...user, expiresAt: user.expiresAt || user.expiresAtRental || null };
@@ -628,5 +748,9 @@ module.exports = {
   checkBotOwnership,
   getUserBots,
   safeDeferUpdate,
+  getEffectiveRoleIds,
+  addMemberRole,
+  removeMemberRole,
+  hasAuthorizedRole,
   handleStaleWorkerInteraction: async () => {}
 };

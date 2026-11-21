@@ -41,7 +41,7 @@ function isUserAdmin(interaction, services, user) {
 exports.isUserAdmin = isUserAdmin;
 
 const { loadCommands } = require('../command-registry');
-const { handlePanelInteraction, resolveLinkedUser } = require('./panel-handler');
+const { handlePanelInteraction, resolveLinkedUser, hasAuthorizedRole } = require('./panel-handler');
 
 const commands = loadCommands();
 const commandMap = new Map(commands.map((command) => [command.data.name, command]));
@@ -170,6 +170,26 @@ function attachInteractionHandler(client, { config, services, logger }) {
         // SLA Guard < 1200ms: Acknowledge immediately to prevent Discord's 3-second timeout
         await safeDeferReply(interaction, { ephemeral: true });
 
+        // RBAC Role Gate: Only /login is accessible without an authorized role.
+        // All other commands require user_role or admin_role (or guild owner/administrator).
+        if (interaction.commandName !== 'login') {
+          const hasRole = await hasAuthorizedRole(interaction, services);
+          if (!hasRole) {
+            const { embed } = require('../panels/renderer');
+            return safeEditReply(interaction, {
+              embeds: [
+                embed(
+                  '⛔ BẠN CHƯA CÓ ROLE SỬ DỤNG BOT',
+                  'Bạn chưa có Role thành viên hoặc chưa đăng nhập tài khoản Web Manager.\n\n' +
+                  '👉 Vui lòng sử dụng lệnh `/login` để đăng nhập và nhận Role tự động.',
+                  0xef4444
+                )
+              ],
+              allowedMentions: { parse: [] }
+            });
+          }
+        }
+
         // Admin command authorization check
         if (interaction.commandName === 'admin' || interaction.commandName === 'wispbyte') {
           const user = (services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function')
@@ -227,6 +247,7 @@ function attachInteractionHandler(client, { config, services, logger }) {
 module.exports = {
   attachInteractionHandler,
   isUserAdmin,
+  hasAuthorizedRole,
   rejectOutsideGuild,
   getEffectiveAllowedGuildId,
   requiredRole: () => 'user',
