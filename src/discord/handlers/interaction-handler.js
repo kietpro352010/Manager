@@ -168,7 +168,17 @@ function attachInteractionHandler(client, { config, services, logger }) {
         }
 
         // SLA Guard < 1200ms: Acknowledge immediately to prevent Discord's 3-second timeout
-        await safeDeferReply(interaction, { ephemeral: true });
+        let isEphemeral = command.ephemeral !== false;
+        if (interaction.commandName === 'check' || interaction.commandName === 'admin' || interaction.commandName === 'wispbyte') {
+          const user = (services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function')
+            ? await resolveLinkedUser(interaction, services)
+            : null;
+          const allowed = isUserAdmin(interaction, services, user);
+          if (!allowed) {
+            isEphemeral = true;
+          }
+        }
+        await safeDeferReply(interaction, { ephemeral: isEphemeral });
 
         // RBAC Role Gate: Only /login is accessible without an authorized role.
         // All other commands require user_role or admin_role (or guild owner/administrator).
@@ -191,7 +201,7 @@ function attachInteractionHandler(client, { config, services, logger }) {
         }
 
         // Admin command authorization check
-        if (interaction.commandName === 'admin' || interaction.commandName === 'wispbyte') {
+        if (interaction.commandName === 'admin' || interaction.commandName === 'wispbyte' || interaction.commandName === 'check') {
           const user = (services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function')
             ? await resolveLinkedUser(interaction, services)
             : null;

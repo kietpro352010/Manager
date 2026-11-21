@@ -44,6 +44,7 @@ const { Link4mService } = require('./services/link4m-service');
 const { ManagerRuntimeSettings } = require('./services/manager-runtime-settings');
 const WispbyteKeepAliveManager = require('./services/wispbyte-keepalive');
 const { AdminNotifier } = require('./services/admin-notifier');
+const { StatusMonitorService } = require('./discord/status-monitor');
 
 const { createApp } = require('./http/app');
 const { attachInteractionHandler } = require('./discord/handlers/interaction-handler');
@@ -239,6 +240,8 @@ async function main() {
     adminNotifier,
     discordClient: client
   };
+  const statusMonitor = new StatusMonitorService({ services, intervalMs: 15 * 60 * 1000 });
+  services.statusMonitor = statusMonitor;
 
   // 6. HTTP Application & Server
   const app = createApp({
@@ -302,6 +305,9 @@ async function main() {
           await registerSlash(autoGuildId);
         }
         wispbyteKeepAlive.start({ discordClient: client, adminRoleId: accessControl.adminRoleId });
+        await statusMonitor.start().catch((err) => {
+          logger.warn('status_monitor_start_failed', { error: err.message });
+        });
       } catch (readyErr) {
         logger.error('discord_ready_handler_failed', { error: readyErr?.message || String(readyErr) });
       }
@@ -340,6 +346,7 @@ async function main() {
       clearInterval(maintenanceCleanupInterval);
       broker.stopOutboxProcessor();
       wispbyteKeepAlive.stop();
+      statusMonitor.stop();
       if (client && typeof client.isReady === 'function' && client.isReady()) client.destroy();
 
       let forceCloseTimer = null;

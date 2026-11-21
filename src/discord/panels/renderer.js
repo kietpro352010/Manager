@@ -567,6 +567,103 @@ function renderWispbyteCheckResult({ results = [], total = 0, okCount = 0, expir
   return { embeds: [checkEmbed], components: [btnRow] };
 }
 
+// ----------------------------------------------------------------------------
+// 6. ALL-IN-ONE SYSTEM STATUS MONITOR PANEL (/check & Auto-Monitor)
+// ----------------------------------------------------------------------------
+function renderProgressBar(current, total, length = 10) {
+  if (total <= 0) return '`[⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜]` **0%**';
+  const ratio = Math.max(0, Math.min(1, current / total));
+  const filled = Math.round(ratio * length);
+  const empty = length - filled;
+  const percent = Math.round(ratio * 100);
+  return `\`[${'🟩'.repeat(filled)}${'⬜'.repeat(empty)}]\` **${percent}%**`;
+}
+
+function renderStatusMonitorPanel(data = {}) {
+  const {
+    totalWorkers = 0,
+    onlineWorkers = 0,
+    offlineWorkers = 0,
+    dbOk = true,
+    dbLatencyMs = 0,
+    discordReady = true,
+    discordPing = 0,
+    uptimeFormatted = '—',
+    rssMb = 0,
+    heapUsedMb = 0,
+    platform = process.platform,
+    nodeVersion = process.version,
+    publicBaseUrl = ''
+  } = data;
+
+  const isCritical = !dbOk || !discordReady;
+  const isWarning = !isCritical && totalWorkers > 0 && offlineWorkers > 0;
+
+  let overallStatusText = 'TẤT CẢ HỆ THỐNG HOẠT ĐỘNG TỐT';
+  let overallStatusEmoji = '🟢';
+  let embedColor = COLOR_ONLINE;
+
+  if (isCritical) {
+    overallStatusText = 'SỰ CỐ HỆ THỐNG — GIÁN ĐOẠN DỊCH VỤ';
+    overallStatusEmoji = '🔴';
+    embedColor = COLOR_OFFLINE;
+  } else if (isWarning) {
+    overallStatusText = 'CÓ BOT TẠM DỪNG / OFFLINE';
+    overallStatusEmoji = '🟡';
+    embedColor = COLOR_WARN;
+  }
+
+  const progressBar = renderProgressBar(onlineWorkers, totalWorkers);
+  const dbStatus = dbOk ? '🟢 Bình thường' : '🔴 Mất kết nối';
+  const dbLatencyText = dbLatencyMs >= 0 ? `${dbLatencyMs} ms` : 'N/A';
+  const discordStatus = discordReady ? '🟢 Đã kết nối' : '🔴 Mất kết nối';
+  const discordPingText = discordPing >= 0 ? `${discordPing} ms` : 'N/A';
+
+  const desc =
+    `### ${overallStatusEmoji} **TÌNH TRẠNG: ${overallStatusText}**\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `🤖 **FLEET BOT MINECRAFT (TỔNG QUAN)**\n` +
+    `• Tổng số bot: **${totalWorkers}** bot\n` +
+    `• Đang Online / AFK: 🟢 **${onlineWorkers}** bot\n` +
+    `• Đang Offline / Lỗi: 🔴 **${offlineWorkers}** bot\n` +
+    `• Tỉ lệ trực tuyến: ${progressBar}\n\n` +
+    `🖥️ **MÁY CHỦ QUẢN LÝ (HOST MANAGER)**\n` +
+    `• Trạng thái: 🟢 **Đang chạy** (\`${platform}\` · \`${nodeVersion}\`)\n` +
+    `• Thời gian hoạt động: \`${uptimeFormatted}\`\n` +
+    `• Bộ nhớ Node.js: RSS \`${rssMb} MB\` | Heap \`${heapUsedMb} MB\`\n\n` +
+    `📡 **KẾT NỐI & DỊCH VỤ LIÊN HỆ**\n` +
+    `• Discord Gateway: ${discordStatus} (Ping: \`${discordPingText}\`)\n` +
+    `• Cơ sở dữ liệu (Supabase): ${dbStatus} (Độ trễ: \`${dbLatencyText}\`)\n` +
+    `• Tần suất tự động kiểm tra: \`15 phút / lần\`\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+
+  const statusEmbed = new EmbedBuilder()
+    .setColor(embedColor)
+    .setTitle('📊 BẢNG THEO DÕI TRẠNG THÁI HỆ THỐNG — KINGMC 24/7')
+    .setDescription(desc)
+    .setFooter({ text: 'Tự động cập nhật mỗi 15 phút • KingMC Enterprise Fleet' })
+    .setTimestamp(new Date());
+
+  const row = new ActionRowBuilder().addComponents(
+    button('Làm mới (Admin)', 'status_monitor:refresh', ButtonStyle.Success, false, '🔄')
+  );
+
+  if (publicBaseUrl && typeof publicBaseUrl === 'string' && publicBaseUrl.startsWith('http')) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setLabel('Web Dashboard')
+        .setStyle(ButtonStyle.Link)
+        .setURL(publicBaseUrl)
+        .setEmoji('🌐')
+    );
+  }
+
+  return {
+    embeds: [statusEmbed],
+    components: [row]
+  };
+}
+
 module.exports = {
   renderBotsList,
   renderBotDetail,
@@ -575,6 +672,8 @@ module.exports = {
   renderBotLogs,
   renderWispbyteList,
   renderWispbyteCheckResult,
+  renderStatusMonitorPanel,
+  renderProgressBar,
   buildLoginModal,
   buildAdminPasswordModal,
   getWorkerState,

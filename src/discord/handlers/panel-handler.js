@@ -511,6 +511,34 @@ async function handlePanelInteraction(interaction, services) {
     return safeDeferUpdate(interaction);
   }
 
+  // 0. Status Monitor Refresh (Admin Only, Public View)
+  if (customId === 'status_monitor:refresh') {
+    const { isUserAdmin } = require('./interaction-handler');
+    const user = (services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function')
+      ? await resolveLinkedUser(interaction, services).catch(() => null)
+      : null;
+    const isAdmin = isUserAdmin(interaction, services, user);
+
+    if (!isAdmin) {
+      if (interaction.deferred || interaction.replied) return;
+      return safeReply(interaction, {
+        content: '⛔ Chỉ Quản trị viên (Admin) mới có quyền làm mới bảng theo dõi hệ thống.',
+        flags: MessageFlags.Ephemeral
+      });
+    }
+
+    if (!checkCooldown(discordUserId, 1500)) {
+      return safeDeferUpdate(interaction);
+    }
+
+    await safeDeferUpdate(interaction);
+    const { collectSystemStatus } = require('../status-monitor');
+    const { renderStatusMonitorPanel } = require('../panels/renderer');
+    const statusData = await collectSystemStatus(services);
+    const view = renderStatusMonitorPanel(statusData);
+    return safeUpdate(interaction, view);
+  }
+
   // Rate limit button presses
   if (!checkCooldown(discordUserId)) {
     return safeDeferUpdate(interaction);
