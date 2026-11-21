@@ -1423,6 +1423,23 @@ async function handleDetailDropZoneClick() {
   }
 }
 
+function getMinecraftItemIconUrl(itemName) {
+  if (!itemName || typeof itemName !== 'string') return '';
+  const clean = itemName.toLowerCase().replace(/^minecraft:/, '').trim();
+  return 'https://cdn.jsdelivr.net/gh/InventivetalentDev/minecraft-assets@1.20.1/assets/minecraft/textures/item/' + encodeURIComponent(clean) + '.png';
+}
+
+function handleItemIconError(img, itemName) {
+  if (!img) return;
+  const clean = String(itemName || '').toLowerCase().replace(/^minecraft:/, '').trim();
+  if (!img.dataset.triedBlock) {
+    img.dataset.triedBlock = 'true';
+    img.src = 'https://cdn.jsdelivr.net/gh/InventivetalentDev/minecraft-assets@1.20.1/assets/minecraft/textures/block/' + encodeURIComponent(clean) + '.png';
+  } else {
+    img.style.display = 'none';
+  }
+}
+
 function createDetailSlot(item,slot,selected) {
   const el=document.createElement('div');
   el.className='inventory-slot'+(selected?' selected':'')+(!item?' empty':'');
@@ -1434,6 +1451,9 @@ function createDetailSlot(item,slot,selected) {
   const safeName = item ? itemLabel(item) : '(Trống)';
   const countStr = item && Number(item.count || 0) > 1 ? ' x' + item.count : '';
   el.setAttribute('aria-label', 'Ô GUI #' + slot + ': ' + safeName + countStr);
+  if (item && item.name) {
+    el.setAttribute('title', safeName + countStr);
+  }
   el.addEventListener('keydown', function(e) {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
@@ -1446,7 +1466,21 @@ function createDetailSlot(item,slot,selected) {
   el.ondrop=function(e){dropDetailInventory(e,slot);};
   el.onclick=function(e){handleDetailSlotClick(slot,item,e);};
   const idx=document.createElement('div');idx.className='slot-index';idx.textContent=slot>=36?String(slot-35):String(slot-8);
+  el.appendChild(idx);
+
+  if (item && item.name && typeof getMinecraftItemIconUrl === 'function') {
+    const img = document.createElement('img');
+    img.className = 'slot-icon-img';
+    img.alt = itemLabel(item);
+    img.loading = 'lazy';
+    img.src = getMinecraftItemIconUrl(item.name);
+    img.onerror = function() {
+      if (typeof handleItemIconError === 'function') handleItemIconError(this, item.name);
+    };
+    el.appendChild(img);
+  }
+
   const name=document.createElement('div');name.className='slot-name';name.textContent=itemLabel(item);
   const count=document.createElement('div');count.className='slot-count';count.textContent=item&&Number(item.count||0)>1?String(item.count):'';
-  el.appendChild(idx);el.appendChild(name);el.appendChild(count);return el;
+  el.appendChild(name);el.appendChild(count);return el;
 }

@@ -1,4 +1,20 @@
 
+function updateEquipSlot(elId, item) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  const label = itemLabel(item);
+  if (!item || !item.name) {
+    el.innerHTML = '<span class="equip-text">-</span>';
+    return;
+  }
+  const iconUrl = typeof getMinecraftItemIconUrl === 'function' ? getMinecraftItemIconUrl(item.name) : '';
+  let imgHtml = '';
+  if (iconUrl) {
+    imgHtml = '<img class="equip-icon-img" src="' + escapeHtml(iconUrl) + '" alt="' + escapeHtml(label) + '" onerror="handleItemIconError(this,\'' + escapeHtml(item.name) + '\')" loading="lazy">';
+  }
+  el.innerHTML = imgHtml + '<span class="equip-text">' + escapeHtml(label) + '</span>';
+}
+
 function renderDetailInventory(){
   if(!detailInventory) return;
   const dSlots = detailInventory.slots || [];
@@ -24,12 +40,12 @@ function renderDetailInventory(){
   document.getElementById('detailFoodCount').textContent=String(detailInventory.foodCount||0);
   document.getElementById('detailInventoryRevision').textContent='revision '+String(detailInventory.revision||0);
   const armor=detailInventory.armor||{};
-  document.getElementById('equipHead').textContent=itemLabel(armor.head);
-  document.getElementById('equipTorso').textContent=itemLabel(armor.torso);
-  document.getElementById('equipLegs').textContent=itemLabel(armor.legs);
-  document.getElementById('equipFeet').textContent=itemLabel(armor.feet);
+  updateEquipSlot('equipHead', armor.head);
+  updateEquipSlot('equipTorso', armor.torso);
+  updateEquipSlot('equipLegs', armor.legs);
+  updateEquipSlot('equipFeet', armor.feet);
   const off=detailInventory.slots?detailInventory.slots['45']:null;
-  document.getElementById('equipOffhand').textContent=itemLabel(off);
+  updateEquipSlot('equipOffhand', off);
 
   const slots=detailInventory.slots||{};
   const invBox=document.getElementById('detailInventory');invBox.innerHTML='';

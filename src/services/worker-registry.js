@@ -205,6 +205,7 @@ class WorkerRegistry {
     this.summaryRequestSeq = new Map();
     this.summaryLastAppliedSeq = new Map();
     this.botLogsCache = new Map(); // botId -> Array max 100
+    this.botChatLogsCache = new Map(); // botId -> Array max 100
     this.secretCache = new Map(); // botId -> decrypted secret
     this.liveHeartbeats = new Map(); // botId -> Date (live RAM heartbeat timestamp)
     this.lastDbStatusPersistAt = new Map(); // botId -> ms (coalesce redundant DB status writes)
@@ -297,6 +298,11 @@ class WorkerRegistry {
         this.botLogsCache.set(botId, logs.slice(-MAX_LOGS_PER_BOT));
       }
     }
+    for (const [botId, logs] of this.botChatLogsCache.entries()) {
+      if (Array.isArray(logs) && logs.length > MAX_LOGS_PER_BOT) {
+        this.botChatLogsCache.set(botId, logs.slice(-MAX_LOGS_PER_BOT));
+      }
+    }
     for (const [botId, entry] of this.secretCache.entries()) {
       const withinGrace = Boolean(entry?.graceUntil && now < entry.graceUntil);
       if (!withinGrace && entry?.cachedAt && now - entry.cachedAt > SECRET_CACHE_TTL_MS) {
@@ -379,6 +385,7 @@ class WorkerRegistry {
       this.summaryRequestSeq.delete(id);
       this.summaryLastAppliedSeq.delete(id);
       this.botLogsCache.delete(id);
+      this.botChatLogsCache.delete(id);
       this.botLogRev.delete(id);
       this.botChatLogRev.delete(id);
       this.secretCache.delete(id);
@@ -546,6 +553,7 @@ class WorkerRegistry {
     await this.store.resetData(record.workerId);
     this.summaryCache.delete(record.workerId);
     this.botLogsCache.delete(record.workerId);
+    this.botChatLogsCache.delete(record.workerId);
     this.secretCache.delete(record.workerId);
     this.liveHeartbeats.delete(record.workerId);
     this.lastDbStatusPersistAt.delete(record.workerId);
@@ -787,29 +795,46 @@ class WorkerRegistry {
     };
     if (Number.isNaN(safeEvent.occurredAt.getTime())) safeEvent.occurredAt = new Date();
 
-    // Lưu vào RAM buffer (tối đa 100 entries)
-    const logs = this.botLogsCache.get(id) || [];
-    logs.push(safeEvent);
-    if (logs.length > MAX_LOGS_PER_BOT) logs.shift();
-    this.botLogsCache.set(id, logs);
-    this.botLogRev.set(id, (this.botLogRev.get(id) || 0) + 1);
-    if (safeEvent.type === 'chat' || safeEvent.type === 'message') {
+    const isChat = safeEvent.type === 'chat' || safeEvent.type === 'message';
+    if (isChat) {
+      // Chat messages stay strictly in botChatLogsCache
+      const chatLogs = this.botChatLogsCache.get(id) || [];
+      chatLogs.push(safeEvent);
+      if (chatLogs.length > MAX_LOGS_PER_BOT) chatLogs.shift();
+      this.botChatLogsCache.set(id, chatLogs);
       this.botChatLogRev.set(id, (this.botChatLogRev.get(id) || 0) + 1);
+    } else {
+      // System events stay strictly in botLogsCache & persist to DB
+      const logs = this.botLogsCache.get(id) || [];
+      logs.push(safeEvent);
+      if (logs.length > MAX_LOGS_PER_BOT) logs.shift();
+      this.botLogsCache.set(id, logs);
+      this.botLogRev.set(id, (this.botLogRev.get(id) || 0) + 1);
+      await this.store.addEvent(id, safeEvent);
     }
     this.bumpRevision(id);
 
-    // High-frequency ephemeral chat messages stay in RAM buffer to protect Supabase storage & Log Ingestion
-    if (safeEvent.type !== 'chat' && safeEvent.type !== 'message') {
-      await this.store.addEvent(id, safeEvent);
-    }
-
-    if (this.adminNotifier && ['crash', 'process_error', 'system_error'].includes(safeEvent.type)) {
+    const ERROR_EVENT_TYPES = [
+      'crash', 'process_error', 'system_error', 'connection_error', 'error',
+      'kicked', 'afk_kicked', 'ip_limited', 'banned', 'reconnect_exhausted', 'auth_failed'
+    ];
+    if (this.adminNotifier && ERROR_EVENT_TYPES.includes(safeEvent.type)) {
+      const isWarn = ['kicked', 'afk_kicked'].includes(safeEvent.type);
       void this.adminNotifier.sendAlert({
-        source: 'Worker System',
+        source: 'BotWorker',
         event: `worker_${safeEvent.type}`,
-        message: `Tiến trình Worker \`${id}\` gặp lỗi: ${safeEvent.message}`,
-        details: { workerId: id, eventType: safeEvent.type },
-        level: 'error'
+        message: `Bot \`${existing.name || existing.alias || id}\` (#${existing.botNumber || id}) - [${safeEvent.type}]: ${safeEvent.message}`,
+        details: {
+          workerId: id,
+          botNumber: existing.botNumber,
+          botName: existing.name || existing.alias,
+          eventType: safeEvent.type,
+          host: existing.status?.serverHost || existing.status?.server || 'kingmc.vn',
+          state: existing.status?.state,
+          errorReason: rawMsg,
+          eventDetails: event?.details || {}
+        },
+        level: isWarn ? 'warn' : 'error'
       });
     }
 
@@ -1141,10 +1166,49 @@ class WorkerRegistry {
     return this.summaryCache.get(id) || null;
   }
 
-  getLogs(workerId) {
+  getSystemLogs(workerId, limit) {
     const id = String(workerId || '').trim().toLowerCase();
     const logs = this.botLogsCache.get(id);
-    return Array.isArray(logs) ? logs.slice() : [];
+    const filtered = Array.isArray(logs) ? logs.filter((l) => l && l.type !== 'chat' && l.type !== 'message') : [];
+    if (Number.isInteger(limit) && limit > 0) {
+      return filtered.slice(-limit);
+    }
+    return filtered;
+  }
+
+  getChatLogs(workerId, limit) {
+    const id = String(workerId || '').trim().toLowerCase();
+    const logs = this.botChatLogsCache.get(id);
+    const result = Array.isArray(logs) ? logs.slice() : [];
+    if (Number.isInteger(limit) && limit > 0) {
+      return result.slice(-limit);
+    }
+    return result;
+  }
+
+  getLogs(workerId, limitOrOpts) {
+    const id = String(workerId || '').trim().toLowerCase();
+    const opts = typeof limitOrOpts === 'object' && limitOrOpts !== null ? limitOrOpts : {};
+    const limit = typeof limitOrOpts === 'number' ? limitOrOpts : opts.limit;
+
+    if (opts.systemOnly === true) {
+      return this.getSystemLogs(id, limit);
+    }
+    if (opts.chatOnly === true) {
+      return this.getChatLogs(id, limit);
+    }
+
+    const sysLogs = this.botLogsCache.get(id) || [];
+    const chatLogs = this.botChatLogsCache.get(id) || [];
+    const combined = [...sysLogs, ...chatLogs].sort((a, b) => {
+      const ta = a?.occurredAt ? new Date(a.occurredAt).getTime() : 0;
+      const tb = b?.occurredAt ? new Date(b.occurredAt).getTime() : 0;
+      return ta - tb;
+    });
+    if (Number.isInteger(limit) && limit > 0) {
+      return combined.slice(-limit);
+    }
+    return combined;
   }
 
   async updateAlias(workerId, alias) {

@@ -874,18 +874,20 @@ function createUserApi({
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
     return res.json({
       ok: true,
-      logs: registry.getLogs(perm.worker.workerId)
+      logs: typeof registry.getSystemLogs === 'function'
+        ? registry.getSystemLogs(perm.worker.workerId)
+        : registry.getLogs(perm.worker.workerId, { systemOnly: true })
     });
   });
 
   router.get('/bot/:id/chat-logs', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
-    const logs = registry.getLogs(perm.worker.workerId);
-    const chatLogs = logs.filter((l) => l.type === 'chat' || l.type === 'message');
     return res.json({
       ok: true,
-      logs: chatLogs
+      logs: typeof registry.getChatLogs === 'function'
+        ? registry.getChatLogs(perm.worker.workerId)
+        : registry.getLogs(perm.worker.workerId, { chatOnly: true })
     });
   });
 
@@ -1052,13 +1054,20 @@ function createUserApi({
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
 
     const normId = String(perm.worker.workerId || '').trim().toLowerCase();
-    if (registry.botLogsCache) {
-      registry.botLogsCache.set(normId, []);
+    const isChatClear = req.path.includes('chat-logs');
+    if (isChatClear) {
+      if (registry.botChatLogsCache) {
+        registry.botChatLogsCache.set(normId, []);
+      }
+      if (registry.botChatLogRev) registry.botChatLogRev.set(normId, (registry.botChatLogRev.get(normId) || 0) + 1);
+    } else {
+      if (registry.botLogsCache) {
+        registry.botLogsCache.set(normId, []);
+      }
+      if (registry.botLogRev) registry.botLogRev.set(normId, (registry.botLogRev.get(normId) || 0) + 1);
     }
-    if (registry.botLogRev) registry.botLogRev.set(normId, (registry.botLogRev.get(normId) || 0) + 1);
-    if (registry.botChatLogRev) registry.botChatLogRev.set(normId, (registry.botChatLogRev.get(normId) || 0) + 1);
     registry.bumpRevision?.(normId);
-    return res.json({ ok: true, message: 'Đã xóa nhật ký sự kiện.' });
+    return res.json({ ok: true, message: isChatClear ? 'Đã xóa nhật ký chat.' : 'Đã xóa nhật ký sự kiện.' });
   });
 
   // 11. REMOTE WINDOW GUI ACTIONS
