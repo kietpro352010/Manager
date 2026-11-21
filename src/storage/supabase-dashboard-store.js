@@ -34,7 +34,7 @@ const USER_LIST_ACCESS_COLUMNS = [
   'id', 'username', 'role', 'status', 'is_permanent', 'expires_at',
   'plan_name', 'note', 'allow_account_change', 'lock_reason',
   'bot_count', 'bot_aliases', 'assigned_bot_ids',
-  'registration_ip', 'device_fingerprint', 'created_at', 'updated_at'
+  'registration_ip', 'device_fingerprint', 'discord_user_id', 'created_at', 'updated_at'
 ].join(',');
 
 const ACCESS_FIELDS = {
@@ -43,7 +43,8 @@ const ACCESS_FIELDS = {
   createdBy: 'created_by', updatedBy: 'updated_by',
   allowAccountChange: 'allow_account_change', lockReason: 'lock_reason',
   botAliases: 'bot_aliases', botCount: 'bot_count',
-  registrationIp: 'registration_ip', deviceFingerprint: 'device_fingerprint', registrationUserAgent: 'registration_user_agent'
+  registrationIp: 'registration_ip', deviceFingerprint: 'device_fingerprint', registrationUserAgent: 'registration_user_agent',
+  discordUserId: 'discord_user_id'
 };
 
 const KEY_FIELDS = {
@@ -393,29 +394,51 @@ class SupabaseDashboardStore {
     const cached = this.getCached('access:all');
     if (cached) return cached;
 
+    // Batch fetch active Discord links to guarantee 100% parity across tables
+    const discordLinkMap = new Map();
+    try {
+      const { data: links } = await this.client.from('manager_discord_links')
+        .select('discord_user_id, username, manager_user_id')
+        .eq('status', 'active');
+      if (Array.isArray(links)) {
+        for (const l of links) {
+          if (l.discord_user_id) {
+            if (l.username) discordLinkMap.set(String(l.username).trim().toLowerCase(), String(l.discord_user_id).trim());
+            if (l.manager_user_id) discordLinkMap.set(String(l.manager_user_id).trim(), String(l.discord_user_id).trim());
+          }
+        }
+      }
+    } catch (_) {}
+
     // 1. Thử đọc từ manager_users
     try {
       const { data: users, error } = await this.client.from(USERS).select(USER_LIST_ACCESS_COLUMNS).order('created_at', { ascending: false });
       if (!error && Array.isArray(users) && users.length > 0) {
-        const result = users.map((u) => ({
-          userId: u.id || ('usr_' + u.username),
-          username: u.username,
-          role: u.role || 'user',
-          status: u.status || 'active',
-          isPermanent: Boolean(u.is_permanent),
-          expiresAt: u.expires_at,
-          planName: u.plan_name || 'Gói mặc định',
-          note: u.note || '',
-          allowAccountChange: u.allow_account_change !== false,
-          lockReason: u.lock_reason || '',
-          botCount: u.bot_count || 1,
-          botAliases: u.bot_aliases || {},
-          registrationIp: u.registration_ip || '',
-          deviceFingerprint: u.device_fingerprint || '',
-          workerIds: Array.isArray(u.assigned_bot_ids) ? u.assigned_bot_ids.map(String) : [],
-          createdAt: u.created_at,
-          updatedAt: u.updated_at
-        }));
+        const result = users.map((u) => {
+          const uNameLower = String(u.username || '').trim().toLowerCase();
+          const uId = String(u.id || '').trim();
+          const dId = String(u.discord_user_id || discordLinkMap.get(uNameLower) || discordLinkMap.get(uId) || '').trim();
+          return {
+            userId: u.id || ('usr_' + u.username),
+            username: u.username,
+            role: u.role || 'user',
+            status: u.status || 'active',
+            isPermanent: Boolean(u.is_permanent),
+            expiresAt: u.expires_at,
+            planName: u.plan_name || 'Gói mặc định',
+            note: u.note || '',
+            allowAccountChange: u.allow_account_change !== false,
+            lockReason: u.lock_reason || '',
+            botCount: u.bot_count || 1,
+            botAliases: u.bot_aliases || {},
+            registrationIp: u.registration_ip || '',
+            deviceFingerprint: u.device_fingerprint || '',
+            discordUserId: dId,
+            workerIds: Array.isArray(u.assigned_bot_ids) ? u.assigned_bot_ids.map(String) : [],
+            createdAt: u.created_at,
+            updatedAt: u.updated_at
+          };
+        });
         this.setCached('access:all', result);
         return result;
       }
@@ -430,7 +453,17 @@ class SupabaseDashboardStore {
       if (usersError) throw usersError;
       const grouped = new Map();
       for (const row of assignments || []) grouped.set(row.user_id, [...(grouped.get(row.user_id) || []), row.worker_id]);
-      const result = (users || []).map((row) => ({ ...mapFrom(row, ACCESS_FIELDS), workerIds: grouped.get(row.user_id) || [] }));
+      const result = (users || []).map((row) => {
+        const mapped = mapFrom(row, ACCESS_FIELDS);
+        const uNameLower = String(mapped.username || '').trim().toLowerCase();
+        const uId = String(mapped.userId || '').trim();
+        const dId = String(mapped.discordUserId || discordLinkMap.get(uNameLower) || discordLinkMap.get(uId) || '').trim();
+        return {
+          ...mapped,
+          discordUserId: dId,
+          workerIds: grouped.get(row.user_id) || []
+        };
+      });
       this.setCached('access:all', result);
       return result;
     } catch (_) {

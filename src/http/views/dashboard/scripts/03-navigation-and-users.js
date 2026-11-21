@@ -713,7 +713,8 @@ function renderUserTable() {
       const matchUser = String(u.username || '').toLowerCase().includes(searchQuery);
       const matchNote = String(u.note || '').toLowerCase().includes(searchQuery);
       const matchPlan = String(u.planName || '').toLowerCase().includes(searchQuery);
-      if (!matchUser && !matchNote && !matchPlan) return false;
+      const matchDiscord = String(u.discordUserId || u.discord_user_id || '').toLowerCase().includes(searchQuery);
+      if (!matchUser && !matchNote && !matchPlan && !matchDiscord) return false;
     }
 
     // Lọc theo trạng thái (UX-01: chỉ coi là Vĩnh Viễn khi isPermanent === true)
@@ -746,6 +747,14 @@ function renderUserTable() {
 
     // Cột 1: Người dùng
     const isAdmin = u.role === 'admin';
+    const discordId = String(u.discordUserId || u.discord_user_id || '').trim();
+    const discordBadge = discordId
+      ? '<div style="font-size:10.5px;color:var(--muted);margin-top:2.5px;display:flex;align-items:center;gap:4px;">' +
+          '<span>💬 Discord:</span> ' +
+          '<span style="font-family:var(--font-mono);color:#818cf8;background:rgba(99,102,241,0.18);padding:1px 6px;border-radius:4px;border:1px solid rgba(99,102,241,0.3);font-weight:600;" title="Discord Snowflake ID: ' + escapeHtml(discordId) + '">' + escapeHtml(discordId) + '</span>' +
+        '</div>'
+      : '<div style="font-size:10px;color:#64748b;margin-top:2px;">💬 Discord: <span style="font-style:italic;">Chưa liên kết</span></div>';
+
     const userCol = '<div>' +
       '<div style="display:flex;align-items:center;gap:6px;">' +
         '<strong style="font-size:13.5px;color:#fff;">' + (isAdmin ? '👑' : '👤') + ' ' + escapeHtml(u.username) + '</strong>' +
@@ -753,6 +762,7 @@ function renderUserTable() {
       '</div>' +
       (u.note ? '<div style="font-size:11px;color:var(--muted);margin-top:2px;">📝 ' + escapeHtml(u.note) + '</div>' : '') +
       (u.planName ? '<div style="font-size:11px;color:#38bdf8;margin-top:1px;font-weight:700;">' + escapeHtml(u.planName) + '</div>' : '') +
+      discordBadge +
       (u.registrationIp || u.registration_ip
         ? '<div style="font-size:10.5px;color:var(--muted);margin-top:2px;">🌐 IP: <span style="font-family:var(--font-mono);color:#38bdf8;">' + escapeHtml(u.registrationIp || u.registration_ip) + '</span></div>'
         : '') +
@@ -1052,6 +1062,7 @@ function openCreateUserModal() {
   if (document.getElementById('userFormExpiresAt')) document.getElementById('userFormExpiresAt').value = '';
   if (document.getElementById('userFormNote')) document.getElementById('userFormNote').value = '';
   if (document.getElementById('userFormAllowAccountChange')) document.getElementById('userFormAllowAccountChange').checked = true;
+  if (document.getElementById('userFormDiscordRow')) document.getElementById('userFormDiscordRow').style.display = 'none';
   renderUserFormBotsCheckboxes([], null);
   document.getElementById('userEditModal')?.classList.remove('hidden');
 }
@@ -1084,6 +1095,19 @@ function openEditUserModal(userId) {
   if (document.getElementById('userFormNote')) document.getElementById('userFormNote').value = u.note || '';
   if (document.getElementById('userFormAllowAccountChange')) {
     document.getElementById('userFormAllowAccountChange').checked = u.allowAccountChange !== false;
+  }
+  if (document.getElementById('userFormDiscordRow')) {
+    const dRow = document.getElementById('userFormDiscordRow');
+    const dVal = document.getElementById('userFormDiscordValue');
+    const dId = String(u.discordUserId || u.discord_user_id || '').trim();
+    if (dRow && dVal) {
+      dRow.style.display = 'block';
+      if (dId) {
+        dVal.innerHTML = '<span>💬 Discord ID:</span> <strong style="color:#818cf8;font-family:var(--font-mono);background:rgba(99,102,241,0.2);padding:2px 8px;border-radius:4px;border:1px solid rgba(99,102,241,0.35);">' + escapeHtml(dId) + '</strong> <span style="color:#22c55e;font-size:11px;font-weight:600;">(Đã liên kết)</span>';
+      } else {
+        dVal.innerHTML = '<span style="color:#94a3b8;font-style:italic;">Chưa liên kết tài khoản Discord</span>';
+      }
+    }
   }
   renderUserFormBotsCheckboxes(u.assignedBotIds || [], u.id);
   document.getElementById('userEditModal')?.classList.remove('hidden');

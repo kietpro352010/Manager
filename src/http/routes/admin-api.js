@@ -16,7 +16,7 @@ const SCHEMA_SQL = typeof rawSchema === 'string' ? rawSchema : (rawSchema?.SCHEM
 const USER_ALLOWED_FIELDS = [
   'status', 'expiresAt', 'planName', 'note', 'workerIds', 'assignedBotIds',
   'botCount', 'username', 'password', 'isPermanent', 'botAliases',
-  'allowAccountChange', 'lockReason'
+  'allowAccountChange', 'lockReason', 'discordUserId'
 ];
 
 function csvEscapeCell(val) {
@@ -148,6 +148,7 @@ function createAdminApi({
       const users = storedUsers.map((user) => ({
         ...user,
         id: String(user.userId || user.id || ''),
+        discordUserId: String(user.discordUserId || user.discord_user_id || ''),
         assignedBotIds: Array.isArray(user.workerIds)
           ? [...new Set(user.workerIds.map((workerId) => String(workerId).trim().toLowerCase()).filter(Boolean))]
           : []
