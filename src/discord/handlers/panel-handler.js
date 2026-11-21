@@ -539,6 +539,33 @@ async function handlePanelInteraction(interaction, services) {
     return safeUpdate(interaction, view);
   }
 
+  // 0B. KBot Server List Refresh (Admin Only, Ephemeral/Private View)
+  if (customId === 'kbot:refresh_servers') {
+    const { isUserAdmin } = require('./interaction-handler');
+    const user = (services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function')
+      ? await resolveLinkedUser(interaction, services).catch(() => null)
+      : null;
+    const isAdmin = isUserAdmin(interaction, services, user);
+
+    if (!isAdmin) {
+      if (interaction.deferred || interaction.replied) return;
+      return safeReply(interaction, {
+        content: '⛔ Chỉ Quản trị viên (Admin) mới có quyền xem và làm mới danh sách máy chủ KBot.',
+        flags: MessageFlags.Ephemeral
+      });
+    }
+
+    if (!checkCooldown(discordUserId, 1500)) {
+      return safeDeferUpdate(interaction);
+    }
+
+    await safeDeferUpdate(interaction);
+    const { renderKbotServerList } = require('../commands/kbot');
+    const client = services?.discordClient || services?.client || interaction.client;
+    const view = await renderKbotServerList(client);
+    return safeUpdate(interaction, view);
+  }
+
   // Rate limit button presses
   if (!checkCooldown(discordUserId)) {
     return safeDeferUpdate(interaction);

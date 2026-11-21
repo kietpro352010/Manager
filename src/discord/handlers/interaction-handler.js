@@ -169,7 +169,7 @@ function attachInteractionHandler(client, { config, services, logger }) {
 
         // SLA Guard < 1200ms: Acknowledge immediately to prevent Discord's 3-second timeout
         let isEphemeral = command.ephemeral !== false;
-        if (interaction.commandName === 'check' || interaction.commandName === 'admin' || interaction.commandName === 'wispbyte') {
+        if (interaction.commandName === 'check' || interaction.commandName === 'admin' || interaction.commandName === 'wispbyte' || interaction.commandName === 'kbot') {
           const user = (services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function')
             ? await resolveLinkedUser(interaction, services)
             : null;
@@ -201,7 +201,7 @@ function attachInteractionHandler(client, { config, services, logger }) {
         }
 
         // Admin command authorization check
-        if (interaction.commandName === 'admin' || interaction.commandName === 'wispbyte' || interaction.commandName === 'check') {
+        if (interaction.commandName === 'admin' || interaction.commandName === 'wispbyte' || interaction.commandName === 'check' || interaction.commandName === 'kbot') {
           const user = (services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function')
             ? await resolveLinkedUser(interaction, services)
             : null;
