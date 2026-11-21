@@ -88,7 +88,7 @@ function isMinecraftOffline(bot) {
 
 function setStatusFilter(filter) {
   activeStatusFilter = filter;
-  ['all','afk','online','offline','unreachable'].forEach(k => {
+  ['all','online','connecting','offline','unreachable'].forEach(k => {
     const el = document.getElementById('tab' + k.charAt(0).toUpperCase() + k.slice(1));
     if (el) el.classList.toggle('active', k === filter);
   });
@@ -271,14 +271,14 @@ window.changeBotSort = changeBotSort;
 
 function updateKpis() {
   const total = bots.length;
-  const afk = bots.filter(b => b.available && b.status === 'afk').length;
-  const online = bots.filter(b => b.available && MINECRAFT_ONLINE_STATES.has(String(b.status || '').toLowerCase())).length;
+  const online = bots.filter(b => b.available && (b.status === 'online' || b.status === 'afk' || b.online)).length;
+  const connecting = bots.filter(b => b.available && ['waking', 'connecting', 'authenticating', 'entering'].includes(String(b.status || '').toLowerCase()) && b.status !== 'online' && b.status !== 'afk').length;
   const offline = bots.filter(isMinecraftOffline).length;
   const unreachable = bots.filter(b => b.available !== true).length;
 
   const tEl = document.getElementById('kpiTotal'); if(tEl) tEl.textContent = String(total);
-  const aEl = document.getElementById('kpiAfk'); if(aEl) aEl.textContent = String(afk);
   const oEl = document.getElementById('kpiOnline'); if(oEl) oEl.textContent = String(online);
+  const cEl = document.getElementById('kpiConnecting'); if(cEl) cEl.textContent = String(connecting);
   const fEl = document.getElementById('kpiOffline'); if(fEl) fEl.textContent = String(offline);
   const uEl = document.getElementById('kpiUnreachable'); if(uEl) uEl.textContent = String(unreachable);
 
@@ -331,8 +331,8 @@ function updateKpis() {
 
   // Cập nhật số đếm trên các Tab Bộ lọc
   const cAll = document.getElementById('countAll'); if(cAll) cAll.textContent = String(total);
-  const cAfk = document.getElementById('countAfk'); if(cAfk) cAfk.textContent = String(afk);
   const cOn = document.getElementById('countOnline'); if(cOn) cOn.textContent = String(online);
+  const cConn = document.getElementById('countConnecting'); if(cConn) cConn.textContent = String(connecting);
   const cOff = document.getElementById('countOffline'); if(cOff) cOff.textContent = String(offline);
   const cUn = document.getElementById('countUnreachable'); if(cUn) cUn.textContent = String(unreachable);
 
@@ -457,8 +457,8 @@ function filterBots() {
   const filtered = bots.filter(b => {
     // 1. Lọc theo Tab trạng thái
     const status = String(b.status || '').toLowerCase();
-    if (activeStatusFilter === 'afk' && status !== 'afk') return false;
-    if (activeStatusFilter === 'online' && !MINECRAFT_ONLINE_STATES.has(status)) return false;
+    if (activeStatusFilter === 'online' && !(b.available && (status === 'online' || status === 'afk' || b.online))) return false;
+    if (activeStatusFilter === 'connecting' && !(b.available && ['waking', 'connecting', 'authenticating', 'entering'].includes(status) && status !== 'online' && status !== 'afk')) return false;
     if (activeStatusFilter === 'offline' && !isMinecraftOffline(b)) return false;
     if (activeStatusFilter === 'unreachable' && b.available === true) return false;
 
@@ -486,7 +486,7 @@ function filterBots() {
 
   // 3. Sắp xếp theo chế độ được chọn
   if (currentSortMode === 'status') {
-    const order = { afk: 1, entering: 2, authenticating: 3, connecting: 4, waking: 5, online: 6, offline: 7, kicked: 8 };
+    const order = { online: 1, afk: 1, entering: 2, authenticating: 3, connecting: 4, waking: 5, offline: 6, kicked: 7 };
     filtered.sort((a, b) => (order[a.status] || 99) - (order[b.status] || 99));
   } else if (currentSortMode === 'uptime') {
     filtered.sort((a, b) => (b.uptimeSeconds || 0) - (a.uptimeSeconds || 0));
@@ -533,6 +533,13 @@ function computeBotCardSig(b) {
 function reconcileBotCards(filtered) {
   const grid = document.getElementById('botGrid');
   if (!grid || draggedBotId !== null) return;
+
+  // Remove non-card elements (such as empty filter state)
+  Array.from(grid.children).forEach(child => {
+    if (!child.classList.contains('bot-card')) {
+      child.remove();
+    }
+  });
 
   const currentCards = Array.from(grid.querySelectorAll('.bot-card'));
   const currentMap = new Map();

@@ -180,6 +180,8 @@ function validateWorkerStatus(rawStatus, source = 'worker') {
     dimension: String(status.dimension || '').slice(0, 40),
     serverHost: String(status.serverHost || status.server || '').trim().slice(0, 128) || null,
     server: String(status.server || status.serverHost || '').trim().slice(0, 128) || null,
+    clientIp: String(status.clientIp || status.hostIp || status.ip || '').trim().slice(0, 48) || null,
+    hostIp: String(status.hostIp || status.clientIp || status.ip || '').trim().slice(0, 48) || null,
     lastStateAt: status.lastStateAt && !Number.isNaN(new Date(status.lastStateAt).getTime())
       ? new Date(status.lastStateAt)
       : null,
@@ -671,6 +673,13 @@ class WorkerRegistry {
         safeStatus.manuallyStopped = Boolean(existing.status.manuallyStopped);
       }
 
+      if (!safeStatus.clientIp && existing.status?.clientIp) {
+        safeStatus.clientIp = existing.status.clientIp;
+      }
+      if (!safeStatus.hostIp && existing.status?.hostIp) {
+        safeStatus.hostIp = existing.status.hostIp;
+      }
+
       // Preserve rich telemetry if incoming report is lightweight/partial
       if (status?.isLightweight === true && existing.status) {
         if (safeStatus.inventory === undefined && existing.status.inventory !== undefined) {
@@ -871,6 +880,9 @@ class WorkerRegistry {
     safe.reachable = Boolean(record.lastHeartbeat && Date.now() - new Date(record.lastHeartbeat).getTime() <= 120000);
     safe.serverHost = record.status?.serverHost || record.status?.server || settings.serverHost || record.serverHost || 'kingmc.vn';
     safe.server = safe.serverHost;
+    safe.ipAddress = record.status?.clientIp || record.status?.hostIp || record.status?.ip || record.clientIp || record.hostIp || null;
+    safe.clientIp = safe.ipAddress;
+    safe.hostIp = safe.ipAddress;
     return safe;
   }
 

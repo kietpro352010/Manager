@@ -734,17 +734,28 @@ function renderDetailRemoteGui(win) {
 
   const container = document.getElementById('detailRemoteGuiSlots');
   if (!container) return;
-  container.innerHTML = win.slots.slice(0, 54).map(function(item, idx) {
-    if (!item) {
-      return '<div role="button" tabindex="0" onclick="clickDetailGuiSlot(' + idx + ')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();clickDetailGuiSlot(' + idx + ');}" aria-label="Ô GUI #' + idx + ': (Trống)" style="aspect-ratio:1;background:var(--surface-soft);border:1px solid var(--border);border-radius:6px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:10px;font-family:monospace;" title="Ô #' + idx + ' (Trống)">' + idx + '</div>';
+
+  const rawSlots = Array.isArray(win.slots) ? win.slots : [];
+  // Ensure container displays exact rows of 9 slots (e.g. 9, 18, 27, 36, 45, 54)
+  const totalSlots = rawSlots.length > 0 ? rawSlots.length : (Number(win.totalSlots) || 27);
+  const slotsToRender = [];
+  for (let i = 0; i < totalSlots; i++) {
+    slotsToRender.push(rawSlots[i] || null);
+  }
+
+  container.innerHTML = slotsToRender.map(function(item, idx) {
+    if (!item || !item.name) {
+      return '<div role="button" tabindex="0" onclick="clickDetailGuiSlot(' + idx + ')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();clickDetailGuiSlot(' + idx + ');}" aria-label="Ô GUI #' + idx + ': (Trống)" style="aspect-ratio:1;background:rgba(255,255,255,0.03);border:1px dashed rgba(255,255,255,0.12);border-radius:6px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:10px;font-family:monospace;transition:border-color 0.15s ease,background 0.15s ease;" onmouseenter="this.style.borderColor=\'rgba(56,189,248,0.4)\';this.style.background=\'rgba(56,189,248,0.06)\'" onmouseleave="this.style.borderColor=\'rgba(255,255,255,0.12)\';this.style.background=\'rgba(255,255,255,0.03)\'" title="Ô #' + idx + ' (Trống - Bấm để click)">' +
+        '<span style="opacity:0.4;font-size:9.5px;">#' + idx + '</span>' +
+        '</div>';
     }
     const tex = resolveItemTexture(item);
     const safeName = escapeHtml(tex.label);
     const initials = (typeof getItemInitials === 'function') ? getItemInitials(tex.label) : (tex.label ? tex.label.slice(0, 2).toUpperCase() : 'IT');
     const ariaLabel = 'Ô GUI #' + idx + ': ' + safeName + (tex.count > 1 ? ' x' + tex.count : '');
-    return '<div role="button" tabindex="0" onclick="clickDetailGuiSlot(' + idx + ')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();clickDetailGuiSlot(' + idx + ');}" aria-label="' + escapeHtml(ariaLabel) + '" style="aspect-ratio:1;background:var(--accent-soft);border:1px solid var(--border-strong);border-radius:8px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;padding:3px;text-align:center;box-shadow:var(--shadow-sm);transition:transform 0.15s ease,border-color 0.15s ease;" onmouseenter="this.style.transform=\'scale(1.04)\'" onmouseleave="this.style.transform=\'none\'" title="Ô #' + idx + ': ' + safeName + ' (Click để chọn)">' +
+    return '<div role="button" tabindex="0" onclick="clickDetailGuiSlot(' + idx + ')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();clickDetailGuiSlot(' + idx + ');}" aria-label="' + escapeHtml(ariaLabel) + '" style="aspect-ratio:1;background:rgba(56,189,248,0.08);border:1px solid rgba(56,189,248,0.3);border-radius:6px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;padding:2px;text-align:center;box-shadow:var(--shadow-sm);transition:transform 0.15s ease,border-color 0.15s ease;" onmouseenter="this.style.transform=\'scale(1.05)\';this.style.borderColor=\'#38bdf8\'" onmouseleave="this.style.transform=\'none\';this.style.borderColor=\'rgba(56,189,248,0.3)\'" title="Ô #' + idx + ': ' + safeName + ' (Click để chọn)">' +
       '<img src="' + escapeHtml(tex.primary) + '" data-fallback-stage="primary" data-secondary-src="' + escapeHtml(tex.secondary) + '" data-tertiary-src="' + escapeHtml(tex.tertiary || tex.secondary) + '" data-initials="' + escapeHtml(initials) + '" onerror="handleItemTextureError(this)" style="width:28px;height:28px;object-fit:contain;image-rendering:pixelated;" alt="' + safeName + '">' +
-      '<span class="slot-text-name" style="font-size:9.5px;font-weight:700;color:var(--text);overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;line-height:1.1;max-width:100%;word-break:break-word;margin-top:1px;">' + safeName + '</span>' +
+      '<span class="slot-text-name" style="font-size:9px;font-weight:700;color:var(--text);overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;line-height:1.1;max-width:100%;word-break:break-word;margin-top:1px;">' + safeName + '</span>' +
       (tex.count > 1 ? '<span style="position:absolute;bottom:2px;right:2px;font-size:9.5px;font-weight:800;background:var(--bg-elevated);border:1px solid var(--border-strong);padding:0 4px;border-radius:4px;color:var(--accent-text);">x' + tex.count + '</span>' : '') +
       '</div>';
   }).join('');

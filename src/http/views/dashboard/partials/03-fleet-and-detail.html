@@ -95,21 +95,21 @@
         <div id="kpiTotal" class="kpi-value">0</div>
         <div class="kpi-sub">Sức chứa hạm đội đám mây</div>
       </div>
-      <div class="kpi-card kpi-afk">
-        <div class="kpi-header">
-          <span class="kpi-title">Đang AFK Ingame</span>
-          <span class="kpi-icon pulse-icon">🟢</span>
-        </div>
-        <div id="kpiAfk" class="kpi-value" style="color:var(--green)">0</div>
-        <div class="kpi-sub">Bot đang cắm chuột trực tiếp</div>
-      </div>
       <div class="kpi-card kpi-online">
         <div class="kpi-header">
-          <span class="kpi-title">Online / Chờ Vào</span>
+          <span class="kpi-title">Đang Online Ingame</span>
+          <span class="kpi-icon pulse-icon">🟢</span>
+        </div>
+        <div id="kpiOnline" class="kpi-value" style="color:var(--green)">0</div>
+        <div class="kpi-sub">Bot đang hoạt động trực tiếp</div>
+      </div>
+      <div class="kpi-card kpi-connecting">
+        <div class="kpi-header">
+          <span class="kpi-title">Đang Kết Nối / Chờ</span>
           <span class="kpi-icon">🟡</span>
         </div>
-        <div id="kpiOnline" class="kpi-value" style="color:var(--blue)">0</div>
-        <div class="kpi-sub">Đang kết nối / sảnh chờ</div>
+        <div id="kpiConnecting" class="kpi-value" style="color:var(--yellow)">0</div>
+        <div class="kpi-sub">Đang vào server / sảnh chờ</div>
       </div>
       <div class="kpi-card kpi-offline">
         <div class="kpi-header">
@@ -155,8 +155,8 @@
     <div class="fleet-search-filter-row">
       <div class="filter-tabs" role="tablist" aria-label="Lọc trạng thái bot">
         <button type="button" class="tab-btn active" id="tabAll" onclick="setStatusFilter('all')">Tất cả (<span id="countAll">0</span>)</button>
-        <button type="button" class="tab-btn" id="tabAfk" onclick="setStatusFilter('afk')">🟢 Đang AFK (<span id="countAfk">0</span>)</button>
-        <button type="button" class="tab-btn" id="tabOnline" onclick="setStatusFilter('online')">🟡 Online/Chờ (<span id="countOnline">0</span>)</button>
+        <button type="button" class="tab-btn" id="tabOnline" onclick="setStatusFilter('online')">🟢 Đang Online (<span id="countOnline">0</span>)</button>
+        <button type="button" class="tab-btn" id="tabConnecting" onclick="setStatusFilter('connecting')">🟡 Đang Kết Nối (<span id="countConnecting">0</span>)</button>
         <button type="button" class="tab-btn" id="tabOffline" onclick="setStatusFilter('offline')">🔴 Offline/Kicked (<span id="countOffline">0</span>)</button>
         <button type="button" class="tab-btn" id="tabUnreachable" onclick="setStatusFilter('unreachable')">⚠️ Lỗi/Unreachable (<span id="countUnreachable">0</span>)</button>
       </div>
@@ -164,7 +164,7 @@
         <input id="searchInput" type="search" aria-label="Tìm kiếm bot theo tên, tài khoản ingame hoặc IP" class="search-box" placeholder="🔍 Tìm bot (tên, user ingame, IP...)" oninput="filterBots()">
         <select id="sortBotsSelect" aria-label="Sắp xếp danh sách bot" class="sort-select" onchange="changeBotSort(this.value)">
           <option value="default">Sắp xếp: Mặc định</option>
-          <option value="status">Sắp xếp: Ưu tiên AFK</option>
+          <option value="status">Sắp xếp: Ưu tiên Online</option>
           <option value="uptime">Sắp xếp: Uptime cao nhất</option>
           <option value="totem">Sắp xếp: Totem nhiều nhất</option>
           <option value="name">Sắp xếp: Tên A-Z</option>

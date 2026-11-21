@@ -188,7 +188,7 @@ function statusMeta(status, available=true, manuallyStopped=false, bot=null) {
   }
   const map={
     online:['green','ONLINE','online'],
-    afk:['green','AFK','afk'],
+    afk:['green','ONLINE','online'],
     waking:['yellow','STARTING...','connecting'],
     connecting:['yellow','CONNECTING','connecting'],
     authenticating:['blue','AUTH','authenticating'],
@@ -401,9 +401,9 @@ function botCardHtml(bot) {
       '</button>';
   }
 
-  const isAFK = bot.status === 'afk';
-  const isOnlineWaiting = ['online', 'waking', 'connecting', 'authenticating', 'entering'].includes(String(bot.status || '').toLowerCase());
-  const statusGlowClass = !bot.available ? 'status-unreachable' : (isAFK ? 'status-afk' : (isOnlineWaiting ? 'status-waiting' : 'status-offline'));
+  const isOnlineIngame = bot.status === 'online' || bot.status === 'afk' || Boolean(bot.online);
+  const isConnectingWaiting = ['waking', 'connecting', 'authenticating', 'entering'].includes(String(bot.status || '').toLowerCase());
+  const statusGlowClass = !bot.available ? 'status-unreachable' : (isOnlineIngame ? 'status-online' : (isConnectingWaiting ? 'status-waiting' : 'status-offline'));
   const displayNum = bot.displayIndex !== undefined ? bot.displayIndex : (bot.botNumber || id);
   const idStr = String(displayNum).padStart(2, '0');
 

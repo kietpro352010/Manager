@@ -449,6 +449,8 @@ function createUserApi({
       username: username || 'Chưa đặt',
       configured,
       available: isReachable,
+      ipAddress: worker.status?.clientIp || worker.status?.hostIp || worker.status?.ip || worker.clientIp || worker.hostIp || worker.host || '',
+      host: worker.status?.clientIp || worker.status?.hostIp || worker.status?.ip || worker.clientIp || worker.hostIp || worker.host || '',
       platform: worker.platform || worker.provider || 'wispbyte',
       provider: worker.provider || 'wispbyte',
       enabled: worker.enabled,

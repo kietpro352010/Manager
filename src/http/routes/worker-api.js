@@ -17,6 +17,15 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
   }
   const auth = createWorkerAuth(registry);
 
+  function getWorkerClientIp(req) {
+    const forwarded = req.headers['x-forwarded-for'];
+    if (forwarded && typeof forwarded === 'string') {
+      const first = forwarded.split(',')[0].trim();
+      if (first) return first;
+    }
+    return req.ip || req.socket?.remoteAddress || null;
+  }
+
   // 1. Scoped routes: /api/v1/workers/:workerId/*
   router.get('/bootstrap', auth, async (req, res, next) => {
     try {
@@ -28,7 +37,10 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
 
   router.post('/heartbeat', auth, async (req, res, next) => {
     try {
-      const worker = await registry.updateStatus(req.workerId, req.body?.status || {}, 'worker-heartbeat');
+      const clientIp = getWorkerClientIp(req);
+      const incomingStatus = req.body?.status || {};
+      const statusWithIp = { ...incomingStatus, ...(clientIp ? { clientIp } : {}) };
+      const worker = await registry.updateStatus(req.workerId, statusWithIp, 'worker-heartbeat');
       if (!worker) return res.status(404).json({ ok: false, error: 'worker_not_found' });
       const settingsRevision = typeof registry.getSettingsRevision === 'function'
         ? registry.getSettingsRevision(req.workerId)
@@ -88,7 +100,10 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
 
   router.post('/poll', auth, async (req, res, next) => {
     try {
-      await registry.updateStatus(req.workerId, req.body?.status || {}, 'wispbyte-poll');
+      const clientIp = getWorkerClientIp(req);
+      const incomingStatus = req.body?.status || {};
+      const statusWithIp = { ...incomingStatus, ...(clientIp ? { clientIp } : {}) };
+      await registry.updateStatus(req.workerId, statusWithIp, 'wispbyte-poll');
       const requestedWait = Number(req.body?.waitMs);
       const waitMs = Number.isFinite(requestedWait)
         ? Math.max(0, Math.min(config.workerPollWaitMs || 15000, requestedWait))
@@ -162,7 +177,9 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
         return res.status(404).json({ ok: false, error: 'worker_not_found_or_disabled' });
       }
 
-      const status = req.body?.status || req.body || {};
+      const clientIp = getWorkerClientIp(req);
+      const incomingStatus = req.body?.status || req.body || {};
+      const status = { ...incomingStatus, ...(clientIp ? { clientIp } : {}) };
       await registry.updateStatus(workerId, status, 'worker-report');
 
       // Record position change telemetry to Cloud if coordinates provided
