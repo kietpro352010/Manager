@@ -87,8 +87,14 @@ function loadConfig(env = process.env) {
   const encryptionKey = parseEncryptionKey(env);
   const previousEncryptionKey = parsePreviousEncryptionKey(env);
 
-  const sessionSecret = String(env.MANAGER_SESSION_SECRET || '').trim() ||
+  const rawSessionSecret = String(env.MANAGER_SESSION_SECRET || '').trim();
+  if (rawSessionSecret && rawSessionSecret.length < 16) {
+    throw new Error('MANAGER_SESSION_SECRET must contain at least 16 characters when configured.');
+  }
+  const sessionSecret = rawSessionSecret ||
     crypto.createHash('sha256').update(Buffer.concat([encryptionKey, Buffer.from(':kbot_session_v11')])).digest('hex');
+  const captchaRequired = bool(env.CAPTCHA_REQUIRED, false);
+  const captchaSecret = String(env.CAPTCHA_SECRET || '').trim() || undefined;
 
   const adminRoleId = String(env.ADMIN_ROLE_ID || '').trim();
   const userRoleId = String(env.USER_ROLE_ID || '').trim();
@@ -154,6 +160,8 @@ function loadConfig(env = process.env) {
     encryptionKey,
     previousEncryptionKey,
     sessionSecret,
+    captchaRequired,
+    captchaSecret,
     masterKey: String(env.MANAGER_MASTER_KEY || env.MANAGER_ENCRYPTION_KEY || '').trim(),
     masterKeyPrevious: String(env.MANAGER_MASTER_KEY_PREVIOUS || '').trim(),
     renderApiKey: String(env.RENDER_API_KEY || '').trim(),

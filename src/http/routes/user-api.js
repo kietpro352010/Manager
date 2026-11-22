@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const net = require('node:net');
+const dns = require('node:dns');
 const express = require('express');
 const { validateProxyUrl } = require('../../services/proxy-validation');
 const { decryptSecret } = require('../../utils/secrets');
@@ -17,6 +18,9 @@ function parseProxyInputToUrl(rawInput, { ignoreEnabledFlag = false } = {}) {
       throw new Error('Hiện tại Worker chỉ hỗ trợ giao thức socks5.');
     }
     const host = String(rawInput.host || '').trim().replace(/^\[|\]$/g, '');
+    if (/[/?#@]/.test(host) || (host.includes(':') && net.isIPv6(host) === 0)) {
+      throw new Error('Địa chỉ host Proxy không được chứa các ký tự đặc biệt (/ ? # @ :).');
+    }
     const port = Number(rawInput.port);
     if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
       throw new Error('Vui lòng nhập Host và Port (1–65535) hợp lệ cho Proxy.');
@@ -62,29 +66,42 @@ function probeProxyTcpLatency(proxyUrl, timeoutMs = 3500) {
     }
     const host = parsed.hostname.replace(/^\[|\]$/g, '');
     const port = Number(parsed.port);
-    const startedAt = Date.now();
-    let settled = false;
-    const socket = net.createConnection({ host, port });
 
-    const done = (result) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      try { socket.destroy(); } catch (_) {}
-      resolve(result);
+    const connectToHost = (targetHost) => {
+      const startedAt = Date.now();
+      let settled = false;
+      const socket = net.createConnection({ host: targetHost, port });
+
+      const done = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { socket.destroy(); } catch (_) {}
+        resolve(result);
+      };
+
+      const timer = setTimeout(() => {
+        done({ ok: false, latencyMs: null, error: `Kết nối quá thời gian chờ (${timeoutMs}ms)` });
+      }, timeoutMs);
+      timer.unref?.();
+
+      socket.once('connect', () => {
+        done({ ok: true, latencyMs: Math.max(1, Date.now() - startedAt), error: null });
+      });
+      socket.once('error', (err) => {
+        done({ ok: false, latencyMs: null, error: err?.code || err?.message || 'connection_failed' });
+      });
     };
 
-    const timer = setTimeout(() => {
-      done({ ok: false, latencyMs: null, error: `Kết nối quá thời gian chờ (${timeoutMs}ms)` });
-    }, timeoutMs);
-    timer.unref?.();
-
-    socket.once('connect', () => {
-      done({ ok: true, latencyMs: Math.max(1, Date.now() - startedAt), error: null });
-    });
-    socket.once('error', (err) => {
-      done({ ok: false, latencyMs: null, error: err?.code || err?.message || 'connection_failed' });
-    });
+    if (net.isIP(host) === 0) {
+      dns.promises.lookup(host, { all: false }).then((rec) => {
+        connectToHost(rec.address);
+      }).catch((dnsErr) => {
+        resolve({ ok: false, latencyMs: null, error: `Lỗi phân giải DNS: ${dnsErr.message}` });
+      });
+    } else {
+      connectToHost(host);
+    }
   });
 }
 
@@ -203,7 +220,15 @@ function createUserApi({
     const key = String(ip || 'unknown');
     let entry = verifyRateLimiter.get(key);
     if (!entry || now > entry.resetAt) {
-      if (verifyRateLimiter.size > 1000) verifyRateLimiter.clear();
+      if (verifyRateLimiter.size > 1000) {
+        for (const [k, v] of verifyRateLimiter.entries()) {
+          if (now > v.resetAt) verifyRateLimiter.delete(k);
+        }
+        if (verifyRateLimiter.size > 1000) {
+          const oldestKey = verifyRateLimiter.keys().next().value;
+          if (oldestKey) verifyRateLimiter.delete(oldestKey);
+        }
+      }
       entry = { count: 0, resetAt: now + 60000 };
     }
     entry.count += 1;
@@ -395,7 +420,8 @@ function createUserApi({
     if (session.role === 'admin') return { allowed: true, user: session, worker };
 
     const assigned = Array.isArray(session.assignedBotIds) ? session.assignedBotIds.map(String) : [];
-    if (!isWorkerAssignedToSession(worker, assigned)) {
+    const allWorkers = await registry.list();
+    if (!isWorkerAssignedToSession(worker, assigned, allWorkers)) {
       return { allowed: false, status: 403, error: 'Bạn không có quyền quản lý bot này.' };
     }
 
@@ -557,6 +583,18 @@ function createUserApi({
       } else {
         const assigned = Array.isArray(session.assignedBotIds) ? session.assignedBotIds.map(String) : [];
         visibleBots = allBots.filter((b) => isWorkerAssignedToSession(b, assigned, allBots));
+        if (assigned.length > 0) {
+          const userOrderMap = new Map(assigned.map((id, idx) => [String(id).toLowerCase(), idx]));
+          visibleBots.sort((a, b) => {
+            const aId = String(a.workerId || '').toLowerCase();
+            const bId = String(b.workerId || '').toLowerCase();
+            const aNum = String(a.botNumber || '').toLowerCase();
+            const bNum = String(b.botNumber || '').toLowerCase();
+            const aPos = userOrderMap.has(aId) ? userOrderMap.get(aId) : (userOrderMap.has(aNum) ? userOrderMap.get(aNum) : Number.MAX_SAFE_INTEGER);
+            const bPos = userOrderMap.has(bId) ? userOrderMap.get(bId) : (userOrderMap.has(bNum) ? userOrderMap.get(bNum) : Number.MAX_SAFE_INTEGER);
+            return aPos - bPos || Number(a.botNumber || 0) - Number(b.botNumber || 0);
+          });
+        }
       }
 
       const payload = visibleBots.map((bot) => {
@@ -972,6 +1010,9 @@ function createUserApi({
     const rawMessage = req.body?.text ?? req.body?.message;
     const message = (typeof rawMessage === 'string' || typeof rawMessage === 'number') ? String(rawMessage).trim() : '';
     if (!message) return res.status(400).json({ ok: false, error: 'Nội dung tin nhắn không được để trống.' });
+    if (/[\r\n]/.test(message)) {
+      return res.status(400).json({ ok: false, error: 'Nội dung tin nhắn không được chứa ký tự xuống dòng.' });
+    }
     if (req.managerAuthSession?.role !== 'admin' && req.managerAuthSession?.allowAccountChange === false && RESTRICTED_MC_CHAT_CMD_RE.test(message)) {
       return res.status(403).json({ ok: false, error: 'Tài khoản thuê bị giới hạn không được gửi lệnh đăng nhập / đổi mật khẩu Minecraft.' });
     }
@@ -1344,6 +1385,9 @@ function createUserApi({
   router.post('/bot/:id/alias', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (perm.user?.role !== 'admin' && perm.user?.allowAccountChange === false) {
+      return res.status(403).json({ ok: false, error: 'Tài khoản của bạn bị hạn chế thay đổi thông tin bot.' });
+    }
 
     const alias = String(req.body?.alias || '').trim().slice(0, 32);
     try {
@@ -1595,9 +1639,13 @@ function createUserApi({
         if (!attempt) {
           return res.status(404).json({ ok: false, error: 'Phiên vượt link không tồn tại hoặc đã hết hạn.' });
         }
+        const attemptUserId = String(attempt.userId || '').trim().toLowerCase();
+        const attemptUsername = String(attempt.username || '').trim().toLowerCase();
+        const sessionUserId = String(session.userId || '').trim().toLowerCase();
+        const sessionUsername = String(session.username || '').trim().toLowerCase();
         const isOwner = session.role === 'admin' ||
-          String(attempt.userId || '').toLowerCase() === String(session.userId || '').toLowerCase() ||
-          String(attempt.username || '').toLowerCase() === String(session.username || '').toLowerCase();
+          (attemptUserId && sessionUserId && attemptUserId === sessionUserId) ||
+          (attemptUsername && sessionUsername && attemptUsername === sessionUsername);
         if (!isOwner) {
           return res.status(403).json({ ok: false, error: 'Không có quyền kiểm tra phiên vượt link này.' });
         }
@@ -1608,6 +1656,9 @@ function createUserApi({
       const result = await link4mService.verifyAndClaimReward(token, attemptId);
       if (req.managerAuthSession?.userId && typeof invalidateUserSessions === 'function') {
         req.managerAuthSession._authVerifiedAt = 0;
+      }
+      if (typeof store.invalidateUserCache === 'function') {
+        store.invalidateUserCache(req.managerAuthSession?.userId, req.managerAuthSession?.username);
       }
       return res.json({ ...result, isRewarded: result?.isRewarded !== undefined ? Boolean(result.isRewarded) : !result?.processing });
     } catch (error) {

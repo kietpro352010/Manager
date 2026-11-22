@@ -10,7 +10,7 @@ function updateEquipSlot(elId, item) {
   const iconUrl = typeof getMinecraftItemIconUrl === 'function' ? getMinecraftItemIconUrl(item.name) : '';
   let imgHtml = '';
   if (iconUrl) {
-    imgHtml = '<img class="equip-icon-img" src="' + escapeHtml(iconUrl) + '" alt="' + escapeHtml(label) + '" onerror="handleItemIconError(this,\'' + escapeHtml(item.name) + '\')" loading="lazy">';
+    imgHtml = '<img class="equip-icon-img" src="' + escapeHtml(iconUrl) + '" alt="' + escapeHtml(label) + '" data-item-name="' + escapeHtml(item.name) + '" onerror="handleItemIconError(this, this.dataset.itemName)" loading="lazy">';
   }
   el.innerHTML = imgHtml + '<span class="equip-text">' + escapeHtml(label) + '</span>';
 }

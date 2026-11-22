@@ -17,7 +17,16 @@ async function getGuildInvite(guild) {
   }
 
   try {
-    // 2. Tìm kênh văn bản mà bot có quyền tạo link mời
+    // 2. Ưu tiên lấy invite sẵn có còn hạn sử dụng (DISCORD-07)
+    if (typeof guild.invites?.fetch === 'function') {
+      const existingInvites = await guild.invites.fetch().catch(() => null);
+      const activeInvite = existingInvites?.find?.((inv) => !inv.expired);
+      if (activeInvite?.url) {
+        return activeInvite.url;
+      }
+    }
+
+    // 3. Tìm kênh văn bản mà bot có quyền tạo link mời
     let channels = guild.channels?.cache;
     if (!channels || channels.size === 0) {
       channels = await guild.channels?.fetch?.().catch(() => null);
@@ -34,11 +43,10 @@ async function getGuildInvite(guild) {
 
       if (targetChannel && typeof targetChannel.createInvite === 'function') {
         const invite = await targetChannel.createInvite({
-          maxAge: 0, // Vĩnh viễn nếu được phép
+          maxAge: 0,
           maxUses: 0,
           reason: 'KBot Server List (/kbot command)'
         }).catch(async () => {
-          // Fallback: Thời hạn 24h nếu server chặn tạo link vĩnh viễn
           return await targetChannel.createInvite({
             maxAge: 86400,
             maxUses: 0,
@@ -49,15 +57,6 @@ async function getGuildInvite(guild) {
         if (invite?.url) {
           return invite.url;
         }
-      }
-    }
-
-    // 3. Fallback: Lấy invite có sẵn nếu có quyền ManageGuild
-    if (typeof guild.invites?.fetch === 'function') {
-      const existingInvites = await guild.invites.fetch().catch(() => null);
-      const firstInvite = existingInvites?.find?.((inv) => !inv.expired);
-      if (firstInvite?.url) {
-        return firstInvite.url;
       }
     }
   } catch (_) {}

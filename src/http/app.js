@@ -249,7 +249,7 @@ function createApp({
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader('X-XSS-Protection', '1; mode=block');
-    res.setHeader('Content-Security-Policy', "default-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:; img-src 'self' data: https: blob:; media-src 'self' https: data: blob:; connect-src 'self' https:;");
+    res.setHeader('Content-Security-Policy', "default-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:; img-src 'self' data: https: blob:; media-src 'self' https: data: blob:; connect-src 'self' https:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self';");
 
     if (isHttps(req)) {
       res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
@@ -446,7 +446,14 @@ function createApp({
     req.managerAuthChecked = true;
     req.managerAuthSession = null;
 
-    if (isBotSecretRequest(req)) return next();
+    if (isBotSecretRequest(req) ||
+        req.path.startsWith('/api/worker/') ||
+        req.path.startsWith('/api/v1/workers/') ||
+        req.path === '/health' ||
+        req.path === '/ready' ||
+        req.path === '/api/ready') {
+      return next();
+    }
 
     const rawToken = getRequestManagerSessionToken(req);
     if (!rawToken) return next();
@@ -459,7 +466,7 @@ function createApp({
       cachedSession &&
       cachedSession.role === 'admin' &&
       !String(cachedSession.userId || '').toLowerCase().startsWith('usr_') &&
-      (!useDbAuth || (cachedSession._authVerifiedAt && Date.now() - cachedSession._authVerifiedAt < READ_POLL_AUTH_CACHE_TTL_MS))
+      (!useDbAuth || (isCacheablePollRead(req) && cachedSession._authVerifiedAt && Date.now() - cachedSession._authVerifiedAt < READ_POLL_AUTH_CACHE_TTL_MS))
     );
     let session = null;
 

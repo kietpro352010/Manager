@@ -209,8 +209,8 @@ class EntitlementService {
 
     const cleanUserId = String(userId || '').trim();
     const member = this.accessControl
-      ? await this.accessControl.memberFor(cleanUserId)
-      : (this.store && typeof this.store.getAccess === 'function' ? await this.store.getAccess(cleanUserId) : null);
+      ? await this.accessControl.memberFor(cleanUserId, { bypassCache: true })
+      : (this.store && typeof this.store.getAccess === 'function' ? await this.store.getAccess(cleanUserId, { bypassCache: true }) : null);
     if (member?.status === 'disabled') {
       throw new Error('Tài khoản này đã bị khóa quyền nạp mã.');
     }
@@ -552,8 +552,9 @@ class EntitlementService {
             ? freshUser.workerIds
             : ((Array.isArray(freshUser.assignedBotIds) && freshUser.assignedBotIds.length) ? freshUser.assignedBotIds : []);
 
-          // Determine which bots still need to be stopped
-          const botsToStop = trackedPending.length ? trackedPending : workerIds;
+          // Determine which bots still need to be stopped (scoped strictly to currently owned bots)
+          const ownedSet = new Set(workerIds.map((id) => String(id).toLowerCase()));
+          const botsToStop = (trackedPending.length ? trackedPending.filter((id) => ownedSet.has(String(id).toLowerCase())) : workerIds);
 
           if (botsToStop.length === 0) {
             this.stopPendingByUser.delete(freshUser.userId);

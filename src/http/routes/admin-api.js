@@ -199,6 +199,44 @@ function createAdminApi({
       values.workerIds = values.assignedBotIds;
     }
     delete values.assignedBotIds;
+
+    if (values.expiresAt !== undefined && values.expiresAt !== null) {
+      if (values.expiresAt === '' || values.expiresAt === 'never' || values.expiresAt === 'permanent') {
+        values.expiresAt = null;
+        values.isPermanent = true;
+      } else {
+        const parsed = Date.parse(values.expiresAt);
+        if (!Number.isFinite(parsed)) {
+          throw new Error('Định dạng thời hạn (expiresAt) không hợp lệ.');
+        }
+        values.expiresAt = new Date(parsed).toISOString();
+      }
+    }
+
+    if (values.workerIds !== undefined && values.workerIds !== null) {
+      if (!Array.isArray(values.workerIds)) {
+        throw new Error('Danh sách bot (workerIds) phải là một mảng.');
+      }
+      values.workerIds = values.workerIds.map((id) => String(id || '').trim()).filter(Boolean);
+    }
+
+    if (values.status !== undefined) {
+      const validStatuses = ['active', 'expired', 'disabled', 'grace_period'];
+      const st = String(values.status || '').trim().toLowerCase();
+      if (!validStatuses.includes(st)) {
+        throw new Error('Trạng thái người dùng không hợp lệ.');
+      }
+      values.status = st;
+    }
+
+    if (values.botCount !== undefined) {
+      const cnt = Number(values.botCount);
+      if (!Number.isSafeInteger(cnt) || cnt < 0 || cnt > 100) {
+        throw new Error('Số lượng bot (botCount) phải là số nguyên từ 0 đến 100.');
+      }
+      values.botCount = cnt;
+    }
+
     // Never allow mass-assignment of privileged roles via user CRUD
     if (src.role !== undefined && String(src.role).trim().toLowerCase() === 'user') {
       values.role = 'user';
@@ -549,11 +587,27 @@ function createAdminApi({
         const provider = explicitProvider || (isHttpUrl ? 'render' : 'wispbyte');
         let slots = 2; // Default dual-slot (1 worker = 2 bot) for Render / host instances
 
-        if (isHttpUrl) {
+        if (provider === 'render') {
+          if (!/^https:\/\//i.test(rawUrl) && !/^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(rawUrl)) {
+            skipped.push({ url: rawUrl, slot: 0, reason: 'Worker URL của Render bắt buộc phải sử dụng giao thức HTTPS (hoặc localhost/127.0.0.1 trong môi trường thử nghiệm).' });
+            continue;
+          }
           try {
             await validateSafeBotUrl(rawUrl);
           } catch (ssrfErr) {
             skipped.push({ url: rawUrl, slot: 0, reason: ssrfErr.message });
+            continue;
+          }
+        } else if (isHttpUrl) {
+          try {
+            await validateSafeBotUrl(rawUrl);
+          } catch (ssrfErr) {
+            skipped.push({ url: rawUrl, slot: 0, reason: ssrfErr.message });
+            continue;
+          }
+        } else {
+          if (!/^[a-zA-Z0-9._-]+$/.test(rawUrl)) {
+            skipped.push({ url: rawUrl, slot: 0, reason: 'Identifier worker không hợp lệ.' });
             continue;
           }
         }
@@ -931,8 +985,8 @@ function createAdminApi({
           l.logType || 'SYSTEM',
           l.category || 'SYSTEM',
           l.actor?.username || l.actorId || 'system',
-          l.actor?.role || 'system',
-          l.actor?.ip || '',
+          l.actor?.role || l.actorRole || 'system',
+          l.actor?.ip || l.actorIp || '',
           l.action || '',
           l.target || l.targetId || '',
           l.status || 'SUCCESS',
@@ -985,11 +1039,11 @@ function createAdminApi({
 
       for (let i = 0; i < numKeys; i++) {
         const key = await entitlementService.createCode({
-          days: Number(days) || 30,
+          days: (Number.isInteger(Number(days)) && Number(days) >= 1 && Number(days) <= 36500) ? Number(days) : 30,
           permanent: Boolean(permanent),
-          botCount: Number(botCount) || 1,
+          botCount: (Number.isInteger(Number(botCount)) && Number(botCount) >= 1 && Number(botCount) <= 100) ? Number(botCount) : 1,
           workerIds: Array.isArray(workerIds) ? workerIds : [],
-          maxUses: Number.isFinite(Number(maxUses)) ? Number(maxUses) : 1,
+          maxUses: (Number.isInteger(Number(maxUses)) && Number(maxUses) >= 1) ? Number(maxUses) : 1,
           planName: planName || 'Standard',
           customCode: customKey,
           expiresAt,
@@ -1180,6 +1234,9 @@ function createAdminApi({
   router.post('/backups/:filename/restore', async (req, res) => {
     try {
       const { filename } = req.params;
+      if (!filename || !/^[a-zA-Z0-9._-]+$/.test(filename)) {
+        return res.status(400).json({ ok: false, error: 'Tên bản sao lưu không hợp lệ.' });
+      }
       const backup = await store.fetchBackupPayload(filename);
       if (!backup) return res.status(404).json({ ok: false, error: 'Không tìm thấy bản sao lưu.' });
 
@@ -1265,7 +1322,7 @@ function createAdminApi({
               };
               const { error } = await store.client.from('manager_keys').upsert(row, { onConflict: 'key_id' });
               if (error && error.code !== '23505') throw error;
-              summary.keysRestored += 1;
+              if (!error) summary.keysRestored += 1;
             } else if (typeof store.createKey === 'function') {
               await store.createKey(k);
               summary.keysRestored += 1;
@@ -1297,7 +1354,9 @@ function createAdminApi({
   router.delete('/backups/:filename', async (req, res) => {
     try {
       const { filename } = req.params;
-      if (!filename) return res.status(400).json({ ok: false, error: 'Thiếu tên bản sao lưu.' });
+      if (!filename || !/^[a-zA-Z0-9._-]+$/.test(filename)) {
+        return res.status(400).json({ ok: false, error: 'Tên bản sao lưu không hợp lệ.' });
+      }
 
       if (typeof store.deleteBackup === 'function') {
         const deleted = await store.deleteBackup(filename);
@@ -1867,37 +1926,39 @@ function createAdminApi({
   router.post('/admin/credentials', async (req, res) => {
     try {
       const body = req.body || {};
-      if (!Object.prototype.hasOwnProperty.call(body, 'password')) {
-        const bots = await listAllBotCredentials();
-        await store.addAudit({
-          action: 'ADMIN_VIEW_BOT_CREDENTIALS',
-          actorId: req.managerAuthSession?.username || 'admin',
-          actorRole: 'admin',
-          actorIp: req.ip || '127.0.0.1',
-          details: { method: 'POST', botCount: bots.length }
-        }).catch(() => null);
-        return res.json({ ok: true, bots });
+      const newPassword = body.password || body.newPassword;
+      if (newPassword) {
+        if (typeof newPassword !== 'string' || newPassword.length < 6 || newPassword.length > 256) {
+          return res.status(400).json({ ok: false, error: 'Mật khẩu phải dài từ 6 đến 256 ký tự.' });
+        }
+        const hashed = hashAdminPassword(newPassword);
+        if (store && typeof store.setSetting === 'function') {
+          await store.setSetting('admin_credentials', { passwordHash: hashed, updatedAt: new Date().toISOString() });
+        }
+        if (typeof registry.setAdminPassword === 'function') {
+          registry.setAdminPassword(hashed);
+        }
+        // Immediately revoke other active admin sessions on password change
+        const currentTokenHash = req.managerAuthSession?.tokenHash || null;
+        if (typeof invalidateAdminSessions === 'function') {
+          invalidateAdminSessions(currentTokenHash);
+        }
+        if (typeof store?.adapter?.revokeAdminSessions === 'function') {
+          await store.adapter.revokeAdminSessions(currentTokenHash).catch(() => null);
+        }
+        return res.json({ ok: true, message: 'Đã cập nhật mật khẩu quản trị viên.' });
       }
-      const { password } = body;
-      if (typeof password !== 'string' || password.length < 6 || password.length > 256) {
-        return res.status(400).json({ ok: false, error: 'Mật khẩu phải dài từ 6 đến 256 ký tự.' });
-      }
-      const hashed = hashAdminPassword(password);
-      if (store && typeof store.setSetting === 'function') {
-        await store.setSetting('admin_credentials', { passwordHash: hashed, updatedAt: new Date().toISOString() });
-      }
-      if (typeof registry.setAdminPassword === 'function') {
-        registry.setAdminPassword(hashed);
-      }
-      // Immediately revoke other active admin sessions on password change
-      const currentTokenHash = req.managerAuthSession?.tokenHash || null;
-      if (typeof invalidateAdminSessions === 'function') {
-        invalidateAdminSessions(currentTokenHash);
-      }
-      if (typeof store?.adapter?.revokeAdminSessions === 'function') {
-        await store.adapter.revokeAdminSessions(currentTokenHash).catch(() => null);
-      }
-      return res.json({ ok: true, message: 'Đã cập nhật mật khẩu quản trị viên.' });
+
+      // If no password change requested, return bots list (for UI modal and backward compatibility)
+      const bots = await listAllBotCredentials();
+      await store.addAudit?.({
+        action: 'ADMIN_VIEW_BOT_CREDENTIALS',
+        actorId: req.managerAuthSession?.username || 'admin',
+        actorRole: 'admin',
+        actorIp: req.ip || '127.0.0.1',
+        details: { method: 'POST', botCount: bots.length }
+      }).catch(() => null);
+      return res.json({ ok: true, bots });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }

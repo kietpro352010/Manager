@@ -245,6 +245,9 @@ async function resolveLinkedUser(interaction, services) {
   // 2. Check if user is linked to a Web Manager account
   const linked = await services.accessStore.getUserByDiscordId(discordUserId);
   if (linked) {
+    if (linked.status === 'disabled') {
+      return null;
+    }
     return qualifiesAsDiscordAdmin && linked.role !== 'admin'
       ? { ...linked, role: 'admin', isPermanent: true }
       : linked;
@@ -451,10 +454,18 @@ async function handlePanelInteraction(interaction, services) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const linkedUser = await resolveLinkedUser(interaction, services);
-    const isSuperAdmin = linkedUser?.role === 'admin' ||
+    const hasAdminPerm = Boolean(
+      interaction.memberPermissions?.has?.('Administrator') ||
+      interaction.memberPermissions?.has?.(8n) ||
+      interaction.member?.permissions?.has?.('Administrator') ||
+      interaction.member?.permissions?.has?.(8n)
+    );
+    const isSuperAdmin = Boolean(
       (services?.config?.adminUserId && services.config.adminUserId === discordUserId) ||
       (services?.accessControl?.adminUserId && services.accessControl.adminUserId === discordUserId) ||
-      interaction.guild?.ownerId === discordUserId;
+      (interaction.guild?.ownerId && interaction.guild.ownerId === discordUserId) ||
+      hasAdminPerm
+    );
 
     if (!isSuperAdmin) {
       return safeReply(interaction, {
@@ -478,6 +489,9 @@ async function handlePanelInteraction(interaction, services) {
     }
     if (typeof services.registry?.setAdminPassword === 'function') {
       services.registry.setAdminPassword(hashed);
+    }
+    if (typeof services.accessStore?.unlinkDiscord === 'function') {
+      await services.accessStore.unlinkDiscord('admin').catch(() => null);
     }
     if (typeof services.accessStore?.adapter?.revokeAdminSessions === 'function') {
       await services.accessStore.adapter.revokeAdminSessions().catch(() => null);

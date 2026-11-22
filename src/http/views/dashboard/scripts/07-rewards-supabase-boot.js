@@ -1037,13 +1037,21 @@ window.addEventListener('online', () => {
 // Dirty-Form & Active Focus Guard (bảo vệ ô đang nhập không bị đồng bộ ngầm ghi đè)
 document.addEventListener('input', (e) => {
   if (e.target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) {
-    e.target.setAttribute('data-dirty', 'true');
+    if (e.target.value === '' && !e.target.dataset.originalValue) {
+      e.target.removeAttribute('data-dirty');
+    } else {
+      e.target.setAttribute('data-dirty', 'true');
+    }
   }
 }, { passive: true });
 
 document.addEventListener('change', (e) => {
   if (e.target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) {
-    e.target.setAttribute('data-dirty', 'true');
+    if (e.target.value === '' && !e.target.dataset.originalValue) {
+      e.target.removeAttribute('data-dirty');
+    } else {
+      e.target.setAttribute('data-dirty', 'true');
+    }
   }
 }, { passive: true });
 

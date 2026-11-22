@@ -47,10 +47,19 @@ async function execute(interaction, services) {
 
   // 1. SETUP
   if (subcommand === 'setup') {
-    const isSuperAdmin = user?.role === 'admin' ||
-      (services?.config?.adminUserId && services.config.adminUserId === interaction.user?.id) ||
-      (services?.accessControl?.adminUserId && services.accessControl.adminUserId === interaction.user?.id) ||
-      interaction.guild?.ownerId === interaction.user?.id;
+    const userId = interaction.user?.id;
+    const hasAdminPerm = Boolean(
+      interaction.memberPermissions?.has?.('Administrator') ||
+      interaction.memberPermissions?.has?.(8n) ||
+      interaction.member?.permissions?.has?.('Administrator') ||
+      interaction.member?.permissions?.has?.(8n)
+    );
+    const isSuperAdmin = Boolean(
+      (services?.config?.adminUserId && services.config.adminUserId === userId) ||
+      (services?.accessControl?.adminUserId && services.accessControl.adminUserId === userId) ||
+      (interaction.guild?.ownerId && interaction.guild.ownerId === userId) ||
+      hasAdminPerm
+    );
 
     if (!isSuperAdmin) {
       return {
@@ -111,10 +120,19 @@ async function execute(interaction, services) {
 
   // 1B. PASSWORD (Đổi mật khẩu Web cho admin ngay trên Discord)
   if (subcommand === 'password') {
-    const isSuperAdmin = user?.role === 'admin' ||
-      (services?.config?.adminUserId && services.config.adminUserId === interaction.user?.id) ||
-      (services?.accessControl?.adminUserId && services.accessControl.adminUserId === interaction.user?.id) ||
-      interaction.guild?.ownerId === interaction.user?.id;
+    const userId = interaction.user?.id;
+    const hasAdminPerm = Boolean(
+      interaction.memberPermissions?.has?.('Administrator') ||
+      interaction.memberPermissions?.has?.(8n) ||
+      interaction.member?.permissions?.has?.('Administrator') ||
+      interaction.member?.permissions?.has?.(8n)
+    );
+    const isSuperAdmin = Boolean(
+      (services?.config?.adminUserId && services.config.adminUserId === userId) ||
+      (services?.accessControl?.adminUserId && services.accessControl.adminUserId === userId) ||
+      (interaction.guild?.ownerId && interaction.guild.ownerId === userId) ||
+      hasAdminPerm
+    );
 
     if (!isSuperAdmin) {
       return {
@@ -148,6 +166,9 @@ async function execute(interaction, services) {
     }
     if (typeof services.registry?.setAdminPassword === 'function') {
       services.registry.setAdminPassword(hashed);
+    }
+    if (typeof services.accessStore?.unlinkDiscord === 'function') {
+      await services.accessStore.unlinkDiscord('admin').catch(() => null);
     }
     if (typeof services.accessStore?.adapter?.revokeAdminSessions === 'function') {
       await services.accessStore.adapter.revokeAdminSessions().catch(() => null);

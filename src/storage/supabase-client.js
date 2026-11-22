@@ -521,7 +521,9 @@ class SupabaseAdapter {
     userToDatabaseRows(users) {
         return users.map(u => {
             let encPassword;
-            if (!process.env.MANAGER_MASTER_KEY_PREVIOUS && u._rawEncryptedPassword && isStoredCredentialCiphertext(u._rawEncryptedPassword) && String(u.password ?? '') === u._decryptedPasswordSnapshot) {
+            if (u.passwordUnreadable === true && u.password === null && u._rawEncryptedPassword) {
+                encPassword = u._rawEncryptedPassword;
+            } else if (!process.env.MANAGER_MASTER_KEY_PREVIOUS && u._rawEncryptedPassword && isStoredCredentialCiphertext(u._rawEncryptedPassword) && String(u.password ?? '') === u._decryptedPasswordSnapshot) {
                 encPassword = u._rawEncryptedPassword;
             } else if (String(u.password ?? '').startsWith('scrypt$')) {
                 encPassword = String(u.password);
@@ -536,7 +538,7 @@ class SupabaseAdapter {
                 status: String(u.status || 'active'),
                 assigned_bot_ids: Array.isArray(u.assignedBotIds) ? u.assignedBotIds : [],
                 expires_at: u.expiresAt ? String(u.expiresAt) : null,
-                is_permanent: Boolean(u.isPermanent === true || u.is_permanent === true || ((u.expiresAt === null || u.expiresAt === undefined) && (u.expires_at === null || u.expires_at === undefined) && String(u.status || 'active').toLowerCase() === 'active' && String(u.role || 'user').toLowerCase() !== 'admin')),
+                is_permanent: Boolean(u.isPermanent === true || u.is_permanent === true),
                 plan_name: String(u.planName || 'Gói mặc định'),
                 bot_aliases: (u.botAliases && typeof u.botAliases === 'object' && !Array.isArray(u.botAliases)) ? u.botAliases : {},
                 allow_account_change: u.allowAccountChange !== false,
@@ -678,8 +680,15 @@ class SupabaseAdapter {
                 select: 'id,username,status,assigned_bot_ids,expires_at,plan_name,allow_account_change,lock_reason,is_permanent,bot_count',
                 limit: '2'
             });
-            if (userId) params.set('id', 'eq.' + String(userId));
-            else params.set('username', 'ilike.' + String(username || '').replace(/[(),]/g, ''));
+            if (userId) {
+                params.set('id', 'eq.' + String(userId));
+            } else {
+                const safeUsername = String(username || '')
+                    .replace(/\\/g, '\\\\')
+                    .replace(/[%_*]/g, '\\$&')
+                    .replace(/[(),]/g, '');
+                params.set('username', 'ilike.' + safeUsername);
+            }
             const res = await fetch(`${this.url}/rest/v1/manager_users?${params.toString()}`, {
                 headers: this.getHeaders(), signal: AbortSignal.timeout(6000)
             });

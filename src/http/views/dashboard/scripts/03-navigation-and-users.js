@@ -272,6 +272,10 @@ window.addEventListener('keydown', (e) => {
 
 // Chuyển tab Đăng nhập / Đăng ký tại Login Gate
 function switchLoginGateTab(tab) {
+  if (tab === 'register') {
+    window.location.href = '/login?tab=register';
+    return;
+  }
   const loginForm = document.getElementById('loginForm');
   const regForm = document.getElementById('registerForm');
   const btnLogin = document.getElementById('tabBtnLogin');
@@ -279,36 +283,19 @@ function switchLoginGateTab(tab) {
   const alertEl = document.getElementById('loginAlert');
   if (alertEl) { alertEl.classList.add('hidden'); alertEl.textContent = ''; }
 
-  if (tab === 'register') {
-    if (loginForm) loginForm.style.display = 'none';
-    if (regForm) regForm.style.display = 'flex';
-    if (btnReg) {
-      btnReg.setAttribute('aria-selected', 'true');
-      btnReg.style.background = 'rgba(56,189,248,0.2)';
-      btnReg.style.color = '#38bdf8';
-      btnReg.style.borderColor = 'rgba(56,189,248,0.4)';
-    }
-    if (btnLogin) {
-      btnLogin.setAttribute('aria-selected', 'false');
-      btnLogin.style.background = 'transparent';
-      btnLogin.style.color = '#94a3b8';
-      btnLogin.style.borderColor = 'transparent';
-    }
-  } else {
-    if (loginForm) loginForm.style.display = 'flex';
-    if (regForm) regForm.style.display = 'none';
-    if (btnLogin) {
-      btnLogin.setAttribute('aria-selected', 'true');
-      btnLogin.style.background = 'rgba(56,189,248,0.2)';
-      btnLogin.style.color = '#38bdf8';
-      btnLogin.style.borderColor = 'rgba(56,189,248,0.4)';
-    }
-    if (btnReg) {
-      btnReg.setAttribute('aria-selected', 'false');
-      btnReg.style.background = 'transparent';
-      btnReg.style.color = '#94a3b8';
-      btnReg.style.borderColor = 'transparent';
-    }
+  if (loginForm) loginForm.style.display = 'flex';
+  if (regForm) regForm.style.display = 'none';
+  if (btnLogin) {
+    btnLogin.setAttribute('aria-selected', 'true');
+    btnLogin.style.background = 'rgba(56,189,248,0.2)';
+    btnLogin.style.color = '#38bdf8';
+    btnLogin.style.borderColor = 'rgba(56,189,248,0.4)';
+  }
+  if (btnReg) {
+    btnReg.setAttribute('aria-selected', 'false');
+    btnReg.style.background = 'transparent';
+    btnReg.style.color = '#94a3b8';
+    btnReg.style.borderColor = 'transparent';
   }
 }
 window.switchLoginGateTab = switchLoginGateTab;
@@ -1062,6 +1049,15 @@ async function submitCustomRenew() {
 window.submitCustomRenew = submitCustomRenew;
 
 // Quản lý Modal Tạo/Sửa User & Checkbox Bot Độc Quyền (1-Bot-1-User)
+function toggleUserFormExpiresAt(isPermanent) {
+  const expInp = document.getElementById('userFormExpiresAt');
+  if (expInp) {
+    expInp.disabled = isPermanent;
+    if (isPermanent) expInp.value = '';
+  }
+}
+window.toggleUserFormExpiresAt = toggleUserFormExpiresAt;
+
 function openCreateUserModal() {
   currentEditingUserId = null;
   document.getElementById('userEditModalTitle').textContent = 'Thêm Người Dùng Mới';
@@ -1071,7 +1067,11 @@ function openCreateUserModal() {
   document.getElementById('userFormPassword').placeholder = 'Tối thiểu 6 ký tự (chữ hoặc số, phân biệt hoa thường)...';
   document.getElementById('userFormStatus').value = 'active';
   if (document.getElementById('userFormPlanName')) document.getElementById('userFormPlanName').value = 'Gói thường';
-  if (document.getElementById('userFormExpiresAt')) document.getElementById('userFormExpiresAt').value = '';
+  if (document.getElementById('userFormIsPermanent')) document.getElementById('userFormIsPermanent').checked = false;
+  if (document.getElementById('userFormExpiresAt')) {
+    document.getElementById('userFormExpiresAt').disabled = false;
+    document.getElementById('userFormExpiresAt').value = '';
+  }
   if (document.getElementById('userFormNote')) document.getElementById('userFormNote').value = '';
   if (document.getElementById('userFormAllowAccountChange')) document.getElementById('userFormAllowAccountChange').checked = true;
   if (document.getElementById('userFormDiscordRow')) document.getElementById('userFormDiscordRow').style.display = 'none';
@@ -1091,8 +1091,13 @@ function openEditUserModal(userId) {
   document.getElementById('userFormPassword').placeholder = 'Để trống nếu không đổi mật khẩu';
   document.getElementById('userFormStatus').value = u.status || 'active';
   if (document.getElementById('userFormPlanName')) document.getElementById('userFormPlanName').value = u.planName || 'Gói thường';
+  const isPerm = u.isPermanent === true;
+  if (document.getElementById('userFormIsPermanent')) {
+    document.getElementById('userFormIsPermanent').checked = isPerm;
+  }
   if (document.getElementById('userFormExpiresAt')) {
-    if (u.expiresAt) {
+    document.getElementById('userFormExpiresAt').disabled = isPerm;
+    if (!isPerm && u.expiresAt) {
       const d = new Date(u.expiresAt);
       if (!isNaN(d.getTime())) {
         const pad = n => String(n).padStart(2, '0');
@@ -1240,11 +1245,12 @@ async function saveUserForm() {
     const url = isUpdate ? ('/api/manager/users/' + encodeURIComponent(id)) : '/api/manager/users';
     const method = isUpdate ? 'PUT' : 'POST';
     const planName = document.getElementById('userFormPlanName')?.value.trim() || 'Gói thường';
-    const expiresAt = document.getElementById('userFormExpiresAt')?.value ? new Date(document.getElementById('userFormExpiresAt').value).toISOString() : null;
+    const isPermanent = !!document.getElementById('userFormIsPermanent')?.checked;
+    const expiresAt = isPermanent ? null : (document.getElementById('userFormExpiresAt')?.value ? new Date(document.getElementById('userFormExpiresAt').value).toISOString() : null);
     const note = document.getElementById('userFormNote')?.value.trim() || '';
     const allowAccountChange = !!document.getElementById('userFormAllowAccountChange')?.checked;
 
-    const payload = { username, status, planName, expiresAt, note, allowAccountChange, assignedBotIds };
+    const payload = { username, status, planName, expiresAt, isPermanent, note, allowAccountChange, assignedBotIds };
     if (password) payload.password = password;
 
     const res = await requestJson(url, {

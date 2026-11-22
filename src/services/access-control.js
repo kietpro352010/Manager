@@ -2,6 +2,7 @@
 
 const SNOWFLAKE = /^\d{17,20}$/;
 const ROLES = new Set(['user', 'admin']);
+const VALID_STATUSES = new Set(['active', 'disabled', 'expired', 'grace_period', 'expiring']);
 
 class AccessControl {
   constructor({ store, adminRoleId, userRoleId, adminUserId, registry } = {}) {
@@ -35,8 +36,8 @@ class AccessControl {
     return SNOWFLAKE.test(this.adminRoleId) && SNOWFLAKE.test(this.userRoleId) && this.adminRoleId !== this.userRoleId;
   }
 
-  async memberFor(userId) {
-    return this.store.getAccess(String(userId));
+  async memberFor(userId, opts = {}) {
+    return this.store.getAccess(String(userId), opts);
   }
 
   roleFor(member, interaction = null) {
@@ -150,7 +151,7 @@ class AccessControl {
     return this.store.setAccess(userId, {
       role,
       workerIds,
-      status: options.status === 'disabled' ? 'disabled' : 'active',
+      status: VALID_STATUSES.has(options.status) ? options.status : (options.status === 'disabled' ? 'disabled' : 'active'),
       isPermanent,
       expiresAt,
       planName: String(options.planName || 'Vĩnh viễn').slice(0, 64),

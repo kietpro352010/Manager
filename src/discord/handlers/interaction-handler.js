@@ -107,6 +107,21 @@ async function rejectOutsideGuild(interaction, logger, allowedGuildOrConfig, ser
     return false;
   }
 
+  // Reject all direct messages (DMs) unconditionally (DISCORD-01)
+  if (!interaction?.guildId) {
+    logger?.warn?.('discord_interaction_dm_rejected', {
+      actorId: interaction?.user?.id,
+      interactionType: interaction?.commandName || interaction?.customId || 'unknown'
+    });
+    const reply = {
+      content: 'This manager is available only in its configured Discord server (DMs are not supported).',
+      allowedMentions: { parse: [] },
+      ephemeral: true
+    };
+    await interaction?.reply?.(reply)?.catch?.(() => {});
+    return true;
+  }
+
   let allowedGuildId = '';
   if (typeof allowedGuildOrConfig === 'string') {
     allowedGuildId = allowedGuildOrConfig.trim();

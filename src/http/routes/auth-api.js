@@ -47,6 +47,18 @@ function getRequestManagerSessionToken(req) {
   return String(parseCookies(req).kingmc_mgr_session || '').trim();
 }
 
+function getAllRequestTokens(req) {
+  const tokens = new Set();
+  const authHeader = String(req?.headers?.authorization || '');
+  if (authHeader.startsWith('Bearer ')) {
+    const bearer = authHeader.slice(7).trim();
+    if (bearer) tokens.add(bearer);
+  }
+  const cookieToken = String(parseCookies(req).kingmc_mgr_session || '').trim();
+  if (cookieToken) tokens.add(cookieToken);
+  return Array.from(tokens);
+}
+
 function isHttps(req) {
   const xfProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
   return !!(req.secure || xfProto === 'https');
@@ -119,8 +131,57 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
     ? Number(config.maxLoginAttempts)
     : 10;
   const MAX_IP_LOGIN_ATTEMPTS = Math.max(MAX_LOGIN_ATTEMPTS * 5, 50);
+  const MAX_GLOBAL_USER_FAILS = 15;
   const loginAttempts = new Map();
   const ipLoginAttempts = new Map();
+  const globalUserFailures = new Map();
+  const captchaRateLimits = new Map();
+  const registerRateLimits = new Map();
+
+  function checkCaptchaRateLimit(ip) {
+    const ipKey = String(ip || 'unknown');
+    const now = Date.now();
+    const windowMs = 60 * 1000;
+    const maxReq = 60;
+    const rec = captchaRateLimits.get(ipKey);
+    if (!rec || now - rec.windowStart > windowMs) {
+      if (captchaRateLimits.size >= MAX_RATE_LIMIT_ENTRIES) {
+        for (const [k, v] of captchaRateLimits.entries()) {
+          if (now - v.windowStart > windowMs) captchaRateLimits.delete(k);
+        }
+      }
+      captchaRateLimits.set(ipKey, { count: 1, windowStart: now });
+      return { allowed: true };
+    }
+    if (rec.count >= maxReq) {
+      return { allowed: false, error: 'Quá nhiều yêu cầu tạo mã xác thực từ địa chỉ IP này. Vui lòng thử lại sau ít phút.' };
+    }
+    rec.count++;
+    return { allowed: true };
+  }
+
+  function checkRegisterRateLimit(ip) {
+    const ipKey = String(ip || 'unknown');
+    const now = Date.now();
+    const windowMs = 15 * 60 * 1000;
+    const maxReq = 20;
+    const rec = registerRateLimits.get(ipKey);
+    if (!rec || now - rec.windowStart > windowMs) {
+      if (registerRateLimits.size >= MAX_RATE_LIMIT_ENTRIES) {
+        for (const [k, v] of registerRateLimits.entries()) {
+          if (now - v.windowStart > windowMs) registerRateLimits.delete(k);
+        }
+      }
+      registerRateLimits.set(ipKey, { count: 1, windowStart: now });
+      return { allowed: true };
+    }
+    if (rec.count >= maxReq) {
+      const waitMinutes = Math.ceil((windowMs - (now - rec.windowStart)) / 60000);
+      return { allowed: false, error: `Quá nhiều lần đăng ký tài khoản từ địa chỉ IP này. Vui lòng thử lại sau ${waitMinutes} phút.` };
+    }
+    rec.count++;
+    return { allowed: true };
+  }
 
   function checkRateLimit(ip, username) {
     const now = Date.now();
@@ -130,7 +191,15 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       const waitMinutes = Math.ceil((RATE_LIMIT_WINDOW_MS - (now - ipRecord.windowStart)) / 60000);
       return { allowed: false, error: `Quá nhiều lần đăng nhập sai từ địa chỉ IP này. Vui lòng thử lại sau ${waitMinutes} phút.` };
     }
-    const key = `${ipKey}:${String(username).toLowerCase()}`;
+
+    const uKey = String(username || '').toLowerCase();
+    const uRecord = globalUserFailures.get(uKey);
+    if (uRecord && now - uRecord.windowStart <= RATE_LIMIT_WINDOW_MS && uRecord.count >= MAX_GLOBAL_USER_FAILS) {
+      const waitMinutes = Math.ceil((RATE_LIMIT_WINDOW_MS - (now - uRecord.windowStart)) / 60000);
+      return { allowed: false, error: `Tài khoản '${username}' tạm thời bị khóa đăng nhập do quá nhiều lần nhập sai mật khẩu. Vui lòng thử lại sau ${waitMinutes} phút.` };
+    }
+
+    const key = `${ipKey}:${uKey}`;
     const record = loginAttempts.get(key);
     if (!record || now - record.windowStart > RATE_LIMIT_WINDOW_MS) {
       if (loginAttempts.size >= MAX_RATE_LIMIT_ENTRIES) {
@@ -157,11 +226,13 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
   function resetRateLimit(ip, username) {
     const key = `${ip}:${String(username).toLowerCase()}`;
     loginAttempts.delete(key);
+    globalUserFailures.delete(String(username).toLowerCase());
   }
 
   function recordFailedAttempt(ip, username) {
     const ipKey = String(ip || 'unknown');
-    const key = `${ipKey}:${String(username).toLowerCase()}`;
+    const uKey = String(username || '').toLowerCase();
+    const key = `${ipKey}:${uKey}`;
     const now = Date.now();
     const record = loginAttempts.get(key);
     if (!record || now - record.windowStart > RATE_LIMIT_WINDOW_MS) {
@@ -184,6 +255,17 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
     } else {
       ipRec.count++;
     }
+    const uRec = globalUserFailures.get(uKey);
+    if (!uRec || now - uRec.windowStart > RATE_LIMIT_WINDOW_MS) {
+      if (globalUserFailures.size >= MAX_RATE_LIMIT_ENTRIES) {
+        for (const [k, v] of globalUserFailures.entries()) {
+          if (now - v.windowStart > RATE_LIMIT_WINDOW_MS) globalUserFailures.delete(k);
+        }
+      }
+      globalUserFailures.set(uKey, { count: 1, windowStart: now });
+    } else {
+      uRec.count++;
+    }
   }
 
   // Periodic cleanup of rate limiter map
@@ -195,11 +277,25 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
     for (const [key, val] of ipLoginAttempts.entries()) {
       if (now - val.windowStart > RATE_LIMIT_WINDOW_MS) ipLoginAttempts.delete(key);
     }
+    for (const [key, val] of globalUserFailures.entries()) {
+      if (now - val.windowStart > RATE_LIMIT_WINDOW_MS) globalUserFailures.delete(key);
+    }
+    for (const [key, val] of captchaRateLimits.entries()) {
+      if (now - val.windowStart > 60 * 1000) captchaRateLimits.delete(key);
+    }
+    for (const [key, val] of registerRateLimits.entries()) {
+      if (now - val.windowStart > 15 * 60 * 1000) registerRateLimits.delete(key);
+    }
   }, 5 * 60 * 1000).unref();
 
   // 0. CAPTCHA
-  router.get('/captcha', (_req, res) => {
+  router.get('/captcha', (req, res) => {
     try {
+      const clientIp = resolveClientIp(req);
+      const rateCheck = checkCaptchaRateLimit(clientIp);
+      if (!rateCheck.allowed) {
+        return res.status(429).json({ ok: false, error: rateCheck.error });
+      }
       const captchaSecret = String(config.captchaSecret || config.sessionSecret || '').trim() || undefined;
       const captcha = generateCaptcha(captchaSecret);
       return res.json(captcha);
@@ -212,6 +308,12 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
   // 1. REGISTER
   router.post('/register', async (req, res) => {
     try {
+      const clientIp = resolveClientIp(req);
+      const regRate = checkRegisterRateLimit(clientIp);
+      if (!regRate.allowed) {
+        return res.status(429).json({ ok: false, error: regRate.error });
+      }
+
       const {
         username,
         password,
@@ -273,8 +375,6 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       if (existing) {
         return res.status(409).json({ ok: false, error: 'Tên đăng nhập này đã có người sử dụng.' });
       }
-
-      const clientIp = resolveClientIp(req);
 
       // Check Multi-Account Limits & Whitelist Exemptions
       let isExempt = false;
@@ -584,6 +684,10 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         return res.status(400).json({ ok: false, error: 'Tên đăng nhập hoặc mật khẩu không hợp lệ.' });
       }
 
+      if (!/^[a-zA-Z0-9_]{3,32}$/.test(cleanUsername)) {
+        return res.status(400).json({ ok: false, error: 'Tên đăng nhập không hợp lệ.' });
+      }
+
       const rateCheck = checkRateLimit(clientIp, cleanUsername);
       if (!rateCheck.allowed) {
         return res.status(429).json({ ok: false, error: rateCheck.error });
@@ -596,11 +700,11 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         let isMatch = false;
         let matchedFromEnv = false;
 
-        if (cachedAdminPass && verifyAdminPassword(cleanPassword, cachedAdminPass)) {
-          isMatch = true;
-        }
-
-        if (!isMatch && config.adminPassword && verifyAdminPassword(cleanPassword, config.adminPassword)) {
+        if (cachedAdminPass) {
+          if (verifyAdminPassword(cleanPassword, cachedAdminPass)) {
+            isMatch = true;
+          }
+        } else if (config.adminPassword && verifyAdminPassword(cleanPassword, config.adminPassword)) {
           isMatch = true;
           matchedFromEnv = true;
         }
@@ -615,7 +719,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
           recordFailedAttempt(clientIp, cleanUsername);
           return res.status(401).json({ ok: false, error: 'Tên đăng nhập hoặc mật khẩu quản trị viên không chính xác.' });
         }
-        if ((matchedFromEnv || !cachedAdminPass) && typeof store?.setSetting === 'function') {
+        if (matchedFromEnv && !cachedAdminPass && typeof store?.setSetting === 'function') {
           const passwordHash = hashAdminPassword(cleanPassword);
           await store.setSetting('admin_credentials', { passwordHash, updatedAt: new Date().toISOString() });
           registry.setAdminPassword(passwordHash);
@@ -845,9 +949,9 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
   // 3. LOGOUT
   router.post('/logout', async (req, res) => {
     try {
-      const token = getRequestManagerSessionToken(req);
+      const tokens = getAllRequestTokens(req);
       const correlationId = req.headers?.['x-correlation-id'] || req.headers?.['x-request-id'] || `corr_${crypto.randomUUID().slice(0, 8)}`;
-      if (token) {
+      for (const token of tokens) {
         const tokenHash = hashSessionToken(token);
         const prevSess = activeSessions.get(tokenHash) || req.managerAuthSession || null;
         activeSessions.delete(tokenHash);
@@ -934,8 +1038,9 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
 
       if (session.role === 'admin') {
         const cachedAdminPass = registry.getAdminPassword();
-        const isMatch = (cachedAdminPass && verifyAdminPassword(currentPassword, cachedAdminPass)) ||
-          (config.adminPassword && verifyAdminPassword(currentPassword, config.adminPassword));
+        const isMatch = cachedAdminPass
+          ? verifyAdminPassword(currentPassword, cachedAdminPass)
+          : (config.adminPassword && verifyAdminPassword(currentPassword, config.adminPassword));
         if (!isMatch) {
           return res.status(401).json({ ok: false, error: 'Mật khẩu hiện tại của Quản trị viên không chính xác.' });
         }

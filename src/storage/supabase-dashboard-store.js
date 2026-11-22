@@ -55,7 +55,7 @@ const KEY_FIELDS = {
   allowAccountChange: 'allow_account_change', note: 'note', planName: 'plan_name',
   maxUses: 'max_uses', usedCount: 'used_count', usedUsers: 'used_users', expiresAt: 'expires_at',
   createdBy: 'created_by', createdAt: 'created_at', lastUsedAt: 'last_used_at', lastUsedBy: 'last_used_by',
-  id: 'id', code: 'code', key: 'key'
+  id: 'id', code: 'code', key: 'key', used: 'used', usedBy: 'used_by', usedAt: 'used_at'
 };
 
 const LINK_FIELDS = {
@@ -445,7 +445,7 @@ class SupabaseDashboardStore {
             registrationIp: u.registration_ip || '',
             deviceFingerprint: u.device_fingerprint || '',
             discordUserId: dId,
-            lastLoginIp: u.last_login_ip || u.registration_ip || '',
+            lastLoginIp: u.last_login_ip || '',
             lastLoginAt: u.last_login_at || null,
             workerIds: Array.isArray(u.assigned_bot_ids) ? u.assigned_bot_ids.map(String) : [],
             createdAt: u.created_at,
@@ -647,7 +647,8 @@ class SupabaseDashboardStore {
 
     const directOnlyFields = [
       'password', 'isTrial', 'trialBotId', 'registrationIp',
-      'deviceFingerprint', 'registrationUserAgent', 'botCount'
+      'deviceFingerprint', 'registrationUserAgent', 'botCount',
+      'lastLoginIp', 'lastLoginAt'
     ];
     const requiresDirectWrite = directOnlyFields.some((field) => fields[field] !== undefined)
       || Boolean(fields.username && existingUser?.username
@@ -882,6 +883,7 @@ class SupabaseDashboardStore {
           .select('id, actor_username, actor_role, actor_ip, timestamp')
           .eq('actor_ip', cleanIp)
           .gte('timestamp', recentSince)
+          .order('timestamp', { ascending: false })
           .limit(10);
         if (res?.error && isMissingSchemaError(res.error)) {
           res = await this.client
@@ -1284,13 +1286,15 @@ class SupabaseDashboardStore {
     const cleanId = String(identifier).trim();
     const cleanIp = String(clientIp).trim();
     const nowIso = new Date().toISOString();
-    this.invalidateCache();
+    this.invalidateUserCache(cleanId, cleanId);
     try {
       if (this.client) {
+        const quotedId = quotePostgrestValue(cleanId);
+        const quotedUsername = quotePostgrestValue(cleanId.toLowerCase());
         const { error } = await this.client.from(USERS).update({
           last_login_ip: cleanIp,
           last_login_at: nowIso
-        }).or(`id.eq.${cleanId},username.eq.${cleanId.toLowerCase()}`);
+        }).or(`id.eq.${quotedId},username.eq.${quotedUsername}`);
         if (error && !isMissingSchemaError(error)) {
           if (this.logger?.warn) {
             this.logger.warn('Failed to update last_login_ip', { identifier: cleanId, ip: cleanIp, error: error.message });
@@ -1705,7 +1709,7 @@ class SupabaseDashboardStore {
           .or(`code_hash.eq.${qCode},code.eq.${qUpper},code.eq.${qCode},key_code.eq.${qUpper},id.eq.${qCode}`)
           .maybeSingle();
         if (!error && data) return mapFrom(data, KEY_FIELDS);
-        if (error && !isMissingSchemaError(error) && error.code !== 'PGRST116') {
+        if (error && (isMissingSchemaError(error) || error.code === '42703')) {
           // Try simpler columns if key_code does not exist on older table
           const fallback = await this.client.from(KEYS).select('*')
             .or(`code_hash.eq.${qCode},code.eq.${qUpper},id.eq.${qCode}`)

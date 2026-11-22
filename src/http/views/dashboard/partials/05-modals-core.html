@@ -514,7 +514,13 @@
         <input id="userFormPlanName" placeholder="Ví dụ: Gói Tuần, VIP Tháng...">
       </div>
       <div class="form-row">
-        <label for="userFormExpiresAt">Hạn thuê (Bỏ trống = Vĩnh viễn)</label>
+        <label for="userFormExpiresAt">Hạn thuê</label>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+          <label class="check-row" style="cursor:pointer;font-size:12px;margin:0;">
+            <input id="userFormIsPermanent" type="checkbox" onchange="toggleUserFormExpiresAt(this.checked)">
+            <span>👑 Vĩnh viễn</span>
+          </label>
+        </div>
         <input id="userFormExpiresAt" type="datetime-local">
       </div>
     </div>

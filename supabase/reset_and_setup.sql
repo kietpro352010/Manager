@@ -1034,8 +1034,7 @@ REVOKE ALL ON TABLE public.manager_session_revocations FROM PUBLIC, anon, authen
 GRANT SELECT ON TABLE public.manager_user_state, public.manager_session_revocations, public.manager_users_write_transactions, public.manager_key_usage_transactions, public.bot_log_clear_cutoffs TO service_role;
 -- Force every service-role user write through the revision-checked RPCs below.
 -- This makes stale legacy snapshot upserts fail closed during mixed-version deploys.
-REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE public.manager_users FROM service_role;
-GRANT SELECT ON TABLE public.manager_users TO service_role;
+GRANT ALL ON TABLE public.manager_users TO service_role;
 
 CREATE OR REPLACE FUNCTION public.bump_manager_users_revision()
 RETURNS trigger
@@ -1407,7 +1406,7 @@ BEGIN
         plan_name = COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),
         bot_aliases = CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,
         allow_account_change = COALESCE((v_user->>'allow_account_change')::boolean, true),
-        is_permanent = COALESCE((v_user->>'is_permanent')::boolean, (NULLIF(v_user->>'expires_at', '') IS NULL AND COALESCE(NULLIF(v_user->>'role', ''), 'user') <> 'admin' AND COALESCE(NULLIF(v_user->>'status', ''), 'active') = 'active'), false),
+        is_permanent = COALESCE((v_user->>'is_permanent')::boolean, false),
         lock_reason = COALESCE(v_user->>'lock_reason', ''),
         note = COALESCE(v_user->>'note', ''),
         bot_count = GREATEST(1, COALESCE((v_user->>'bot_count')::integer, jsonb_array_length(COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb)), 1)),
@@ -1427,7 +1426,7 @@ BEGIN
           plan_name = COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),
           bot_aliases = CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,
           allow_account_change = COALESCE((v_user->>'allow_account_change')::boolean, true),
-          is_permanent = COALESCE((v_user->>'is_permanent')::boolean, (NULLIF(v_user->>'expires_at', '') IS NULL AND COALESCE(NULLIF(v_user->>'role', ''), 'user') <> 'admin' AND COALESCE(NULLIF(v_user->>'status', ''), 'active') = 'active'), false),
+          is_permanent = COALESCE((v_user->>'is_permanent')::boolean, false),
           lock_reason = COALESCE(v_user->>'lock_reason', ''),
           note = COALESCE(v_user->>'note', ''),
           bot_count = GREATEST(1, COALESCE((v_user->>'bot_count')::integer, jsonb_array_length(COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb)), 1)),
@@ -1450,7 +1449,7 @@ BEGIN
         COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),
         CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,
         COALESCE((v_user->>'allow_account_change')::boolean, true),
-        COALESCE((v_user->>'is_permanent')::boolean, (NULLIF(v_user->>'expires_at', '') IS NULL AND COALESCE(NULLIF(v_user->>'role', ''), 'user') <> 'admin' AND COALESCE(NULLIF(v_user->>'status', ''), 'active') = 'active'), false),
+        COALESCE((v_user->>'is_permanent')::boolean, false),
         COALESCE(v_user->>'lock_reason', ''), COALESCE(v_user->>'note', ''),
         GREATEST(1, COALESCE((v_user->>'bot_count')::integer, jsonb_array_length(COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb)), 1)),
         COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, now()),
@@ -1598,7 +1597,7 @@ BEGIN
       COALESCE(NULLIF(v_user->>'plan_name', ''), 'Gói mặc định'),
       CASE WHEN jsonb_typeof(v_user->'bot_aliases') = 'object' THEN v_user->'bot_aliases' ELSE '{}'::jsonb END,
       COALESCE((v_user->>'allow_account_change')::boolean, true),
-      COALESCE((v_user->>'is_permanent')::boolean, (NULLIF(v_user->>'expires_at', '') IS NULL AND COALESCE(NULLIF(v_user->>'role', ''), 'user') <> 'admin' AND COALESCE(NULLIF(v_user->>'status', ''), 'active') = 'active'), false),
+      COALESCE((v_user->>'is_permanent')::boolean, false),
       COALESCE(v_user->>'lock_reason', ''), COALESCE(v_user->>'note', ''),
       GREATEST(1, COALESCE((v_user->>'bot_count')::integer, jsonb_array_length(COALESCE(v_user->'assigned_bot_ids', '[]'::jsonb)), 1)),
       COALESCE(NULLIF(v_user->>'created_at', '')::timestamptz, now()),
@@ -3216,6 +3215,10 @@ BEGIN
      OR (v_hint_username <> '' AND lower(username) = v_hint_username)
   FOR UPDATE
   LIMIT 1;
+
+  IF FOUND AND lower(COALESCE(v_user.status, '')) = 'disabled' THEN
+    RAISE EXCEPTION 'Tài khoản người dùng đã bị khóa, không thể kích hoạt mã quà tặng.';
+  END IF;
 
   v_target_username := COALESCE(
     NULLIF(v_user.username, ''),

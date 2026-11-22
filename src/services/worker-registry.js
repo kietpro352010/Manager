@@ -48,6 +48,18 @@ const VALID_WORKER_STATES = new Set([
 function validateWorkerStatus(rawStatus, source = 'worker') {
   const status = rawStatus && typeof rawStatus === 'object' && !Array.isArray(rawStatus) ? rawStatus : {};
 
+  const asBoolean = (value, defaultVal = false) => {
+    if (value === null || value === undefined) return defaultVal;
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') {
+      const s = value.trim().toLowerCase();
+      if (s === 'true' || s === '1' || s === 'yes') return true;
+      if (s === 'false' || s === '0' || s === 'no') return false;
+    }
+    if (typeof value === 'number') return value !== 0;
+    return Boolean(value);
+  };
+
   const asNumber = (value, min = 0, max = Number.MAX_SAFE_INTEGER) => {
     if (value === null || value === undefined || value === '') return null;
     const num = Number(value);
@@ -147,7 +159,7 @@ function validateWorkerStatus(rawStatus, source = 'worker') {
 
   const normalized = {
     state,
-    online: Boolean(status.online ?? status.connected),
+    online: asBoolean(status.online ?? status.connected, false),
     username: String(status.username || '').slice(0, 64),
     connectedAt: status.connectedAt && !Number.isNaN(new Date(status.connectedAt).getTime())
       ? new Date(status.connectedAt).toISOString()
@@ -159,11 +171,11 @@ function validateWorkerStatus(rawStatus, source = 'worker') {
     reconnectAttempts: asInteger(status.reconnectAttempts, 0, 1000) || 0,
     reconnectCount: asInteger(status.reconnectCount, 0, 10000) || 0,
     afkMode: 'still',
-    proxyEnabled: Boolean(status.proxyEnabled),
+    proxyEnabled: asBoolean(status.proxyEnabled, false),
     lastError: String(status.lastError || '').slice(0, 240),
     lastKickReason: String(status.lastKickReason || '').slice(0, 240),
     restriction: String(status.restriction || '').slice(0, 40) || null,
-    maintenanceWindow: Boolean(status.maintenanceWindow),
+    maintenanceWindow: asBoolean(status.maintenanceWindow, false),
     maintenanceTimeZone: String(status.maintenanceTimeZone || '').slice(0, 40),
     maintenanceStart: String(status.maintenanceStart || '').slice(0, 5),
     maintenanceEnd: String(status.maintenanceEnd || '').slice(0, 5),
@@ -185,7 +197,7 @@ function validateWorkerStatus(rawStatus, source = 'worker') {
     lastStateAt: status.lastStateAt && !Number.isNaN(new Date(status.lastStateAt).getTime())
       ? new Date(status.lastStateAt)
       : null,
-    manuallyStopped: status.manuallyStopped !== undefined ? Boolean(status.manuallyStopped) : undefined,
+    manuallyStopped: status.manuallyStopped !== undefined ? asBoolean(status.manuallyStopped, false) : undefined,
     updatedAt: new Date(),
     source
   };
@@ -309,6 +321,12 @@ class WorkerRegistry {
       const withinGrace = Boolean(entry?.graceUntil && now < entry.graceUntil);
       if (!withinGrace && entry?.cachedAt && now - entry.cachedAt > SECRET_CACHE_TTL_MS) {
         this.secretCache.delete(botId);
+      }
+    }
+    for (const [botId, hbDate] of this.liveHeartbeats.entries()) {
+      const hbTime = hbDate instanceof Date ? hbDate.getTime() : new Date(hbDate).getTime();
+      if (!Number.isFinite(hbTime) || now - hbTime > 86400000) {
+        this.liveHeartbeats.delete(botId);
       }
     }
     if (this.summaryRequestSeq.size > 500) {
@@ -470,12 +488,10 @@ class WorkerRegistry {
     let preservedGrace = null;
     if (cached) {
       const isExpired = cached.cachedAt && (now - cached.cachedAt > SECRET_CACHE_TTL_MS);
-      if (isExpired) {
-        if (typeof cached === 'object' && cached.previousSecret && cached.graceUntil && now < cached.graceUntil) {
-          preservedGrace = { previousSecret: cached.previousSecret, graceUntil: cached.graceUntil };
-        }
-        this.secretCache.delete(id);
-      } else {
+      if (typeof cached === 'object' && cached.previousSecret && cached.graceUntil && now < cached.graceUntil) {
+        preservedGrace = { previousSecret: cached.previousSecret, graceUntil: cached.graceUntil };
+      }
+      if (!isExpired) {
         if (typeof cached === 'object') {
           if (cached.enabled === false) return null;
           return cached.secret;
@@ -681,7 +697,7 @@ class WorkerRegistry {
       }
 
       // Preserve rich telemetry if incoming report is lightweight/partial
-      if (status?.isLightweight === true && existing.status) {
+      if ((status?.isLightweight === true || status?.isPartial === true || status?.inventory === undefined) && existing.status) {
         if (safeStatus.inventory === undefined && existing.status.inventory !== undefined) {
           safeStatus.inventory = existing.status.inventory;
         }

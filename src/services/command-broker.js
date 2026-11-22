@@ -138,13 +138,18 @@ class CommandBroker {
             await store.completeOutboxItem(item.id, this.instanceId);
           }
         } catch (err) {
-          const attempts = Number(item.attempts || 1);
-          if (attempts >= 8) {
-            await store.failOutboxItem(item.id, this.instanceId, err.message || 'MAX_RETRIES_EXCEEDED');
-          } else {
-            const nextRetryDelaySec = Math.min(3600, Math.pow(2, attempts) * 10);
-            const nextRetryAtIso = new Date(Date.now() + nextRetryDelaySec * 1000).toISOString();
-            await store.rescheduleOutboxItem(item.id, this.instanceId, nextRetryAtIso, err.message);
+          try {
+            const attempts = Number(item.attempts || 1);
+            if (attempts >= 8) {
+              await store.failOutboxItem(item.id, this.instanceId, err.message || 'MAX_RETRIES_EXCEEDED');
+            } else {
+              const nextRetryDelaySec = Math.min(3600, Math.pow(2, attempts) * 10);
+              const nextRetryAtIso = new Date(Date.now() + nextRetryDelaySec * 1000).toISOString();
+              await store.rescheduleOutboxItem(item.id, this.instanceId, nextRetryAtIso, err.message);
+              this.triggerOutbox(nextRetryDelaySec * 1000);
+            }
+          } catch (failErr) {
+            this.logger?.warn?.('outbox_reschedule_failed', { itemId: item.id, error: failErr?.message });
           }
         }
       }
@@ -436,27 +441,45 @@ class CommandBroker {
     }
   }
 
-  async poll(workerId, { waitMs = this.config.workerPollWaitMs } = {}) {
+  async poll(workerId, { waitMs = this.config.workerPollWaitMs, signal = null } = {}) {
     const next = await this.commandStore.take(workerId);
-    if (next) return next;
+    if (next || signal?.aborted) return next;
 
     const currentVersion = this.wakeVersions.get(workerId) || 0;
     await new Promise((resolve) => {
       let resolved = false;
+      let timer = null;
+      let onAbort = null;
+
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        if (signal && onAbort) signal.removeEventListener?.('abort', onAbort);
+        const currentWaiters = this.pollWaiters.get(workerId);
+        if (currentWaiters) {
+          const index = currentWaiters.indexOf(onWake);
+          if (index !== -1) currentWaiters.splice(index, 1);
+          if (currentWaiters.length === 0) this.pollWaiters.delete(workerId);
+        }
+      };
+
       const onWake = () => {
         if (resolved) return;
         resolved = true;
-        clearTimeout(timer);
+        cleanup();
         resolve();
       };
 
-      const timer = setTimeout(() => {
-        if (resolved) return;
-        resolved = true;
-        const currentWaiters = this.pollWaiters.get(workerId) || [];
-        const index = currentWaiters.indexOf(onWake);
-        if (index !== -1) currentWaiters.splice(index, 1);
-        resolve();
+      if (signal) {
+        if (signal.aborted) {
+          resolve();
+          return;
+        }
+        onAbort = () => onWake();
+        signal.addEventListener?.('abort', onAbort, { once: true });
+      }
+
+      timer = setTimeout(() => {
+        onWake();
       }, Math.max(100, Math.min(waitMs, 30000)));
       timer.unref?.();
 
@@ -471,6 +494,7 @@ class CommandBroker {
       this.pollWaiters.get(workerId).push(onWake);
     });
 
+    if (signal?.aborted) return null;
     return this.commandStore.take(workerId);
   }
 
@@ -689,7 +713,8 @@ class CommandBroker {
     const commandId = String(payload.commandId || '');
     let result = (payload.result && typeof payload.result === 'object') ? { ...payload.result } : { ...(payload || {}) };
     delete result.commandId;
-    const action = payload.action || result.action;
+    const pending = this.pendingResults.get(commandId);
+    const action = pending?.action || payload.action || result.action;
     result = this.validateResultPayload(action, result);
     return this.reportResult(workerId, commandId, result);
   }
@@ -1241,7 +1266,7 @@ class CommandBroker {
       return { ok: false, error: 'COMMAND_OWNERSHIP_MISMATCH' };
     }
 
-    const action = pending?.action || rawResult?.action || storedCommand?.action;
+    const action = storedCommand?.action || pending?.action || rawResult?.action;
     const result = this.validateResultPayload(action, rawResult);
 
     // If storedCommand is already completed, return idempotent success
@@ -1272,6 +1297,11 @@ class CommandBroker {
       if (candidateStatus && typeof candidateStatus === 'object' && typeof this.registry?.updateStatus === 'function') {
         try {
           await this.registry.updateStatus(wid, candidateStatus, 'manager-command-poll-late');
+        } catch (_) {}
+      }
+      if (action === 'reset' && isSuccess) {
+        try {
+          await this.syncResetState(wid, candidateStatus, 'manager-command-poll-late', cid, { excludeCommandIds: cid ? [cid] : [] });
         } catch (_) {}
       }
       if (pending && pending.workerId === wid && typeof pending.finish === 'function') {
