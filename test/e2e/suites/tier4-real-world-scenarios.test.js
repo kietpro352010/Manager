@@ -18,7 +18,8 @@ try {
 } catch (_) {}
 
 // Ensure module resolution finds worker dependencies (mineflayer, minecraft-protocol, etc.)
-const workerNodeModules = path.resolve(__dirname, '../../../../worker/node_modules');
+const WORKER_ROOT = process.env.WORKER_DIR || path.resolve(__dirname, '../../../../worker');
+const workerNodeModules = path.join(WORKER_ROOT, 'node_modules');
 if (!module.paths.includes(workerNodeModules)) {
   module.paths.push(workerNodeModules);
 }
@@ -69,13 +70,13 @@ const { encryptSecret, decryptSecret } = require('../../../src/utils/secrets');
 // Worker Imports (with resilient fallback)
 let WorkerFleet, MinecraftSession, WorkerRuntime, WispbytePoller, isMaintenanceWindow, createWorkerApp, ManagerReporter;
 try {
-  WorkerFleet = require('../../../../worker/src/services/worker-fleet');
-  MinecraftSession = require('../../../../worker/src/game/minecraft-session').MinecraftSession;
-  WorkerRuntime = require('../../../../worker/src/services/worker-runtime');
-  WispbytePoller = require('../../../../worker/src/transports/wispbyte-poller');
-  ManagerReporter = require('../../../../worker/src/transports/manager-reporter');
-  isMaintenanceWindow = require('../../../../worker/src/services/maintenance-window').isMaintenanceWindow;
-  createWorkerApp = require('../../../../worker/src/http/app').createApp;
+  WorkerFleet = require(path.join(WORKER_ROOT, 'src/services/worker-fleet'));
+  MinecraftSession = require(path.join(WORKER_ROOT, 'src/game/minecraft-session')).MinecraftSession;
+  WorkerRuntime = require(path.join(WORKER_ROOT, 'src/services/worker-runtime'));
+  WispbytePoller = require(path.join(WORKER_ROOT, 'src/transports/wispbyte-poller'));
+  ManagerReporter = require(path.join(WORKER_ROOT, 'src/transports/manager-reporter'));
+  isMaintenanceWindow = require(path.join(WORKER_ROOT, 'src/services/maintenance-window')).isMaintenanceWindow;
+  createWorkerApp = require(path.join(WORKER_ROOT, 'src/http/app')).createApp;
 } catch (_) {
   WorkerFleet = require('D:/worker/src/services/worker-fleet');
   MinecraftSession = require('D:/worker/src/game/minecraft-session').MinecraftSession;
@@ -454,8 +455,12 @@ async function testScenario1() {
     try { session.bot.end(); } catch (_) {}
   }
   await session.stop();
+  workerServer.closeIdleConnections?.();
+  workerServer.closeAllConnections?.();
   await new Promise((r) => workerServer.close(r));
   await mcServer.stop();
+  managerServer.closeIdleConnections?.();
+  managerServer.closeAllConnections?.();
   await new Promise((r) => managerServer.close(r));
   await supabaseServer.close();
 
@@ -662,7 +667,11 @@ async function testScenario2() {
   assert.ok(csvText.includes('ADMIN_RESET_BOT_CUSTOMER'), 'CSV export must include ADMIN_RESET_BOT_CUSTOMER');
 
   // Cleanup
+  mockRenderServer.closeIdleConnections?.();
+  mockRenderServer.closeAllConnections?.();
   await new Promise((r) => mockRenderServer.close(r));
+  managerServer.closeIdleConnections?.();
+  managerServer.closeAllConnections?.();
   await new Promise((r) => managerServer.close(r));
   await supabaseServer.close();
 
@@ -1096,6 +1105,8 @@ async function testScenario5() {
   assert.strictEqual(poller.pendingResults.length, 0, 'Result must be successfully flushed upon reconnection');
 
   await poller.stop();
+  managerServer.closeIdleConnections?.();
+  managerServer.closeAllConnections?.();
   await new Promise((r) => managerServer.close(r));
   await supabaseServer.close();
 

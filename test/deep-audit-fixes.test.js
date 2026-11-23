@@ -65,7 +65,11 @@ async function startServer(app) {
   return {
     server,
     baseUrl: `http://127.0.0.1:${port}`,
-    close: () => new Promise((resolve) => server.close(resolve))
+    close: () => {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
+      return new Promise((resolve) => server.close(resolve));
+    }
   };
 }
 
@@ -1754,9 +1758,16 @@ test('AUDIT-R2-07: SSRF trailing-dot / bracketed IPv6 blocked & CommandBroker.wa
   });
   const worker = { workerId: 'bot-t', enabled: true, transport: 'wispbyte-poll' };
   const cid = crypto.randomUUID();
-  const dispatchPromise = broker.dispatchPoll(worker, { commandId: cid, action: 'status', payload: {} });
-  const waitPromise = broker.waitForResult(cid, { timeoutMs: 500 });
-  const [dispatchRes, waitRes] = await Promise.all([dispatchPromise, waitPromise]);
+  const keepAlive = setTimeout(() => {}, 1500);
+  let dispatchRes;
+  let waitRes;
+  try {
+    const dispatchPromise = broker.dispatchPoll(worker, { commandId: cid, action: 'status', payload: {} });
+    const waitPromise = broker.waitForResult(cid, { timeoutMs: 500 });
+    [dispatchRes, waitRes] = await Promise.all([dispatchPromise, waitPromise]);
+  } finally {
+    clearTimeout(keepAlive);
+  }
   assert.strictEqual(dispatchRes.timedOut, true);
   assert.strictEqual(waitRes.timedOut, true, 'waitForResult must settle with timedOut=true instead of hanging forever');
 });

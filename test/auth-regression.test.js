@@ -302,6 +302,8 @@ async function runTests() {
       assert.ok(isStoredCredentialCiphertext(botEncPass));
       assert.strictEqual(decryptUserPassword(botEncPass), botPlainPass);
     } finally {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
       await new Promise((resolve) => server.close(resolve));
     }
   }
@@ -431,6 +433,8 @@ async function runTests() {
       assert.strictEqual(loginRes3.status, 200);
       assert.strictEqual(activeSessions.size, 1, 'activeSessions must contain 1 session on success');
     } finally {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
       await new Promise((resolve) => server.close(resolve));
     }
   }
@@ -562,6 +566,8 @@ async function runTests() {
       });
       assert.strictEqual(adminMeAfter.status, 401, 'Old admin session token must be revoked and rejected with 401');
     } finally {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
       await new Promise((resolve) => server.close(resolve));
     }
   }
@@ -639,6 +645,8 @@ async function runTests() {
       assert.ok(warn2, 'Must log warning when DB revoke throws');
       assert.ok(warn2.meta.error.includes('Database connection reset'));
     } finally {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
       await new Promise((resolve) => server.close(resolve));
     }
   }
@@ -728,9 +736,13 @@ async function runTests() {
         assert.strictEqual(linkJson.ok, true);
         assert.strictEqual(capturedAttemptIp, '198.51.100.42', 'user-api must resolve IP safely via req.ip');
       } finally {
+        userServer.closeIdleConnections?.();
+        userServer.closeAllConnections?.();
         await new Promise((resolve) => userServer.close(resolve));
       }
     } finally {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
       await new Promise((resolve) => server.close(resolve));
     }
   }
@@ -829,6 +841,8 @@ async function runTests() {
       checkRateLimit('10.200.0.2', 'after_purge_user');
       assert.ok(map.size <= 5000 - 99, 'Expired entries must be purged, reducing map size below 5000');
     } finally {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
       await new Promise((resolve) => server.close(resolve));
     }
   }
@@ -924,6 +938,8 @@ async function runTests() {
       assert.strictEqual(noKeyJson.keyRedeemed, undefined);
       assert.strictEqual(noKeyJson.keyError, undefined);
     } finally {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
       await new Promise((resolve) => server.close(resolve));
     }
   }
@@ -1016,6 +1032,8 @@ async function runTests() {
         '/login must call store.getUser with { bypassCache: true }'
       );
     } finally {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
       await new Promise((resolve) => server.close(resolve));
     }
   }
@@ -1095,6 +1113,8 @@ async function runTests() {
       });
       assert.strictEqual(loginResBad.status, 401, 'Wrong admin password must be rejected');
     } finally {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
       await new Promise((resolve) => server.close(resolve));
     }
   }

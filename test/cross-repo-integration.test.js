@@ -15,6 +15,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
 const http = require('node:http');
 const crypto = require('node:crypto');
 const path = require('node:path');
@@ -31,6 +32,10 @@ const { encryptSecret, decryptSecret, safeDecryptText, safeDecryptJson, timingSa
 
 // Worker Modules
 const WORKER_DIR = process.env.WORKER_DIR || path.resolve(__dirname, '../../worker');
+if (!fs.existsSync(path.join(WORKER_DIR, 'src/services/worker-runtime.js'))) {
+  test('CROSS-REPO INTEGRATION: skipped when sibling BotWorker checkout is absent', { skip: `Missing sibling worker repo at ${WORKER_DIR}` }, () => {});
+  return;
+}
 const WorkerRuntime = require(path.join(WORKER_DIR, 'src/services/worker-runtime'));
 const { createRouter: createWorkerRouter } = require(path.join(WORKER_DIR, 'src/http/routes'));
 const { requireWorkerSecret, safeEqual, extractWorkerToken } = require(path.join(WORKER_DIR, 'src/http/auth'));
@@ -71,6 +76,8 @@ function startServer(app) {
 function stopServer(server) {
   return new Promise((resolve) => {
     if (!server || !server.listening) return resolve();
+    server.closeIdleConnections?.();
+    server.closeAllConnections?.();
     server.close(() => resolve());
   });
 }

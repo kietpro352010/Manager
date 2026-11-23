@@ -42,14 +42,15 @@ const { rejectOutsideGuild } = require('../../../src/discord/handlers/interactio
 // ----------------------------------------------------------------------------
 // Worker Modules
 // ----------------------------------------------------------------------------
-const WorkerFleet = require('../../../../worker/src/services/worker-fleet');
-const WorkerRuntime = require('../../../../worker/src/services/worker-runtime');
-const { MinecraftSession } = require('../../../../worker/src/game/minecraft-session');
-const ServerMonitor = require('../../../../worker/src/game/server-monitor');
-const ManagerReporter = require('../../../../worker/src/transports/manager-reporter');
-const WispbytePoller = require('../../../../worker/src/transports/wispbyte-poller');
-const { loadConfig } = require('../../../../worker/src/config/env');
-const { isMaintenanceWindow, nextMaintenanceBoundary } = require('../../../../worker/src/services/maintenance-window');
+const WORKER_ROOT = process.env.WORKER_DIR || path.resolve(__dirname, '../../../../worker');
+const WorkerFleet = require(path.join(WORKER_ROOT, 'src/services/worker-fleet'));
+const WorkerRuntime = require(path.join(WORKER_ROOT, 'src/services/worker-runtime'));
+const { MinecraftSession } = require(path.join(WORKER_ROOT, 'src/game/minecraft-session'));
+const ServerMonitor = require(path.join(WORKER_ROOT, 'src/game/server-monitor'));
+const ManagerReporter = require(path.join(WORKER_ROOT, 'src/transports/manager-reporter'));
+const WispbytePoller = require(path.join(WORKER_ROOT, 'src/transports/wispbyte-poller'));
+const { loadConfig } = require(path.join(WORKER_ROOT, 'src/config/env'));
+const { isMaintenanceWindow, nextMaintenanceBoundary } = require(path.join(WORKER_ROOT, 'src/services/maintenance-window'));
 
 // ----------------------------------------------------------------------------
 // Mineflayer Resolver
@@ -59,7 +60,7 @@ try {
   mineflayer = require('mineflayer');
 } catch (_) {
   try {
-    mineflayer = require(path.resolve(__dirname, '../../../../worker/node_modules/mineflayer'));
+    mineflayer = require(path.join(WORKER_ROOT, 'node_modules/mineflayer'));
   } catch (__) {
     mineflayer = require('D:/worker/node_modules/mineflayer');
   }
@@ -751,6 +752,8 @@ async function runTier1Suite() {
     const server = http.createServer((req, res) => res.end('ok'));
     await new Promise((resolve) => server.listen(0, resolve));
     assert.strictEqual(server.listening, true);
+    server.closeIdleConnections?.();
+    server.closeAllConnections?.();
     await new Promise((resolve) => server.close(resolve));
     assert.strictEqual(server.listening, false);
   });
@@ -771,27 +774,27 @@ async function runTier1Suite() {
   // FEATURE 10: Worker Test Suite Restoration (T1-F10-01 to T1-F10-05)
   // ===========================================================================
   await test('T1-F10-01', 'Worker Test Suite Restoration: package.json test script present', async () => {
-    const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../../../worker/package.json'), 'utf8'));
+    const pkg = JSON.parse(fs.readFileSync(path.join(WORKER_ROOT, 'package.json'), 'utf8'));
     assert.ok(pkg.scripts?.test, 'Worker package.json must have test script');
   });
 
   await test('T1-F10-02', 'Worker Test Suite Restoration: integration test file exists', async () => {
-    const filePath = path.resolve(__dirname, '../../../../worker/test/integration.test.js');
+    const filePath = path.join(WORKER_ROOT, 'test/integration.test.js');
     assert.ok(fs.existsSync(filePath), `Worker integration test must exist at ${filePath}`);
   });
 
   await test('T1-F10-03', 'Worker Test Suite Restoration: remediation audit test file exists', async () => {
-    const filePath = path.resolve(__dirname, '../../../../worker/test/remediation-audit.test.js');
+    const filePath = path.join(WORKER_ROOT, 'test/remediation-audit.test.js');
     assert.ok(fs.existsSync(filePath), `Remediation audit test must exist at ${filePath}`);
   });
 
   await test('T1-F10-04', 'Worker Test Suite Restoration: challenger stress test file exists', async () => {
-    const filePath = path.resolve(__dirname, '../../../../worker/test/challenger_stress.test.js');
+    const filePath = path.join(WORKER_ROOT, 'test/challenger_stress.test.js');
     assert.ok(fs.existsSync(filePath), `Stress test must exist at ${filePath}`);
   });
 
   await test('T1-F10-05', 'Worker Test Suite Restoration: test files have valid syntax', async () => {
-    const integrationPath = path.resolve(__dirname, '../../../../worker/test/integration.test.js');
+    const integrationPath = path.join(WORKER_ROOT, 'test/integration.test.js');
     const content = fs.readFileSync(integrationPath, 'utf8');
     assert.ok(content.length > 500);
   });

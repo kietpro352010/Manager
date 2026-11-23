@@ -110,6 +110,8 @@ async function startTestApp({ adminPassword = 'AdminPass!99' } = {}) {
     dispatchedCommands,
     authRouter: app._authRouter,
     async close() {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
       await new Promise((resolve) => server.close(resolve));
       await supabaseServer.close();
     }

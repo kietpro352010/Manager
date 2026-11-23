@@ -1161,6 +1161,8 @@ async function testLink4mInitFailureDegradedVisibility() {
     assert.strictEqual(recoveredReady.status, 'ready');
     assert.deepStrictEqual(recoveredReady.warnings, []);
   } finally {
+    server.closeIdleConnections?.();
+    server.closeAllConnections?.();
     await new Promise((resolve) => server.close(resolve));
   }
 
@@ -1241,6 +1243,8 @@ async function testCommandResetErrorVisibility() {
     assert.strictEqual(pendingOutcome?.error, 'RESET_STATE_SYNC_FAILED');
     assert.ok(pollErrors.some((e) => e.msg === 'command_reset_partial_sync_failed'));
   } finally {
+    workerServer.closeIdleConnections?.();
+    workerServer.closeAllConnections?.();
     await new Promise((resolve) => workerServer.close(resolve));
   }
 
@@ -1279,6 +1283,8 @@ async function testCommandResetErrorVisibility() {
     assert.strictEqual(actionBody.ok, false);
     assert.strictEqual(actionBody.code, 'RESET_STATE_SYNC_FAILED');
   } finally {
+    userServer.closeIdleConnections?.();
+    userServer.closeAllConnections?.();
     await new Promise((resolve) => userServer.close(resolve));
   }
 
@@ -2191,6 +2197,8 @@ async function testFailClosedMissingAtomicRpcAndHealthReadiness() {
     assert.strictEqual(rJson.checks.commandSyncRpc.ok, false);
     assert.ok(rJson.warnings.some((w) => w.startsWith('command_sync_rpc_missing:')));
   } finally {
+    server.closeIdleConnections?.();
+    server.closeAllConnections?.();
     await new Promise((resolve) => server.close(resolve));
   }
 
@@ -2339,6 +2347,8 @@ async function testSessionRevocationFailClosedMiddleware() {
     });
     assert.strictEqual(meDeleted.status, 401, 'Deleted user token must be rejected immediately');
   } finally {
+    serverLocal.closeIdleConnections?.();
+    serverLocal.closeAllConnections?.();
     await new Promise((resolve) => serverLocal.close(resolve));
   }
 
@@ -2434,6 +2444,8 @@ async function testSessionRevocationFailClosedMiddleware() {
     });
     assert.strictEqual(afterExternalDelete.status, 401, 'Manager A must reject session immediately when DB auth loses user');
   } finally {
+    serverProcA.closeIdleConnections?.();
+    serverProcA.closeAllConnections?.();
     await new Promise((resolve) => serverProcA.close(resolve));
   }
 
@@ -2880,6 +2892,8 @@ async function testPublicLoginViewSecurityAccessibilityAndApiContract() {
     await new Promise((r) => setTimeout(r, 360));
     assert.strictEqual(simReal.ctxStats.replacedLocation, '/', 'Successful web login must redirect to /');
   } finally {
+    server.closeIdleConnections?.();
+    server.closeAllConnections?.();
     await new Promise((resolve) => server.close(resolve));
   }
 
@@ -3105,10 +3119,14 @@ async function testGracePeriodAndDataRetentionLifecycle() {
       assert.strictEqual(auditLogRecord.action, 'ADMIN_RESET_BOT_CUSTOMER');
       assert.strictEqual(auditLogRecord.details.reason, 'admin_manually_reset_customer_bot');
     } finally {
+      adminServer.closeIdleConnections?.();
+      adminServer.closeAllConnections?.();
       await new Promise((resolve) => adminServer.close(resolve));
     }
 
   } finally {
+    testServer.closeIdleConnections?.();
+    testServer.closeAllConnections?.();
     await new Promise((resolve) => testServer.close(resolve));
   }
 

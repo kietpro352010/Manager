@@ -299,7 +299,11 @@ function startTestServer(options = {}) {
         server,
         port,
         baseUrl: `http://127.0.0.1:${port}`,
-        close: () => new Promise((res) => server.close(res))
+        close: () => {
+          server.closeIdleConnections?.();
+          server.closeAllConnections?.();
+          return new Promise((res) => server.close(res));
+        }
       });
     });
     server.on('error', reject);

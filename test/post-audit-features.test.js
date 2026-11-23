@@ -309,6 +309,8 @@ async function runTests() {
     );
     console.log('✅ 2 & 3. Password reveal, bot creds, snapshot delta rev, compact /bots & ETag/gzip/textures verified.');
   } finally {
+    server.closeIdleConnections?.();
+    server.closeAllConnections?.();
     await new Promise((resolve) => server.close(resolve));
   }
 

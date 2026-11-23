@@ -25,7 +25,8 @@ const crypto = require('node:crypto');
 const vm = require('node:vm');
 
 // Resolve worker deps if needed
-const workerNodeModules = path.resolve(__dirname, '../../../../worker/node_modules');
+const WORKER_ROOT = process.env.WORKER_DIR || path.resolve(__dirname, '../../../../worker');
+const workerNodeModules = path.join(WORKER_ROOT, 'node_modules');
 if (!module.paths.includes(workerNodeModules)) {
   module.paths.push(workerNodeModules);
 }
@@ -52,9 +53,9 @@ const dashboardParts = require('../../../src/http/views/dashboard');
 const { HTML: DASHBOARD_HTML } = require('../../../src/http/views/dashboard-html');
 
 // Real Worker classes
-const ManagerReporter = require('D:/worker/src/transports/manager-reporter');
-const WispbytePoller = require('D:/worker/src/transports/wispbyte-poller');
-const { MinecraftSession } = require('D:/worker/src/game/minecraft-session');
+const ManagerReporter = require(path.join(WORKER_ROOT, 'src/transports/manager-reporter'));
+const WispbytePoller = require(path.join(WORKER_ROOT, 'src/transports/wispbyte-poller'));
+const { MinecraftSession } = require(path.join(WORKER_ROOT, 'src/game/minecraft-session'));
 
 const quietLogger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
 
@@ -184,6 +185,8 @@ async function createFullStackEnv({
     encryptionKey,
     close: async () => {
       broker.stopOutboxProcessor?.();
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
       await new Promise((resolve) => server.close(resolve));
       await supabaseServer.close();
     }

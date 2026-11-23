@@ -45,10 +45,11 @@ const { createAdminApi } = require('../../../src/http/routes/admin-api');
 const { createWorkerApi } = require('../../../src/http/routes/worker-api');
 
 // Worker Core Modules
-const { MinecraftSession } = require('D:/worker/src/game/minecraft-session.js');
-const ServerMonitor = require('D:/worker/src/game/server-monitor.js');
-const { isMaintenanceWindow } = require('D:/worker/src/services/maintenance-window.js');
-const { createRouter: createWorkerRouter } = require('D:/worker/src/http/routes.js');
+const WORKER_ROOT = process.env.WORKER_DIR || path.resolve(__dirname, '../../../../worker');
+const { MinecraftSession } = require(path.join(WORKER_ROOT, 'src/game/minecraft-session.js'));
+const ServerMonitor = require(path.join(WORKER_ROOT, 'src/game/server-monitor.js'));
+const { isMaintenanceWindow } = require(path.join(WORKER_ROOT, 'src/services/maintenance-window.js'));
+const { createRouter: createWorkerRouter } = require(path.join(WORKER_ROOT, 'src/http/routes.js'));
 
 // Mineflayer Resolution
 let mineflayer;
@@ -56,7 +57,7 @@ try {
   mineflayer = require('mineflayer');
 } catch (_) {
   try {
-    mineflayer = require(path.resolve(__dirname, '../../../../worker/node_modules/mineflayer'));
+    mineflayer = require(path.join(WORKER_ROOT, 'node_modules/mineflayer'));
   } catch (__) {
     mineflayer = require('D:/worker/node_modules/mineflayer');
   }

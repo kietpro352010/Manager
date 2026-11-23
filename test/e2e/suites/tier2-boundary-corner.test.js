@@ -58,7 +58,7 @@ const {
 } = require('../../../src/discord/handlers/panel-handler');
 
 // Worker Core Imports (via relative resolution)
-const WORKER_ROOT = path.resolve(__dirname, '../../../../worker');
+const WORKER_ROOT = process.env.WORKER_DIR || path.resolve(__dirname, '../../../../worker');
 const {
   loadConfig: loadWorkerConfig,
   positiveInt: workerPositiveInt,
@@ -94,7 +94,11 @@ function startServer(app) {
         server,
         port,
         url: `http://127.0.0.1:${port}`,
-        close: () => new Promise((res) => server.close(res))
+        close: () => {
+          server.closeIdleConnections?.();
+          server.closeAllConnections?.();
+          return new Promise((res) => server.close(res));
+        }
       });
     });
   });
