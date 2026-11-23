@@ -233,6 +233,8 @@ test('DISCORD-RBAC-04: User management lists include discordUserId', async () =>
     assert.strictEqual(data.users[1].discordUserId, '');
   } finally {
     server.close();
+    server.closeIdleConnections?.();
+    server.closeAllConnections?.();
   }
 });
 

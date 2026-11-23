@@ -129,5 +129,7 @@ test('ADMIN-API-02: GET /users includes lastLoginIp and botMinecraftUser', async
     assert.strictEqual(data.availableBots[0].label, 'KingMC Bot 1');
   } finally {
     server.close();
+    server.closeIdleConnections?.();
+    server.closeAllConnections?.();
   }
 });

@@ -529,6 +529,8 @@ async function runTests() {
       assert.strictEqual(auditCalled, true, 'Audit log must be written on confirmed success');
     } finally {
       server.close();
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
     }
   }
   console.log('✅ API-05: Chat API confirmation & 504/500/200 mapping verified.');
@@ -601,6 +603,8 @@ async function runTests() {
       assert.strictEqual(resInvTimeout.status, 504);
     } finally {
       server.close();
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
     }
   }
   console.log('✅ API-06: Window click/close & inventory broker confirmation verified.');
@@ -677,6 +681,8 @@ async function runTests() {
       assert.strictEqual(workerStatus.manuallyStopped, false, 'manuallyStopped must be reset to false upon confirmed start');
     } finally {
       server.close();
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
     }
   }
   console.log('✅ API-07 & API-08: Defer manuallyStopped flag & lifecycle 504 verified.');

@@ -1764,17 +1764,25 @@ function generateOpenApiSpec() {
 function readJsonBody(req) {
   return new Promise((resolve) => {
     let raw = '';
+    let settled = false;
+    const done = (val) => {
+      if (settled) return;
+      settled = true;
+      resolve(val);
+    };
     req.on('data', (chunk) => {
       raw += chunk;
     });
     req.on('end', () => {
-      if (!raw.trim()) return resolve({});
+      if (!raw.trim()) return done({});
       try {
-        resolve(JSON.parse(raw));
+        done(JSON.parse(raw));
       } catch (_) {
-        resolve({});
+        done({});
       }
     });
+    req.on('error', () => done({}));
+    req.on('close', () => done({}));
   });
 }
 

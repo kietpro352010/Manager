@@ -173,7 +173,11 @@ async function runWorkerRegistryAuditTests() {
       assert.strictEqual(validJson.ok, true);
       assert.strictEqual(validJson.assignedUser, 'testowner');
     } finally {
-      await new Promise((resolve) => server.close(resolve));
+      await new Promise((resolve) => {
+        server.close(resolve);
+        server.closeIdleConnections?.();
+        server.closeAllConnections?.();
+      });
     }
   }
   console.log('✅ WORKER-01: Promise truthiness fix verified.');
@@ -337,7 +341,11 @@ async function runWorkerRegistryAuditTests() {
       assert.ok(auditRec, 'Must write audit entry for GLOBAL_BOT_SECRET_USED');
       assert.strictEqual(auditRec.targetId, 'w01');
     } finally {
-      await new Promise((resolve) => server.close(resolve));
+      await new Promise((resolve) => {
+        server.close(resolve);
+        server.closeIdleConnections?.();
+        server.closeAllConnections?.();
+      });
     }
   }
   console.log('✅ WORKER-03: Scoped global bot secret & audit logging verified.');
@@ -476,7 +484,11 @@ async function runWorkerRegistryAuditTests() {
       assert.strictEqual(evtJson.error, 'worker_not_found_or_disabled');
     } finally {
       registry.authenticate = originalAuthenticate;
-      await new Promise((resolve) => server.close(resolve));
+      await new Promise((resolve) => {
+        server.close(resolve);
+        server.closeIdleConnections?.();
+        server.closeAllConnections?.();
+      });
     }
   }
   console.log('✅ WORKER-05: addEvent() worker existence & enabled verification verified.');
@@ -796,7 +808,11 @@ async function runWorkerRegistryAuditTests() {
         assert.strictEqual(diagJson.resource.rssMb, 128);
         assert.strictEqual(diagJson.resource.heapUsedMb, 64);
       } finally {
-        await new Promise((resolve) => server.close(resolve));
+        await new Promise((resolve) => {
+        server.close(resolve);
+        server.closeIdleConnections?.();
+        server.closeAllConnections?.();
+      });
       }
     }
   }

@@ -110,9 +110,11 @@ async function startTestApp({ adminPassword = 'AdminPass!99' } = {}) {
     dispatchedCommands,
     authRouter: app._authRouter,
     async close() {
-      server.closeIdleConnections?.();
-      server.closeAllConnections?.();
-      await new Promise((resolve) => server.close(resolve));
+      await new Promise((resolve) => {
+        server.close(resolve);
+        server.closeIdleConnections?.();
+        server.closeAllConnections?.();
+      });
       await supabaseServer.close();
     }
   };
@@ -163,6 +165,7 @@ test('AUTH progressive lockout: 5 attempts per batch -> 15s, 30s, 45s, 1m, 2m, 5
         body: JSON.stringify({ username: 'farmuser', password: 'UserPass!99' })
       });
       assert.equal(blockedRes.status, 429, `Attempt during batch ${t + 1} pause must stay 429`);
+      await blockedRes.text();
 
       expireAllRateLimitLocks(env.authRouter);
     }
@@ -184,6 +187,7 @@ test('AUTH progressive lockout: 5 attempts per batch -> 15s, 30s, 45s, 1m, 2m, 5
         body: JSON.stringify({ username: 'farmuser', password: `wrong_after_reset_${i}` })
       });
       assert.equal(res.status, 401);
+      await res.text();
     }
     const resetFifth = await fetch(`${env.baseUrl}/api/auth/login`, {
       method: 'POST',
@@ -202,6 +206,7 @@ test('AUTH progressive lockout: 5 attempts per batch -> 15s, 30s, 45s, 1m, 2m, 5
         body: JSON.stringify({ username: 'admin', password: `bad_admin_${i}` })
       });
       assert.equal(res.status, 401);
+      await res.text();
     }
     const adminLock = await fetch(`${env.baseUrl}/api/auth/login`, {
       method: 'POST',
@@ -318,6 +323,7 @@ test('SYSTEM MAINTENANCE MODE: locks user worker ops across Web API & Discord wh
       body: '{}'
     });
     assert.equal(adminStartRes.status, 200, 'Admin must still operate workers during maintenance');
+    await adminStartRes.text();
     assert.equal(env.dispatchedCommands.length, 1);
 
     // 6. Discord panel-handler blocks non-admin bot:start during maintenance
@@ -380,6 +386,7 @@ test('SYSTEM MAINTENANCE MODE: locks user worker ops across Web API & Discord wh
       body: '{}'
     });
     assert.equal(userStartAfter.status, 200, 'User worker operations must succeed once maintenance ends');
+    await userStartAfter.text();
     assert.equal(env.dispatchedCommands.length, 2);
   } finally {
     await env.close();

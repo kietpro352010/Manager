@@ -109,6 +109,8 @@ test('M2-01: SPA route mount restoration (/api/manager, /api/rewards/link4m, /ap
     assert.strictEqual(unauthAdminRes.status, 401, '/api/admin/users must reach adminRouter and return 401 (not 404)');
   } finally {
     server.close();
+    server.closeIdleConnections?.();
+    server.closeAllConnections?.();
   }
 });
 
@@ -392,6 +394,8 @@ test('M2-05: Customer reset dispatches stop to worker broker before wiping data'
     assert.deepStrictEqual(resetWorkers, ['bot-reset-01'], 'registry.resetData must be called on reset-customer');
   } finally {
     server.close();
+    server.closeIdleConnections?.();
+    server.closeAllConnections?.();
   }
 });
 
@@ -482,5 +486,7 @@ test('M2-06: Custom worker secret < 32 chars rejected with 400 Bad Request via a
     assert.strictEqual(jsonSecretKeyEmpty.error, 'Worker secret must be at least 32 characters');
   } finally {
     server.close();
+    server.closeIdleConnections?.();
+    server.closeAllConnections?.();
   }
 });

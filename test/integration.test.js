@@ -181,6 +181,8 @@ async function runTests() {
   const res1 = await fetch(`http://127.0.0.1:${server1.address().port}/ready`);
   assert.strictEqual(res1.status, 503, 'Readiness must return 503 if Discord client is not ready');
   server1.close();
+  server1.closeIdleConnections?.();
+  server1.closeAllConnections?.();
 
   // 6b. Discord configured and ready -> 200
   const appReady = createApp({
@@ -194,6 +196,8 @@ async function runTests() {
   const res2 = await fetch(`http://127.0.0.1:${server2.address().port}/ready`);
   assert.strictEqual(res2.status, 200, 'Readiness must return 200 when DB and Discord are ready');
   server2.close();
+  server2.closeIdleConnections?.();
+  server2.closeAllConnections?.();
 
   // 6c. Discord not configured (web-only mode) -> 200
   const appNoDiscord = createApp({
@@ -207,6 +211,8 @@ async function runTests() {
   const res3 = await fetch(`http://127.0.0.1:${server3.address().port}/ready`);
   assert.strictEqual(res3.status, 200, 'Readiness must return 200 when Discord is not configured and DB is ok');
   server3.close();
+  server3.closeIdleConnections?.();
+  server3.closeAllConnections?.();
 
   console.log('✅ 6. Readiness Probe: Strict 503/200 gating validated.');
 
