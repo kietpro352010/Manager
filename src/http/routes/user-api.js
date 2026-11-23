@@ -1913,7 +1913,7 @@ function createUserApi({
     return {
       ok: true,
       service: 'KingMC AFK Bot Cloud 24/7',
-      version: '12.1-Modular-Enterprise',
+      version: '12.1.1-Modular-Enterprise',
       uptime: Math.floor(process.uptime()),
       totalBots: bots.length,
       onlineBots: onlineCount,

@@ -1235,7 +1235,7 @@ html, body {
       <div class="brand-meta">
         <div class="brand-title-row">
           <span class="brand-name">KBOT Manager</span>
-          <span class="brand-version">V12.1</span>
+          <span class="brand-version">V12.1.1</span>
         </div>
         <span class="brand-sub">Nền Tảng Điều Khiển Minecraft Bot Thương Mại</span>
       </div>

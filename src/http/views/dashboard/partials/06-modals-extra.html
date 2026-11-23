@@ -3,18 +3,35 @@
     <div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:12px;border-bottom:1px solid rgba(255,255,255,0.08);">
       <div>
         <h3 id="changelogModalTitle" style="margin:0;display:flex;align-items:center;gap:8px;">📜 Nhật Ký Cập Nhật & Lịch Sử Phiên Bản</h3>
-        <div style="color:var(--muted);font-size:11.5px;margin-top:2px;">Hành trình tối ưu và nâng cấp KingMC Sentinel (V1.0 - V12.1 Pure Render)</div>
+        <div style="color:var(--muted);font-size:11.5px;margin-top:2px;">Hành trình tối ưu và nâng cấp KingMC Sentinel (V1.0 - V12.1.1 Pure Render)</div>
       </div>
       <button type="button" class="small" onclick="closeChangelogModal()" aria-label="Đóng">✕</button>
     </div>
 
     <div class="changelog-body">
-      <!-- V12.1 -->
+      <!-- V12.1.1 -->
       <div class="timeline-item latest">
         <div class="timeline-node"></div>
         <div class="timeline-header">
+          <span class="timeline-version">👑 KBOT Commercial Enterprise Edition V12.1.1 (Release 23/11/2026 — Bảo Trì, Bảo Mật Đăng Nhập &amp; Tối Ưu Toàn Diện)</span>
+          <span class="timeline-badge current">RELEASE 23/11/2026 • MAINTENANCE MODE • PROGRESSIVE LOCKOUT • DISCORD /CHECK • VIP LINK4M • WISPBYTE PERF</span>
+        </div>
+        <div class="timeline-content">
+          <ul>
+            <li><strong>Chế Độ Bảo Trì Hệ Thống (Quản Lý User):</strong> Bổ sung nút bật/tắt bảo trì kèm thông báo tùy chỉnh ngay trên thanh quản trị; tự động khóa thao tác điều khiển worker của khách trên Web &amp; Discord với lớp phủ làm mờ trực quan trong khi vẫn giữ đăng nhập và toàn quyền Admin.</li>
+            <li><strong>Khóa Đăng Nhập Lũy Tiến Chống Dò Mật Khẩu:</strong> Cho phép 5 lần thử mỗi đợt, tự động tạm khóa tăng dần <code>15s → 30s → 45s → 1p → 2p → 5p → 1h</code> (tối đa 1 giờ) kèm đồng hồ đếm ngược trực tiếp trên form đăng nhập và tự đặt lại khi đăng nhập đúng.</li>
+            <li><strong>Nâng Cấp Discord <code>/check</code>, Auto-15p &amp; Giao Diện Lệnh:</strong> Sửa triệt để lịch tự động cập nhật mỗi 15 phút kèm mốc thời gian VN, bổ sung thống kê tài khoản còn hạn/hết hạn, chuẩn hóa trạng thái chỉ còn Online/Offline và đánh giá sức khỏe hệ thống dựa trên Manager + Supabase + Discord.</li>
+            <li><strong>Vượt Link Ủng Hộ Admin Cho VIP Vĩnh Viễn &amp; Làm Đẹp Log/Chat:</strong> Hiển thị nút vượt link Link4M cho tài khoản VIP Vĩnh Viễn (ghi nhận ủng hộ Admin, giữ nguyên quyền vĩnh viễn), cấu trúc lại bảng Event Log &amp; Chat Log dễ đọc, bỏ tính năng gửi tin hàng loạt cũ và tối ưu toàn diện CPU/RAM/băng thông khởi chạy trên BotWorker.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- V12.1 -->
+      <div class="timeline-item">
+        <div class="timeline-node"></div>
+        <div class="timeline-header">
           <span class="timeline-version">👑 KBOT Commercial Enterprise Edition V12.1 (Release 19/11/2026 — Live Sync, Discord DM Alerts &amp; Mobile Pro)</span>
-          <span class="timeline-badge current">RELEASE 19/11/2026 • LIVE 8-SETTING SYNC • DISCORD DM ALERTS • ANTI-CHEAT JITTER • MOBILE UI PRO</span>
+          <span class="timeline-badge">RELEASE 19/11/2026 • LIVE 8-SETTING SYNC • DISCORD DM ALERTS • ANTI-CHEAT JITTER • MOBILE UI PRO</span>
         </div>
         <div class="timeline-content">
           <ul>

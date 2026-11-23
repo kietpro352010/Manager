@@ -1166,19 +1166,20 @@ test('DA-P3-01: Dashboard & Login JS AST parse cleanly and satisfy UX-01..03, BW
   assert.ok(DASHBOARD_HTML.includes('id="detailSettingNotifyOnAfkRecover"'), 'AFK recover notification toggle must exist in Settings panel');
   assert.ok(DASHBOARD_HTML.includes('id="detailSettingNotifyOnReconnectExhausted"'), 'Reconnect exhausted notification toggle must exist in Settings panel');
 
-  // 5. V12.1 Release (19/11/2026), Changelog & Mobile Responsive UI contracts
+  // 5. V12.1.1 Release (23/11/2026), Changelog & Mobile Responsive UI contracts
   assert.ok(PUBLIC_LOGIN_HTML.includes('viewport-fit=cover'), 'Login page viewport meta must include viewport-fit=cover for safe-area-inset support');
   assert.ok(DASHBOARD_HTML.includes('viewport-fit=cover'), 'Dashboard viewport meta must include viewport-fit=cover for safe-area-inset support');
-  assert.ok(PUBLIC_LOGIN_HTML.includes('<span class="brand-version">V12.1</span>'), 'Login page must display version V12.1');
+  assert.ok(PUBLIC_LOGIN_HTML.includes('<span class="brand-version">V12.1.1</span>'), 'Login page must display version V12.1.1');
   assert.ok(PUBLIC_LOGIN_HTML.includes('background:var(--surface-input);border:1px solid var(--border-subtle)'), 'Login captcha box must use valid surface tokens');
-  assert.ok(DASHBOARD_HTML.includes('V12.1 ENTERPRISE'), 'Sidebar must display V12.1 ENTERPRISE');
-  assert.ok(DASHBOARD_HTML.includes('V12.1 PRO'), 'Header and Hero must display V12.1 PRO');
-  assert.ok(DASHBOARD_HTML.includes('KBOT V12.1 • GIẢI PHÁP AFK KINGMC SỐ 1'), 'In-app login gate must display KBOT V12.1 badge');
-  assert.ok(DASHBOARD_HTML.includes('🚀 KBOT V12.1 COMMERCIAL ENTERPRISE'), 'Footer must display V12.1 COMMERCIAL ENTERPRISE');
+  assert.ok(DASHBOARD_HTML.includes('V12.1.1 ENTERPRISE'), 'Sidebar must display V12.1.1 ENTERPRISE');
+  assert.ok(DASHBOARD_HTML.includes('V12.1.1 PRO'), 'Header and Hero must display V12.1.1 PRO');
+  assert.ok(DASHBOARD_HTML.includes('KBOT V12.1.1 • GIẢI PHÁP AFK KINGMC SỐ 1'), 'In-app login gate must display KBOT V12.1.1 badge');
+  assert.ok(DASHBOARD_HTML.includes('🚀 KBOT V12.1.1 COMMERCIAL ENTERPRISE'), 'Footer must display V12.1.1 COMMERCIAL ENTERPRISE');
+  assert.ok(DASHBOARD_HTML.includes('RELEASE 23/11/2026'), 'Changelog must include V12.1.1 release dated 23/11/2026');
   assert.ok(DASHBOARD_HTML.includes('RELEASE 19/11/2026'), 'Changelog must include V12.1 release dated 19/11/2026');
   assert.ok(DASHBOARD_HTML.includes('settingsRevision'), 'V12.1 changelog must document live settingsRevision sync');
   assert.ok(DASHBOARD_HTML.includes('afk_kicked') && DASHBOARD_HTML.includes('reconnect_exhausted'), 'V12.1 changelog must document AFK Discord DM notifications');
-  assert.strictEqual((DASHBOARD_HTML.match(/class="timeline-badge current"/g) || []).length, 1, 'Only V12.1 in changelog may carry timeline-badge current');
+  assert.strictEqual((DASHBOARD_HTML.match(/class="timeline-badge current"/g) || []).length, 1, 'Only V12.1.1 in changelog may carry timeline-badge current');
   assert.ok(DASHBOARD_STYLES.includes('grid-template-columns: repeat(9, minmax(28px, 1fr))'), 'Mobile 9-column inventory & GUI slot grid must fit narrow viewports without overflow');
   assert.ok(DASHBOARD_STYLES.includes('grid-template-columns: 28px minmax(0, 1fr) auto auto'), 'Mobile schedule-row-top must keep handle, title, toggle, and delete button aligned without squishing');
   assert.ok(DASHBOARD_STYLES.includes('#detailChatPanel .chat-row'), 'Mobile chat form must target .chat-row rather than non-existent .inline');
