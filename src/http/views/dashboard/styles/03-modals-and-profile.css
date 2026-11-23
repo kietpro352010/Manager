@@ -59,6 +59,7 @@
   width: min(760px, 100%);
 }
 
+body.user-mode .admin-only,
 .user-mode .admin-only {
   display: none !important;
 }

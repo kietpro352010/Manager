@@ -4,6 +4,7 @@ const {
   ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, TextInputStyle, ModalBuilder, TextInputBuilder
 } = require('discord.js');
 const { escapeMarkdown } = require('discord.js');
+const { redactStringSecrets } = require('../../utils/logger');
 
 const COLOR_BRAND = 0x0ea5e9; // Sky blue
 const COLOR_ONLINE = 0x22c55e; // Green
@@ -18,6 +19,12 @@ function padId(num) {
 function safe(value, max = 250) {
   const limit = Math.min(max, 1024);
   return escapeMarkdown(String(value || '—').replace(/[\r\n\t]/g, ' ').slice(0, limit)).replace(/@/g, '@\u200b');
+}
+
+function plainCode(value, max = 250) {
+  const limit = Math.min(max, 1024);
+  const raw = value === undefined || value === null || value === '' ? '—' : String(value);
+  return raw.replace(/[\r\n\t`]/g, ' ').slice(0, limit).replace(/@/g, '@\u200b');
 }
 
 function button(label, customId, style = ButtonStyle.Secondary, disabled = false, emoji = null) {
@@ -62,14 +69,10 @@ function getWorkerState(worker) {
   let color = COLOR_OFFLINE;
 
   if (isOnline) {
-    label = isAfkState ? 'ONLINE (AFK)' : 'ONLINE';
+    label = 'ONLINE';
     emoji = '🟢';
     color = COLOR_ONLINE;
-  } else if (rawState === 'connecting' || rawState === 'reconnecting') {
-    label = rawState.toUpperCase();
-    emoji = '🟡';
-    color = COLOR_WARN;
-  } else if (rawState === 'stopping' || rawState === 'starting') {
+  } else if (rawState === 'connecting' || rawState === 'reconnecting' || rawState === 'stopping' || rawState === 'starting') {
     label = rawState.toUpperCase();
     emoji = '🟡';
     color = COLOR_WARN;
@@ -83,35 +86,37 @@ function getWorkerState(worker) {
 // ----------------------------------------------------------------------------
 function renderBotsList({ user, workers = [], page = 0, pageSize = 5, notice = '' }) {
   const totalBots = workers.length;
+  const onlineCount = workers.filter((w) => getWorkerState(w).isOnline).length;
+  const offlineCount = Math.max(0, totalBots - onlineCount);
   const totalPages = Math.max(1, Math.ceil(totalBots / pageSize));
   const currentPage = Math.max(0, Math.min(page, totalPages - 1));
   const startIndex = currentPage * pageSize;
   const currentWorkers = workers.slice(startIndex, startIndex + pageSize);
 
-  let desc = `Tài khoản: **${safe(user?.username || 'Khách')}**\nSố bot được cấp: **${totalBots}**`;
+  let desc = `👤 **Tài khoản:** \`${plainCode(user?.username || 'Khách')}\`  ·  🤖 **Bot:** **${totalBots}** (🟢 **${onlineCount}** / 🔴 **${offlineCount}**)`;
   if (notice) {
     desc += `\n\n${notice}`;
   }
-  desc += '\n\nChọn nút có tên bot bên dưới để xem thông tin hoặc điều khiển bot.\n\n';
+  desc += '\n\n';
 
   if (totalBots === 0) {
-    desc += '⚠️ *Bạn chưa sở hữu bot nào. Vui lòng liên hệ Admin hoặc truy cập Web Manager để đăng ký bot.*';
+    desc += 'ℹ️ *Bạn chưa sở hữu bot nào. Vui lòng liên hệ Admin hoặc truy cập Web Manager để đăng ký bot.*';
   } else {
     for (const worker of currentWorkers) {
       const state = getWorkerState(worker);
       const rawName = safe(worker.name || `BOT ${padId(worker.botNumber || 1)}`);
       const botLabel = rawName.toLowerCase().startsWith('bot #') ? rawName : `Bot #${padId(worker.botNumber || 1)} · ${rawName}`;
-      const fullBotId = worker.workerId;
-      const mcUsername = safe(worker.status?.username || worker.settings?.account?.username || '');
-      desc += `${state.emoji} **${botLabel}**\n` +
-              `> **Bot ID:** \`${fullBotId}\`\n` +
-              (mcUsername ? `> **Username:** \`${mcUsername}\`\n` : '') +
-              `> **Trạng thái:** \`${state.label}\`\n\n`;
+      const fullBotId = plainCode(worker.workerId);
+      const rawMcUsername = worker.status?.username || worker.settings?.account?.username || '';
+      const mcUsername = rawMcUsername ? plainCode(rawMcUsername) : 'Chưa đặt';
+      desc += `${state.emoji} **${botLabel}** — \`${state.label}\`\n` +
+              `> • Bot ID: \`${fullBotId}\` · Nhân vật: \`${mcUsername}\`\n\n`;
     }
   }
 
-  const hasOnline = workers.some((w) => getWorkerState(w).isOnline);
-  const mainEmbed = embed('KINGMC CLOUD 24/7 — DANH SÁCH BOT', desc, hasOnline ? COLOR_ONLINE : COLOR_BRAND);
+  const hasOnline = onlineCount > 0;
+  const mainEmbed = embed('🎮 KINGMC CLOUD 24/7 — DANH SÁCH BOT', desc.trimEnd(), hasOnline ? COLOR_ONLINE : COLOR_BRAND)
+    .setFooter({ text: `Trang ${currentPage + 1}/${totalPages} • Chọn nút bên dưới để điều khiển bot` });
 
   // Components
   const components = [];
@@ -160,8 +165,8 @@ function renderBotDetail({ user, worker, notice = '', isExecuting = false }) {
   const state = getWorkerState(worker);
   const botName = safe(worker.name || `BOT ${padId(worker.botNumber || 1)}`);
   const rawWorkerId = String(worker.workerId || worker.id || '');
-  const fullBotId = safe(rawWorkerId);
-  const mcUsername = safe(worker.status?.username || worker.settings?.account?.username || 'Chưa thiết lập');
+  const fullBotId = plainCode(rawWorkerId);
+  const mcUsername = plainCode(worker.status?.username || worker.settings?.account?.username || 'Chưa thiết lập');
   const pingMs = Number(worker.status?.pingMs);
   const ping = state.isOnline && Number.isFinite(pingMs) ? `${pingMs} ms` : '—';
   const tpsValue = worker.status?.tps;
@@ -170,7 +175,7 @@ function renderBotDetail({ user, worker, notice = '', isExecuting = false }) {
     : '—';
   const uptime = state.isOnline ? uptimeText(worker.status?.uptimeSeconds) : '—';
   const reconnects = worker.status?.reconnectCount || worker.status?.reconnectAttempts || 0;
-  const server = safe(
+  const server = plainCode(
     worker.status?.server ||
     worker.status?.serverHost ||
     worker.settings?.serverHost ||
@@ -178,7 +183,7 @@ function renderBotDetail({ user, worker, notice = '', isExecuting = false }) {
     worker.server ||
     'kingmc.vn'
   );
-  const provider = safe(worker.provider || 'wispbyte').toUpperCase();
+  const provider = plainCode(worker.provider || 'wispbyte', 40).toUpperCase();
   const position = worker.status?.position;
   const hasPosition = position &&
     [position.x, position.y, position.z].every((value) => value !== null && value !== undefined && Number.isFinite(Number(value)));
@@ -213,22 +218,24 @@ function renderBotDetail({ user, worker, notice = '', isExecuting = false }) {
   const location = [coordinates, placeName].filter(Boolean).join(' · ') || 'Chưa có dữ liệu vị trí';
 
   let descText = notice ? `${notice}\n\n` : '';
-  descText += `> **Bot ID:** \`${fullBotId}\`\n` +
-              `> **Username:** \`${mcUsername}\`\n` +
-              `> **Server:** \`${server}\`\n` +
-              `> **Trạng thái:** ${state.emoji} **${state.label}**\n` +
-              `> **Ping:** \`${ping}\` · **TPS:** \`${tps}\`\n` +
-              `> **Location:** \`${safe(location, 180)}\`\n` +
-              `> **Uptime:** \`${uptime}\` · **Reconnects:** \`${reconnects}\`\n\n` +
-              'Thông tin nhanh và thao tác bot ở các nút bên dưới.';
+  descText +=
+    `━━ **THÔNG TIN BOT** ━━\n` +
+    `• **Bot ID:** \`${fullBotId}\`\n` +
+    `• **Nhân vật:** \`${mcUsername}\` · **Server:** \`${server}\`\n` +
+    `• **Trạng thái:** ${state.emoji} **${state.label}**\n\n` +
+    `━━ **HIỆU NĂNG & VỊ TRÍ** ━━\n` +
+    `• **Ping:** \`${ping}\` · **TPS:** \`${tps}\`\n` +
+    `• **Uptime:** \`${uptime}\` · **Reconnects:** \`${reconnects}\`\n` +
+    `• **Vị trí:** \`${plainCode(location, 180)}\``;
 
   const detailEmbed = embed(
     `${state.emoji} ${botName.toUpperCase()} — CHI TIẾT BOT`,
     descText,
     state.color
-  );
+  ).setFooter({ text: 'KBOT Cloud 24/7 • Sử dụng các nút bên dưới để điều khiển' });
+
   if (user?.role === 'admin') {
-    detailEmbed.addFields({ name: '🖥️ Host / Nền tảng', value: '`' + provider + '`', inline: true });
+    detailEmbed.addFields({ name: '🖥️ Nền tảng lưu trữ', value: '`' + provider + '`', inline: true });
   }
 
   // Buttons
@@ -261,8 +268,7 @@ function renderBotDetail({ user, worker, notice = '', isExecuting = false }) {
 // 4. ADMIN PANELS (/admin)
 // ----------------------------------------------------------------------------
 function renderAdminStatus({ stats, systemInfo, notice = '' }) {
-  let desc = `### 🛡️ TỔNG QUAN HỆ THỐNG ENTERPRISE (ADMIN)\n\n`;
-  if (notice) desc += `${notice}\n\n`;
+  let desc = notice ? `${notice}\n\n` : '';
 
   const totalWorkers = stats?.totalWorkers ?? 0;
   const onlineWorkers = stats?.onlineWorkers ?? 0;
@@ -273,14 +279,27 @@ function renderAdminStatus({ stats, systemInfo, notice = '' }) {
   const dbLatency = systemInfo?.checks?.database?.latencyMs ? `${systemInfo.checks.database.latencyMs} ms` : '—';
   const discordStatus = systemInfo?.checks?.discord?.ok ? '🟢 Sẵn sàng' : '🟡 Đang kết nối';
 
-  desc += `• **Tổng số Bot trong Fleet:** **${totalWorkers}** bot\n` +
-          `• **Đang Online:** **${onlineWorkers}** bot | **Offline:** **${totalWorkers - onlineWorkers}** bot\n` +
-          `• **Bộ nhớ Node.js:** RSS \`${memoryRss} MB\` | Heap \`${memoryHeap} MB\`\n` +
-          `• **Thời gian hoạt động:** \`${uptime}\`\n` +
-          `• **Cơ sở dữ liệu (Supabase):** ${dbStatus} (\`${dbLatency}\`)\n` +
-          `• **Discord Gateway:** ${discordStatus}\n`;
+  desc += `Tổng quan trạng thái hoạt động của hệ thống **KingMC Cloud**.`;
 
-  const adminEmbed = embed('BẢNG ĐIỀU KHIỂN HỆ THỐNG — ADMIN', desc, COLOR_BRAND);
+  const adminEmbed = embed('🛡️ BẢNG ĐIỀU KHIỂN HỆ THỐNG — ADMIN', desc, COLOR_BRAND)
+    .addFields(
+      {
+        name: '🤖 Trạng thái Bot',
+        value: `Tổng: **${totalWorkers}** bot\n🟢 Online: **${onlineWorkers}** · 🔴 Offline: **${totalWorkers - onlineWorkers}**`,
+        inline: true
+      },
+      {
+        name: '🖥️ Host Manager',
+        value: `Uptime: \`${uptime}\`\nRSS \`${memoryRss} MB\` · Heap \`${memoryHeap} MB\``,
+        inline: true
+      },
+      {
+        name: '📡 Kết nối Dịch vụ',
+        value: `Supabase: ${dbStatus} (\`${dbLatency}\`)\nDiscord: ${discordStatus}`,
+        inline: false
+      }
+    )
+    .setFooter({ text: 'KBOT Enterprise Admin Panel' });
 
   const btnRow = new ActionRowBuilder().addComponents(
     button('Xem tất cả Bot', 'admin:bots:0', ButtonStyle.Primary, false, '🤖'),
@@ -297,22 +316,22 @@ function renderAdminBots({ workers = [], page = 0, pageSize = 5, notice = '' }) 
   const currentPage = Math.max(0, Math.min(page, totalPages - 1));
   const currentWorkers = workers.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
 
-  let desc = `### 🌐 QUẢN LÝ TOÀN BỘ BOT TRÊN HỆ THỐNG (ADMIN)\n` +
-             `Tổng số bot: **${totalBots}** | Trang: **${currentPage + 1}/${totalPages}**\n\n`;
+  let desc = `Tổng số bot: **${totalBots}**  ·  Trang **${currentPage + 1}/${totalPages}**\n\n`;
   if (notice) desc += `${notice}\n\n`;
 
   for (const worker of currentWorkers) {
     const state = getWorkerState(worker);
     const botName = safe(worker.name || `BOT ${padId(worker.botNumber || 1)}`);
-    const fullBotId = worker.workerId;
-    const mcUser = safe(worker.status?.username || '—');
-    const provider = safe(worker.provider || 'wispbyte');
+    const fullBotId = plainCode(worker.workerId);
+    const mcUser = plainCode(worker.status?.username || '—');
+    const provider = plainCode(worker.provider || 'wispbyte', 40);
 
-    desc += `${state.emoji} **${botName.toUpperCase()}** (\`${fullBotId}\`)\n` +
-            `> Minecraft: \`${mcUser}\` | Host: \`${provider}\` | Trạng thái: **${state.label}**\n\n`;
+    desc += `${state.emoji} **${botName.toUpperCase()}** (\`${fullBotId}\`) — **${state.label}**\n` +
+            `> • Nhân vật: \`${mcUser}\` · Host: \`${provider}\`\n\n`;
   }
 
-  const adminEmbed = embed('DANH SÁCH TOÀN BỘ BOT — ADMIN', desc, COLOR_BRAND);
+  const adminEmbed = embed('🌐 DANH SÁCH TOÀN BỘ BOT — ADMIN', desc.trimEnd(), COLOR_BRAND)
+    .setFooter({ text: `KBOT Admin • Trang ${currentPage + 1}/${totalPages}` });
   const components = [];
 
   if (currentWorkers.length > 0) {
@@ -362,10 +381,10 @@ function buildLoginModal() {
     .setCustomId('login_password')
     .setLabel('Mật khẩu (Password)')
     .setStyle(TextInputStyle.Short)
-    .setPlaceholder('Mật khẩu Minecraft bot')
+    .setPlaceholder('Mật khẩu tài khoản Web')
     .setRequired(true)
     .setMinLength(6)
-    .setMaxLength(128);
+    .setMaxLength(256);
 
   modal.addComponents(
     new ActionRowBuilder().addComponents(usernameInput),
@@ -382,12 +401,12 @@ function buildAdminPasswordModal() {
 
   const passwordInput = new TextInputBuilder()
     .setCustomId('new_password')
-    .setLabel('Mật khẩu quản trị mới (6–128 ký tự)')
+    .setLabel('Mật khẩu quản trị mới (6–256 ký tự)')
     .setStyle(TextInputStyle.Short)
     .setPlaceholder('Nhập mật khẩu mới (sẽ được ẩn và mã hóa)')
     .setRequired(true)
     .setMinLength(6)
-    .setMaxLength(128);
+    .setMaxLength(256);
 
   modal.addComponents(new ActionRowBuilder().addComponents(passwordInput));
   return modal;
@@ -411,27 +430,12 @@ async function botDashboard(services, userId, role, notice = '') {
 function renderBotLogs({ user, worker, logs = [] }) {
   const safeLogs = Array.isArray(logs) ? logs : [];
   const rawWorkerId = String(worker?.workerId || worker?.id || '');
-  const fullBotId = safe(rawWorkerId || 'Toàn hệ thống');
+  const fullBotId = plainCode(rawWorkerId || 'Toàn hệ thống');
   const botName = safe(worker?.name || (worker?.botNumber ? `BOT ${padId(worker.botNumber)}` : fullBotId));
 
   const sanitize = (text) => {
     if (!text || typeof text !== 'string') return '';
-    return text
-      // 1. Private keys block
-      .replace(/-----BEGIN[ A-Z0-9_-]*PRIVATE KEY-----[\s\S]*?(?:-----END[ A-Z0-9_-]*PRIVATE KEY-----|$)/gi, '[REDACTED PRIVATE KEY]')
-      // 2. Database connection strings: postgres://user:password@host
-      .replace(/([a-zA-Z0-9+.-]+:\/\/[^:]+:)[^@]+(@)/gi, '$1[REDACTED]$2')
-      // 3. Authorization header with Bearer or Basic or token
-      .replace(/(authorization\s*[:=]\s*)(Bearer\s+[A-Za-z0-9_\-\.]+|Basic\s+[A-Za-z0-9+/=]+|[^\s,;]+)/gi, '$1[REDACTED]')
-      // 4. Standalone Bearer token
-      .replace(/(Bearer\s+)[A-Za-z0-9_\-\.]+/gi, '$1[REDACTED]')
-      // 5. Standard key-value secret fields
-      .replace(/(password|token|secret|apikey|access_token|refresh_token)\s*[:=]\s*[^\s,;]+/gi, '$1: [REDACTED]')
-      // 6. Word boundary key: / key=
-      .replace(/\b(key)\s*[:=]\s*[^\s,;]+/gi, '$1: [REDACTED]')
-      // 7. Minecraft auth commands (/login, /dn, /register, /dk, /changepassword)
-      .replace(/(\/(?:[a-z0-9_-]+:)?(?:login|l|register|reg|dn|dk|changepassword|changepass)\s+).+$/gim, '$1[REDACTED]')
-      // 8. Neutralize Discord markdown code-block breakout
+    return redactStringSecrets(text)
       .replace(/```/g, '`\u200b`\u200b`');
   };
 
@@ -473,13 +477,12 @@ function renderBotLogs({ user, worker, logs = [] }) {
 
 function maskCookieDisplay(cookie) {
   if (!cookie || typeof cookie !== 'string') return '—';
-  if (cookie.length <= 8) return '********';
+  if (cookie.length < 24) return '********';
   return cookie.slice(0, 4) + '****' + cookie.slice(-4);
 }
 
 function renderWispbyteList({ accounts = [], notice = '' }) {
-  let desc = `### 🛰️ DANH SÁCH TÀI KHOẢN WISPBYTE AUTO-KEEPALIVE\n` +
-             `Hệ thống tự động truy cập Client Panel **24h/lần** để duy trì quy tắc 14 ngày của Wispbyte.\n\n`;
+  let desc = `Tự động truy cập Client Panel **24h/lần** để duy trì quy tắc 14 ngày của Wispbyte.\n\n`;
 
   if (notice) desc += `${notice}\n\n`;
 
@@ -490,7 +493,11 @@ function renderWispbyteList({ accounts = [], notice = '' }) {
             `> 💡 *Lấy chuỗi cookie từ Request Header \`Cookie:\` khi đăng nhập https://wispbyte.com/client trên trình duyệt.*`;
   } else {
     desc += `Tổng số tài khoản: **${accounts.length}**\n\n`;
-    accounts.forEach((acc, idx) => {
+    const footerHint = `> 💡 *Dùng nút bên dưới hoặc \`/wispbyte check\` để kích hoạt giữ hạn ngay.*`;
+    const maxDescBudget = 3800 - footerHint.length;
+    let omittedCount = 0;
+    for (let idx = 0; idx < accounts.length; idx++) {
+      const acc = accounts[idx];
       const isOk = acc.lastStatus === 'ok';
       const isExpired = acc.lastStatus === 'expired';
       const icon = isOk ? '🟢' : (isExpired ? '🔴' : '⚪');
@@ -500,21 +507,30 @@ function renderWispbyteList({ accounts = [], notice = '' }) {
         : 'Chưa có';
       const renewCount = acc.renewCount || 0;
       const maskedCookie = maskCookieDisplay(acc.cookie);
-      const panelUrl = acc.panelUrl || 'https://wispbyte.com/client';
+      const panelUrl = plainCode(acc.panelUrl || 'https://wispbyte.com/client', 120);
 
-      desc += `**${idx + 1}. ${icon} ${safe(acc.name || acc.id)}** (\`${acc.id}\`)\n` +
-              `> • Trạng thái: **${statusLabel}** | Lần giữ hạn: **${renewCount}** lần\n` +
-              `> • Truy cập cuối: \`${lastPing}\`\n` +
-              `> • Panel: \`${panelUrl}\` | Cookie: \`${maskedCookie}\`\n`;
+      let entry = `**${idx + 1}. ${icon} ${safe(acc.name || acc.id)}** (\`${plainCode(acc.id)}\`)\n` +
+                  `> • Trạng thái: **${statusLabel}** · Lần giữ hạn: **${renewCount}**\n` +
+                  `> • Truy cập cuối: \`${lastPing}\`\n` +
+                  `> • Panel: \`${panelUrl}\` · Cookie: \`${maskedCookie}\`\n`;
       if (acc.lastMessage && acc.lastMessage !== 'Saved, ready for ping' && acc.lastMessage !== '—') {
-        desc += `> • Ghi chú: *${safe(acc.lastMessage, 120)}*\n`;
+        entry += `> • Ghi chú: *${safe(acc.lastMessage, 120)}*\n`;
       }
-      desc += `\n`;
-    });
-    desc += `> 💡 *Dùng nút bên dưới hoặc lệnh \`/wispbyte check\` để kích hoạt truy cập Client Panel ngay lập tức.*`;
+      entry += `\n`;
+      if (desc.length + entry.length > maxDescBudget) {
+        omittedCount = accounts.length - idx;
+        break;
+      }
+      desc += entry;
+    }
+    if (omittedCount > 0) {
+      desc += `*...và ${omittedCount} tài khoản khác (đã rút gọn theo giới hạn Discord Embed).*\n\n`;
+    }
+    desc += footerHint;
   }
 
-  const wispEmbed = embed('QUẢN LÝ ĐA TÀI KHOẢN WISPBYTE — ADMIN', desc, COLOR_BRAND);
+  const wispEmbed = embed('🛰️ QUẢN LÝ WISPBYTE AUTO-KEEPALIVE — ADMIN', desc, COLOR_BRAND)
+    .setFooter({ text: 'Wispbyte KeepAlive • Kiểm tra tự động mỗi 24 giờ' });
 
   const btnRow = new ActionRowBuilder().addComponents(
     button('Kiểm tra / Gia hạn ngay', 'wispbyte:check', ButtonStyle.Primary, false, '🔄'),
@@ -529,34 +545,46 @@ function renderWispbyteCheckResult({ results = [], total = 0, okCount = 0, expir
   const allOk = okCount === total && total > 0;
   const statusColor = allOk ? COLOR_ONLINE : (expiredCount > 0 ? COLOR_OFFLINE : COLOR_WARN);
 
-  let desc = `### 🛰️ KẾT QUẢ TRUY CẬP CLIENT PANEL WISPBYTE\n\n`;
-  if (notice) desc += `${notice}\n\n`;
+  let desc = notice ? `${notice}\n\n` : '';
 
   desc += `• **Tổng số tài khoản:** \`${total}\`\n` +
           `• **Thành công:** **${okCount}** ✅\n` +
-          `• **Hết hạn / Lỗi:** **${(expiredCount || 0) + (errorCount || 0)}** ⚠️\n\n`;
+          `• **Hết hạn / Khác:** **${(expiredCount || 0) + (errorCount || 0)}** ⚠️\n\n`;
+
+  const footerText = '';
+  const expiredWarning = expiredCount > 0
+    ? `⚠️ **CẢNH BÁO:** Phát hiện **${expiredCount}** tài khoản bị hết hạn Cookie!\n` +
+      `Vui lòng lấy Cookie mới từ trình duyệt và cập nhật lại bằng:\n` +
+      `\`/wispbyte add id:<id> cookie:<cookie_mới>\`\n\n`
+    : '';
+  const maxDescBudget = 3850 - expiredWarning.length;
 
   if (Array.isArray(results) && results.length > 0) {
-    results.forEach((r, idx) => {
+    let omittedCount = 0;
+    for (let idx = 0; idx < results.length; idx++) {
+      const r = results[idx];
       const icon = r.success ? '🟢' : (r.status === 'expired' ? '🔴' : '🟡');
-      desc += `**${idx + 1}. ${icon} ${safe(r.name || r.id)}** (\`${r.id}\`)\n` +
-              `> • Trạng thái: ${r.success ? '**OK**' : `**${(r.status || 'ERROR').toUpperCase()}**`}\n` +
-              `> • Chi tiết: *${safe(r.message || '—', 160)}*\n` +
-              `> • Tổng lần giữ hạn: **${r.renewCount || 0}**\n\n`;
-    });
+      const entry = `**${idx + 1}. ${icon} ${safe(r.name || r.id)}** (\`${plainCode(r.id)}\`)\n` +
+                    `> • Trạng thái: ${r.success ? '**OK**' : `**${(r.status || 'ERROR').toUpperCase()}**`}\n` +
+                    `> • Chi tiết: *${safe(r.message || '—', 160)}*\n` +
+                    `> • Tổng lần giữ hạn: **${r.renewCount || 0}**\n\n`;
+      if (desc.length + entry.length > maxDescBudget) {
+        omittedCount = results.length - idx;
+        break;
+      }
+      desc += entry;
+    }
+    if (omittedCount > 0) {
+      desc += `*...và ${omittedCount} kết quả khác (đã rút gọn theo giới hạn Discord Embed).*\n\n`;
+    }
   } else {
     desc += `ℹ️ *Chưa có tài khoản Wispbyte nào được cấu hình trong hệ thống.*\n\n`;
   }
 
-  if (expiredCount > 0) {
-    desc += `⚠️ **CẢNH BÁO:** Phát hiện **${expiredCount}** tài khoản bị hết hạn Cookie!\n` +
-            `Vui lòng lấy Cookie mới từ trình duyệt và cập nhật lại bằng:\n` +
-            `\`/wispbyte add id:<id> cookie:<cookie_mới>\`\n\n`;
-  }
+  desc += expiredWarning;
 
-  desc += `*Hệ thống tự động lặp lại kiểm tra mỗi 24 giờ.*`;
-
-  const checkEmbed = embed('KẾT QUẢ GIA HẠN WISPBYTE — ADMIN', desc, statusColor);
+  const checkEmbed = embed('🛰️ KẾT QUẢ GIA HẠN WISPBYTE — ADMIN', desc.trimEnd(), statusColor)
+    .setFooter({ text: 'Hệ thống tự động lặp lại kiểm tra mỗi 24 giờ' });
 
   const btnRow = new ActionRowBuilder().addComponents(
     button('Kiểm tra lại', 'wispbyte:check', ButtonStyle.Primary, false, '🔄'),
@@ -581,9 +609,15 @@ function renderProgressBar(current, total, length = 10) {
 
 function renderStatusMonitorPanel(data = {}) {
   const {
+    managerOk = true,
     totalWorkers = 0,
     onlineWorkers = 0,
     offlineWorkers = 0,
+    totalUsers = 0,
+    activeUsers = 0,
+    expiredUsers = 0,
+    permanentUsers = 0,
+    disabledUsers = 0,
     dbOk = true,
     dbLatencyMs = 0,
     discordReady = true,
@@ -593,56 +627,85 @@ function renderStatusMonitorPanel(data = {}) {
     heapUsedMb = 0,
     platform = process.platform,
     nodeVersion = process.version,
-    publicBaseUrl = ''
+    publicBaseUrl = '',
+    checkedAtMs = Date.now(),
+    checkedAtUnix = Math.floor(Date.now() / 1000),
+    intervalMinutes = 15,
+    nextCheckAtUnix = Math.floor(Date.now() / 1000) + (15 * 60)
   } = data;
 
-  const isCritical = !dbOk || !discordReady;
-  const isWarning = !isCritical && totalWorkers > 0 && offlineWorkers > 0;
+  const coreHealthy = managerOk !== false && Boolean(dbOk) && Boolean(discordReady);
+  const degradedServices = [];
+  if (managerOk === false) degradedServices.push('Manager');
+  if (!dbOk) degradedServices.push('Supabase');
+  if (!discordReady) degradedServices.push('Discord');
 
-  let overallStatusText = 'TẤT CẢ HỆ THỐNG HOẠT ĐỘNG TỐT';
-  let overallStatusEmoji = '🟢';
-  let embedColor = COLOR_ONLINE;
-
-  if (isCritical) {
-    overallStatusText = 'SỰ CỐ HỆ THỐNG — GIÁN ĐOẠN DỊCH VỤ';
-    overallStatusEmoji = '🔴';
-    embedColor = COLOR_OFFLINE;
-  } else if (isWarning) {
-    overallStatusText = 'CÓ BOT TẠM DỪNG / OFFLINE';
-    overallStatusEmoji = '🟡';
-    embedColor = COLOR_WARN;
-  }
+  const overallStatusText = coreHealthy
+    ? 'TỐT (MÁY CHỦ & DỊCH VỤ ỔN ĐỊNH)'
+    : `SỰ CỐ (${degradedServices.join(', ').toUpperCase()})`;
+  const overallStatusEmoji = coreHealthy ? '🟢' : '🔴';
+  const embedColor = coreHealthy ? COLOR_ONLINE : COLOR_OFFLINE;
 
   const progressBar = renderProgressBar(onlineWorkers, totalWorkers);
-  const dbStatus = dbOk ? '🟢 Bình thường' : '🔴 Mất kết nối';
+  const managerStatus = managerOk !== false ? '🟢 Hoạt động tốt' : '🔴 Gián đoạn';
+  const dbStatus = dbOk ? '🟢 Kết nối tốt' : '🔴 Mất kết nối';
   const dbLatencyText = dbLatencyMs >= 0 ? `${dbLatencyMs} ms` : 'N/A';
-  const discordStatus = discordReady ? '🟢 Đã kết nối' : '🔴 Mất kết nối';
+  const discordStatus = discordReady ? '🟢 Kết nối tốt' : '🔴 Mất kết nối';
   const discordPingText = discordPing >= 0 ? `${discordPing} ms` : 'N/A';
 
+  const checkedTimeFormatted = new Intl.DateTimeFormat('vi-VN', {
+    timeZone: 'Asia/Ho_Chi_Minh',
+    hour12: false,
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  }).format(new Date(checkedAtMs));
+
+  const userSummaryExtra = [];
+  if (permanentUsers > 0) userSummaryExtra.push(`Vĩnh viễn: **${permanentUsers}**`);
+  if (disabledUsers > 0) userSummaryExtra.push(`Bị khóa: **${disabledUsers}**`);
+  const extraUserLine = userSummaryExtra.length > 0 ? `\n• ${userSummaryExtra.join(' · ')}` : '';
+
   const desc =
-    `### ${overallStatusEmoji} **TÌNH TRẠNG: ${overallStatusText}**\n\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `🤖 **FLEET BOT MINECRAFT (TỔNG QUAN)**\n` +
-    `• Tổng số bot: **${totalWorkers}** bot\n` +
-    `• Đang Online / AFK: 🟢 **${onlineWorkers}** bot\n` +
-    `• Đang Offline / Lỗi: 🔴 **${offlineWorkers}** bot\n` +
-    `• Tỉ lệ trực tuyến: ${progressBar}\n\n` +
-    `🖥️ **MÁY CHỦ QUẢN LÝ (HOST MANAGER)**\n` +
-    `• Trạng thái: 🟢 **Đang chạy** (\`${platform}\` · \`${nodeVersion}\`)\n` +
-    `• Thời gian hoạt động: \`${uptimeFormatted}\`\n` +
-    `• Bộ nhớ Node.js: RSS \`${rssMb} MB\` | Heap \`${heapUsedMb} MB\`\n\n` +
-    `📡 **KẾT NỐI & DỊCH VỤ LIÊN HỆ**\n` +
-    `• Discord Gateway: ${discordStatus} (Ping: \`${discordPingText}\`)\n` +
-    `• Cơ sở dữ liệu (Supabase): ${dbStatus} (Độ trễ: \`${dbLatencyText}\`)\n` +
-    `• Tần suất tự động kiểm tra: \`15 phút / lần\`\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+    `${overallStatusEmoji} **Tình trạng hệ thống:** **${overallStatusText}**\n` +
+    `🕒 **Kiểm tra lúc:** \`${checkedTimeFormatted}\` (<t:${checkedAtUnix}:R>)\n` +
+    `⏱️ **Tự động cập nhật tiếp theo:** <t:${nextCheckAtUnix}:R> (mỗi **${intervalMinutes} phút**)`;
 
   const statusEmbed = new EmbedBuilder()
     .setColor(embedColor)
     .setTitle('📊 BẢNG THEO DÕI TRẠNG THÁI HỆ THỐNG — KINGMC 24/7')
     .setDescription(desc)
-    .setFooter({ text: 'Tự động cập nhật mỗi 15 phút • KingMC Enterprise Fleet' })
-    .setTimestamp(new Date());
+    .addFields(
+      {
+        name: '🤖 Trạng thái Bot',
+        value:
+          `• Tổng số bot: **${totalWorkers}**\n` +
+          `• Online: 🟢 **${onlineWorkers}**  ·  Offline: 🔴 **${offlineWorkers}**\n` +
+          `• Tỉ lệ online: ${progressBar}`,
+        inline: true
+      },
+      {
+        name: '👥 Thống kê Người dùng',
+        value:
+          `• Tổng tài khoản: **${totalUsers}**\n` +
+          `• Còn hạn: 🟢 **${activeUsers}**\n` +
+          `• Hết hạn: 🔴 **${expiredUsers}**${extraUserLine}`,
+        inline: true
+      },
+      {
+        name: '🖥️ Máy chủ Manager & Kết nối',
+        value:
+          `• Manager: ${managerStatus} (Uptime \`${uptimeFormatted}\` · RSS \`${rssMb} MB\` / Heap \`${heapUsedMb} MB\` · \`${platform}\` \`${nodeVersion}\`)\n` +
+          `• Cơ sở dữ liệu (Supabase): ${dbStatus} (\`${dbLatencyText}\`)\n` +
+          `• Discord Gateway: ${discordStatus} (Ping: \`${discordPingText}\`)`,
+        inline: false
+      }
+    )
+    .setFooter({ text: `Tự động kiểm tra mỗi ${intervalMinutes} phút • KBOT Cloud 24/7` })
+    .setTimestamp(new Date(checkedAtMs));
 
   const row = new ActionRowBuilder().addComponents(
     button('Làm mới (Admin)', 'status_monitor:refresh', ButtonStyle.Success, false, '🔄')
@@ -680,6 +743,8 @@ module.exports = {
   uptimeText,
   padId,
   safe,
+  plainCode,
+  maskCookieDisplay,
   embed,
   button,
   botDashboard,

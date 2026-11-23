@@ -545,6 +545,14 @@ class SupabaseAdapter {
                 lock_reason: String(u.lockReason || ''),
                 note: String(u.note || ''),
                 bot_count: Math.max(1, Number(u.botCount || (Array.isArray(u.assignedBotIds) && u.assignedBotIds.length ? u.assignedBotIds.length : 1))),
+                ...(u.discordUserId || u.discord_user_id ? { discord_user_id: String(u.discordUserId || u.discord_user_id) } : {}),
+                ...(u.isTrial !== undefined || u.is_trial !== undefined ? { is_trial: Boolean(u.isTrial ?? u.is_trial) } : {}),
+                ...(u.trialBotId || u.trial_bot_id ? { trial_bot_id: String(u.trialBotId || u.trial_bot_id) } : {}),
+                ...(u.registrationIp || u.registration_ip ? { registration_ip: String(u.registrationIp || u.registration_ip) } : {}),
+                ...(u.deviceFingerprint || u.device_fingerprint ? { device_fingerprint: String(u.deviceFingerprint || u.device_fingerprint) } : {}),
+                ...(u.registrationUserAgent || u.registration_user_agent ? { registration_user_agent: String(u.registrationUserAgent || u.registration_user_agent) } : {}),
+                ...(u.lastLoginIp || u.last_login_ip ? { last_login_ip: String(u.lastLoginIp || u.last_login_ip) } : {}),
+                ...(u.lastLoginAt || u.last_login_at ? { last_login_at: String(u.lastLoginAt || u.last_login_at) } : {}),
                 created_at: u.createdAt || new Date().toISOString(),
                 updated_at: u.updatedAt || new Date().toISOString()
             };
@@ -586,8 +594,13 @@ class SupabaseAdapter {
             note: String(u.note || ''),
             registeredIp: u.registered_ip || u.registeredIp || u.registration_ip || (typeof u.note === 'string' && u.note.match(/\[IP:\s*([^\]]+)\]/) ? u.note.match(/\[IP:\s*([^\]]+)\]/)[1].trim() : ''),
             createdIp: u.created_ip || u.createdIp || u.registration_ip || (typeof u.note === 'string' && u.note.match(/\[IP:\s*([^\]]+)\]/) ? u.note.match(/\[IP:\s*([^\]]+)\]/)[1].trim() : ''),
+            discordUserId: u.discord_user_id || '',
+            isTrial: Boolean(u.is_trial),
+            trialBotId: u.trial_bot_id || '',
             registrationIp: u.registration_ip || '',
             deviceFingerprint: u.device_fingerprint || '',
+            lastLoginIp: u.last_login_ip || '',
+            lastLoginAt: u.last_login_at || null,
             createdAt: u.created_at,
             updatedAt: u.updated_at
         };

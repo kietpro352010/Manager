@@ -204,16 +204,20 @@ function detailStatusHtml() {
   // 7. Render Remote GUI Inspector
   renderDetailRemoteGui(detailBot.currentWindow);
 
-  const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : { isExpired: false };
-  const isExpUser = Boolean(userExp && userExp.isExpired && (typeof currentUser === 'undefined' || currentUser?.role !== 'admin'));
+  const lockInfo = (typeof getWorkerLockInfo === 'function')
+    ? getWorkerLockInfo()
+    : { locked: false, message: '' };
+  const isLockedUser = Boolean(lockInfo && lockInfo.locked);
   ['detailStartButton', 'detailStopButton', 'detailRestartButton'].forEach(id => {
     const btn = document.getElementById(id);
     if (btn) {
-      btn.disabled = isExpUser;
-      if (isExpUser) {
+      btn.disabled = isLockedUser;
+      if (isLockedUser) {
         btn.style.opacity = '0.45';
         btn.style.cursor = 'not-allowed';
-        btn.title = 'Tính năng bị vô hiệu hóa do tài khoản đã hết hạn. Hãy gia hạn key để sử dụng.';
+        btn.title = lockInfo.reason === 'maintenance'
+          ? ('Hệ thống đang bảo trì: ' + lockInfo.message)
+          : 'Tính năng bị vô hiệu hóa do tài khoản đã hết hạn. Hãy gia hạn key để sử dụng.';
       } else {
         btn.style.opacity = '';
         btn.style.cursor = '';
@@ -233,94 +237,6 @@ async function detailGet(path) {
 // ----------------------------------------------------------------------------
 // COMMERCIAL SAAS FRONTEND FUNCTIONS
 // ----------------------------------------------------------------------------
-
-function openBroadcastModal() {
-  document.getElementById('broadcastCommandInput').value = '';
-  document.getElementById('broadcastResultBox').style.display = 'none';
-  const tagSelect = document.getElementById('broadcastTargetTag');
-  if (tagSelect) {
-    const existingTags = new Set();
-    let countRentable = 0;
-    let countRented = 0;
-    let countNotRentable = 0;
-    (bots || []).forEach(b => {
-      if (b.rentable === false) countNotRentable++;
-      else if (b.assignedUsername) countRented++;
-      else countRentable++;
-
-      if (Array.isArray(b.tags)) b.tags.forEach(t => {
-        const clean = String(t || '').trim().toLowerCase().replace(/^#/, '');
-        if (clean) existingTags.add(clean);
-      });
-    });
-
-    let html = '<option value="">🌐 Toàn bộ bot trong danh sách (' + (bots || []).length + ' bot)</option>';
-    html += '<optgroup label="📋 Nhóm Trạng Thái Thuê">';
-    html += '<option value="sys:rentable">✨ Cho thuê (sẵn sàng) (' + countRentable + ' bot)</option>';
-    html += '<option value="sys:rented">👤 Đang được thuê (' + countRented + ' bot)</option>';
-    html += '<option value="sys:not-rentable">🚫 Không cho thuê (' + countNotRentable + ' bot)</option>';
-    html += '</optgroup>';
-
-    if (existingTags.size > 0) {
-      html += '<optgroup label="🏷️ Tag riêng tự tạo">';
-      Array.from(existingTags).sort().forEach(tag => {
-        const count = (bots || []).filter(b => Array.isArray(b.tags) && b.tags.map(x => String(x).toLowerCase().replace(/^#/, '')).includes(tag)).length;
-        html += '<option value="' + escapeHtml(tag) + '">🏷️ #' + escapeHtml(tag) + ' (' + count + ' bot)</option>';
-      });
-      html += '</optgroup>';
-    }
-    tagSelect.innerHTML = html;
-    if (activeTagFilter) {
-      tagSelect.value = activeTagFilter.toLowerCase();
-    }
-  }
-  document.getElementById('broadcastModal').classList.remove('hidden');
-}
-
-function closeBroadcastModal() {
-  document.getElementById('broadcastModal').classList.add('hidden');
-}
-
-async function submitBroadcastCommand() {
-  const msg = document.getElementById('broadcastCommandInput').value.trim();
-  const targetTag = document.getElementById('broadcastTargetTag')?.value || '';
-  const box = document.getElementById('broadcastResultBox');
-  if (!msg) {
-    box.style.display = 'block';
-    box.style.background = 'rgba(239,68,68,0.2)';
-    box.style.color = 'var(--red)';
-    box.textContent = 'Vui lòng nhập lệnh cần gửi!';
-    return;
-  }
-  box.style.display = 'block';
-  box.style.background = 'rgba(56,189,248,0.2)';
-  box.style.color = '#38bdf8';
-  box.textContent = 'Đang bắn lệnh tới các bot...';
-  try {
-    const payload = { message: msg };
-    if (targetTag) payload.tag = targetTag;
-    const res = await requestJson('/api/manager/all/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    if (res.ok) {
-      box.style.background = 'rgba(16,185,129,0.2)';
-      box.style.color = 'var(--green)';
-      box.textContent = res.data?.message || 'Đã gửi thành công!';
-      showToast('Đã broadcast lệnh thành công!');
-      setTimeout(closeBroadcastModal, 1500);
-    } else {
-      box.style.background = 'rgba(239,68,68,0.2)';
-      box.style.color = 'var(--red)';
-      box.textContent = res.data?.error || 'Lỗi gửi broadcast.';
-    }
-  } catch(e) {
-    box.style.background = 'rgba(239,68,68,0.2)';
-    box.style.color = 'var(--red)';
-    box.textContent = e.message || 'Lỗi mạng.';
-  }
-}
 
 function openRenewModal() {
   document.getElementById('renewKeyInput').value = '';
@@ -509,6 +425,8 @@ async function submitCreateKeys() {
   }
   const defaultPlanName = isPermanent ? 'VIP Vĩnh Viễn' : ('Gói ' + days + ' Ngày');
   const planName = document.getElementById('createKeyPlan')?.value.trim() || defaultPlanName;
+  const customKey = document.getElementById('createKeyCustomKey')?.value.trim();
+  const validDays = Number(document.getElementById('createKeyValidDays')?.value) || 0;
   const count = Number(document.getElementById('createKeyCount')?.value) || 1;
   const botCount = Number(document.getElementById('createKeyBotCount')?.value) || 1;
   const rawMaxUses = document.getElementById('createKeyMaxUses')?.value;
@@ -522,10 +440,22 @@ async function submitCreateKeys() {
     const res = await requestJson('/api/manager/keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ days, permanent: isPermanent, isPermanent, setPermanent: isPermanent, planName, count, botCount, maxUses })
+      body: JSON.stringify({
+        days,
+        permanent: isPermanent,
+        isPermanent,
+        setPermanent: isPermanent,
+        planName,
+        count,
+        botCount,
+        maxUses,
+        customKey: customKey || undefined,
+        validDays: validDays > 0 ? validDays : undefined
+      })
     });
     if (!res.ok) throw new Error(res.data?.error || 'Lỗi tạo key');
     showToast(res.data?.message || 'Đã tạo key thành công!');
+    if (document.getElementById('createKeyCustomKey')) document.getElementById('createKeyCustomKey').value = '';
     await refreshKeysTable();
   } catch(e) {
     showToast(e.message || 'Lỗi tạo key');
@@ -764,10 +694,12 @@ function renderDetailRemoteGui(win) {
 const _inFlightGuiSlotClicks = new Set();
 async function clickDetailGuiSlot(slot) {
   if (!selectedBotId) return;
-  const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : { isExpired: false };
-  const isExpUser = Boolean(userExp && userExp.isExpired && (typeof currentUser === 'undefined' || currentUser?.role !== 'admin'));
-  if (isExpUser) {
-    if (typeof showToast === 'function') showToast('⚠️ Gói bot của bạn đã hết hạn, tính năng điều khiển bị vô hiệu hóa. Vui lòng gia hạn để tiếp tục sử dụng.', 'warning', 4500);
+  const lockInfo = (typeof getWorkerLockInfo === 'function') ? getWorkerLockInfo() : { locked: false };
+  if (lockInfo && lockInfo.locked) {
+    if (typeof showToast === 'function') {
+      const prefix = lockInfo.reason === 'maintenance' ? '🛠️ Hệ thống đang bảo trì: ' : '⚠️ ';
+      showToast(prefix + lockInfo.message, 'warning', 4500);
+    }
     return;
   }
   if (_inFlightGuiSlotClicks.has(slot)) return;
@@ -795,6 +727,14 @@ window._inFlightGuiSlotClicks = _inFlightGuiSlotClicks;
 
 async function closeDetailGuiWindow() {
   if (!selectedBotId) return;
+  const lockInfo = (typeof getWorkerLockInfo === 'function') ? getWorkerLockInfo() : { locked: false };
+  if (lockInfo && lockInfo.locked) {
+    if (typeof showToast === 'function') {
+      const prefix = lockInfo.reason === 'maintenance' ? '🛠️ Hệ thống đang bảo trì: ' : '⚠️ ';
+      showToast(prefix + lockInfo.message, 'warning', 4500);
+    }
+    return;
+  }
   try {
     const res = await requestJson('/api/manager/bot/' + selectedBotId + '/window/close', {
       method: 'POST',
@@ -859,8 +799,8 @@ function updateUserHeaderCountdown() {
     if (banner) banner.style.display = 'none';
     return;
   }
-  const topBar = document.querySelector('.top-actions') || document.querySelector('.header') || document.getElementById('homePage');
-  if (!badge) {
+  const headerContainer = document.querySelector('.global-header-right') || document.querySelector('.top-actions');
+  if (!badge && headerContainer) {
     badge = document.createElement('div');
     badge.id = 'userRentalCountdownBadge';
     badge.style.display = 'inline-flex';
@@ -870,9 +810,17 @@ function updateUserHeaderCountdown() {
     badge.style.padding = '4px 10px';
     badge.style.borderRadius = '20px';
     badge.style.marginRight = '8px';
-    const ref = document.querySelector('.top-actions');
-    if (ref) ref.insertBefore(badge, ref.firstChild);
+    const roleBadge = headerContainer.querySelector('#globalUserRoleBadge');
+    headerContainer.insertBefore(badge, roleBadge || headerContainer.firstChild);
   }
+  const setBadgeStyle = (bg, color, border, html) => {
+    if (!badge) return;
+    badge.style.display = 'inline-flex';
+    badge.style.background = bg;
+    badge.style.color = color;
+    badge.style.border = border;
+    badge.innerHTML = html;
+  };
 
   const bannerIcon = document.getElementById('userRentalBannerIcon');
   const bannerPlan = document.getElementById('userRentalBannerPlan');
@@ -885,11 +833,12 @@ function updateUserHeaderCountdown() {
   }
 
   if (currentUser.isPermanent === true) {
-    badge.style.display = 'inline-flex';
-    badge.style.background = 'rgba(16,185,129,0.15)';
-    badge.style.color = 'var(--green)';
-    badge.style.border = '1px solid rgba(16,185,129,0.3)';
-    badge.innerHTML = '<span>👑 Hạn thuê: <b>VIP Vĩnh Viễn</b></span>';
+    setBadgeStyle(
+      'rgba(16,185,129,0.15)',
+      'var(--green)',
+      '1px solid rgba(16,185,129,0.3)',
+      '<span>👑 Hạn thuê: <b>VIP Vĩnh Viễn</b></span>'
+    );
 
     if (banner) {
       if (bannerIcon) bannerIcon.textContent = '👑';
@@ -905,11 +854,12 @@ function updateUserHeaderCountdown() {
   }
 
   if (!currentUser.expiresAt) {
-    badge.style.display = 'inline-flex';
-    badge.style.background = 'rgba(148,163,184,0.15)';
-    badge.style.color = '#cbd5e1';
-    badge.style.border = '1px solid rgba(148,163,184,0.35)';
-    badge.innerHTML = '<span>⚪ <b>Chưa kích hoạt gói</b></span><button class="small primary" onclick="openRenewModal()" style="margin-left:6px;">🔑 Nhập Key kích hoạt</button>';
+    setBadgeStyle(
+      'rgba(148,163,184,0.15)',
+      '#cbd5e1',
+      '1px solid rgba(148,163,184,0.35)',
+      '<span>⚪ <b>Chưa kích hoạt gói</b></span><button class="small primary" onclick="openRenewModal()" style="margin-left:6px;">🔑 Nhập Key kích hoạt</button>'
+    );
 
     if (banner) {
       if (bannerIcon) bannerIcon.textContent = '🔑';
@@ -935,11 +885,12 @@ function updateUserHeaderCountdown() {
       const mins = remainingMin % 60;
       const graceText = (hours > 0 ? (hours + 'h ') : '') + mins + 'm';
 
-      badge.style.display = 'inline-flex';
-      badge.style.background = 'rgba(245,158,11,0.2)';
-      badge.style.color = '#fbbf24';
-      badge.style.border = '1px solid rgba(245,158,11,0.45)';
-      badge.innerHTML = '<span>⏳ Hạn thuê: <b>ĐANG ÂN HẠN 6H (còn ' + graceText + ')</b></span><button class="small primary" onclick="openRenewModal()" style="margin-left:4px;">🎁 Gia Hạn Ngay</button>';
+      setBadgeStyle(
+        'rgba(245,158,11,0.2)',
+        '#fbbf24',
+        '1px solid rgba(245,158,11,0.45)',
+        '<span>⏳ Hạn thuê: <b>ĐANG ÂN HẠN 6H (còn ' + graceText + ')</b></span><button class="small primary" onclick="openRenewModal()" style="margin-left:4px;">🎁 Gia Hạn Ngay</button>'
+      );
 
       if (banner) {
         if (bannerIcon) bannerIcon.textContent = '⏳';
@@ -954,11 +905,12 @@ function updateUserHeaderCountdown() {
       return;
     }
 
-    badge.style.display = 'inline-flex';
-    badge.style.background = 'rgba(239,68,68,0.2)';
-    badge.style.color = 'var(--red)';
-    badge.style.border = '1px solid rgba(239,68,68,0.4)';
-    badge.innerHTML = '<span>⚠️ Hạn thuê: <b>ĐÃ HẾT HẠN (' + exactFormatted + ')</b></span><button class="small primary" onclick="openRenewModal()" style="margin-left:4px;">🎁 Gia Hạn Ngay</button>';
+    setBadgeStyle(
+      'rgba(239,68,68,0.2)',
+      'var(--red)',
+      '1px solid rgba(239,68,68,0.4)',
+      '<span>⚠️ Hạn thuê: <b>ĐÃ HẾT HẠN (' + exactFormatted + ')</b></span><button class="small primary" onclick="openRenewModal()" style="margin-left:4px;">🎁 Gia Hạn Ngay</button>'
+    );
 
     if (banner) {
       if (bannerIcon) bannerIcon.textContent = '⛔';
@@ -973,11 +925,12 @@ function updateUserHeaderCountdown() {
     return;
   }
 
-  badge.style.display = 'inline-flex';
-  badge.style.background = countdown.color === 'var(--green)' ? 'rgba(16,185,129,0.15)' : (countdown.color === 'var(--yellow)' ? 'rgba(234,179,8,0.15)' : 'rgba(239,68,68,0.2)');
-  badge.style.color = countdown.color;
-  badge.style.border = '1px solid ' + (countdown.color === 'var(--green)' ? 'rgba(16,185,129,0.3)' : (countdown.color === 'var(--yellow)' ? 'rgba(234,179,8,0.3)' : 'rgba(239,68,68,0.4)'));
-  badge.innerHTML = '<span>⏳ Hạn thuê: <b>' + countdown.text + '</b> (' + exactFormatted + ')</span><button class="small" onclick="openRenewModal()" style="margin-left:4px;">🎁 Gia Hạn</button>';
+  setBadgeStyle(
+    countdown.color === 'var(--green)' ? 'rgba(16,185,129,0.15)' : (countdown.color === 'var(--yellow)' ? 'rgba(234,179,8,0.15)' : 'rgba(239,68,68,0.2)'),
+    countdown.color,
+    '1px solid ' + (countdown.color === 'var(--green)' ? 'rgba(16,185,129,0.3)' : (countdown.color === 'var(--yellow)' ? 'rgba(234,179,8,0.3)' : 'rgba(239,68,68,0.4)')),
+    '<span>⏳ Hạn thuê: <b>' + countdown.text + '</b> (' + exactFormatted + ')</span><button class="small" onclick="openRenewModal()" style="margin-left:4px;">🎁 Gia Hạn</button>'
+  );
 
   if (banner) {
     if (bannerIcon) bannerIcon.textContent = '⏳';
@@ -1028,6 +981,9 @@ async function refreshDetail(force=false) {
         : '/snapshot';
       const snapshot=await detailGet(snapshotPath);
       if(!isCurrentRequest()) return;
+      if (snapshot && snapshot.maintenance && typeof syncSystemMaintenanceState === 'function') {
+        syncSystemMaintenanceState(snapshot.maintenance, { rerender: true });
+      }
 
       if(snapshot && snapshot.unchanged){
         uptimeSyncAt=Date.now();
@@ -1189,32 +1145,55 @@ async function loadDetailLogs(force=false, expectedGeneration=detailRefreshGener
     function formatLogLineHtml(entry) {
       const line = formatDetailLogEntryText(entry, true);
       if (!line) return '';
-      let cls = 'line';
-      const lower = line.toLowerCase();
-      if (lower.includes('[lỗi]') || lower.includes('[error]') || lower.includes('lỗi') || lower.includes('❌')) {
-        cls += ' line-error';
-      } else if (lower.includes('[cảnh báo]') || lower.includes('[warn]') || lower.includes('warning') || lower.includes('⚠️')) {
-        cls += ' line-warn';
-      } else if (lower.includes('[totem]') || lower.includes('⚡')) {
-        cls += ' line-flow';
-      } else if (lower.includes('[afk]') || lower.includes('✅') || lower.includes('🎉')) {
-        cls += ' line-success';
-      } else if (lower.includes('[vào cụm]') || lower.includes('[flow]') || lower.includes('[gui]') || lower.includes('[menu]') || lower.includes('🎯')) {
-        cls += ' line-flow';
-      } else if (lower.includes('[chat]') || lower.includes('[tin nhắn]')) {
-        cls += ' line-chat';
+
+      let timeText = '--:--:--';
+      let rest = line;
+      const timeMatch = line.match(/^(\d{2}:\d{2}:\d{2})\s+(.*)$/);
+      if (timeMatch) {
+        timeText = timeMatch[1];
+        rest = timeMatch[2];
       }
 
-      const timeMatch = line.match(/^(\d{2}:\d{2}:\d{2})\s*(.*)$/);
-      if (timeMatch) {
-        return '<div class="' + cls + '"><span class="line-time">' + escapeHtml(timeMatch[1]) + '</span>' + escapeHtml(timeMatch[2]) + '</div>';
+      let rawTag = '';
+      let bodyText = rest;
+      const tagMatch = rest.match(/^\[([^\]]{1,24})\]\s*(.*)$/);
+      if (tagMatch) {
+        rawTag = tagMatch[1].trim();
+        bodyText = tagMatch[2].trim() || rawTag;
       }
-      return '<div class="' + cls + '">' + escapeHtml(line) + '</div>';
+
+      const lower = (rawTag + ' ' + bodyText).toLowerCase();
+      let kind = 'info';
+      let pillLabel = rawTag ? rawTag.slice(0, 14).toUpperCase() : 'HỆ THỐNG';
+      if (lower.includes('lỗi') || lower.includes('error') || lower.includes('❌') || lower.includes('disconnect') || lower.includes('kicked')) {
+        kind = 'error';
+        if (!rawTag) pillLabel = 'LỖI';
+      } else if (lower.includes('cảnh báo') || lower.includes('warn') || lower.includes('⚠')) {
+        kind = 'warn';
+        if (!rawTag) pillLabel = 'CẢNH BÁO';
+      } else if (lower.includes('totem') || lower.includes('vào cụm') || lower.includes('flow') || lower.includes('gui') || lower.includes('menu') || lower.includes('🎯')) {
+        kind = 'flow';
+        if (!rawTag) pillLabel = 'LUỒNG';
+      } else if (lower.includes('thành công') || lower.includes('connected') || lower.includes('spawn') || lower.includes('✅') || lower.includes('🎉')) {
+        kind = 'success';
+        if (!rawTag) pillLabel = 'HOÀN TẤT';
+      } else if (lower.includes('chat') || lower.includes('tin nhắn')) {
+        kind = 'chat';
+        if (!rawTag) pillLabel = 'CHAT';
+      }
+
+      return '<div class="log-row log-row-' + kind + '">' +
+        '<span class="log-time">' + escapeHtml(timeText) + '</span>' +
+        '<span class="log-pill log-pill-' + kind + '">' + escapeHtml(pillLabel) + '</span>' +
+        '<span class="log-body">' + escapeHtml(bodyText) + '</span>' +
+      '</div>';
     }
     const lines = Array.isArray(data?.logs) ? data.logs : [];
+    const countEl = document.getElementById('detailEventCount');
+    if (countEl) countEl.textContent = lines.length + ' sự kiện';
     const newHtml = lines.length > 0
       ? lines.map(formatLogLineHtml).join('')
-      : '<div class="empty" style="color:var(--muted);padding:8px;font-style:italic;">Chưa có nhật ký sự kiện.</div>';
+      : '<div class="log-empty">Chưa có nhật ký sự kiện nào.</div>';
     if (box && box.innerHTML !== newHtml) {
       box.innerHTML = newHtml;
     }
@@ -1251,20 +1230,17 @@ async function loadDetailChat(force=false, expectedGeneration=detailRefreshGener
     function formatChatLineHtml(entry) {
       const line = formatDetailLogEntryText(entry, false);
       if (!line) return '';
-      let cls = 'line line-chat';
+      let cls = 'chat-row-item';
       const timeMatch = line.match(/^(\d{2}:\d{2}:\d{2})\s*(.*)$/);
-      const timePart = timeMatch ? timeMatch[1] : '';
-      let rest = timeMatch ? timeMatch[2] : line;
+      const timePart = timeMatch ? timeMatch[1] : '--:--:--';
+      const rest = timeMatch ? timeMatch[2] : line;
 
-      let innerHtml = '';
-      if (timePart) {
-        innerHtml += '<span class="line-time">' + escapeHtml(timePart) + '</span>';
-      }
-
+      let bodyHtml = '';
       // 1. Tin nhắn lệnh / outgoing do bot gửi: "→ /menu"
       if (rest.startsWith('→') || rest.includes('→ /')) {
-        cls += ' line-outgoing';
-        innerHtml += '<span class="chat-outgoing">' + escapeHtml(rest) + '</span>';
+        cls += ' chat-row-outgoing';
+        const cleanCmd = rest.replace(/^→\s*/, '');
+        bodyHtml = '<span class="chat-dir-pill">BOT →</span><code class="chat-cmd-text">' + escapeHtml(cleanCmd) + '</code>';
       }
       // 2. Tin nhắn Role | Player: "VIP | Alex: hello" hoặc "[VIP] Alex: hello"
       else if (/^\[?([^\]|]+)[\]|]\s*([A-Za-z0-9_]{1,16})\s*[:»]\s*(.+)$/u.test(rest)) {
@@ -1272,36 +1248,41 @@ async function loadDetailChat(force=false, expectedGeneration=detailRefreshGener
         const role = m[1].trim();
         const user = m[2].trim();
         const msg = m[3].trim();
-        innerHtml += '<span class="chat-badge">' + escapeHtml(role) + '</span> ' +
-                     '<span class="chat-sender">' + escapeHtml(user) + ':</span> ' +
-                     '<span class="chat-text">' + escapeHtml(msg) + '</span>';
+        bodyHtml = '<span class="chat-badge">' + escapeHtml(role) + '</span>' +
+                   '<span class="chat-sender">' + escapeHtml(user) + ':</span> ' +
+                   '<span class="chat-text">' + escapeHtml(msg) + '</span>';
       }
       // 3. Tin nhắn người chơi chuẩn vanilla: "<Player> hello"
       else if (/^<([A-Za-z0-9_]{1,16})>\s*(.+)$/u.test(rest)) {
         const m = rest.match(/^<([A-Za-z0-9_]{1,16})>\s*(.+)$/u);
         const user = m[1].trim();
         const msg = m[2].trim();
-        innerHtml += '<span class="chat-sender">&lt;' + escapeHtml(user) + '&gt;</span> ' +
-                     '<span class="chat-text">' + escapeHtml(msg) + '</span>';
+        bodyHtml = '<span class="chat-sender">' + escapeHtml(user) + ':</span> ' +
+                   '<span class="chat-text">' + escapeHtml(msg) + '</span>';
       }
       // 4. Tin nhắn hệ thống server: "[HỆ THỐNG] ..." hoặc "[Server] ..."
       else if (rest.startsWith('[HỆ THỐNG]') || rest.startsWith('[Server]') || rest.startsWith('Server:')) {
-        cls += ' line-server';
+        cls += ' chat-row-server';
         const cleanMsg = rest.replace(/^(\[HỆ THỐNG\]|\[Server\]|Server:)\s*/, '');
-        innerHtml += '<span class="chat-server-badge">HỆ THỐNG</span> ' +
-                     '<span class="chat-server-text">' + escapeHtml(cleanMsg) + '</span>';
+        bodyHtml = '<span class="chat-server-badge">HỆ THỐNG</span>' +
+                   '<span class="chat-server-text">' + escapeHtml(cleanMsg) + '</span>';
       }
       // 5. Mặc định
       else {
-        innerHtml += '<span class="chat-text">' + escapeHtml(rest) + '</span>';
+        bodyHtml = '<span class="chat-text">' + escapeHtml(rest) + '</span>';
       }
 
-      return '<div class="' + cls + '">' + innerHtml + '</div>';
+      return '<div class="' + cls + '">' +
+        '<span class="log-time">' + escapeHtml(timePart) + '</span>' +
+        '<div class="chat-body">' + bodyHtml + '</div>' +
+      '</div>';
     }
     const lines = Array.isArray(data?.logs) ? data.logs : [];
+    const countEl = document.getElementById('detailChatCount');
+    if (countEl) countEl.textContent = lines.length + ' tin';
     const newHtml = lines.length > 0
       ? lines.map(formatChatLineHtml).join('')
-      : '<div class="empty" style="color:var(--muted);padding:8px;font-style:italic;">Chưa có tin nhắn nào.</div>';
+      : '<div class="log-empty">Chưa có tin nhắn chat nào.</div>';
     if (box && box.innerHTML !== newHtml) {
       box.innerHTML = newHtml;
     }
@@ -1317,26 +1298,10 @@ async function loadDetailChat(force=false, expectedGeneration=detailRefreshGener
 async function loadDetailPositionHistory(force=false, expectedGeneration=detailRefreshGeneration, expectedBotId=selectedBotId) {
   const box=document.getElementById('detailPositionHistory');
   if(!box) return;
-  if(!force && Date.now()-lastPositionHistoryFetchedAt<15000) return;
+  if(!currentUser || (expectedGeneration!==null && (expectedGeneration!==detailRefreshGeneration || expectedBotId!==selectedBotId))) return;
+  // Endpoint /position-logs là stub in-memory; không poll mạng thừa.
   lastPositionHistoryFetchedAt=Date.now();
-  try {
-    const data=await detailGet('/position-logs?limit=10');
-    if(!currentUser || (expectedGeneration!==null && (expectedGeneration!==detailRefreshGeneration || expectedBotId!==selectedBotId))) return;
-    const positionText=value => value && [value.x,value.y,value.z].every(v=>v!==null && v!==undefined && Number.isFinite(Number(v)))
-      ? ('X ' + Math.round(Number(value.x)) + ', Y ' + Math.round(Number(value.y)) + ', Z ' + Math.round(Number(value.z)))
-      : '--';
-    const rows=Array.isArray(data.logs)?data.logs.slice().reverse():[];
-    box.innerHTML=rows.length?rows.map(row=>{
-      const when=row.changed_at?new Date(row.changed_at).toLocaleString('vi-VN',{hour12:false}):'--';
-      const fromDimension=String(row.from_dimension||'unknown').replace(/^minecraft:/,'');
-      const toDimension=String(row.to_dimension||'unknown').replace(/^minecraft:/,'');
-      return '<div style="border-bottom:1px solid var(--border);padding:4px 0;"><span style="color:var(--muted);">'+escapeHtml(when)+'</span> · '+escapeHtml(positionText(row.from_position))+' ('+escapeHtml(fromDimension)+') → '+escapeHtml(positionText(row.to_position))+' ('+escapeHtml(toDimension)+') · '+escapeHtml(row.reason||'MOVE')+' · '+escapeHtml(row.location_state||'Unknown')+'</div>';
-    }).join(''):'Chưa có lịch sử tọa độ.';
-    lastPositionHistoryRevision=Number(data.revision||0);
-    lastPositionHistoryFetchedAt=Date.now();
-  } catch(err) {
-    if(expectedGeneration===detailRefreshGeneration && expectedBotId===selectedBotId) box.textContent='Không tải được lịch sử tọa độ: '+(err.message||'lỗi Supabase');
-  }
+  box.textContent='Theo dõi tọa độ trực tiếp ở bảng Trạng thái hiện tại (endpoint lịch sử tọa độ không khả dụng).';
 }
 
 function itemLabel(item) {

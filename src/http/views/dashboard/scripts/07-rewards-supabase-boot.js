@@ -111,14 +111,25 @@ async function loadLink4mStatus() {
     }
 
     // 3. Trường hợp sẵn sàng vượt link (Nút sáng bình thường, click được)
+    const isPermanentUser = Boolean(
+      data.isPermanent ||
+      data.supportMode ||
+      (typeof currentUser !== 'undefined' && currentUser?.isPermanent === true)
+    );
+    const rewardHoursVal = Number(data.rewardHours || 12) || 12;
     if (btn) {
       btn.disabled = false;
       btn.style.opacity = '1';
       btn.style.filter = 'none';
       btn.style.cursor = 'pointer';
       btn.style.pointerEvents = 'auto';
-      btn.innerHTML = '<span>⚡</span> Vượt link +12h <span id="link4mUsageBadge" style="font-size:11px;background:rgba(56,189,248,0.25);padding:2px 6px;border-radius:4px;color:#fff;">' + countText + '</span>';
-      btn.title = 'Vượt link nhận thêm 12h thời gian sử dụng bot (' + countText + ')';
+      if (isPermanentUser) {
+        btn.innerHTML = '<span>❤️</span> Vượt link ủng hộ Admin <span id="link4mUsageBadge" style="font-size:11px;background:rgba(56,189,248,0.25);padding:2px 6px;border-radius:4px;color:#fff;">' + countText + '</span>';
+        btn.title = 'Tài khoản VIP Vĩnh Viễn không cộng thêm thời gian — vượt link để ủng hộ Admin (' + countText + ')';
+      } else {
+        btn.innerHTML = '<span>⚡</span> Vượt link +' + rewardHoursVal + 'h <span id="link4mUsageBadge" style="font-size:11px;background:rgba(56,189,248,0.25);padding:2px 6px;border-radius:4px;color:#fff;">' + countText + '</span>';
+        btn.title = 'Vượt link nhận thêm ' + rewardHoursVal + 'h thời gian sử dụng bot (' + countText + ')';
+      }
     }
     if (expBtn) {
       expBtn.disabled = false;
@@ -279,6 +290,88 @@ async function saveLink4mConfigModal() {
   }
 }
 
+async function loadMaintenanceAdminSetting() {
+  try {
+    const res = await requestJson('/api/manager/maintenance');
+    if (res.ok && res.data?.maintenance && typeof syncSystemMaintenanceState === 'function') {
+      syncSystemMaintenanceState(res.data.maintenance, { rerender: false });
+    }
+  } catch (_) {}
+}
+
+async function toggleMaintenanceSetting() {
+  const currentEnabled = Boolean(
+    (typeof getSystemMaintenanceInfo === 'function' ? getSystemMaintenanceInfo().enabled : window.systemMaintenance?.enabled)
+  );
+  const newEnabled = !currentEnabled;
+  const existingMsg = (typeof getSystemMaintenanceInfo === 'function' ? getSystemMaintenanceInfo().message : window.systemMaintenance?.message) || '';
+  try {
+    const res = await requestJson('/api/manager/maintenance', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: { enabled: newEnabled, message: existingMsg }
+    });
+    if (res.ok && res.data?.maintenance) {
+      if (typeof syncSystemMaintenanceState === 'function') {
+        syncSystemMaintenanceState(res.data.maintenance, { rerender: true });
+      }
+      showToast(res.data.message || (newEnabled ? 'Đã BẬT chế độ bảo trì!' : 'Đã TẮT chế độ bảo trì!'));
+      if (typeof refreshHome === 'function') void refreshHome();
+    } else {
+      showToast('Lỗi cập nhật bảo trì: ' + (res.data?.error || 'Không thành công'));
+    }
+  } catch (err) {
+    showToast('Lỗi: ' + err.message);
+  }
+}
+
+async function openMaintenanceConfigModal() {
+  try {
+    const res = await requestJson('/api/manager/maintenance');
+    const maint = res.ok && res.data?.maintenance
+      ? res.data.maintenance
+      : (typeof getSystemMaintenanceInfo === 'function' ? getSystemMaintenanceInfo() : window.systemMaintenance);
+    if (maint && typeof syncSystemMaintenanceState === 'function') {
+      syncSystemMaintenanceState(maint, { rerender: false });
+    }
+    const cb = document.getElementById('maintenanceModalEnabled');
+    const msgEl = document.getElementById('maintenanceModalMessage');
+    if (cb) cb.checked = Boolean(maint?.enabled);
+    if (msgEl) msgEl.value = maint?.message || '';
+  } catch (_) {}
+  const modal = document.getElementById('maintenanceSettingsModal');
+  if (modal) modal.classList.remove('hidden');
+}
+
+function closeMaintenanceConfigModal() {
+  const modal = document.getElementById('maintenanceSettingsModal');
+  if (modal) modal.classList.add('hidden');
+}
+
+async function saveMaintenanceConfigModal() {
+  const enabled = document.getElementById('maintenanceModalEnabled')?.checked === true;
+  const message = String(document.getElementById('maintenanceModalMessage')?.value || '').trim();
+  try {
+    const res = await requestJson('/api/manager/maintenance', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: { enabled, message }
+    });
+    if (res.ok && res.data?.maintenance) {
+      if (typeof syncSystemMaintenanceState === 'function') {
+        syncSystemMaintenanceState(res.data.maintenance, { rerender: true });
+      }
+      closeMaintenanceConfigModal();
+      showToast(res.data.message || 'Đã lưu cấu hình bảo trì thành công!');
+      if (typeof refreshHome === 'function') void refreshHome();
+    } else {
+      showToast('Lỗi: ' + (res.data?.error || 'Không thể lưu cấu hình bảo trì'));
+    }
+  } catch (err) {
+    showToast('Lỗi: ' + err.message);
+  }
+}
+
 // BUG-10: loadCurrentUser chưa từng được định nghĩa trong UI script trong khi
 // checkRewardQueryParams gọi nó sau khi nhận thưởng Link4M → ReferenceError bị nuốt,
 // thông tin thuê bao (giờ còn lại) không refresh. Định nghĩa lại hàm này.
@@ -307,8 +400,14 @@ function checkRewardQueryParams() {
   const reward = params.get('reward');
   const attemptId = params.get('attempt') || '';
   if (reward === 'success') {
+    const isPerm = Boolean(
+      params.get('permanent') === '1' ||
+      params.get('support') === '1' ||
+      params.get('added') === '0h' ||
+      (typeof currentUser !== 'undefined' && currentUser?.isPermanent === true)
+    );
     const added = params.get('added') || '12h';
-    showToast('🎉 Chúc mừng! Bạn đã vượt link thành công và được cộng thêm ' + added + ' sử dụng!');
+    showToast(isPerm ? '❤️ Cảm ơn bạn đã vượt link ủng hộ Admin!' : ('🎉 Chúc mừng! Bạn đã vượt link thành công và được cộng thêm ' + added + ' sử dụng!'));
     void loadCurrentUser();
     void loadLink4mStatus();
     window.history.replaceState({}, document.title, window.location.pathname);
@@ -330,7 +429,14 @@ function checkRewardQueryParams() {
           });
           if (res.ok && res.data?.isRewarded) {
             clearInterval(pollTimer);
-            showToast('🎉 Xác nhận từ Link4M thành công! Đã cộng +' + (res.data.rewardHours || 12) + 'h vào tài khoản!');
+            const isPerm = Boolean(
+              res.data?.permanent ||
+              res.data?.supportAdmin ||
+              (typeof currentUser !== 'undefined' && currentUser?.isPermanent === true)
+            );
+            showToast(isPerm
+              ? '❤️ Cảm ơn bạn đã vượt link ủng hộ Admin!'
+              : ('🎉 Xác nhận từ Link4M thành công! Đã cộng +' + (res.data.rewardHours || 12) + 'h vào tài khoản!'));
             void loadCurrentUser();
             void loadLink4mStatus();
           }
@@ -355,6 +461,11 @@ window.openLink4mConfigModal = openLink4mConfigModal;
 window.closeLink4mConfigModal = closeLink4mConfigModal;
 window.updateLink4mModalFields = updateLink4mModalFields;
 window.saveLink4mConfigModal = saveLink4mConfigModal;
+window.loadMaintenanceAdminSetting = loadMaintenanceAdminSetting;
+window.toggleMaintenanceSetting = toggleMaintenanceSetting;
+window.openMaintenanceConfigModal = openMaintenanceConfigModal;
+window.closeMaintenanceConfigModal = closeMaintenanceConfigModal;
+window.saveMaintenanceConfigModal = saveMaintenanceConfigModal;
 
 window.toggleTrialGiftSetting = toggleTrialGiftSetting;
 window.saveTrialDaysSetting = saveTrialDaysSetting;
@@ -378,6 +489,12 @@ function updateDetailUptime(){
 
 async function handleRenameClick(btn) {
   if (!btn) return;
+  const lockInfo = (typeof getWorkerLockInfo === 'function') ? getWorkerLockInfo() : { locked: false };
+  if (lockInfo && lockInfo.locked) {
+    const prefix = lockInfo.reason === 'maintenance' ? '🛠️ Hệ thống đang bảo trì: ' : '⚠️ ';
+    if (typeof showToast === 'function') showToast(prefix + lockInfo.message, 'warning', 4500);
+    return;
+  }
   const botId = String(btn.getAttribute('data-bot-id') || '').trim();
   if (!botId) return;
   const currentLabel = btn.getAttribute('data-bot-label') || '';
@@ -428,8 +545,9 @@ async function openSupabaseModal() {
     if (res.ok && res.data) {
       const urlInput = document.getElementById('supabaseUrlInput');
       const keyInput = document.getElementById('supabaseKeyInput');
+      const envEnabled = Boolean(res.data.enabled || res.data.connected);
       if (urlInput) urlInput.value = res.data.url || '';
-      if (keyInput) keyInput.value = res.data.hasKey ? '••••••••••••••••' : '';
+      if (keyInput) keyInput.value = (res.data.hasKey || envEnabled) ? '••••••••••••••••' : '';
 
       if (badge) {
         if (res.data.connected) {
@@ -494,17 +612,6 @@ async function testSupabaseConnection() {
   const badge = document.getElementById('supabaseStatusBadge');
   const statusMsg = document.getElementById('supabaseStatusMsg');
 
-  const url = (document.getElementById('supabaseUrlInput')?.value || '').trim();
-  const key = (document.getElementById('supabaseKeyInput')?.value || '').trim();
-
-  if (!url) {
-    if (alertBox) {
-      alertBox.textContent = '⚠️ Vui lòng nhập Supabase Project URL.';
-      alertBox.className = 'login-alert error';
-    }
-    return;
-  }
-
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang test...'; }
   if (alertBox) alertBox.className = 'login-alert hidden';
 
@@ -512,7 +619,7 @@ async function testSupabaseConnection() {
     const res = await requestJson('/api/manager/supabase/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, key })
+      body: JSON.stringify({})
     });
 
     if (res.ok) {
@@ -552,58 +659,16 @@ async function testSupabaseConnection() {
 }
 
 async function saveSupabaseConfig() {
-  const btn = document.getElementById('supabaseSaveBtn');
   const alertBox = document.getElementById('supabaseAlertBox');
-  const badge = document.getElementById('supabaseStatusBadge');
   const statusMsg = document.getElementById('supabaseStatusMsg');
-
-  const url = (document.getElementById('supabaseUrlInput')?.value || '').trim();
-  const key = (document.getElementById('supabaseKeyInput')?.value || '').trim();
-
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang lưu...'; }
-  if (alertBox) alertBox.className = 'login-alert hidden';
-
-  try {
-    const res = await requestJson('/api/manager/supabase/config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, key })
-    });
-
-    if (res.ok) {
-      if (alertBox) {
-        alertBox.textContent = '✅ ' + (res.data?.message || 'Đã lưu cấu hình Supabase!');
-        alertBox.className = 'login-alert success';
-      }
-      if (badge) {
-        if (res.data.connected) {
-          badge.innerHTML = '🟢 Đã kết nối';
-          badge.style.background = 'rgba(34,197,94,0.2)';
-          badge.style.color = '#4ade80';
-          badge.style.borderColor = 'rgba(34,197,94,0.4)';
-        } else {
-          badge.innerHTML = '🟡 Đã lưu (Chưa ping)';
-          badge.style.background = 'rgba(234,179,8,0.2)';
-          badge.style.color = '#eab308';
-          badge.style.borderColor = 'rgba(234,179,8,0.4)';
-        }
-      }
-      if (statusMsg) statusMsg.textContent = res.data?.message || 'Cấu hình đã được lưu.';
-      showToast('✅ Đã lưu cấu hình Supabase Cloud!');
-    } else {
-      if (alertBox) {
-        alertBox.textContent = '⚠️ ' + (res.data?.error || 'Lưu cấu hình thất bại.');
-        alertBox.className = 'login-alert error';
-      }
-    }
-  } catch (err) {
-    if (alertBox) {
-      alertBox.textContent = '⚠️ Lỗi: ' + err.message;
-      alertBox.className = 'login-alert error';
-    }
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '💾 Lưu cấu hình'; }
+  const msg = 'Cấu hình Supabase chỉ đọc từ biến môi trường server (.env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY). Không thể lưu từ trình duyệt.';
+  if (alertBox) {
+    alertBox.textContent = 'ℹ️ ' + msg;
+    alertBox.className = 'login-alert info';
   }
+  if (statusMsg) statusMsg.textContent = msg;
+  showToast(msg, 'info');
+  return false;
 }
 
 function formatSupabaseCounts(counts, isUpload) {
@@ -627,7 +692,6 @@ async function runSupabaseSyncAction(buttonId, endpoint, busyText, successPrefix
   const btn = document.getElementById(buttonId);
   const otherBtnId = buttonId === 'supabaseSyncBtn' ? 'supabaseSyncDownBtn' : 'supabaseSyncBtn';
   const otherBtn = document.getElementById(otherBtnId);
-  const saveBtn = document.getElementById('supabaseSaveBtn');
   const alertBox = document.getElementById('supabaseAlertBox');
   if (btn?.disabled) return;
 
@@ -639,7 +703,6 @@ async function runSupabaseSyncAction(buttonId, endpoint, busyText, successPrefix
     btn.innerHTML = '<span class="spinner-sm"></span> ' + escapeHtml(busyText);
   }
   if (otherBtn) otherBtn.disabled = true;
-  if (saveBtn) saveBtn.disabled = true;
 
   if (alertBox) {
     alertBox.innerHTML = '<div style="display:flex;align-items:center;gap:8px;"><span class="spinner-sm"></span><span>' + escapeHtml(busyText) + ' Đang xử lý dữ liệu với Supabase Cloud...</span></div>';
@@ -698,7 +761,6 @@ async function runSupabaseSyncAction(buttonId, endpoint, busyText, successPrefix
       btn.innerHTML = btn.dataset.originalHtml || (buttonId === 'supabaseSyncBtn' ? '⬆ Tải lên Supabase Cloud' : '⬇ Đồng bộ xuống');
     }
     if (otherBtn) otherBtn.disabled = false;
-    if (saveBtn) saveBtn.disabled = false;
   }
 }
 async function syncAllToSupabase() {
@@ -775,9 +837,6 @@ window.cancelDetailSlotSelection = cancelDetailSlotSelection;
 window.moveDetailItem = moveDetailItem;
 window.openAddBotModal = openAddBotModal;
 window.openAdminModal = openAdminModal;
-window.openBroadcastModal = openBroadcastModal;
-window.closeBroadcastModal = closeBroadcastModal;
-window.submitBroadcast = submitBroadcastCommand;
 window.hideLoginGate = hideLoginGate;
 window.openBatchSettingsModal = openBatchSettingsModal;
 window.closeBatchSettingsModal = closeBatchSettingsModal;
@@ -868,9 +927,6 @@ window.openBackupManagerModal = openBackupManagerModal;
 window.closeBackupManagerModal = closeBackupManagerModal;
 window.refreshBackupList = refreshBackupList;
 window.triggerCreateBackup = triggerCreateBackup;
-window.openBroadcastModal = openBroadcastModal;
-window.closeBroadcastModal = closeBroadcastModal;
-window.submitBroadcastCommand = submitBroadcastCommand;
 window.openRenewModal = openRenewModal;
 window.closeRenewModal = closeRenewModal;
 window.submitRenewKey = submitRenewKey;
@@ -917,6 +973,9 @@ window.addEventListener('unhandledrejection',event=>{
 
     if (res.ok && res.data?.user) {
       currentUser = res.data.user;
+      if (res.data?.maintenance && typeof syncSystemMaintenanceState === 'function') {
+        syncSystemMaintenanceState(res.data.maintenance, { rerender: false });
+      }
       applyUserRoleUI();
       hideLoginGate();
       const routed = await resolveRouteFromUrl();
@@ -1037,7 +1096,7 @@ window.addEventListener('online', () => {
 // Dirty-Form & Active Focus Guard (bảo vệ ô đang nhập không bị đồng bộ ngầm ghi đè)
 document.addEventListener('input', (e) => {
   if (e.target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) {
-    if (e.target.value === '' && !e.target.dataset.originalValue) {
+    if ((e.target.value || '').trim() === '' && !e.target.dataset.originalValue) {
       e.target.removeAttribute('data-dirty');
     } else {
       e.target.setAttribute('data-dirty', 'true');
@@ -1047,11 +1106,17 @@ document.addEventListener('input', (e) => {
 
 document.addEventListener('change', (e) => {
   if (e.target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) {
-    if (e.target.value === '' && !e.target.dataset.originalValue) {
+    if ((e.target.value || '').trim() === '' && !e.target.dataset.originalValue) {
       e.target.removeAttribute('data-dirty');
     } else {
       e.target.setAttribute('data-dirty', 'true');
     }
+  }
+}, { passive: true });
+
+document.addEventListener('focusout', (e) => {
+  if (e.target && e.target.classList?.contains('card-redeem-input') && (e.target.value || '').trim() === '') {
+    e.target.removeAttribute('data-dirty');
   }
 }, { passive: true });
 

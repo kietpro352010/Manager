@@ -95,6 +95,7 @@ const {
   getRequestManagerSessionToken,
   isHttps
 } = require('./routes/auth-api');
+const { resolveClientIp, isTrustedProxyRequest } = require('../services/captcha');
 
 const { createUserApi } = require('./routes/user-api');
 const { createAdminApi } = require('./routes/admin-api');
@@ -119,6 +120,11 @@ function createApp({
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
 
+  app.use((req, _res, next) => {
+    req.clientIp = resolveClientIp(req);
+    next();
+  });
+
   // Shared active sessions map in memory (TTL synced with DB)
   const activeSessions = new Map();
 
@@ -130,7 +136,7 @@ function createApp({
         activeSessions.delete(key);
       }
     }
-    while (activeSessions.size >= 1000) {
+    while (activeSessions.size > maxEntries) {
       const oldestKey = activeSessions.keys().next().value;
       if (oldestKey === undefined) break;
       activeSessions.delete(oldestKey);
@@ -160,11 +166,12 @@ function createApp({
 
     const globalSecret = String(config.botSecretKey || '').trim();
     if (globalSecret && timingSafeStringEquals(incoming, globalSecret)) {
+      const clientIp = req.clientIp || resolveClientIp(req);
       if (!isWorkerRoute) {
-        logger?.warn?.('GLOBAL_BOT_SECRET_BLOCKED', { path, ip: req.ip });
+        logger?.warn?.('GLOBAL_BOT_SECRET_BLOCKED', { path, ip: clientIp });
         return false;
       }
-      logger?.warn?.('GLOBAL_BOT_SECRET_USED', { path, ip: req.ip });
+      logger?.warn?.('GLOBAL_BOT_SECRET_USED', { path, ip: clientIp });
       return true;
     }
 
@@ -248,10 +255,9 @@ function createApp({
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-    res.setHeader('X-XSS-Protection', '1; mode=block');
     res.setHeader('Content-Security-Policy', "default-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:; img-src 'self' data: https: blob:; media-src 'self' https: data: blob:; connect-src 'self' https:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self';");
 
-    if (isHttps(req)) {
+    if (isHttps(req, config?.publicBaseUrl)) {
       res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     }
 
@@ -310,54 +316,128 @@ function createApp({
   app.use(express.urlencoded({ extended: false, limit: '128kb' }));
 
   // 4. CSRF Protection for Browser State-Changing Requests
+  function resolveExpectedOrigin(req) {
+    const rawHost = String(req.headers['host'] || '').trim();
+    if (!rawHost) return '';
+    let scheme = 'http';
+    if (req.secure === true || req.socket?.encrypted === true) {
+      scheme = 'https';
+    } else if (isTrustedProxyRequest(req)) {
+      const xfProtoRaw = String(req.headers['x-forwarded-proto'] || '').trim();
+      const parts = xfProtoRaw ? xfProtoRaw.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean) : [];
+      const lastProto = parts[parts.length - 1] || '';
+      if (lastProto === 'https') {
+        scheme = 'https';
+      } else if (lastProto === 'http') {
+        scheme = 'http';
+      } else {
+        const cfVisitor = String(req.headers['cf-visitor'] || '');
+        if (cfVisitor.includes('"https"')) scheme = 'https';
+      }
+    }
+    if (scheme === 'http' && config?.publicBaseUrl) {
+      try {
+        const pub = new URL(config.publicBaseUrl);
+        if (pub.protocol === 'https:' && pub.host.toLowerCase() === rawHost.toLowerCase()) {
+          scheme = 'https';
+        }
+      } catch (_) {}
+    }
+    try {
+      const u = new URL(`${scheme}://${rawHost}`);
+      if (u.username || u.password || u.pathname !== '/' || u.search || u.hash) return '';
+      return u.origin;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function verifyCsrfOriginOrReferer(req, res, origin, referer, host) {
+    const expectedOrigin = resolveExpectedOrigin(req);
+    if (!host || !expectedOrigin) {
+      res.status(403).json({ ok: false, error: 'Thiếu Host header hợp lệ để xác thực nguồn yêu cầu.' });
+      return false;
+    }
+    if (origin) {
+      try {
+        if (new URL(origin).origin !== expectedOrigin) {
+          res.status(403).json({ ok: false, error: 'Yêu cầu bị từ chối do vi phạm bảo vệ CSRF (Origin mismatch).' });
+          return false;
+        }
+      } catch (_) {
+        res.status(403).json({ ok: false, error: 'Origin header không hợp lệ.' });
+        return false;
+      }
+    } else if (referer) {
+      try {
+        if (new URL(referer).origin !== expectedOrigin) {
+          res.status(403).json({ ok: false, error: 'Yêu cầu bị từ chối do vi phạm bảo vệ CSRF (Referer mismatch).' });
+          return false;
+        }
+      } catch (_) {
+        res.status(403).json({ ok: false, error: 'Referer header không hợp lệ.' });
+        return false;
+      }
+    }
+    return true;
+  }
+
   app.use((req, res, next) => {
     if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
       if (isBotSecretRequest(req)) return next();
-      if (req.path === '/api/auth/login' ||
-          req.path === '/api/auth/register' ||
-          req.path === '/api/auth/logout' ||
-          req.path === '/api/auth/verify-bot-access' ||
-          req.path === '/api/rewards/link4m/return' ||
-          req.path === '/api/rewards/link4m/verify') {
-        return next();
-      }
 
-      if (req.path.startsWith('/api/worker/') || req.path.startsWith('/api/v1/workers/')) {
-        const authHeader = String(req.headers['authorization'] || '');
-        const hasBearer = authHeader.startsWith('Bearer ') && authHeader.slice(7).trim().length > 0;
-        if (isBotSecretRequest(req) || hasBearer) {
-          return next();
-        }
+      if (
+        req.path === '/api/auth/register' ||
+        req.path === '/api/auth/verify-bot-access' ||
+        req.path === '/api/rewards/link4m/return' ||
+        req.path === '/api/rewards/link4m/verify'
+      ) {
+        return next();
       }
 
       const cookies = parseCookies(req);
       const hasSessionCookie = Boolean(cookies.kingmc_mgr_session);
       const origin = req.headers['origin'];
       const referer = req.headers['referer'];
-      const host = req.headers['host'];
+      const host = String(req.headers['host'] || '').trim();
+      const secFetchSite = String(req.headers['sec-fetch-site'] || '').trim().toLowerCase();
+
+      if (req.path === '/api/auth/logout' && !hasSessionCookie) {
+        return next();
+      }
+
+      if (req.path === '/api/auth/login') {
+        if (secFetchSite === 'cross-site') {
+          return res.status(403).json({ ok: false, error: 'Yêu cầu bị từ chối do vi phạm bảo vệ CSRF (cross-site).' });
+        }
+        if ((origin || referer) && !verifyCsrfOriginOrReferer(req, res, origin, referer, host)) {
+          return;
+        }
+        return next();
+      }
+
+      if (!hasSessionCookie && (req.path.startsWith('/api/worker/') || req.path.startsWith('/api/v1/workers/'))) {
+        const authHeader = String(req.headers['authorization'] || '');
+        const hasBearer = /^Bearer\s+\S+/i.test(authHeader);
+        if (isBotSecretRequest(req) || hasBearer) {
+          return next();
+        }
+      }
+
+      if (hasSessionCookie && !host) {
+        return res.status(403).json({ ok: false, error: 'Thiếu Host header để xác thực nguồn yêu cầu.' });
+      }
+
+      if (hasSessionCookie && secFetchSite === 'cross-site') {
+        return res.status(403).json({ ok: false, error: 'Yêu cầu bị từ chối do vi phạm bảo vệ CSRF (cross-site).' });
+      }
 
       if (hasSessionCookie && !origin && !referer) {
         return res.status(403).json({ ok: false, error: 'Yêu cầu từ trình duyệt thiếu header xác thực nguồn (Origin/Referer).' });
       }
 
-      if (origin && host) {
-        try {
-          const originHost = new URL(origin).host;
-          if (originHost !== host) {
-            return res.status(403).json({ ok: false, error: 'Yêu cầu bị từ chối do vi phạm bảo vệ CSRF (Origin mismatch).' });
-          }
-        } catch (_) {
-          return res.status(403).json({ ok: false, error: 'Origin header không hợp lệ.' });
-        }
-      } else if (!origin && referer && host) {
-        try {
-          const refererHost = new URL(referer).host;
-          if (refererHost !== host) {
-            return res.status(403).json({ ok: false, error: 'Yêu cầu bị từ chối do vi phạm bảo vệ CSRF (Referer mismatch).' });
-          }
-        } catch (_) {
-          return res.status(403).json({ ok: false, error: 'Referer header không hợp lệ.' });
-        }
+      if ((origin || referer) && !verifyCsrfOriginOrReferer(req, res, origin, referer, host)) {
+        return;
       }
     }
     next();
@@ -679,6 +759,7 @@ function createApp({
     logger,
     activeSessions
   });
+  app._authRouter = authRouter;
   app.use('/api/auth', authRouter);
 
   const userRouter = createUserApi({

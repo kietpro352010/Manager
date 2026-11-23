@@ -1,6 +1,7 @@
 'use strict';
 
 const AsyncKeyLock = require('../services/async-key-lock');
+const { encryptUserPassword, isStoredCredentialCiphertext } = require('../utils/secrets');
 
 const TABLE = 'manager_workers';
 const REGISTRY_TABLE = 'bot_registry';
@@ -56,15 +57,18 @@ class SupabaseWorkerStore {
     this.client = client;
     this.adapter = client.adapter || null;
     this.sequenceLock = new AsyncKeyLock();
+    this._settingsLock = new AsyncKeyLock();
     this.lastAllocatedBotNumber = 0;
     const parsedTtl = Number(cacheTtlMs);
     this.cacheTtlMs = Number.isFinite(parsedTtl) && parsedTtl >= 0 ? parsedTtl : 30000;
+    this._cacheGen = 0;
     this._listCache = null;
     this._itemCache = new Map();
     this._numberCache = new Map();
   }
 
   invalidateCache(workerId = null) {
+    this._cacheGen += 1;
     this._listCache = null;
     if (workerId) {
       const id = String(workerId);
@@ -128,11 +132,12 @@ class SupabaseWorkerStore {
       }
       if (hit) this._itemCache.delete(id);
     }
+    const gen = this._cacheGen;
     const columns = includeEvents ? '*' : WORKER_LIST_COLUMNS;
     const { data, error } = await this.client.from(TABLE).select(columns).eq('worker_id', workerId).maybeSingle();
     if (error && error.code !== 'PGRST116') throw error;
     const mapped = fromRow(data);
-    if (!includeEvents && mapped) this._cacheWorker(mapped);
+    if (!includeEvents && mapped && gen === this._cacheGen) this._cacheWorker(mapped);
     return this._cloneWorker(mapped);
   }
 
@@ -145,10 +150,11 @@ class SupabaseWorkerStore {
       }
       if (hit) this._numberCache.delete(num);
     }
+    const gen = this._cacheGen;
     const { data, error } = await this.client.from(TABLE).select(WORKER_LIST_COLUMNS).eq('bot_number', num).maybeSingle();
     if (error && error.code !== 'PGRST116') throw error;
     const mapped = fromRow(data);
-    if (mapped) this._cacheWorker(mapped);
+    if (mapped && gen === this._cacheGen) this._cacheWorker(mapped);
     return this._cloneWorker(mapped);
   }
 
@@ -156,10 +162,11 @@ class SupabaseWorkerStore {
     if (!bypassCache && this.cacheTtlMs > 0 && this._listCache && Date.now() < this._listCache.expiresAt) {
       return this._listCache.data.map((w) => this._cloneWorker(w));
     }
+    const gen = this._cacheGen;
     const { data, error } = await this.client.from(TABLE).select(WORKER_LIST_COLUMNS).order('bot_number', { ascending: true }).order('created_at', { ascending: true });
     if (error && error.code !== 'PGRST116') throw error;
     const mapped = (data || []).map(fromRow);
-    if (this.cacheTtlMs > 0) {
+    if (this.cacheTtlMs > 0 && gen === this._cacheGen) {
       const expiresAt = Date.now() + this.cacheTtlMs;
       this._listCache = { data: mapped, expiresAt };
       this._itemCache.clear();
@@ -226,31 +233,33 @@ class SupabaseWorkerStore {
   }
 
   async patchSettings(workerId, patch) {
-    let rpcError = null;
-    try {
-      const { data, error } = await this.client.rpc('manager_patch_worker_settings', {
-        p_worker_id: workerId,
-        p_patch: patch
-      });
-      if (!error) {
-        this.invalidateCache(workerId);
-        return data;
+    return this._settingsLock.run(String(workerId), async () => {
+      let rpcError = null;
+      try {
+        const { data, error } = await this.client.rpc('manager_patch_worker_settings', {
+          p_worker_id: workerId,
+          p_patch: patch
+        });
+        if (!error) {
+          this.invalidateCache(workerId);
+          return data;
+        }
+        rpcError = error;
+      } catch (err) {
+        rpcError = err;
       }
-      rpcError = error;
-    } catch (err) {
-      rpcError = err;
-    }
 
-    if (rpcError && !isRpcUnavailableError(rpcError)) {
-      throw rpcError;
-    }
+      if (rpcError && !isRpcUnavailableError(rpcError)) {
+        throw rpcError;
+      }
 
-    // Fallback: đọc trực tiếp và update JSON settings
-    const current = await this.get(workerId, { bypassCache: true });
-    if (!current) throw new Error(`Worker ${workerId} không tồn tại.`);
-    const merged = { ...(current.settings || {}), ...patch };
-    await this.update(workerId, { settings: merged });
-    return merged;
+      // Fallback: đọc trực tiếp và update JSON settings
+      const current = await this.get(workerId, { bypassCache: true });
+      if (!current) throw new Error(`Worker ${workerId} không tồn tại.`);
+      const merged = { ...(current.settings || {}), ...patch };
+      await this.update(workerId, { settings: merged });
+      return merged;
+    });
   }
 
   async resetData(workerId) {
@@ -397,16 +406,32 @@ class SupabaseWorkerStore {
     if (this.adapter && typeof this.adapter.saveBotSettings === 'function') {
       return await this.adapter.saveBotSettings(botId, payload);
     }
+    const protectCredential = (raw, label) => {
+      const val = String(raw ?? '');
+      if (!val || val === '********') return '';
+      if (isStoredCredentialCiphertext(val)) return val;
+      const encrypted = encryptUserPassword(val);
+      if (!encrypted) throw new Error(`Không tạo được ciphertext cho ${label}.`);
+      return encrypted;
+    };
+    const settingsObj = payload.settings && typeof payload.settings === 'object' ? { ...payload.settings } : {};
+    const proxyObj = payload.proxy && typeof payload.proxy === 'object' ? { ...payload.proxy } : {};
+    if (Object.prototype.hasOwnProperty.call(proxyObj, 'password')) {
+      proxyObj.password = protectCredential(proxyObj.password, 'password Proxy');
+    }
+    if (settingsObj.proxy && typeof settingsObj.proxy === 'object' && Object.prototype.hasOwnProperty.call(settingsObj.proxy, 'password')) {
+      settingsObj.proxy = { ...settingsObj.proxy, password: protectCredential(settingsObj.proxy.password, 'password Proxy') };
+    }
     const row = {
       bot_id: String(botId),
-      settings: payload.settings || {},
-      proxy: payload.proxy || {},
+      settings: settingsObj,
+      proxy: proxyObj,
       schedules: payload.schedules || [],
       auto_chat: payload.autoChat || [],
       updated_at: new Date().toISOString()
     };
     if (payload.username) row.username = payload.username;
-    if (payload.password) row.password = payload.password;
+    if (payload.password) row.password = protectCredential(payload.password, 'password bot');
     const { error } = await this.client.from(SETTINGS_TABLE).upsert(row, { onConflict: 'bot_id' });
     if (error) throw error;
   }

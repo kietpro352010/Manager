@@ -4,9 +4,9 @@ const { SlashCommandBuilder } = require('discord.js');
 const { embed, renderWispbyteList, renderWispbyteCheckResult } = require('../panels/renderer');
 const { resolveLinkedUser } = require('../handlers/panel-handler');
 
-function checkUserAdmin(interaction, services, user) {
+function checkUserAdmin(interaction, services, user, allowedGuildId) {
   const { isUserAdmin } = require('../handlers/interaction-handler');
-  return isUserAdmin(interaction, services, user);
+  return isUserAdmin(interaction, services, user, allowedGuildId);
 }
 
 const definition = new SlashCommandBuilder()
@@ -57,10 +57,12 @@ const definition = new SlashCommandBuilder()
   );
 
 async function execute(interaction, services) {
+  const { getEffectiveAllowedGuildId } = require('../handlers/interaction-handler');
+  const allowedGuildId = await getEffectiveAllowedGuildId(services?.config, services);
   const user = (services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function')
     ? await resolveLinkedUser(interaction, services)
     : null;
-  const isAdmin = checkUserAdmin(interaction, services, user);
+  const isAdmin = checkUserAdmin(interaction, services, user, allowedGuildId);
 
   if (!isAdmin) {
     return {

@@ -124,8 +124,20 @@ function getVisibleFocusableElements(container) {
   if (!container) return [];
   const all = Array.from(container.querySelectorAll(MODAL_FOCUSABLE_SELECTOR));
   return all.filter(el => {
-    if (el.disabled || el.hidden) return false;
+    if (el.disabled || el.hidden || el.type === 'hidden') return false;
     if (el.style && (el.style.display === 'none' || el.style.visibility === 'hidden')) return false;
+    if (typeof el.closest === 'function' && el.closest('.hidden, [hidden]')) return false;
+    if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+      try {
+        const cs = window.getComputedStyle(el);
+        if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) return false;
+      } catch (_) {}
+    }
+    if (typeof el.getClientRects === 'function') {
+      try {
+        if (el.getClientRects().length === 0) return false;
+      } catch (_) {}
+    }
     return true;
   });
 }
@@ -174,6 +186,10 @@ function trapModalFocus(modalEl) {
 function openAccessibleModal(modalEl) {
   if (!modalEl) return;
   if (typeof closeGlobalProfileDropdown === 'function') closeGlobalProfileDropdown();
+  const stack = (document._kbotOpenModalStack = document._kbotOpenModalStack || []);
+  const idx = stack.indexOf(modalEl);
+  if (idx !== -1) stack.splice(idx, 1);
+  stack.push(modalEl);
   modalEl._previousActiveElement = document.activeElement;
   modalEl.classList.remove('hidden');
   trapModalFocus(modalEl);
@@ -191,6 +207,9 @@ function openAccessibleModal(modalEl) {
 
 function closeAccessibleModal(modalEl) {
   if (!modalEl) return;
+  const stack = (document._kbotOpenModalStack = document._kbotOpenModalStack || []);
+  const idx = stack.indexOf(modalEl);
+  if (idx !== -1) stack.splice(idx, 1);
   modalEl.classList.add('hidden');
   if (modalEl._previousActiveElement && typeof modalEl._previousActiveElement.focus === 'function') {
     try { modalEl._previousActiveElement.focus(); } catch (_) {}
@@ -207,8 +226,12 @@ function setupAccessibleModals() {
       let wasHidden = modal.classList.contains('hidden') || (modal.style && modal.style.display === 'none');
       const observer = new MutationObserver(() => {
         const isHidden = modal.classList.contains('hidden') || (modal.style && modal.style.display === 'none');
+        const stack = (document._kbotOpenModalStack = document._kbotOpenModalStack || []);
         if (wasHidden && !isHidden) {
           if (typeof closeGlobalProfileDropdown === 'function') closeGlobalProfileDropdown();
+          const idx = stack.indexOf(modal);
+          if (idx !== -1) stack.splice(idx, 1);
+          stack.push(modal);
           // Modal opened: record previous active element and focus primary input or first interactive element
           modal._previousActiveElement = document.activeElement;
           setTimeout(() => {
@@ -222,6 +245,8 @@ function setupAccessibleModals() {
             }
           }, 10);
         } else if (!wasHidden && isHidden) {
+          const idx = stack.indexOf(modal);
+          if (idx !== -1) stack.splice(idx, 1);
           // Modal closed: restore focus
           if (modal._previousActiveElement && typeof modal._previousActiveElement.focus === 'function') {
             try { modal._previousActiveElement.focus(); } catch (_) {}
@@ -262,11 +287,29 @@ window.addEventListener('keydown', (e) => {
     if (currentUser) hideLoginGate();
     return;
   }
-  const openModals = Array.from(document.querySelectorAll('.modal:not(.hidden)'));
-  if (openModals.length > 0) {
-    const modal = openModals[openModals.length - 1];
-    closeAccessibleModal(modal);
+  const stack = Array.isArray(document._kbotOpenModalStack) ? document._kbotOpenModalStack : [];
+  let modal = null;
+  for (let i = stack.length - 1; i >= 0; i--) {
+    const candidate = stack[i];
+    if (candidate && !candidate.classList.contains('hidden')) {
+      modal = candidate;
+      break;
+    }
+  }
+  if (!modal) {
+    const openModals = Array.from(document.querySelectorAll('.modal:not(.hidden)'));
+    if (openModals.length > 0) modal = openModals[openModals.length - 1];
+  }
+  if (modal) {
     e.preventDefault();
+    if (modal.id === 'userAnnouncementModal' && typeof dismissUserAnnouncement === 'function') {
+      dismissUserAnnouncement();
+      closeAccessibleModal(modal);
+    } else if (modal.id === 'reassignBotConfirmModal' && typeof closeReassignBotConfirmModal === 'function') {
+      closeReassignBotConfirmModal(false);
+    } else {
+      closeAccessibleModal(modal);
+    }
   }
 });
 
@@ -300,6 +343,48 @@ function switchLoginGateTab(tab) {
 }
 window.switchLoginGateTab = switchLoginGateTab;
 
+function getInAppDeviceFingerprint() {
+  try {
+    const parts = [
+      screen.width || 0,
+      screen.height || 0,
+      screen.colorDepth || 0,
+      navigator.hardwareConcurrency || 1,
+      navigator.languages ? navigator.languages.join(',') : (navigator.language || ''),
+      Intl.DateTimeFormat().resolvedOptions().timeZone || ''
+    ];
+    const raw = parts.join(';');
+    let h = 2166136261;
+    for (let i = 0; i < raw.length; i++) {
+      h ^= raw.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return 'dfp_' + (h >>> 0).toString(16);
+  } catch (_) {
+    return 'dfp_unknown';
+  }
+}
+
+async function refreshInAppRegisterCaptcha() {
+  const wrap = document.getElementById('inAppRegCaptchaWrap');
+  const container = document.getElementById('inAppRegCaptchaImgContainer');
+  const tokenInput = document.getElementById('inAppRegCaptchaToken');
+  const answerInput = document.getElementById('inAppRegCaptchaAnswer');
+  if (!wrap || !container) return;
+  if (answerInput) answerInput.value = '';
+  try {
+    const res = await requestJson('/api/auth/captcha');
+    if (res.ok && res.data && res.data.token && res.data.svg) {
+      wrap.style.display = 'block';
+      if (tokenInput) tokenInput.value = res.data.token;
+      const parser = new DOMParser();
+      const svgDoc = parser.parseFromString(res.data.svg, 'image/svg+xml');
+      if (svgDoc.documentElement) container.replaceChildren(svgDoc.documentElement);
+    }
+  } catch (_) {}
+}
+window.refreshInAppRegisterCaptcha = refreshInAppRegisterCaptcha;
+
 // Xử lý tự đăng ký tài khoản mới trên In-App Login Gate
 async function handleInAppRegisterSubmit(event) {
   if (event) event.preventDefault();
@@ -309,6 +394,8 @@ async function handleInAppRegisterSubmit(event) {
   const password = String(document.getElementById('regPassword')?.value || '');
   const confirmPassword = String(document.getElementById('regConfirmPassword')?.value || '');
   const licenseKey = String(document.getElementById('regLicenseKey')?.value || '').trim().toUpperCase();
+  const captchaToken = String(document.getElementById('inAppRegCaptchaToken')?.value || '');
+  const captchaAnswer = String(document.getElementById('inAppRegCaptchaAnswer')?.value || '').trim();
 
   if (alertEl) { alertEl.classList.add('hidden'); alertEl.textContent = ''; }
 
@@ -331,7 +418,15 @@ async function handleInAppRegisterSubmit(event) {
     const res = await requestJson('/api/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password, confirmPassword, key: licenseKey, licenseKey })
+      body: JSON.stringify({
+        username,
+        password,
+        confirmPassword,
+        key: licenseKey,
+        licenseKey,
+        deviceFingerprint: getInAppDeviceFingerprint(),
+        ...(captchaToken ? { captchaToken, captchaAnswer } : {})
+      })
     });
 
     if (!res.ok) {
@@ -357,6 +452,7 @@ async function handleInAppRegisterSubmit(event) {
       if (typeof checkRewardQueryParams === 'function') checkRewardQueryParams();
     }, 350);
   } catch (err) {
+    void refreshInAppRegisterCaptcha();
     if (alertEl) {
       alertEl.className = 'login-alert error';
       alertEl.textContent = '⚠️ ' + err.message;
@@ -540,16 +636,18 @@ async function openUserManagementModal() {
 window.openUserManagementModal = openUserManagementModal;
 
 function closeUserManagementModal() {
-  document.getElementById('userManagementModal')?.classList.add('hidden');
+  navigateTo('dashboard');
 }
 window.closeUserManagementModal = closeUserManagementModal;
 
 // Tải dữ liệu toàn bộ User và Bot Ownership
 async function refreshUserManagementPage() {
   void loadTrialGiftSetting();
+  if (typeof loadMaintenanceAdminSetting === 'function') {
+    void loadMaintenanceAdminSetting();
+  }
   const tbodyFull = document.getElementById('userFullTableBody');
-  const tbodyModal = document.getElementById('userTableBody');
-  const placeholders = [tbodyFull, tbodyModal].filter(Boolean);
+  const placeholders = [tbodyFull].filter(Boolean);
   placeholders.forEach(tb => {
     tb.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--muted);">⏳ Đang làm mới dữ liệu người dùng...</td></tr>';
   });
@@ -684,8 +782,7 @@ function attachUserTableDelegation(tbody) {
 // Render bảng User (áp dụng bộ lọc trạng thái và tìm kiếm thời gian thực)
 function renderUserTable() {
   const tbodyFull = document.getElementById('userFullTableBody');
-  const tbodyModal = document.getElementById('userTableBody');
-  const targets = [tbodyFull, tbodyModal].filter(Boolean);
+  const targets = [tbodyFull].filter(Boolean);
   if (!targets.length) return;
   targets.forEach(attachUserTableDelegation);
 

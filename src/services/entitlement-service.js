@@ -248,8 +248,25 @@ class EntitlementService {
     const isPermanent = existingPermanent || key.isPermanent === true || key.days === -1;
     const currentExpiry = member?.expiresAt ? Date.parse(member.expiresAt) : NaN;
     const base = Number.isFinite(currentExpiry) && currentExpiry > now ? currentExpiry : now;
-    const addedDays = Math.max(1, Number(key.days) || 1);
-    const expiresAt = isPermanent ? null : new Date(base + addedDays * 86400000).toISOString();
+    let addedDays = 0;
+    let durationMs = 0;
+    if (!isPermanent) {
+      const rawDurationMs = Number(key.durationMs ?? key.duration_ms);
+      const rawDays = Number(key.days ?? key.durationDays);
+      if (Number.isFinite(rawDurationMs) && rawDurationMs > 0) {
+        durationMs = Math.floor(rawDurationMs);
+        addedDays = Math.max(1, Math.round(durationMs / 86400000));
+      } else if (Number.isFinite(rawDays) && rawDays > 0) {
+        addedDays = Math.floor(rawDays);
+      } else {
+        throw new Error('Mã kích hoạt không có thời hạn hợp lệ.');
+      }
+    }
+    const newExpiryMs = isPermanent ? null : (durationMs > 0 ? base + durationMs : base + addedDays * 86400000);
+    if (!isPermanent && (!Number.isFinite(newExpiryMs) || newExpiryMs <= now)) {
+      throw new Error('Không thể tính toán thời hạn sử dụng mới hợp lệ.');
+    }
+    const expiresAt = isPermanent ? null : new Date(newExpiryMs).toISOString();
 
     // 3. Phân bổ Bot rảnh (dùng map ownership 1 lần thay vì N+1 query assignedUser)
     const currentIds = Array.isArray(member?.workerIds) ? member.workerIds.map(String) : [];
@@ -316,6 +333,8 @@ class EntitlementService {
       workerIds: desired,
       isPermanent,
       expiresAt,
+      addDays: isPermanent ? 0 : addedDays,
+      durationMs: isPermanent ? 0 : durationMs,
       planName: String(key.planName || member?.planName || 'Standard').slice(0, 64),
       note: member?.note || '',
       username: member?.username || cleanUserId,
@@ -359,7 +378,7 @@ class EntitlementService {
         }
       } else if (this.store.client?.from) {
         try {
-          const res = await this.store.client.from('manager_pending_allocations').insert({
+          const allocRow = {
             id: allocId,
             username: allocUsername,
             target_bot_count: targetCount,
@@ -368,7 +387,11 @@ class EntitlementService {
             status: 'pending_retry',
             created_at: nowIso,
             updated_at: nowIso
-          });
+          };
+          const allocTable = this.store.client.from('manager_pending_allocations');
+          const res = typeof allocTable.upsert === 'function'
+            ? await allocTable.upsert(allocRow, { onConflict: 'id', ignoreDuplicates: true })
+            : await allocTable.insert(allocRow);
           if (res?.error) {
             allocError = res.error;
           } else {
@@ -497,10 +520,20 @@ class EntitlementService {
         }
 
         const processUser = async () => {
-          // Re-fetch fresh user from DB to avoid acting on stale snapshot
-          const freshUser = (typeof this.store.getAccess === 'function'
-            ? await this.store.getAccess(u.userId, { bypassCache: true }).catch(() => null)
-            : null) || u;
+          // Re-fetch fresh user from DB to avoid acting on stale snapshot; fail-closed on read error (ENT-06)
+          let freshUser = u;
+          if (typeof this.store.getAccess === 'function') {
+            try {
+              freshUser = await this.store.getAccess(u.userId, { bypassCache: true });
+            } catch (readErr) {
+              this.logger?.warn?.('expiration_sweep_reread_failed', { userId: u.userId, error: readErr?.message });
+              return;
+            }
+            if (!freshUser) {
+              this.stopPendingByUser.delete(u.userId);
+              return;
+            }
+          }
 
           if (freshUser.isPermanent) {
             this.stopPendingByUser.delete(freshUser.userId);
@@ -612,9 +645,19 @@ class EntitlementService {
           }
 
           // Before updating terminal status, re-read fresh user to check if renewed while stopping bots
-          const latestUser = (typeof this.store.getAccess === 'function'
-            ? await this.store.getAccess(freshUser.userId, { bypassCache: true }).catch(() => null)
-            : null) || freshUser;
+          let latestUser = freshUser;
+          if (typeof this.store.getAccess === 'function') {
+            try {
+              latestUser = await this.store.getAccess(freshUser.userId, { bypassCache: true });
+            } catch (readErr) {
+              this.logger?.warn?.('expiration_sweep_finalize_reread_failed', { userId: freshUser.userId, error: readErr?.message });
+              return;
+            }
+            if (!latestUser) {
+              this.stopPendingByUser.delete(freshUser.userId);
+              return;
+            }
+          }
 
           const latestExpiry = latestUser.expiresAt ? Date.parse(latestUser.expiresAt) : NaN;
           if (
@@ -635,27 +678,35 @@ class EntitlementService {
           if (remainingFailed.length === 0) {
             // All bots confirmed stopped: transition to terminal 'expired' state
             this.stopPendingByUser.delete(latestUser.userId);
-            await this.store.setAccess(latestUser.userId, {
-              ...latestUser,
-              status: 'expired',
-              inGracePeriod: false,
-              stopPendingWorkers: []
-            }, 'system:expiration');
-            expiredCount++;
+            const currentPending = Array.isArray(latestUser.stopPendingWorkers) ? latestUser.stopPendingWorkers : [];
+            if (latestUser.status !== 'expired' || currentPending.length > 0 || latestUser.inGracePeriod) {
+              await this.store.setAccess(latestUser.userId, {
+                ...latestUser,
+                status: 'expired',
+                inGracePeriod: false,
+                stopPendingWorkers: []
+              }, 'system:expiration');
+              expiredCount++;
+            }
             this.logger?.info('user_grace_period_expired_bots_stopped', {
               userId: latestUser.userId,
               username: latestUser.username,
               stoppedWorkers: botsToStop
             });
           } else {
-            // Some stops unconfirmed: retain in 'expiring' for automatic retry on next cycle
+            // Some stops unconfirmed: retain in 'expiring' and skip redundant DB write if unchanged (ENT-08)
             this.stopPendingByUser.set(latestUser.userId, [...remainingFailed]);
-            await this.store.setAccess(latestUser.userId, {
-              ...latestUser,
-              status: 'expiring',
-              inGracePeriod: false,
-              stopPendingWorkers: remainingFailed
-            }, 'system:expiration_retry');
+            const prevPending = Array.isArray(latestUser.stopPendingWorkers) ? [...latestUser.stopPendingWorkers].map(String).sort() : [];
+            const nextPending = [...remainingFailed].map(String).sort();
+            const samePending = prevPending.length === nextPending.length && prevPending.every((v, idx) => v === nextPending[idx]);
+            if (latestUser.status !== 'expiring' || !samePending || latestUser.inGracePeriod) {
+              await this.store.setAccess(latestUser.userId, {
+                ...latestUser,
+                status: 'expiring',
+                inGracePeriod: false,
+                stopPendingWorkers: remainingFailed
+              }, 'system:expiration_retry');
+            }
             this.logger?.warn('user_expiration_partially_failed_will_retry', {
               userId: latestUser.userId,
               remainingFailed

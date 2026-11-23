@@ -18,12 +18,7 @@ docs/
 CLAUDE.md
 SETUP.md
 FEATURES.md
-tests/
-test/
 TEST_INFRA.md
 TEST_READY.md
-supabase/migrations/
-!supabase/migrations/20261122000000_deep_audit_remediation_safe.sql
 /scripts/
 render.yaml
-.github/

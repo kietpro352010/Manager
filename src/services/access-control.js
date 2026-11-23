@@ -145,7 +145,7 @@ class AccessControl {
       }
     }
 
-    const isPermanent = options.isPermanent !== undefined ? Boolean(options.isPermanent) : true;
+    const isPermanent = options.isPermanent === true;
     const expiresAt = isPermanent ? null : (options.expiresAt || null);
 
     return this.store.setAccess(userId, {
@@ -154,7 +154,7 @@ class AccessControl {
       status: VALID_STATUSES.has(options.status) ? options.status : (options.status === 'disabled' ? 'disabled' : 'active'),
       isPermanent,
       expiresAt,
-      planName: String(options.planName || 'Vĩnh viễn').slice(0, 64),
+      planName: String(options.planName || (isPermanent ? 'Vĩnh viễn' : 'Gói mặc định')).slice(0, 64),
       note: String(options.note || '').slice(0, 300),
       username: String(options.username || '').slice(0, 64),
       ...(options.allowAccountChange !== undefined ? { allowAccountChange: Boolean(options.allowAccountChange) } : {}),

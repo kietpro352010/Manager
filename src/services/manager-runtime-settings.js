@@ -57,26 +57,32 @@ class ManagerRuntimeSettings {
   }
 
   async update(patch = {}) {
-    const hasSecretPatch = ['renderApiKey', 'link4mApiToken', 'link4mSecretKey'].some((key) => Object.hasOwn(patch, key));
-    if (this.secretsDecryptionFailed && hasSecretPatch) {
-      throw new Error('Không thể cập nhật cấu hình bí mật khi chưa giải mã được dữ liệu hiện tại.');
-    }
-    const next = { ...this.values };
-    if (Object.hasOwn(patch, 'publicBaseUrl')) {
-      const raw = String(patch.publicBaseUrl || '').trim();
-      const normalized = raw ? normalizePublicUrl(raw) : '';
-      if (raw && !normalized) throw new Error('Public manager URL must be a valid HTTPS URL without credentials.');
-      next.publicBaseUrl = normalized;
-    }
-    for (const key of ['renderApiKey', 'link4mApiToken', 'link4mSecretKey']) {
-      if (!Object.hasOwn(patch, key)) continue;
-      const value = String(patch[key] || '').trim();
-      if (value.length > 4096) throw new Error(`${key} exceeds the allowed length.`);
-      next[key] = value;
-    }
-    await this.persist(next);
-    this.values = next;
-    return this.snapshot();
+    const run = async () => {
+      const hasSecretPatch = ['renderApiKey', 'link4mApiToken', 'link4mSecretKey'].some((key) => Object.hasOwn(patch, key));
+      if (this.secretsDecryptionFailed && hasSecretPatch) {
+        throw new Error('Không thể cập nhật cấu hình bí mật khi chưa giải mã được dữ liệu hiện tại.');
+      }
+      const next = { ...this.values };
+      if (Object.hasOwn(patch, 'publicBaseUrl')) {
+        const raw = String(patch.publicBaseUrl || '').trim();
+        const normalized = raw ? normalizePublicUrl(raw) : '';
+        if (raw && !normalized) throw new Error('Public manager URL must be a valid HTTPS URL without credentials.');
+        next.publicBaseUrl = normalized;
+      }
+      for (const key of ['renderApiKey', 'link4mApiToken', 'link4mSecretKey']) {
+        if (!Object.hasOwn(patch, key)) continue;
+        const value = String(patch[key] || '').trim();
+        if (value.length > 4096) throw new Error(`${key} exceeds the allowed length.`);
+        next[key] = value;
+      }
+      await this.persist(next);
+      this.values = next;
+      return this.snapshot();
+    };
+    const prev = this._updateChain || Promise.resolve();
+    const current = prev.then(run, run);
+    this._updateChain = current.catch(() => {});
+    return current;
   }
 
   async persist(values = this.values) {

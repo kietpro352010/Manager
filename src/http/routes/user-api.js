@@ -2,10 +2,11 @@
 
 const crypto = require('node:crypto');
 const net = require('node:net');
-const dns = require('node:dns');
 const express = require('express');
-const { validateProxyUrl } = require('../../services/proxy-validation');
+const { validateProxyUrl, resolveAndValidateHost } = require('../../services/proxy-validation');
+const { resolveClientIp } = require('../../services/captcha');
 const { decryptSecret } = require('../../utils/secrets');
+const { getMaintenanceState } = require('../../utils/maintenance');
 
 function parseProxyInputToUrl(rawInput, { ignoreEnabledFlag = false } = {}) {
   if (rawInput === null || rawInput === undefined || rawInput === '') return '';
@@ -56,52 +57,50 @@ function parseProxyUrlToObject(proxyUrl) {
   }
 }
 
-function probeProxyTcpLatency(proxyUrl, timeoutMs = 3500) {
+async function probeProxyTcpLatency(proxyUrl, timeoutMs = 3500) {
+  let parsed;
+  try {
+    parsed = new URL(proxyUrl);
+  } catch {
+    return { ok: false, latencyMs: null, error: 'URL Proxy không hợp lệ.' };
+  }
+  const host = parsed.hostname.replace(/^\[|\]$/g, '');
+  const port = Number(parsed.port);
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return { ok: false, latencyMs: null, error: 'Host hoặc port Proxy không hợp lệ.' };
+  }
+
+  let verified;
+  try {
+    verified = await resolveAndValidateHost(host, { allowLocal: false });
+  } catch (ssrfErr) {
+    return { ok: false, latencyMs: null, error: ssrfErr?.message || 'Địa chỉ Proxy bị chặn (SSRF).' };
+  }
+
   return new Promise((resolve) => {
-    let parsed;
-    try {
-      parsed = new URL(proxyUrl);
-    } catch {
-      return resolve({ ok: false, latencyMs: null, error: 'URL Proxy không hợp lệ.' });
-    }
-    const host = parsed.hostname.replace(/^\[|\]$/g, '');
-    const port = Number(parsed.port);
+    const startedAt = Date.now();
+    let settled = false;
+    const socket = net.createConnection({ host: verified.ip, port });
 
-    const connectToHost = (targetHost) => {
-      const startedAt = Date.now();
-      let settled = false;
-      const socket = net.createConnection({ host: targetHost, port });
-
-      const done = (result) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        try { socket.destroy(); } catch (_) {}
-        resolve(result);
-      };
-
-      const timer = setTimeout(() => {
-        done({ ok: false, latencyMs: null, error: `Kết nối quá thời gian chờ (${timeoutMs}ms)` });
-      }, timeoutMs);
-      timer.unref?.();
-
-      socket.once('connect', () => {
-        done({ ok: true, latencyMs: Math.max(1, Date.now() - startedAt), error: null });
-      });
-      socket.once('error', (err) => {
-        done({ ok: false, latencyMs: null, error: err?.code || err?.message || 'connection_failed' });
-      });
+    const done = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { socket.destroy(); } catch (_) {}
+      resolve(result);
     };
 
-    if (net.isIP(host) === 0) {
-      dns.promises.lookup(host, { all: false }).then((rec) => {
-        connectToHost(rec.address);
-      }).catch((dnsErr) => {
-        resolve({ ok: false, latencyMs: null, error: `Lỗi phân giải DNS: ${dnsErr.message}` });
-      });
-    } else {
-      connectToHost(host);
-    }
+    const timer = setTimeout(() => {
+      done({ ok: false, latencyMs: null, error: `Kết nối quá thời gian chờ (${timeoutMs}ms)` });
+    }, timeoutMs);
+    timer.unref?.();
+
+    socket.once('connect', () => {
+      done({ ok: true, latencyMs: Math.max(1, Date.now() - startedAt), error: null });
+    });
+    socket.once('error', (err) => {
+      done({ ok: false, latencyMs: null, error: err?.code || err?.message || 'connection_failed' });
+    });
   });
 }
 
@@ -425,20 +424,30 @@ function createUserApi({
       return { allowed: false, status: 403, error: 'Bạn không có quyền quản lý bot này.' };
     }
 
+    const method = String(req.method || 'GET').toUpperCase();
+    const routePath = String(req.path || '').split('?')[0].toLowerCase();
+    const isReadRequest = method === 'GET' || method === 'HEAD';
+    const isRenewRequest = routePath === '/renew' ||
+      routePath === '/redeem' ||
+      routePath === '/manager/renew' ||
+      routePath === '/keys/redeem';
+
+    const maintenance = await getMaintenanceState(store);
+    if (maintenance.enabled && !isReadRequest && !isRenewRequest) {
+      return {
+        allowed: false,
+        status: 503,
+        code: 'SYSTEM_MAINTENANCE',
+        error: `Hệ thống đang bảo trì: ${maintenance.message}`
+      };
+    }
+
     const isExpired = session.status === 'expired' ||
       session.status === 'grace_period' ||
       session.inGracePeriod === true ||
       (!session.isPermanent && session.expiresAtRental && Date.now() > Date.parse(session.expiresAtRental));
 
     if (isExpired) {
-      const method = String(req.method || 'GET').toUpperCase();
-      const routePath = String(req.path || '').split('?')[0].toLowerCase();
-      const isReadRequest = method === 'GET' || method === 'HEAD';
-      const isRenewRequest = routePath === '/renew' ||
-        routePath === '/redeem' ||
-        routePath === '/manager/renew' ||
-        routePath === '/keys/redeem';
-
       if (!isReadRequest && !isRenewRequest) {
         return {
           allowed: false,
@@ -608,6 +617,7 @@ function createUserApi({
       const managerRamMb = session.role === 'admin'
         ? Math.round(process.memoryUsage().rss / (1024 * 1024))
         : undefined;
+      const maintenance = await getMaintenanceState(store);
       const currentUserSnapshot = {
         status: session.status || 'active',
         expiresAt: session.expiresAtRental || null,
@@ -639,7 +649,11 @@ function createUserApi({
       });
       const sig = crypto
         .createHash('sha1')
-        .update(JSON.stringify({ bots: sigBots, currentUser: currentUserSnapshot }))
+        .update(JSON.stringify({
+          bots: sigBots,
+          currentUser: currentUserSnapshot,
+          maintenance: { enabled: maintenance.enabled, message: maintenance.message }
+        }))
         .digest('hex')
         .slice(0, 16);
 
@@ -648,6 +662,7 @@ function createUserApi({
           ok: true,
           unchanged: true,
           sig,
+          maintenance,
           ...(managerRamMb !== undefined ? { managerRamMb } : {})
         });
       }
@@ -657,11 +672,12 @@ function createUserApi({
         sig,
         bots: payload,
         currentUser: currentUserSnapshot,
+        maintenance,
         ...(managerRamMb !== undefined ? { managerRamMb } : {})
       });
     } catch (error) {
-      logger.error('Failed to get bots', { error: error.message });
-      return res.status(500).json({ ok: false, error: error.message });
+      logger?.error?.('Failed to get bots', { error: error.message });
+      return res.status(500).json({ ok: false, error: 'Đã xảy ra lỗi hệ thống. Vui lòng thử lại sau.' });
     }
   };
 
@@ -671,6 +687,16 @@ function createUserApi({
   // 2. REORDER BOTS (Drag and drop in UI)
   router.post('/bots/reorder', requireSession, async (req, res) => {
     const session = req.managerAuthSession;
+    if (session?.role !== 'admin') {
+      const maintenance = await getMaintenanceState(store);
+      if (maintenance.enabled) {
+        return res.status(503).json({
+          ok: false,
+          code: 'SYSTEM_MAINTENANCE',
+          error: `Hệ thống đang bảo trì: ${maintenance.message}`
+        });
+      }
+    }
     const isExpired = session?.status === 'expired' ||
       session?.status === 'grace_period' ||
       session?.inGracePeriod === true ||
@@ -730,8 +756,8 @@ function createUserApi({
       session.assignedBotIds = updatedOrder;
       return res.json({ ok: true, message: 'Đã lưu thứ tự bot.', order: updatedOrder });
     } catch (error) {
-      logger?.error('Failed to reorder bots', { error: error.message });
-      return res.status(500).json({ ok: false, error: error.message });
+      logger?.error?.('Failed to reorder bots', { error: error.message });
+      return res.status(500).json({ ok: false, error: 'Đã xảy ra lỗi hệ thống. Vui lòng thử lại sau.' });
     }
   });
 
@@ -753,10 +779,20 @@ function createUserApi({
     });
   });
 
+  // 3.5. GET SYSTEM MAINTENANCE STATE
+  router.get('/maintenance', requireSession, async (_req, res) => {
+    try {
+      const maintenance = await getMaintenanceState(store);
+      return res.json({ ok: true, maintenance });
+    } catch (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+  });
+
   // 4. GET BOT SNAPSHOT (Complete state for Detail drawer/modal)
   router.get('/bot/:id/snapshot', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
 
     const worker = perm.worker;
     const session = req.managerAuthSession;
@@ -772,9 +808,10 @@ function createUserApi({
             : `${worker.status?.state || ''}:${inventory.revision || 0}:${logs.length}`
         );
 
+    const maintenance = await getMaintenanceState(store);
     const reqRev = typeof req.query?.rev === 'string' ? req.query.rev : '';
     if (reqRev && reqRev === rev) {
-      return res.json({ ok: true, unchanged: true, rev });
+      return res.json({ ok: true, unchanged: true, rev, maintenance });
     }
 
     const assignmentMap = session.role === 'admin' ? await getUserAssignmentsMap() : null;
@@ -823,14 +860,15 @@ function createUserApi({
       inventory,
       settings,
       autoChatSchedules: worker.settings?.autoChatSchedules || [],
-      botSchedules: worker.settings?.botSchedules || []
+      botSchedules: worker.settings?.botSchedules || [],
+      maintenance
     });
   });
 
   // 5. GET SPECIFIC BOT STATE (Fallback for Detail drawer)
   router.get('/bot/:id/state', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
 
     const worker = perm.worker;
     const session = req.managerAuthSession;
@@ -851,7 +889,7 @@ function createUserApi({
   // 6. DETAIL SUB-GETTERS (Fallbacks)
   router.get('/bot/:id/inventory', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
     return res.json({
       ok: true,
       inventory: perm.worker.status?.inventory || { items: [], slots: {}, revision: 0 }
@@ -860,7 +898,7 @@ function createUserApi({
 
   router.get('/bot/:id/settings', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
     const worker = perm.worker;
     const session = req.managerAuthSession;
     const canRevealMcAccount = session.role === 'admin' || session.allowAccountChange !== false;
@@ -893,7 +931,7 @@ function createUserApi({
 
   router.get(['/bot/:id/autoChat', '/bot/:id/auto-chat'], requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
     return res.json({
       ok: true,
       autoChatSchedules: perm.worker.settings?.autoChatSchedules || []
@@ -902,7 +940,7 @@ function createUserApi({
 
   router.get(['/bot/:id/botSchedules', '/bot/:id/bot-schedules'], requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
     return res.json({
       ok: true,
       botSchedules: perm.worker.settings?.botSchedules || []
@@ -911,7 +949,7 @@ function createUserApi({
 
   router.get('/bot/:id/logs', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
     return res.json({
       ok: true,
       logs: typeof registry.getSystemLogs === 'function'
@@ -922,7 +960,7 @@ function createUserApi({
 
   router.get('/bot/:id/chat-logs', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
     return res.json({
       ok: true,
       logs: typeof registry.getChatLogs === 'function'
@@ -933,14 +971,14 @@ function createUserApi({
 
   router.get('/bot/:id/position-logs', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
     return res.json({ ok: true, logs: [] });
   });
 
   // 7. GET & SAVE MINECRAFT CREDENTIALS
   router.get('/bot/:id/account', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
 
     if (req.managerAuthSession.role !== 'admin' && req.managerAuthSession.allowAccountChange === false) {
       return res.status(403).json({ ok: false, error: 'Gói dịch vụ của bạn không cho phép xem tài khoản Minecraft.' });
@@ -964,7 +1002,7 @@ function createUserApi({
 
   router.post('/bot/:id/account', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
 
     if (req.managerAuthSession.role !== 'admin' && req.managerAuthSession.allowAccountChange === false) {
       return res.status(403).json({ ok: false, error: 'Gói dịch vụ của bạn không cho phép tự đổi tài khoản Minecraft.' });
@@ -1004,7 +1042,7 @@ function createUserApi({
 
   router.post('/bot/:id/send', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
 
     const worker = perm.worker;
     const rawMessage = req.body?.text ?? req.body?.message;
@@ -1045,13 +1083,16 @@ function createUserApi({
   // 9. SCHEDULE CONFIGURATION
   router.post(['/bot/:id/auto-chat', '/bot/:id/autoChat'], requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
     if (req.managerAuthSession?.role !== 'admin' && req.managerAuthSession?.allowAccountChange === false) {
       return res.status(403).json({ ok: false, error: 'Tài khoản của bạn bị hạn chế thay đổi cấu hình lịch Auto Chat của bot.' });
     }
 
     if (!Array.isArray(req.body?.autoChatSchedules)) {
       return res.status(400).json({ ok: false, error: 'Schedules must be an array.' });
+    }
+    if (req.body.autoChatSchedules.length > 50) {
+      return res.status(400).json({ ok: false, error: 'Số lượng lịch Auto Chat tối đa là 50.' });
     }
 
     const worker = perm.worker;
@@ -1061,19 +1102,23 @@ function createUserApi({
       await registry.updateSettings(worker.workerId, { autoChatSchedules: schedules });
       return res.json({ ok: true, message: 'Đã lưu lịch Auto Chat thành công.' });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      logger?.error?.('Failed to update autoChatSchedules', { workerId: worker.workerId, error: error.message });
+      return res.status(500).json({ ok: false, error: 'Đã xảy ra lỗi hệ thống. Vui lòng thử lại sau.' });
     }
   });
 
   router.post(['/bot/:id/bot-schedules', '/bot/:id/botSchedules'], requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
     if (req.managerAuthSession?.role !== 'admin' && req.managerAuthSession?.allowAccountChange === false) {
       return res.status(403).json({ ok: false, error: 'Tài khoản của bạn bị hạn chế thay đổi lịch hoạt động Bot.' });
     }
 
     if (!Array.isArray(req.body?.botSchedules)) {
       return res.status(400).json({ ok: false, error: 'Schedules must be an array.' });
+    }
+    if (req.body.botSchedules.length > 50) {
+      return res.status(400).json({ ok: false, error: 'Số lượng lịch hoạt động Bot tối đa là 50.' });
     }
 
     const worker = perm.worker;
@@ -1083,7 +1128,8 @@ function createUserApi({
       await registry.updateSettings(worker.workerId, { botSchedules: schedules });
       return res.json({ ok: true, message: 'Đã lưu lịch hoạt động Bot thành công.' });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      logger?.error?.('Failed to update botSchedules', { workerId: worker.workerId, error: error.message });
+      return res.status(500).json({ ok: false, error: 'Đã xảy ra lỗi hệ thống. Vui lòng thử lại sau.' });
     }
   });
 
@@ -1094,7 +1140,7 @@ function createUserApi({
     }
 
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
 
     const normId = String(perm.worker.workerId || '').trim().toLowerCase();
     const isChatClear = req.path.includes('chat-logs');
@@ -1116,7 +1162,7 @@ function createUserApi({
   // 11. REMOTE WINDOW GUI ACTIONS
   router.post('/bot/:id/window/click', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
 
     try {
       const dispatchResult = await broker.dispatch(perm.worker.workerId, 'window_click', req.body || {});
@@ -1144,7 +1190,7 @@ function createUserApi({
 
   router.post('/bot/:id/window/close', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
 
     try {
       const dispatchResult = await broker.dispatch(perm.worker.workerId, 'window_close', req.body || {});
@@ -1166,7 +1212,7 @@ function createUserApi({
   // 12. INVENTORY SUB-ACTIONS
   router.post('/bot/:id/inventory/:invAction', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
 
     const invAction = req.params.invAction;
     try {
@@ -1201,7 +1247,7 @@ function createUserApi({
       return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên (ADMIN) mới được kiểm tra cấu hình Proxy.' });
     }
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
 
     let proxyUrl = '';
     try {
@@ -1234,7 +1280,7 @@ function createUserApi({
       return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên (ADMIN) mới được xem cấu hình Proxy.' });
     }
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
 
     return res.json({ ok: true, proxy: resolveAdminProxyObject(perm.worker) });
   });
@@ -1244,7 +1290,7 @@ function createUserApi({
       return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên (ADMIN) mới được thay đổi cấu hình Proxy.' });
     }
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
 
     let proxyUrl = '';
     try {
@@ -1265,7 +1311,7 @@ function createUserApi({
           targetId: perm.worker.workerId,
           actorId: req.managerAuthSession.username,
           actorRole: 'admin',
-          actorIp: req.ip || '127.0.0.1',
+          actorIp: resolveClientIp(req) || '127.0.0.1',
           details: { enabled: Boolean(proxyUrl) }
         }).catch(() => {});
       }
@@ -1275,14 +1321,15 @@ function createUserApi({
         message: proxyUrl ? 'Đã lưu cấu hình Proxy cho bot.' : 'Đã tắt Proxy cho bot.'
       });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      logger?.error?.('Failed to update bot proxy', { workerId: perm.worker.workerId, error: error.message });
+      return res.status(500).json({ ok: false, error: 'Đã xảy ra lỗi hệ thống. Vui lòng thử lại sau.' });
     }
   });
 
   // 14. UPDATE BOT SETTINGS
   router.post('/bot/:id/settings', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
 
     const isAdmin = req.managerAuthSession.role === 'admin';
     const rawPatch = req.body || {};
@@ -1318,8 +1365,18 @@ function createUserApi({
       if (!isRestrictedUser && patch.spawnCommands !== undefined && patch.spawnCommands !== '********') {
         settingsPatch.spawnCommands = String(patch.spawnCommands || '').slice(0, 1000);
       }
-      if (!isRestrictedUser && Array.isArray(patch.autoChatSchedules)) settingsPatch.autoChatSchedules = patch.autoChatSchedules;
-      if (!isRestrictedUser && Array.isArray(patch.botSchedules)) settingsPatch.botSchedules = patch.botSchedules;
+      if (!isRestrictedUser && patch.autoChatSchedules !== undefined) {
+        if (!Array.isArray(patch.autoChatSchedules) || patch.autoChatSchedules.length > 50) {
+          return res.status(400).json({ ok: false, error: 'autoChatSchedules phải là mảng tối đa 50 phần tử.' });
+        }
+        settingsPatch.autoChatSchedules = patch.autoChatSchedules;
+      }
+      if (!isRestrictedUser && patch.botSchedules !== undefined) {
+        if (!Array.isArray(patch.botSchedules) || patch.botSchedules.length > 50) {
+          return res.status(400).json({ ok: false, error: 'botSchedules phải là mảng tối đa 50 phần tử.' });
+        }
+        settingsPatch.botSchedules = patch.botSchedules;
+      }
 
       if (patch.proxy !== undefined || patch.proxyUrl !== undefined) {
         if (!isAdmin) {
@@ -1335,7 +1392,13 @@ function createUserApi({
 
       if (isAdmin) {
         if (patch.serverHost !== undefined) settingsPatch.serverHost = String(patch.serverHost).trim();
-        if (patch.serverPort !== undefined) settingsPatch.serverPort = Number(patch.serverPort);
+        if (patch.serverPort !== undefined) {
+          const parsedPort = Number(patch.serverPort);
+          if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+            return res.status(400).json({ ok: false, error: 'Port máy chủ phải là số nguyên từ 1 đến 65535.' });
+          }
+          settingsPatch.serverPort = parsedPort;
+        }
         if (patch.version !== undefined) settingsPatch.version = String(patch.version).trim();
       }
       if (!isRestrictedUser && patch.username !== undefined) settingsPatch.username = String(patch.username).trim();
@@ -1348,7 +1411,7 @@ function createUserApi({
         targetId: worker.workerId,
         actorId: req.managerAuthSession.username,
         actorRole: req.managerAuthSession.role,
-        actorIp: req.ip || '127.0.0.1',
+        actorIp: resolveClientIp(req) || '127.0.0.1',
         details: {
           ecoMode: savedSettings.ecoMode,
           autoTotem: savedSettings.autoTotem,
@@ -1358,12 +1421,21 @@ function createUserApi({
         }
       });
 
-      const responseSettings = savedSettings && typeof savedSettings === 'object' ? { ...savedSettings } : {};
-      if (!isAdmin) {
-        delete responseSettings.serviceUrl;
-        delete responseSettings.proxyUrl;
-        delete responseSettings.proxyCiphertext;
-        delete responseSettings.mcCredentialsCiphertext;
+      const rawSaved = savedSettings && typeof savedSettings === 'object' ? savedSettings : {};
+      const responseSettings = {};
+      const ALLOWED_RESPONSE_KEYS = [
+        'afkMode', 'proxyEnabled', 'alias', 'tags', 'rentable',
+        'ecoMode', 'autoTotem', 'antiHungry', 'autoReconnect', 'antiAfkKick',
+        'userNotifyEnabled', 'notifyOnAfkKick', 'notifyOnAfkRecover', 'notifyOnReconnectExhausted',
+        'spawnCommands', 'autoChatSchedules', 'botSchedules'
+      ];
+      for (const k of ALLOWED_RESPONSE_KEYS) {
+        if (rawSaved[k] !== undefined) responseSettings[k] = rawSaved[k];
+      }
+      if (isAdmin) {
+        for (const adminKey of ['serviceUrl', 'serverHost', 'serverPort', 'version', 'username']) {
+          if (rawSaved[adminKey] !== undefined) responseSettings[adminKey] = rawSaved[adminKey];
+        }
       }
       if (isRestrictedUser && responseSettings.spawnCommands) {
         responseSettings.spawnCommands = '********';
@@ -1376,15 +1448,21 @@ function createUserApi({
         bot: buildBotPayload(updatedWorker || worker, req.managerAuthSession)
       });
     } catch (error) {
-      const status = /Proxy|không hợp lệ|array/i.test(error.message) ? 400 : 500;
-      return res.status(status).json({ ok: false, error: error.message });
+      const isBadRequest = /Proxy|không hợp lệ|array|mảng|Port/i.test(error.message || '');
+      if (!isBadRequest) {
+        logger?.error?.('Failed to update bot settings', { workerId: perm.worker.workerId, error: error.message });
+      }
+      return res.status(isBadRequest ? 400 : 500).json({
+        ok: false,
+        error: isBadRequest ? error.message : 'Đã xảy ra lỗi hệ thống. Vui lòng thử lại sau.'
+      });
     }
   });
 
   // 15. UPDATE BOT ALIAS & TAGS
   router.post('/bot/:id/alias', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
     if (perm.user?.role !== 'admin' && perm.user?.allowAccountChange === false) {
       return res.status(403).json({ ok: false, error: 'Tài khoản của bạn bị hạn chế thay đổi thông tin bot.' });
     }
@@ -1394,7 +1472,8 @@ function createUserApi({
       await registry.updateAlias(perm.worker.workerId, alias);
       return res.json({ ok: true, alias, message: 'Đã đổi biệt danh bot thành công.' });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      logger?.error?.('Failed to update bot alias', { workerId: perm.worker.workerId, error: error.message });
+      return res.status(500).json({ ok: false, error: 'Đã xảy ra lỗi hệ thống. Vui lòng thử lại sau.' });
     }
   });
 
@@ -1403,14 +1482,15 @@ function createUserApi({
       return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên (ADMIN) mới được chỉnh sửa nhãn bot.' });
     }
     const perm = await checkBotPermissionAsync(req, req.params.id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
 
     const tags = Array.isArray(req.body?.tags) ? req.body.tags.map((t) => String(t).trim().slice(0, 20)).slice(0, 5) : [];
     try {
       await registry.updateTags(perm.worker.workerId, tags);
       return res.json({ ok: true, tags, message: 'Đã cập nhật nhãn bot.' });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      logger?.error?.('Failed to update bot tags', { workerId: perm.worker.workerId, error: error.message });
+      return res.status(500).json({ ok: false, error: 'Đã xảy ra lỗi hệ thống. Vui lòng thử lại sau.' });
     }
   });
 
@@ -1421,7 +1501,7 @@ function createUserApi({
       return next();
     }
     const perm = await checkBotPermissionAsync(req, id);
-    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error });
+    if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
 
     const allowedActions = ['start', 'stop', 'restart', 'reconnect', 'respawn', 'inventory', 'look', 'toss', 'status', 'reset'];
     if (!allowedActions.includes(action)) {
@@ -1550,13 +1630,14 @@ function createUserApi({
       const status = await link4mService.getDailyQuotaStatus(req.managerAuthSession.userId);
       return res.json({ ok: true, ...status });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      logger?.error?.('Failed to get Link4M status', { error: error.message });
+      return res.status(500).json({ ok: false, error: 'Đã xảy ra lỗi hệ thống. Vui lòng thử lại sau.' });
     }
   });
 
   router.post(['/rewards/link4m/start', '/start'], requireSession, async (req, res) => {
     try {
-      const clientIp = req.ip || req.socket?.remoteAddress || '127.0.0.1';
+      const clientIp = resolveClientIp(req) || '127.0.0.1';
       const result = await link4mService.createLinkAttempt(req.managerAuthSession.userId, clientIp);
       return res.json(result);
     } catch (error) {
@@ -1595,7 +1676,11 @@ function createUserApi({
                 body: JSON.stringify(payload)
               }).then(r => r.json()).then(data => {
                 if (data.ok) {
-                  alert('Chúc mừng! Bạn đã nhận thêm ' + (data.addedHours || data.rewardHours || 12) + ' giờ sử dụng Bot thành công.');
+                  if (data.permanent || data.supportAdmin) {
+                    alert('Cảm ơn bạn đã vượt link ủng hộ Admin! Tài khoản của bạn là VIP Vĩnh Viễn nên không cộng thêm thời gian.');
+                  } else {
+                    alert('Chúc mừng! Bạn đã nhận thêm ' + (data.addedHours || data.rewardHours || 12) + ' giờ sử dụng Bot thành công.');
+                  }
                   window.location.href = '/';
                 } else {
                   alert('Xác thực thất bại: ' + (data.error || 'Token không hợp lệ.'));
@@ -1610,13 +1695,14 @@ function createUserApi({
         </html>
       `);
     } catch (error) {
-      return res.status(500).send('Lỗi xử lý xác nhận: ' + error.message);
+      logger?.error?.('Failed to render Link4M return page', { error: error.message });
+      return res.status(500).send('Đã xảy ra lỗi hệ thống khi xử lý xác nhận.');
     }
   });
 
   router.post(['/rewards/link4m/verify', '/verify'], async (req, res) => {
     try {
-      const clientIp = req.ip || req.socket?.remoteAddress || '127.0.0.1';
+      const clientIp = resolveClientIp(req) || '127.0.0.1';
       if (!checkVerifyRateLimit(clientIp)) {
         return res.status(429).json({ ok: false, error: 'Thao tác quá nhanh. Vui lòng thử lại sau 1 phút.' });
       }
@@ -1650,7 +1736,15 @@ function createUserApi({
           return res.status(403).json({ ok: false, error: 'Không có quyền kiểm tra phiên vượt link này.' });
         }
         const isRewarded = attempt.status === 'rewarded' || attempt.status === 'completed';
-        return res.json({ ok: true, isRewarded, status: attempt.status, rewardHours: attempt.rewardHours || 12 });
+        const isPermanent = Boolean(session.isPermanent === true || Number(attempt.rewardHours) === 0);
+        return res.json({
+          ok: true,
+          isRewarded,
+          status: attempt.status,
+          permanent: isPermanent,
+          supportAdmin: isPermanent,
+          rewardHours: isPermanent ? 0 : (attempt.rewardHours || 12)
+        });
       }
 
       const result = await link4mService.verifyAndClaimReward(token, attemptId);
@@ -1687,9 +1781,25 @@ function createUserApi({
   router.get(['/user/discord-link', '/discord-link'], requireSession, async (req, res) => {
     try {
       const user = req.managerAuthSession;
-      let link = await store.getDiscordLink(user.userId || user.username);
-      if (!link && user.username && user.username !== user.userId) {
-        link = await store.getDiscordLink(user.username);
+      const primaryId = String(user.userId || user.username || '').trim();
+      const ownUserIdLower = primaryId.toLowerCase();
+      const ownUsernameLower = String(user.username || '').trim().toLowerCase();
+      let link = !/^\d{17,20}$/.test(primaryId)
+        ? await store.getDiscordLink(primaryId)
+        : null;
+      if (!link && ownUsernameLower && ownUsernameLower !== ownUserIdLower && !/^\d{17,20}$/.test(ownUsernameLower)) {
+        const candidate = await store.getDiscordLink(user.username);
+        if (candidate) {
+          const linkOwnerId = String(candidate.manager_user_id || candidate.managerUserId || '').trim().toLowerCase();
+          const linkUsername = String(candidate.username || '').trim().toLowerCase();
+          if (
+            (!linkOwnerId && !linkUsername) ||
+            linkOwnerId === ownUserIdLower ||
+            linkUsername === ownUsernameLower
+          ) {
+            link = candidate;
+          }
+        }
       }
       const discordNotifyEnabled = await readUserDiscordNotifyEnabled(user);
       if (!link || String(link.status || 'active').toLowerCase() === 'revoked') {
@@ -1704,7 +1814,8 @@ function createUserApi({
         discordNotifyEnabled
       });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      logger?.error?.('Failed to fetch Discord link', { error: error.message });
+      return res.status(500).json({ ok: false, error: 'Đã xảy ra lỗi hệ thống. Vui lòng thử lại sau.' });
     }
   });
 
@@ -1742,7 +1853,7 @@ function createUserApi({
           targetId: userKey,
           actorId: user.username || userKey,
           actorRole: user.role || 'user',
-          actorIp: req.ip || '127.0.0.1',
+          actorIp: resolveClientIp(req) || '127.0.0.1',
           details: { enabled }
         }).catch(() => null);
       }
@@ -1754,7 +1865,8 @@ function createUserApi({
           : 'Đã TẮT nhận tin nhắn thông báo riêng qua Discord (DM).'
       });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      logger?.error?.('Failed to toggle Discord notify', { error: error.message });
+      return res.status(500).json({ ok: false, error: 'Đã xảy ra lỗi hệ thống. Vui lòng thử lại sau.' });
     }
   });
 
@@ -1782,7 +1894,8 @@ function createUserApi({
       }
       return res.json({ ok: true, message: 'Đã hủy liên kết tài khoản Discord thành công.' });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      logger?.error?.('Failed to unlink Discord account', { error: error.message });
+      return res.status(500).json({ ok: false, error: 'Đã xảy ra lỗi hệ thống. Vui lòng thử lại sau.' });
     }
   });
 
@@ -1810,40 +1923,47 @@ function createUserApi({
     };
   }
 
-  // 19. PUBLIC SYSTEM INFO & COMBINED BOOTSTRAP (BW-01, SEC-05)
+  async function getCachedBootstrapPayload() {
+    const now = Date.now();
+    if (publicBootstrapCache && (now - publicBootstrapCache.at < 10000)) {
+      return publicBootstrapCache.payload;
+    }
+    const sysInfo = await buildPublicSystemInfo();
+    const payload = {
+      ok: true,
+      systemInfo: sysInfo,
+      loginConfig: {
+        ok: true,
+        trialGiftEnabled: sysInfo.trialGiftEnabled,
+        trialDays: sysInfo.trialDays
+      },
+      health: {
+        ok: true,
+        status: 'healthy',
+        uptime: sysInfo.uptime
+      }
+    };
+    publicBootstrapCache = { at: now, payload };
+    return payload;
+  }
+
+  // 19. PUBLIC SYSTEM INFO & COMBINED BOOTSTRAP (BW-01, SEC-05, API-19)
   router.get(['/public/system-info', '/system-info'], async (_req, res) => {
     try {
-      return res.json(await buildPublicSystemInfo());
+      const bootstrapPayload = await getCachedBootstrapPayload();
+      return res.json(bootstrapPayload.systemInfo);
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      logger?.error?.('Failed to build public system info', { error: error.message });
+      return res.status(500).json({ ok: false, error: 'Đã xảy ra lỗi hệ thống. Vui lòng thử lại sau.' });
     }
   });
 
   router.get(['/public/bootstrap', '/bootstrap'], async (_req, res) => {
     try {
-      const now = Date.now();
-      if (publicBootstrapCache && (now - publicBootstrapCache.at < 10000)) {
-        return res.json(publicBootstrapCache.payload);
-      }
-      const sysInfo = await buildPublicSystemInfo();
-      const payload = {
-        ok: true,
-        systemInfo: sysInfo,
-        loginConfig: {
-          ok: true,
-          trialGiftEnabled: sysInfo.trialGiftEnabled,
-          trialDays: sysInfo.trialDays
-        },
-        health: {
-          ok: true,
-          status: 'healthy',
-          uptime: sysInfo.uptime
-        }
-      };
-      publicBootstrapCache = { at: now, payload };
-      return res.json(payload);
+      return res.json(await getCachedBootstrapPayload());
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      logger?.error?.('Failed to build public bootstrap payload', { error: error.message });
+      return res.status(500).json({ ok: false, error: 'Đã xảy ra lỗi hệ thống. Vui lòng thử lại sau.' });
     }
   });
 

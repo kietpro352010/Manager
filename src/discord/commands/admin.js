@@ -4,9 +4,19 @@ const { SlashCommandBuilder } = require('discord.js');
 const { buildAdminPasswordModal, embed } = require('../panels/renderer');
 const { resolveLinkedUser } = require('../handlers/panel-handler');
 
-function checkUserAdmin(interaction, services, user) {
+async function getAllowedGuildId(services) {
+  const { getEffectiveAllowedGuildId } = require('../handlers/interaction-handler');
+  return getEffectiveAllowedGuildId(services?.config, services);
+}
+
+function checkUserAdmin(interaction, services, user, allowedGuildId) {
   const { isUserAdmin } = require('../handlers/interaction-handler');
-  return isUserAdmin(interaction, services, user);
+  return isUserAdmin(interaction, services, user, allowedGuildId);
+}
+
+function checkSuperAdmin(interaction, services, allowedGuildId) {
+  const { isSuperAdmin } = require('../handlers/interaction-handler');
+  return isSuperAdmin(interaction, services, allowedGuildId);
 }
 
 const definition = new SlashCommandBuilder()
@@ -32,10 +42,11 @@ function shouldSkipDefer(interaction) {
 }
 
 async function execute(interaction, services) {
+  const allowedGuildId = await getAllowedGuildId(services);
   const user = (services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function')
     ? await resolveLinkedUser(interaction, services)
     : null;
-  const isAdmin = checkUserAdmin(interaction, services, user);
+  const isAdmin = checkUserAdmin(interaction, services, user, allowedGuildId);
 
   if (!isAdmin) {
     return {
@@ -47,21 +58,7 @@ async function execute(interaction, services) {
 
   // 1. SETUP
   if (subcommand === 'setup') {
-    const userId = interaction.user?.id;
-    const hasAdminPerm = Boolean(
-      interaction.memberPermissions?.has?.('Administrator') ||
-      interaction.memberPermissions?.has?.(8n) ||
-      interaction.member?.permissions?.has?.('Administrator') ||
-      interaction.member?.permissions?.has?.(8n)
-    );
-    const isSuperAdmin = Boolean(
-      (services?.config?.adminUserId && services.config.adminUserId === userId) ||
-      (services?.accessControl?.adminUserId && services.accessControl.adminUserId === userId) ||
-      (interaction.guild?.ownerId && interaction.guild.ownerId === userId) ||
-      hasAdminPerm
-    );
-
-    if (!isSuperAdmin) {
+    if (!checkSuperAdmin(interaction, services, allowedGuildId)) {
       return {
         embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Chỉ Chủ sở hữu server hoặc SuperAdmin mới có quyền chạy setup.', 0xef4444)]
       };
@@ -90,6 +87,13 @@ async function execute(interaction, services) {
       adminUserId: adminUser ? adminUser.id : (services.accessControl?.adminUserId || services.config.adminUserId || ''),
       configuredBy: interaction.user?.id || 'discord-setup'
     });
+
+    await services.accessStore?.addAudit?.({
+      action: 'DISCORD_ADMIN_SETUP',
+      actorId: interaction.user?.id || 'discord-setup',
+      targetId: interaction.guildId || '',
+      details: { adminRoleId: adminRole.id, userRoleId: userRole.id, adminUserId: adminUser?.id || null }
+    }).catch(() => null);
 
     // Tự động đồng bộ slash commands vào server này ngay lập tức
     try {
@@ -120,21 +124,7 @@ async function execute(interaction, services) {
 
   // 1B. PASSWORD (Đổi mật khẩu Web cho admin ngay trên Discord)
   if (subcommand === 'password') {
-    const userId = interaction.user?.id;
-    const hasAdminPerm = Boolean(
-      interaction.memberPermissions?.has?.('Administrator') ||
-      interaction.memberPermissions?.has?.(8n) ||
-      interaction.member?.permissions?.has?.('Administrator') ||
-      interaction.member?.permissions?.has?.(8n)
-    );
-    const isSuperAdmin = Boolean(
-      (services?.config?.adminUserId && services.config.adminUserId === userId) ||
-      (services?.accessControl?.adminUserId && services.accessControl.adminUserId === userId) ||
-      (interaction.guild?.ownerId && interaction.guild.ownerId === userId) ||
-      hasAdminPerm
-    );
-
-    if (!isSuperAdmin) {
+    if (!checkSuperAdmin(interaction, services, allowedGuildId)) {
       return {
         embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Chỉ Chủ sở hữu server hoặc SuperAdmin mới có quyền đổi mật khẩu quản trị viên.', 0xef4444)]
       };
@@ -156,8 +146,8 @@ async function execute(interaction, services) {
       };
     }
 
-    const { hashAdminPassword } = require('../../utils/secrets');
-    const hashed = hashAdminPassword(newPassword);
+    const { hashAdminPasswordAsync } = require('../../utils/secrets');
+    const hashed = await hashAdminPasswordAsync(newPassword);
     if (services.accessStore && typeof services.accessStore.setSetting === 'function') {
       await services.accessStore.setSetting('admin_credentials', {
         passwordHash: hashed,
@@ -178,6 +168,12 @@ async function execute(interaction, services) {
     if (typeof services.invalidateAdminSessions === 'function') {
       services.invalidateAdminSessions();
     }
+    await services.accessStore?.addAudit?.({
+      action: 'DISCORD_ADMIN_PASSWORD_CHANGED',
+      actorId: interaction.user?.id || 'discord-admin',
+      targetId: 'admin',
+      details: { via: 'discord_command', guildId: interaction.guildId || null }
+    }).catch(() => null);
 
     return {
       embeds: [

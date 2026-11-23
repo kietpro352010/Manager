@@ -10,6 +10,12 @@ const definition = new SlashCommandBuilder()
 async function execute(interaction, services) {
   const discordUserId = interaction.user?.id;
   await services.accessStore.unlinkDiscord(discordUserId);
+  await services.accessStore?.addAudit?.({
+    action: 'DISCORD_LOGOUT',
+    actorId: discordUserId,
+    targetId: discordUserId,
+    details: { guildId: interaction.guildId || null }
+  }).catch(() => null);
 
   let roleNote = '';
   if (services) {

@@ -1,4 +1,9 @@
 window.__INITIAL_USER__ = null;
+window.systemMaintenance = {
+  enabled: false,
+  message: 'Hệ thống đang bảo trì nâng cấp máy chủ. Tạm khóa thao tác điều khiển worker, vui lòng quay lại sau.',
+  updatedAt: null
+};
 let currentUser = window.__INITIAL_USER__ || null;
 let userManagementList = [];
 let userManagementAvailableBots = [];
@@ -299,6 +304,149 @@ function getUserExpirationInfo() {
 }
 window.getUserExpirationInfo = getUserExpirationInfo;
 
+const DEFAULT_SYSTEM_MAINTENANCE_MSG =
+  'Hệ thống đang bảo trì nâng cấp máy chủ. Tạm khóa thao tác điều khiển worker, vui lòng quay lại sau.';
+
+function getSystemMaintenanceInfo() {
+  const m = window.systemMaintenance || {};
+  const msg = String(m.message || '').trim() || DEFAULT_SYSTEM_MAINTENANCE_MSG;
+  return {
+    enabled: Boolean(m.enabled),
+    message: msg,
+    updatedAt: m.updatedAt || null
+  };
+}
+window.getSystemMaintenanceInfo = getSystemMaintenanceInfo;
+
+function getWorkerLockInfo() {
+  const isAdmin = Boolean(typeof currentUser !== 'undefined' && currentUser && currentUser.role === 'admin');
+  const maint = getSystemMaintenanceInfo();
+  const userExp = getUserExpirationInfo();
+  if (isAdmin) {
+    return { locked: false, reason: null, message: '', userExp, maintenance: maint };
+  }
+  if (maint.enabled) {
+    return {
+      locked: true,
+      reason: 'maintenance',
+      message: maint.message,
+      userExp,
+      maintenance: maint
+    };
+  }
+  if (userExp.isExpired) {
+    return {
+      locked: true,
+      reason: 'expired',
+      message: 'Gói bot của bạn đã hết hạn, tính năng điều khiển bị vô hiệu hóa. Vui lòng gia hạn để tiếp tục sử dụng.',
+      userExp,
+      maintenance: maint
+    };
+  }
+  return { locked: false, reason: null, message: '', userExp, maintenance: maint };
+}
+window.getWorkerLockInfo = getWorkerLockInfo;
+
+function renderSystemMaintenanceBanner() {
+  const maint = getSystemMaintenanceInfo();
+  const isAdmin = Boolean(typeof currentUser !== 'undefined' && currentUser && currentUser.role === 'admin');
+
+  const badge = document.getElementById('maintenanceStatusBadge');
+  if (badge) {
+    badge.textContent = maint.enabled ? 'ĐANG BẬT' : 'TẮT';
+    badge.style.color = maint.enabled ? '#fbbf24' : '#94a3b8';
+  }
+  const grp = document.getElementById('maintenanceControlGroup');
+  if (grp) {
+    grp.style.borderColor = maint.enabled ? 'rgba(245,158,11,0.85)' : 'rgba(245,158,11,0.38)';
+    grp.style.background = maint.enabled ? 'rgba(120,53,15,0.28)' : 'var(--card2)';
+  }
+
+  const isLoggedIn = Boolean(typeof currentUser !== 'undefined' && currentUser);
+
+  const banner = document.getElementById('systemMaintenanceBanner');
+  if (banner) {
+    if (maint.enabled && isLoggedIn) {
+      banner.classList.remove('hidden');
+      const titleEl = document.getElementById('systemMaintenanceBannerTitle');
+      const msgEl = document.getElementById('systemMaintenanceBannerMessage');
+      const actionsEl = document.getElementById('systemMaintenanceAdminActions');
+      if (titleEl) {
+        titleEl.textContent = isAdmin
+          ? 'CHẾ ĐỘ BẢO TRÌ ĐANG BẬT (NGƯỜI DÙNG BỊ KHÓA WORKER)'
+          : 'HỆ THỐNG ĐANG BẢO TRÌ';
+      }
+      if (msgEl) {
+        msgEl.textContent = isAdmin
+          ? ('Thông báo đang hiển thị cho khách: ' + maint.message)
+          : maint.message;
+      }
+      if (actionsEl) {
+        actionsEl.style.display = isAdmin ? 'flex' : 'none';
+      }
+    } else {
+      banner.classList.add('hidden');
+    }
+  }
+
+  const detailBanner = document.getElementById('detailMaintenanceBanner');
+  if (detailBanner) {
+    if (maint.enabled && isLoggedIn && !isAdmin) {
+      detailBanner.classList.remove('hidden');
+      const dMsg = document.getElementById('detailMaintenanceBannerMessage');
+      if (dMsg) dMsg.textContent = maint.message;
+    } else {
+      detailBanner.classList.add('hidden');
+    }
+  }
+
+  const lockInfo = getWorkerLockInfo();
+  const inFlight = typeof allLifecycleActionInFlight !== 'undefined' && Boolean(allLifecycleActionInFlight);
+  ['allStartButton', 'allStopButton', 'allRestartButton', 'allReconnectButton'].forEach((id) => {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    if (!btn.dataset.defaultTitle) {
+      btn.dataset.defaultTitle = btn.getAttribute('title') || '';
+    }
+    if (lockInfo.locked) {
+      btn.disabled = true;
+      btn.classList.add('locked-control-btn');
+      btn.style.opacity = '0.5';
+      btn.style.cursor = 'not-allowed';
+      btn.title = lockInfo.message || 'Tạm khóa điều khiển';
+    } else {
+      btn.disabled = Boolean(inFlight && btn.id !== 'allReconnectButton');
+      btn.classList.remove('locked-control-btn');
+      btn.style.opacity = '';
+      btn.style.cursor = '';
+      btn.title = btn.dataset.defaultTitle || '';
+    }
+  });
+}
+window.renderSystemMaintenanceBanner = renderSystemMaintenanceBanner;
+
+function syncSystemMaintenanceState(nextMaint, options = {}) {
+  if (!nextMaint || typeof nextMaint !== 'object') return false;
+  const prev = getSystemMaintenanceInfo();
+  const cleanMsg = String(nextMaint.message || '').trim() || DEFAULT_SYSTEM_MAINTENANCE_MSG;
+  const nextEnabled = Boolean(nextMaint.enabled);
+  const changed = prev.enabled !== nextEnabled || prev.message !== cleanMsg;
+  window.systemMaintenance = {
+    enabled: nextEnabled,
+    message: cleanMsg,
+    updatedAt: nextMaint.updatedAt || null
+  };
+  renderSystemMaintenanceBanner();
+  if (changed && options && options.rerender !== false) {
+    if (typeof renderHome === 'function') renderHome();
+    if (typeof selectedBotId !== 'undefined' && selectedBotId !== null && typeof detailStatusHtml === 'function') {
+      detailStatusHtml();
+    }
+  }
+  return changed;
+}
+window.syncSystemMaintenanceState = syncSystemMaintenanceState;
+
 function botCardHtml(bot) {
   if (!bot) return '';
   const [color, label, errorType] = statusMeta(bot.status, bot.available, !!bot.manuallyStopped, bot);
@@ -422,7 +570,7 @@ function botCardHtml(bot) {
     } else if (errorType === 'secret_mismatch') {
       errorBannerHtml = '<div class="bot-error-action-banner warning">' +
         '<div class="bot-error-text">⚠️ <strong>Lệch Secret Key (409):</strong> Worker từ chối lệnh do khóa bí mật không khớp với Manager.</div>' +
-        (isAdmin ? '<button type="button" class="bot-action-chip warning" onclick="event.stopPropagation(); openEditSecretModal(' + escapeHtml(idArg) + ')" title="Cập nhật Secret Key cho Bot #' + idStr + '">🔑 Sửa Secret Key</button>' : '') +
+        (isAdmin ? '<button type="button" class="bot-action-chip warning" onclick="event.stopPropagation(); openEditSecretModal(' + escapeHtml(idArg) + ')" title="Cập nhật Secret Key cho Bot #' + escapeHtml(idStr) + '">🔑 Sửa Secret Key</button>' : '') +
       '</div>';
     } else if (errorType === 'render_sleep') {
       const isRender = bot?.url ? String(bot.url).includes('.onrender.com') : true;
@@ -453,15 +601,26 @@ function botCardHtml(bot) {
     }
   }
 
-  const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : { isExpired: false };
-  const isCardLocked = userExp.isExpired && !isAdmin;
+  const lockInfo = getWorkerLockInfo();
+  const userExp = lockInfo.userExp || { isExpired: false };
+  const isMaintenanceLocked = lockInfo.locked && lockInfo.reason === 'maintenance';
+  const isCardLocked = lockInfo.locked;
 
   const cardDisabledAttr = isCardLocked ? ' disabled="true"' : '';
   const cardDisabledStyle = isCardLocked ? ' style="opacity:0.45; cursor:not-allowed;"' : '';
-  const cardDisabledTitle = isCardLocked ? ' title="Tính năng điều khiển bị vô hiệu hóa do gói bot đã hết hạn. Hãy gia hạn key để sử dụng."' : '';
+  const cardDisabledTitle = isCardLocked
+    ? (' title="' + escapeHtml(isMaintenanceLocked ? ('Hệ thống đang bảo trì: ' + lockInfo.message) : 'Tính năng điều khiển bị vô hiệu hóa do gói bot đã hết hạn. Hãy gia hạn key để sử dụng.') + '"')
+    : '';
 
   let cardOverlayHtml = '';
-  if (isCardLocked) {
+  if (isMaintenanceLocked) {
+    cardOverlayHtml = '<div class="bot-card-expire-overlay maintenance" onclick="event.stopPropagation()">' +
+      '<div class="bot-card-expire-badge">🛠️ HỆ THỐNG ĐANG BẢO TRÌ</div>' +
+      '<div class="bot-card-expire-title">TẠM KHÓA THAO TÁC WORKER</div>' +
+      '<div class="bot-card-expire-desc">' + escapeHtml(lockInfo.message) + '</div>' +
+      '<div class="bot-card-maintenance-note">Tài khoản vẫn đăng nhập bình thường. Worker sẽ mở lại ngay khi bảo trì hoàn tất.</div>' +
+    '</div>';
+  } else if (isCardLocked) {
     if (userExp.inGracePeriod) {
       const remainingMin = Math.max(1, Math.round(userExp.remainingGraceMs / 60000));
       const hours = Math.floor(remainingMin / 60);
@@ -499,14 +658,18 @@ function botCardHtml(bot) {
     }
   }
 
-  return '<div class="bot-card ' + statusGlowClass + (isCardLocked ? (' is-card-expired ' + (userExp.inGracePeriod ? 'grace-period' : 'grace-expired')) : '') + '" data-bot-id="' + escapeHtml(id) + '" draggable="' + (isAdmin ? 'true' : 'false') + '" ' +
+  const lockedCardClasses = isMaintenanceLocked
+    ? ' is-card-expired is-card-maintenance'
+    : (isCardLocked ? (' is-card-expired ' + (userExp.inGracePeriod ? 'grace-period' : 'grace-expired')) : '');
+
+  return '<div class="bot-card ' + statusGlowClass + lockedCardClasses + '" data-bot-id="' + escapeHtml(id) + '" draggable="' + (isAdmin ? 'true' : 'false') + '" ' +
     (isAdmin ? 'ondragstart="startBotDrag(event,' + escapeHtml(idArg) + ')" ondragover="allowBotDrop(event)" ondrop="dropBot(event,' + escapeHtml(idArg) + ')" ondragend="endBotDrag(event)"' : '') +
     ' onclick="openBot(this.dataset.botId)">' +
     cardOverlayHtml +
 
     '<div class="bot-card-topbar">' +
       '<div class="bot-card-title-group">' +
-        '<span class="bot-id-chip">#' + idStr + '</span>' +
+        '<span class="bot-id-chip">#' + escapeHtml(idStr) + '</span>' +
         '<h2 class="bot-card-name" title="' + escapeHtml(bot.label) + '">' + escapeHtml(bot.label) + '</h2>' +
         '<button type="button" class="bot-mini-btn btn-rename-alias" data-bot-id="' + escapeHtml(id) + '" data-bot-label="' + escapeHtml(bot.label) + '" ' + cardDisabledAttr + (isCardLocked ? cardDisabledStyle + cardDisabledTitle : 'title="Đổi tên / Ghi chú hiển thị"') + ' onclick="event.stopPropagation(); handleRenameClick(this)">✏</button>' +
       '</div>' +
@@ -596,7 +759,7 @@ function botCardHtml(bot) {
         '<button type="button" class="small card-btn primary" ' + cardDisabledAttr + (isCardLocked ? cardDisabledStyle + cardDisabledTitle : '') + ' onclick="quickBotAction(event,' + escapeHtml(idArg) + ',\'start\')">▶ Bật</button>' :
         '<button type="button" class="small card-btn danger" ' + cardDisabledAttr + (isCardLocked ? cardDisabledStyle + cardDisabledTitle : '') + ' onclick="quickBotAction(event,' + escapeHtml(idArg) + ',\'stop\')">⏹ Dừng</button>'
       ) +
-      '<button type="button" class="small card-btn detail-link-btn" onclick="openBot(' + escapeHtml(idArg) + ')">⚙ Chi Tiết →</button>' +
+      '<button type="button" class="small card-btn detail-link-btn" ' + (isMaintenanceLocked ? (cardDisabledAttr + cardDisabledStyle + cardDisabledTitle) : '') + ' onclick="openBot(' + escapeHtml(idArg) + ')">⚙ Chi Tiết →</button>' +
     '</div>' +
 
   '</div>';
@@ -659,6 +822,10 @@ async function quickRedeemKeyOnCard(btnOrInput, botId) {
       body: JSON.stringify({ key })
     });
     if (res.ok) {
+      if (input) {
+        input.value = '';
+        input.removeAttribute('data-dirty');
+      }
       if (currentUser) {
         currentUser.status = 'active';
         currentUser.inGracePeriod = false;

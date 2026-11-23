@@ -4,10 +4,15 @@ class AsyncKeyLock {
   constructor() {
     this.tails = new Map();
     this.counts = new Map();
+    this.epoch = 0;
   }
 
-  async run(keyValue, task, { waitTimeoutMs = 12000, executionTimeoutMs = 30000 } = {}) {
+  async run(keyValue, task, { waitTimeoutMs, executionTimeoutMs = 30000 } = {}) {
     const key = String(keyValue);
+    const parsedExecMs = Number(executionTimeoutMs);
+    const effectiveExecMs = Number.isFinite(parsedExecMs) ? parsedExecMs : 30000;
+    const effectiveWaitMs = waitTimeoutMs === undefined ? Math.max(30000, effectiveExecMs) : waitTimeoutMs;
+    const runEpoch = this.epoch;
     const count = (this.counts.get(key) || 0) + 1;
     this.counts.set(key, count);
 
@@ -28,10 +33,10 @@ class AsyncKeyLock {
 
     let waitTimer = null;
     const timeoutPromise = new Promise((_, reject) => {
-      if (waitTimeoutMs > 0) {
+      if (effectiveWaitMs > 0) {
         waitTimer = setTimeout(() => {
-          reject(new Error(`Timeout waiting for local key lock: ${key} (${waitTimeoutMs}ms)`));
-        }, waitTimeoutMs);
+          reject(new Error(`Timeout waiting for local key lock: ${key} (${effectiveWaitMs}ms)`));
+        }, effectiveWaitMs);
         waitTimer.unref?.();
       }
     });
@@ -40,37 +45,46 @@ class AsyncKeyLock {
       await Promise.race([previous.catch(() => {}), timeoutPromise]);
     } catch (waitErr) {
       release();
-      this.decrementCount(key, tail);
+      this.decrementCount(key, tail, runEpoch);
       throw waitErr;
     } finally {
       if (waitTimer) clearTimeout(waitTimer);
+    }
+
+    if (runEpoch !== this.epoch) {
+      release();
+      this.decrementCount(key, tail, runEpoch);
+      throw new Error(`Lock cleared while waiting for key: ${key}`);
     }
 
     let execTimer = null;
     let timedOut = false;
     let taskSettled = false;
     let cleanedUp = false;
+    const ac = typeof AbortController === 'function' ? new AbortController() : null;
     const cleanupOnce = () => {
       if (cleanedUp) return;
       cleanedUp = true;
       release();
-      this.decrementCount(key, tail);
+      this.decrementCount(key, tail, runEpoch);
     };
 
     let taskPromise;
     try {
-      taskPromise = Promise.resolve(task());
+      taskPromise = Promise.resolve(task(ac ? { signal: ac.signal } : {}));
     } catch (syncErr) {
       taskPromise = Promise.reject(syncErr);
     }
 
     const execTimeoutPromise = new Promise((_, reject) => {
-      if (executionTimeoutMs > 0) {
+      if (effectiveExecMs > 0) {
         execTimer = setTimeout(() => {
           if (taskSettled) return;
           timedOut = true;
-          reject(new Error(`Execution timeout for local key lock: ${key} (${executionTimeoutMs}ms)`));
-        }, executionTimeoutMs);
+          const err = new Error(`Execution timeout for local key lock: ${key} (${effectiveExecMs}ms)`);
+          ac?.abort(err);
+          reject(err);
+        }, effectiveExecMs);
         execTimer.unref?.();
       }
     });
@@ -92,11 +106,14 @@ class AsyncKeyLock {
     }
   }
 
-  decrementCount(key, tail) {
+  decrementCount(key, tail, runEpoch = this.epoch) {
+    if (runEpoch !== this.epoch) return;
     const current = (this.counts.get(key) || 1) - 1;
     if (current <= 0) {
       this.counts.delete(key);
-      this.tails.delete(key);
+      if (!tail || this.tails.get(key) === tail) {
+        this.tails.delete(key);
+      }
     } else {
       this.counts.set(key, current);
     }
@@ -107,6 +124,7 @@ class AsyncKeyLock {
   }
 
   clear() {
+    this.epoch += 1;
     this.tails.clear();
     this.counts.clear();
   }

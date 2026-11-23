@@ -58,7 +58,7 @@
 
       <div id="link4mApiTokenGroup" style="display:none;">
         <label for="link4mModalApiToken" style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Link4M Publisher API Token:</label>
-        <input type="text" id="link4mModalApiToken" placeholder="Nhập API Token từ tài khoản Link4M của bạn..." style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
+        <input type="password" id="link4mModalApiToken" autocomplete="off" placeholder="Nhập API Token từ tài khoản Link4M của bạn..." style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
         <span style="font-size:11.5px;color:var(--muted);display:block;margin-top:4px;">Backend sẽ tự gọi https://link4m.co/api để rút gọn link trả thưởng động.</span>
       </div>
 
@@ -75,13 +75,48 @@
 
       <div>
         <label for="link4mModalSecretKey" style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Khóa bí mật Webhook Postback (Tùy chọn):</label>
-        <input type="text" id="link4mModalSecretKey" placeholder="Để trống nếu không dùng server postback..." style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
+        <input type="password" id="link4mModalSecretKey" autocomplete="off" placeholder="Để trống nếu không dùng server postback..." style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
       </div>
     </div>
 
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;border-top:1px solid var(--border);padding-top:12px;">
       <button type="button" class="secondary" onclick="closeLink4mConfigModal()">Đóng</button>
       <button type="button" class="primary" onclick="saveLink4mConfigModal()">💾 Lưu Cài Đặt</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL CẤU HÌNH BẢO TRÌ HỆ THỐNG (ADMIN) -->
+<div id="maintenanceSettingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="maintenanceSettingsModalTitle">
+  <div class="modal-card" style="max-width:520px;width:100%;box-sizing:border-box;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:10px;">
+      <h3 id="maintenanceSettingsModalTitle" style="margin:0;color:#fbbf24;display:flex;align-items:center;gap:8px;">🛠️ Cấu Hình Bảo Trì Hệ Thống</h3>
+      <button type="button" class="small" onclick="closeMaintenanceConfigModal()" aria-label="Đóng">✕</button>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:14px;font-size:13px;">
+      <div style="padding:10px 12px;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.35);border-radius:8px;color:#fde68a;font-size:12px;line-height:1.5;">
+        Người dùng vẫn có thể đăng nhập Web để xem trạng thái hoặc gia hạn key, nhưng toàn bộ thẻ Worker sẽ hiển thị làm mờ và khóa thao tác điều khiển (Web &amp; Discord) cho tới khi bạn tắt bảo trì. Quản trị viên vẫn thao tác bình thường.
+      </div>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:rgba(15,23,42,0.6);border:1px solid var(--border);border-radius:8px;">
+        <label for="maintenanceModalEnabled" style="margin:0;cursor:pointer;">
+          <strong style="color:var(--text);display:block;">Bật chế độ bảo trì hệ thống:</strong>
+          <span style="font-size:11.5px;color:var(--muted);">Khóa tạm thời toàn bộ thao tác Worker đối với tài khoản khách</span>
+        </label>
+        <input type="checkbox" id="maintenanceModalEnabled" style="width:20px;height:20px;cursor:pointer;">
+      </div>
+
+      <div>
+        <label for="maintenanceModalMessage" style="font-weight:700;display:block;margin-bottom:6px;color:var(--text);">Thông báo bảo trì hiển thị cho người dùng:</label>
+        <textarea id="maintenanceModalMessage" rows="4" maxlength="600" placeholder="Ví dụ: Hệ thống đang bảo trì nâng cấp máy chủ đến 22:00. Tạm khóa điều khiển worker, mong bạn thông cảm." style="width:100%;padding:10px 12px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;resize:vertical;font-family:inherit;line-height:1.45;"></textarea>
+        <span style="font-size:11.5px;color:var(--muted);display:block;margin-top:4px;">Tối đa 600 ký tự. Để trống sẽ dùng thông báo bảo trì mặc định.</span>
+      </div>
+    </div>
+
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;border-top:1px solid var(--border);padding-top:12px;">
+      <button type="button" class="secondary" onclick="closeMaintenanceConfigModal()">Đóng</button>
+      <button type="button" class="primary" onclick="saveMaintenanceConfigModal()">💾 Lưu Cài Đặt</button>
     </div>
   </div>
 </div>
@@ -223,7 +258,7 @@
         ⚡ <strong>Direct Connection:</strong> Không bắt buộc! Chỉ cần nhập URL là Manager tự kết nối trực tiếp với Worker.
       </div>
     </div>
-    <div class="form-row" style="margin-bottom:12px;">
+    <div class="form-row admin-only" style="margin-bottom:12px;">
       <label for="editBotTags" style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">🏷️ Nhóm Tags (ngăn cách bởi dấu phẩy)</label>
       <input id="editBotTags" placeholder="farm, afk, lobby, vip..." autocomplete="off" oninput="renderEditBotTagPreviews(this.value)" style="width:100%;box-sizing:border-box;">
       <div id="editBotTagsPreview" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;min-height:24px;"></div>
@@ -426,7 +461,7 @@
     </div>
     <div class="form-row">
       <label for="webhookTelegramToken">Telegram Bot Token (Tùy chọn)</label>
-      <input id="webhookTelegramToken" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11">
+      <input id="webhookTelegramToken" type="password" autocomplete="off" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11">
     </div>
     <div class="form-row">
       <label for="webhookTelegramChatId">Telegram Chat ID (Tùy chọn)</label>
@@ -450,40 +485,6 @@
     </div>
   </div>
 </div>
-<div id="userManagementModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="userManagementModalTitle">
-  <div class="modal-card modal-lg">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px;">
-      <div>
-        <h3 id="userManagementModalTitle" style="margin:0 0 4px;font-size:18.5px;">👥 Quản lý Người dùng & Phân quyền Bot (RBAC)</h3>
-        <div style="color:var(--muted);font-size:12px;">Tạo tài khoản và phân quyền vận hành bot cho từng thành viên.</div>
-      </div>
-      <button type="button" class="primary" onclick="openCreateUserModal()">＋ Thêm Người Dùng Mới</button>
-    </div>
-
-    <div class="user-table-wrap">
-      <table class="user-table">
-        <thead>
-          <tr>
-            <th>TÊN ĐĂNG NHẬP</th>
-            <th>GÓI & HẠN THUÊ</th>
-            <th>GHI CHÚ</th>
-            <th>TRẠNG THÁI</th>
-            <th>BOT ĐƯỢC CẤP QUYỀN</th>
-            <th style="text-align:right;">THAO TÁC</th>
-          </tr>
-        </thead>
-        <tbody id="userTableBody">
-          <tr><td colspan="6" style="text-align:center;padding:24px;color:var(--muted);">Đang tải danh sách người dùng...</td></tr>
-        </tbody>
-      </table>
-    </div>
-
-    <div class="modal-actions">
-      <button type="button" onclick="closeUserManagementModal()">Đóng</button>
-    </div>
-  </div>
-</div>
-
 <div id="userEditModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="userEditModalTitle">
   <div class="modal-card" style="width:min(580px, 98vw);">
     <h3 id="userEditModalTitle">Thêm Người Dùng Mới</h3>

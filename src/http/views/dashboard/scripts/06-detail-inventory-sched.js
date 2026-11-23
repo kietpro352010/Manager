@@ -78,50 +78,52 @@ function dropDetailInventory(event,destinationSlot){
   if(source===45){unequipAndMove('off-hand',destinationSlot);return;}
   moveDetailItem(source,destinationSlot);
 }
-async function unequipAndMove(destination,slot){
-  showToast('Đang tháo trang bị...');
-  // BUG-22: Worker /inventory/unequip kiểm tra inventory revision và trả 409 khi
-  // revision thiếu/sai. Gửi revision đúng từ snapshot; nếu 409 (dữ liệu đã đổi) thì
-  // refresh từ response của worker rồi thử lại đúng 1 lần.
-  let result=await detailPost('/inventory/unequip',{destination,revision:detailInventory?detailInventory.revision:0});
-  if(!result.ok&&result.status===409&&result.data?.inventory){
-    detailInventory=result.data.inventory;
-    renderDetailInventory();
-    result=await detailPost('/inventory/unequip',{destination,revision:detailInventory.revision});
-  }
-  if(!result.ok){showToast(result.data?.error||'Không thể tháo trang bị.');await refreshDetail(true);return;}
-  await refreshDetail(true);
-  if(!detailInventory) return;
-  const targetSlot = result.data?.unequippedToSlot ?? result.data?.slot;
-  if(Number.isInteger(targetSlot) && targetSlot !== slot){
-    await moveDetailItem(targetSlot, slot);
-  } else {
-    let found=null;
-    const slots=detailInventory.slots||{};
-    for(let s=9;s<=35;s++){
-      const item=slots[String(s)];
-      if(item&&item.name){found={slot:s,item};break;}
+async function _moveDetailItemLocked(sourceSlot,destSlot){
+  let result=await detailPost('/inventory/move',{sourceSlot,destSlot,revision:detailInventory.revision});
+  if(!result.ok && (result.status === 409 || String(result.data?.error || '').includes('revision_mismatch'))){
+    if(result.data?.inventory){
+      detailInventory=result.data.inventory;
+      renderDetailInventory();
+    } else {
+      await refreshDetail(true);
     }
-    if(found&&slot!==found.slot){await moveDetailItem(found.slot,slot);}
+    result=await detailPost('/inventory/move',{sourceSlot,destSlot,revision:detailInventory?.revision});
   }
+  if(result.data?.inventory){detailInventory=result.data.inventory;renderDetailInventory();}
+  if(!result.ok){showToast(result.data?.error||'Di chuyển thất bại.');await refreshDetail(true);return false;}
+  showToast(result.data?.message||'Đã di chuyển item.');
+  return true;
+}
+async function unequipAndMove(destination,slot){
+  if(detailInventoryBusy||!detailInventory) return;
+  detailInventoryBusy=true;
+  try{
+    showToast('Đang tháo trang bị...');
+    // BUG-22: Worker /inventory/unequip kiểm tra inventory revision và trả 409 khi
+    // revision thiếu/sai. Gửi revision đúng từ snapshot; nếu 409 (dữ liệu đã đổi) thì
+    // refresh từ response của worker rồi thử lại đúng 1 lần.
+    let result=await detailPost('/inventory/unequip',{destination,revision:detailInventory?detailInventory.revision:0});
+    if(!result.ok&&result.status===409&&result.data?.inventory){
+      detailInventory=result.data.inventory;
+      renderDetailInventory();
+      result=await detailPost('/inventory/unequip',{destination,revision:detailInventory.revision});
+    }
+    if(!result.ok){showToast(result.data?.error||'Không thể tháo trang bị.');await refreshDetail(true);return;}
+    await refreshDetail(true);
+    if(!detailInventory) return;
+    const targetSlot = result.data?.unequippedToSlot ?? result.data?.slot;
+    if(Number.isInteger(targetSlot) && targetSlot !== slot){
+      await _moveDetailItemLocked(targetSlot, slot);
+    } else if (!Number.isInteger(targetSlot)) {
+      showToast('Đã tháo trang bị về rương đồ.');
+    }
+  } finally {detailInventoryBusy=false;}
 }
 async function moveDetailItem(sourceSlot,destSlot){
   if(detailInventoryBusy||!detailInventory) return;
   detailInventoryBusy=true;
   try{
-    let result=await detailPost('/inventory/move',{sourceSlot,destSlot,revision:detailInventory.revision});
-    if(!result.ok && (result.status === 409 || String(result.data?.error || '').includes('revision_mismatch'))){
-      if(result.data?.inventory){
-        detailInventory=result.data.inventory;
-        renderDetailInventory();
-      } else {
-        await refreshDetail(true);
-      }
-      result=await detailPost('/inventory/move',{sourceSlot,destSlot,revision:detailInventory?.revision});
-    }
-    if(result.data?.inventory){detailInventory=result.data.inventory;renderDetailInventory();}
-    if(!result.ok){showToast(result.data?.error||'Di chuyển thất bại.');await refreshDetail(true);return;}
-    showToast(result.data?.message||'Đã di chuyển item.');
+    await _moveDetailItemLocked(sourceSlot,destSlot);
   } finally {detailInventoryBusy=false;}
 }
 async function dropDetailItemToWorld(event){
@@ -365,6 +367,12 @@ async function saveDetailSettings(){
     ? isDetailSettingsRestrictedUser()
     : Boolean(typeof currentUser!=='undefined'&&currentUser&&currentUser.role!=='admin'&&currentUser.allowAccountChange===false);
   const spawnElement=document.getElementById('detailSpawnCommands');
+  const spawnCommandsValue=spawnElement?String(spawnElement.value||''):'';
+  if(!isRestricted&&spawnElement&&spawnCommandsValue.length>1000){
+    showToast('Spawn Commands tối đa 1000 ký tự (hiện '+spawnCommandsValue.length+' ký tự).','error');
+    spawnElement.focus();
+    return;
+  }
   const notifySettings={
     userNotifyEnabled:!!document.getElementById('detailSettingUserNotifyEnabled')?.checked,
     notifyOnAfkKick:!!document.getElementById('detailSettingNotifyOnAfkKick')?.checked,
@@ -378,9 +386,9 @@ async function saveDetailSettings(){
     autoReconnect:!!document.getElementById('detailSettingAutoReconnect')?.checked,
     antiAfkKick:!!document.getElementById('detailSettingAntiAfkKick')?.checked,
     ...notifySettings,
-    // BUG-24: đồng bộ Spawn Commands từ trang Detail (worker sanitizer cắt 5000 ký tự).
+    // Đồng bộ Spawn Commands từ trang Detail (backend giới hạn 1000 ký tự).
     // Giá trị '********' (masked) được worker phía sau hiểu là "giữ nguyên".
-    ...(spawnElement?{spawnCommands:String(spawnElement.value||'')}:{})
+    ...(spawnElement?{spawnCommands:spawnCommandsValue}:{})
   }};
   detailSettingsSaveInFlight=true;setDetailSettingsDisabled(true);
   try{
@@ -441,11 +449,19 @@ window.allowDetailBotScheduleDrop = allowDetailBotScheduleDrop;
 window.dropDetailBotSchedule = dropDetailBotSchedule;
 async function detailPost(path,body){
   if(selectedBotId===null) return {ok:false,status:0,data:{error:'Chưa chọn bot.'}};
-  const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : { isExpired: false };
-  const isExpUser = Boolean(userExp && userExp.isExpired && (typeof currentUser === 'undefined' || currentUser?.role !== 'admin'));
-  if (isExpUser) {
-    if (typeof showToast === 'function') showToast('⚠️ Gói bot của bạn đã hết hạn, tính năng điều khiển bị vô hiệu hóa. Vui lòng gia hạn để tiếp tục sử dụng.', 'warning', 4500);
-    return { ok: false, status: 403, data: { ok: false, error: 'Gói bot của bạn đã hết hạn, tính năng điều khiển bị vô hiệu hóa. Vui lòng gia hạn để tiếp tục sử dụng.' } };
+  const lockInfo = (typeof getWorkerLockInfo === 'function') ? getWorkerLockInfo() : { locked: false };
+  if (lockInfo && lockInfo.locked) {
+    const prefix = lockInfo.reason === 'maintenance' ? '🛠️ Hệ thống đang bảo trì: ' : '⚠️ ';
+    if (typeof showToast === 'function') showToast(prefix + lockInfo.message, 'warning', 4500);
+    return {
+      ok: false,
+      status: lockInfo.reason === 'maintenance' ? 503 : 403,
+      data: {
+        ok: false,
+        code: lockInfo.reason === 'maintenance' ? 'SYSTEM_MAINTENANCE' : undefined,
+        error: lockInfo.message
+      }
+    };
   }
   invalidateDetailReads();
   return requestJson(
@@ -460,10 +476,10 @@ async function detailPost(path,body){
 }
 
 async function detailAction(action){
-  const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : { isExpired: false };
-  const isExpUser = Boolean(userExp && userExp.isExpired && (typeof currentUser === 'undefined' || currentUser?.role !== 'admin'));
-  if (isExpUser) {
-    if (typeof showToast === 'function') showToast('⚠️ Gói bot của bạn đã hết hạn, tính năng điều khiển bị vô hiệu hóa. Vui lòng gia hạn để tiếp tục sử dụng.', 'warning', 4500);
+  const lockInfo = (typeof getWorkerLockInfo === 'function') ? getWorkerLockInfo() : { locked: false };
+  if (lockInfo && lockInfo.locked) {
+    const prefix = lockInfo.reason === 'maintenance' ? '🛠️ Hệ thống đang bảo trì: ' : '⚠️ ';
+    if (typeof showToast === 'function') showToast(prefix + lockInfo.message, 'warning', 4500);
     return;
   }
   if(detailLifecycleActionInFlight)return;
@@ -667,10 +683,10 @@ window.refreshStatus = refreshStatus;
 
 async function quickCardAction(btn, botId, action) {
   if (!botId || btn.disabled) return;
-  const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : { isExpired: false };
-  const isExpUser = Boolean(userExp && userExp.isExpired && (typeof currentUser === 'undefined' || currentUser?.role !== 'admin'));
-  if (isExpUser) {
-    if (typeof showToast === 'function') showToast('⚠️ Gói bot của bạn đã hết hạn, tính năng điều khiển bị vô hiệu hóa. Vui lòng gia hạn để tiếp tục sử dụng.', 'warning', 4500);
+  const lockInfo = (typeof getWorkerLockInfo === 'function') ? getWorkerLockInfo() : { locked: false };
+  if (lockInfo && lockInfo.locked) {
+    const prefix = lockInfo.reason === 'maintenance' ? '🛠️ Hệ thống đang bảo trì: ' : '⚠️ ';
+    if (typeof showToast === 'function') showToast(prefix + lockInfo.message, 'warning', 4500);
     return;
   }
   btn.disabled = true;
@@ -756,7 +772,7 @@ async function sendDetailMessage(event){
   event.preventDefault();
   if(detailChatSendInFlight)return;
   const input=document.getElementById('detailMessageInput');
-  const sendBtn=document.querySelector('#detailChatForm button[type="submit"], #detailSendButton');
+  const sendBtn=document.getElementById('detailSendButton')||document.querySelector('#detailChatForm button[type="submit"], .chat-form button[type="submit"]')||event?.currentTarget?.querySelector?.('button[type="submit"]');
   const text=String(input?.value||'');
   if(!text.trim()){showToast('Nội dung không được trống.');return;}
   if (!detailCommandHistory.length || detailCommandHistory[detailCommandHistory.length - 1] !== text.trim()) {

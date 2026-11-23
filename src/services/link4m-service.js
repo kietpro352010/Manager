@@ -36,7 +36,9 @@ function validPublicUrl(raw) {
   } catch {
     return '';
   }
-  if ((url.protocol !== 'https:' && url.protocol !== 'http:') || !url.hostname || url.username || url.password || url.search || url.hash) {
+  const requireHttps = process.env.NODE_ENV === 'production' && !process.env.NODE_TEST_CONTEXT;
+  const allowedProto = requireHttps ? url.protocol === 'https:' : (url.protocol === 'https:' || url.protocol === 'http:');
+  if (!allowedProto || !url.hostname || url.username || url.password || url.search || url.hash) {
     return '';
   }
   return `${url.protocol}//${url.host}`;
@@ -158,9 +160,7 @@ class Link4mService {
         reason: 'Tính năng Link4M hiện đang gặp sự cố khởi tạo cấu hình.'
       };
     }
-    if (member.isPermanent) {
-      return { ok: true, ...config, eligible: false, reason: 'Tài khoản vĩnh viễn không cần vượt link.' };
-    }
+    const isPermanent = member.isPermanent === true;
     const now = new Date();
     const usedToday = await this.store.countLinkRewards(userId, vietnamDayStart(now));
     const last = await this.store.lastLinkReward(userId);
@@ -172,6 +172,8 @@ class Link4mService {
       ok: true,
       ...config,
       eligible: config.enabled && config.providerConfigured && config.callbackConfigured && usedToday < config.dailyLimit && cooldownRemainingMs === 0,
+      isPermanent,
+      supportMode: isPermanent,
       usedToday,
       todayCount: usedToday,
       remainingToday: Math.max(0, config.dailyLimit - usedToday),
@@ -199,13 +201,11 @@ class Link4mService {
   }
 
   async startAttemptLocked(userId, clientIp) {
-    const member = await this.accessControl.memberFor(userId);
+    const member = await this.accessControl.memberFor(userId, { bypassCache: true });
     if (!member || member.status === 'disabled') {
       throw new Error('Tài khoản đã bị khóa, không thể vượt link.');
     }
-    if (member.isPermanent) {
-      throw new Error('Tài khoản vĩnh viễn không cần vượt link.');
-    }
+    const isPermanent = member.isPermanent === true;
     if (this.lastInitError) {
       throw new Error(`Tính năng Link4M hiện đang gặp sự cố khởi tạo: ${this.lastInitError}`);
     }
@@ -241,7 +241,9 @@ class Link4mService {
         attemptId: active.attemptId,
         providerUrl: active.providerUrl,
         expiresAt: active.expiresAt,
-        rewardHours: active.rewardHours,
+        rewardHours: isPermanent ? 0 : active.rewardHours,
+        isPermanent,
+        supportMode: isPermanent,
         reused: true
       };
     }
@@ -283,7 +285,15 @@ class Link4mService {
       throw error;
     }
 
-    return { attemptId, providerUrl, expiresAt, rewardHours, reused: false };
+    return {
+      attemptId,
+      providerUrl,
+      expiresAt,
+      rewardHours: isPermanent ? 0 : rewardHours,
+      isPermanent,
+      supportMode: isPermanent,
+      reused: false
+    };
   }
 
   async createShortLink(returnUrl, apiToken) {
@@ -295,6 +305,7 @@ class Link4mService {
         requestUrl.searchParams.set('url', returnUrl);
         const response = await this.fetch(requestUrl, { signal: AbortSignal.timeout(8000), redirect: 'error' });
         if (!response.ok) {
+          await response.body?.cancel?.().catch(() => {});
           lastError = new Error(`provider_http_${response.status}`);
           continue;
         }
@@ -330,7 +341,11 @@ class Link4mService {
       throw new Error('Mã token xác minh vượt link không hợp lệ.');
     }
     if (attempt.status === 'rewarded' || attempt.status === 'completed') {
-      return { replayed: true, isRewarded: true, rewardHours: attempt.rewardHours };
+      const member = await this.accessControl.memberFor(attempt.userId).catch(() => null);
+      const isPermanent = Boolean(member?.isPermanent === true || Number(attempt.rewardHours) === 0);
+      return isPermanent
+        ? { replayed: true, isRewarded: true, permanent: true, supportAdmin: true, rewardHours: 0, addedHours: 0 }
+        : { replayed: true, isRewarded: true, rewardHours: attempt.rewardHours };
     }
     if (attempt.expiresAt && Date.parse(attempt.expiresAt) <= Date.now()) {
       throw new Error('Phiên vượt link đã hết hạn. Vui lòng tạo liên kết mới.');
@@ -386,7 +401,11 @@ class Link4mService {
       throw new Error('Chữ ký hoàn thành Link4M không hợp lệ.');
     }
     if (attempt.status === 'rewarded' || attempt.status === 'completed') {
-      return { replayed: true, isRewarded: true, rewardHours: attempt.rewardHours };
+      const member = await this.accessControl.memberFor(attempt.userId).catch(() => null);
+      const isPermanent = Boolean(member?.isPermanent === true || Number(attempt.rewardHours) === 0);
+      return isPermanent
+        ? { replayed: true, isRewarded: true, permanent: true, supportAdmin: true, rewardHours: 0, addedHours: 0 }
+        : { replayed: true, isRewarded: true, rewardHours: attempt.rewardHours };
     }
     if (attempt.expiresAt && Date.parse(attempt.expiresAt) <= Date.now()) {
       throw new Error('Phiên vượt link đã hết hạn.');
@@ -400,10 +419,11 @@ class Link4mService {
 
   async completeVerifiedAttempt(attempt, tokenHash) {
     const run = async () => {
-      const member = await this.accessControl.memberFor(attempt.userId);
-      if (!member || member.status === 'disabled' || member.isPermanent) {
+      const member = await this.accessControl.memberFor(attempt.userId, { bypassCache: true });
+      if (!member || member.status === 'disabled') {
         throw new Error('Tài khoản không đủ điều kiện nhận thưởng.');
       }
+      const isPermanent = member.isPermanent === true;
 
       // Thử gọi RPC claim_manager_link4m_reward nguyên tử
       if (this.store.adapter && typeof this.store.adapter.claimLink4mReward === 'function') {
@@ -420,6 +440,17 @@ class Link4mService {
             } else if (typeof this.store.invalidateCache === 'function') {
               this.store.invalidateCache();
             }
+            if (rpcRes.permanent || isPermanent) {
+              return {
+                replayed: Boolean(rpcRes.replayed),
+                permanent: true,
+                supportAdmin: true,
+                rewardHours: 0,
+                addedHours: 0,
+                expiresAt: null,
+                message: 'Cảm ơn bạn đã vượt link ủng hộ Admin! (Tài khoản VIP Vĩnh Viễn không cộng thêm thời gian.)'
+              };
+            }
             return {
               replayed: Boolean(rpcRes.replayed),
               rewardHours: rpcRes.addedHours || rpcRes.rewardHours || attempt.rewardHours || 12,
@@ -430,15 +461,69 @@ class Link4mService {
         }
       }
 
-      const claimed = await this.store.claimLinkAttempt(attempt.attemptId, tokenHash);
+      let claimed = await this.store.claimLinkAttempt(attempt.attemptId, tokenHash);
       if (!claimed) {
         const latest = await this.store.getLinkAttempt(attempt.attemptId);
-        if (latest?.status === 'rewarded') return { replayed: true, rewardHours: latest.rewardHours };
-        if (latest?.status === 'processing') return { processing: true };
-        throw new Error('Phiên nhận thưởng đã hết hạn hoặc được nhận rồi.');
+        if (latest?.status === 'rewarded') {
+          return isPermanent
+            ? { replayed: true, permanent: true, supportAdmin: true, rewardHours: 0, addedHours: 0 }
+            : { replayed: true, rewardHours: latest.rewardHours };
+        }
+        if (latest?.status === 'processing') {
+          const procTs = Date.parse(latest.processingAt || latest.updatedAt || '');
+          if (Number.isFinite(procTs) && (Date.now() - procTs) > 60_000 && typeof this.store.resetLinkAttempt === 'function') {
+            await this.store.resetLinkAttempt(attempt.attemptId).catch(() => {});
+            claimed = await this.store.claimLinkAttempt(attempt.attemptId, tokenHash);
+          }
+          if (!claimed) return { processing: true };
+        } else {
+          throw new Error('Phiên nhận thưởng đã hết hạn hoặc được nhận rồi.');
+        }
       }
 
       try {
+        if (isPermanent) {
+          const completed = await this.store.completeLink4mReward(attempt.attemptId, attempt.userId, {
+            role: 'user',
+            status: 'active',
+            workerIds: member.workerIds || [],
+            isPermanent: true,
+            expiresAt: member.expiresAt || null,
+            planName: member.planName || 'VIP Vĩnh Viễn',
+            allowAccountChange: member.allowAccountChange !== false,
+            botCount: member.botCount,
+            note: member.note || '',
+            username: member.username || attempt.userId
+          }, `link4m-support:${attempt.attemptId}`);
+
+          if (!completed) throw new Error('Không thể ghi nhận lượt vượt link ủng hộ Admin.');
+
+          if (typeof this.store.invalidateUserCache === 'function') {
+            this.store.invalidateUserCache(attempt.userId, member.username);
+          } else if (typeof this.store.invalidateCache === 'function') {
+            this.store.invalidateCache();
+          }
+
+          if (typeof this.store.addAudit === 'function') {
+            await this.store.addAudit({
+              actorId: attempt.userId,
+              action: 'link4m.support_admin',
+              target: attempt.attemptId,
+              details: { supportAdmin: true, rewardHours: 0 }
+            }).catch(() => {});
+          }
+
+          return {
+            replayed: false,
+            permanent: true,
+            supportAdmin: true,
+            rewardHours: 0,
+            addedHours: 0,
+            expiresAt: null,
+            message: 'Cảm ơn bạn đã vượt link ủng hộ Admin! (Tài khoản VIP Vĩnh Viễn không cộng thêm thời gian.)'
+          };
+        }
+
         const now = Date.now();
         const currentExpiry = member.expiresAt ? Date.parse(member.expiresAt) : NaN;
         const base = Number.isFinite(currentExpiry) && currentExpiry > now ? currentExpiry : now;

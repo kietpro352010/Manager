@@ -98,7 +98,7 @@ async function main() {
   let adminUserId = roleSettings?.adminUserId || config.adminUserId;
 
   const accessControl = new AccessControl({ store: accessStore, adminUserId });
-  if (adminRoleId || userRoleId) {
+  if (adminRoleId && userRoleId) {
     accessControl.setRoleIds(adminRoleId, userRoleId);
     if (!roleSettings?.guildId || !roleSettings?.adminRoleId || !roleSettings?.userRoleId) {
       roleSettings = {
@@ -111,6 +111,11 @@ async function main() {
       };
       await accessStore.setSetting('discord_access', roleSettings);
     }
+  } else if (adminRoleId || userRoleId) {
+    logger.warn('discord_roles_partial_config', {
+      hasAdminRoleId: Boolean(adminRoleId),
+      hasUserRoleId: Boolean(userRoleId)
+    });
   }
 
   // 4. Discord Client & Admin Notifier
@@ -347,8 +352,9 @@ async function main() {
       broker.stopOutboxProcessor();
       wispbyteKeepAlive.stop();
       statusMonitor.stop();
-      if (client && typeof client.isReady === 'function' && client.isReady()) client.destroy();
+      try { client?.destroy?.(); } catch (_) {}
 
+      server.closeIdleConnections?.();
       let forceCloseTimer = null;
       try {
         await Promise.race([
@@ -377,22 +383,39 @@ async function main() {
     return shutdownPromise;
   };
 
-  process.on('uncaughtException', (err) => {
+  const flushCrashAlert = async (eventName, message, errorObj) => {
+    let alertTimer = null;
+    try {
+      await Promise.race([
+        Promise.resolve().then(() => adminNotifier.sendAlert({
+          source: 'Manager Process',
+          event: eventName,
+          message,
+          error: errorObj,
+          level: 'error'
+        })).catch(() => {}),
+        new Promise((resolve) => {
+          alertTimer = setTimeout(resolve, 1500);
+          alertTimer.unref?.();
+        })
+      ]);
+    } catch (_) {
+    } finally {
+      if (alertTimer) clearTimeout(alertTimer);
+    }
+  };
+
+  process.on('uncaughtException', async (err) => {
     logger.error('uncaught_exception', { message: err.message, stack: err.stack });
-    void Promise.resolve().then(() => adminNotifier.sendAlert({
-        source: 'Manager Process',
-        event: 'uncaught_exception',
-        message: `Sự cố nghiêm trọng không được bắt: ${err.message}`,
-        error: err,
-        level: 'error'
-      })).catch(() => {});
-    void shutdown('uncaughtException', 1);
+    await flushCrashAlert('uncaught_exception', `Sự cố nghiêm trọng không được bắt: ${err.message}`, err);
+    await shutdown('uncaughtException', 1);
   });
 
-  process.on('unhandledRejection', (reason) => {
-    const msg = reason instanceof Error ? reason.message : String(reason);
-    logger.error('unhandled_rejection', { message: msg });
-    void shutdown('unhandledRejection', 1);
+  process.on('unhandledRejection', async (reason) => {
+    const errObj = reason instanceof Error ? reason : new Error(String(reason));
+    logger.error('unhandled_rejection', { message: errObj.message });
+    await flushCrashAlert('unhandled_rejection', `Lỗi promise chưa xử lý: ${errObj.message}`, errObj);
+    await shutdown('unhandledRejection', 1);
   });
 
   process.once('SIGTERM', () => void shutdown('SIGTERM'));

@@ -1,10 +1,12 @@
 const _inFlightQuickActions = new Set();
 async function quickBotAction(event, id, action) {
   if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
-  const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : { isExpired: false };
-  const isExpUser = Boolean(userExp && userExp.isExpired && (typeof currentUser === 'undefined' || currentUser?.role !== 'admin'));
-  if (isExpUser) {
-    if (typeof showToast === 'function') showToast('⚠️ Gói bot của bạn đã hết hạn, tính năng điều khiển bị vô hiệu hóa. Vui lòng gia hạn để tiếp tục sử dụng.', 'warning', 4500);
+  const lockInfo = (typeof getWorkerLockInfo === 'function') ? getWorkerLockInfo() : { locked: false };
+  if (lockInfo && lockInfo.locked) {
+    if (typeof showToast === 'function') {
+      const prefix = lockInfo.reason === 'maintenance' ? '🛠️ Hệ thống đang bảo trì: ' : '⚠️ ';
+      showToast(prefix + lockInfo.message, 'warning', 4500);
+    }
     return;
   }
   const btn = event?.currentTarget || (event?.target && typeof event.target.closest === 'function' ? event.target.closest('button') : null);
@@ -169,7 +171,9 @@ function exportBotList() {
   const exportData = bots.map(b => ({
     id: b.id,
     label: b.label,
-    url: b.url
+    url: b.url || '',
+    ...(b.provider ? { provider: b.provider } : {}),
+    ...(b.serviceId ? { serviceId: b.serviceId } : {})
   }));
   const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
   const objectUrl = URL.createObjectURL(blob);
@@ -197,31 +201,55 @@ async function handleImportFile(event) {
     const data = JSON.parse(text);
     if (!Array.isArray(data)) throw new Error('File JSON không đúng định dạng danh sách bot.');
     showToast('Đang khôi phục ' + data.length + ' bot từ file...');
-    const botsToImport = data.map(item => ({
-      url: normalizeClientBotUrl(item.url || item.endpoint || item.sourceUrl),
-      label: String(item.label || item.name || '').trim(),
-      secretKey: item.secretKey ? String(item.secretKey).trim() : undefined
-    })).filter(b => Boolean(b.url));
+    const botsToImport = data.map(item => {
+      const rawUrl = String(item.url || item.endpoint || item.sourceUrl || '').trim();
+      const provider = String(item.provider || '').trim() || undefined;
+      const serviceId = String(item.serviceId || '').trim() || undefined;
+      return {
+        ...(item.id !== undefined ? { id: item.id } : {}),
+        url: rawUrl ? normalizeClientBotUrl(rawUrl) : '',
+        label: String(item.label || item.name || '').trim(),
+        ...(provider ? { provider } : {}),
+        ...(serviceId ? { serviceId } : {}),
+        secretKey: item.secretKey ? String(item.secretKey).trim() : undefined
+      };
+    }).filter(b => Boolean(b.url || b.serviceId || (b.provider && b.provider !== 'render')));
 
     if (!botsToImport.length) {
-      showToast('Không tìm thấy URL bot hợp lệ nào trong file JSON.');
+      showToast('Không tìm thấy cấu hình bot hợp lệ nào trong file JSON.');
       return;
     }
 
-    const res = await requestJson('/api/manager/bots/batch-import', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bots: botsToImport })
-    });
-    if (res.ok) {
+    const BATCH_SIZE = 50;
+    let totalAdded = 0;
+    let totalSkipped = 0;
+    let lastError = '';
+    for (let i = 0; i < botsToImport.length; i += BATCH_SIZE) {
+      const batch = botsToImport.slice(i, i + BATCH_SIZE);
+      const res = await requestJson('/api/manager/bots/batch-import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bots: batch })
+      });
+      if (!res.ok) {
+        lastError = res.data?.error || 'Thao tác không thành công.';
+        break;
+      }
       const payload = res.data || {};
-      const added = payload.addedCount || (payload.bots || []).length || 0;
-      const skipped = payload.skippedCount || (payload.skipped || []).length || 0;
-      showToast('Đã khôi phục thành công ' + added + ' bot mới!' + (skipped ? ' (Bỏ qua ' + skipped + ')' : ''));
+      totalAdded += payload.addedCount || (payload.bots || []).length || 0;
+      totalSkipped += payload.skippedCount || (payload.skipped || []).length || 0;
+    }
+
+    if (!lastError) {
+      showToast('Đã khôi phục thành công ' + totalAdded + ' bot mới!' + (totalSkipped ? ' (Bỏ qua ' + totalSkipped + ')' : ''));
       lastHomeSig = '';
       await refreshHome();
     } else {
-      showToast('Lỗi nhập bot: ' + (res.data?.error || 'Thao tác không thành công.'));
+      showToast('Lỗi nhập bot' + (totalAdded ? ' (đã nhập ' + totalAdded + ')' : '') + ': ' + lastError);
+      if (totalAdded > 0) {
+        lastHomeSig = '';
+        await refreshHome();
+      }
     }
   } catch (err) {
     showToast('Lỗi đọc file: ' + (err.message || 'Không thể khôi phục.'));
@@ -230,6 +258,11 @@ async function handleImportFile(event) {
 window.handleImportFile = handleImportFile;
 
 async function reconnectOfflineBots() {
+  const lockInfo = typeof getWorkerLockInfo === 'function' ? getWorkerLockInfo() : { locked: false, message: '' };
+  if (lockInfo.locked) {
+    showToast(lockInfo.message || 'Hệ thống đang tạm khóa điều khiển worker.', 'warning');
+    return;
+  }
   const offlineList = bots.filter(b => (!b.available || b.status === 'offline' || b.status === 'kicked' || b.status === 'error') && !b.manuallyStopped);
   if (!offlineList.length) {
     showToast('Tất cả bot đều đang hoạt động tốt!');
@@ -290,7 +323,7 @@ function updateKpis() {
   const totalFleetRam = bots.reduce((sum, b) => sum + Number(b.hostHardware?.botRssMb || b.ramRss || b.rssMb || b.memory?.rssMb || 0), 0);
   const avgFleetRam = activeBots.length > 0 ? totalFleetRam / activeBots.length : 0;
 
-  // Tính tổng RAM đã dùng / Tổng RAM được cấp, Trung bình % CPU và Tổng băng thông toàn hạm đội
+  // Tính tổng RAM đã dùng / Tổng RAM được cấp, Trung bình % CPU và Tổng băng thông toàn bộ bot
   const botsWithHw = activeBots.filter(b => b.hostHardware && Number(b.hostHardware.ramTotalMb) > 0);
   let fleetRamUsedMb = 0;
   let fleetRamTotalMb = 0;
@@ -515,6 +548,7 @@ function filterBots() {
 function computeBotCardSig(b) {
   const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : null;
   const expKey = userExp && userExp.isExpired ? (userExp.inGracePeriod ? 'grace' : 'expired') : 'ok';
+  const maintKey = window.systemMaintenance?.enabled ? ('maint:' + (window.systemMaintenance.message || '')) : 'ok';
   const pos = b.position || b.roundedLocation || null;
   const posStr = pos && Number.isFinite(Number(pos.x)) ? `${Math.round(pos.x)},${Math.round(pos.y)},${Math.round(pos.z)}` : '';
   return JSON.stringify([
@@ -526,7 +560,7 @@ function computeBotCardSig(b) {
     b.ipAddress, b.tags,
     b.hostHardware?.botRssMb ?? b.hardware?.botRamMb ?? null,
     b.hostHardware?.cpuPercent ?? b.hardware?.hostCpuPercent ?? null,
-    currentUser?.role || '', expKey
+    currentUser?.role || '', expKey, maintKey
   ]);
 }
 
@@ -571,7 +605,14 @@ function reconcileBotCards(filtered) {
         if (fresh) {
           const activeEl = document.activeElement;
           const hasFocusInside = activeEl && existing.contains(activeEl);
-          const hasDirtyInput = existing.querySelector && existing.querySelector('[data-dirty="true"]');
+          const dirtyEls = existing.querySelectorAll ? Array.from(existing.querySelectorAll('[data-dirty="true"]')) : [];
+          const hasDirtyInput = dirtyEls.some(el => {
+            if (String(el.value || '').trim() === '' && !el.dataset.originalValue) {
+              el.removeAttribute('data-dirty');
+              return false;
+            }
+            return true;
+          });
           if (!hasFocusInside && !hasDirtyInput) {
             if (existing.innerHTML !== fresh.innerHTML) {
               existing.innerHTML = fresh.innerHTML;
@@ -1150,15 +1191,19 @@ async function refreshHome() {
     }
     if (data.currentUser && currentUser) {
       const prevExp = currentUser.expiresAt;
+      const prevIsPermanent = currentUser.isPermanent;
       const prevBots = JSON.stringify(currentUser.assignedBotIds || []);
       const prevStatus = currentUser.status;
       const prevPlan = currentUser.planName;
       Object.assign(currentUser, data.currentUser);
-      if (prevExp !== currentUser.expiresAt || prevBots !== JSON.stringify(currentUser.assignedBotIds || []) || prevStatus !== currentUser.status || prevPlan !== currentUser.planName) {
+      if (prevExp !== currentUser.expiresAt || prevIsPermanent !== currentUser.isPermanent || prevBots !== JSON.stringify(currentUser.assignedBotIds || []) || prevStatus !== currentUser.status || prevPlan !== currentUser.planName) {
         applyUserRoleUI();
         updateUserHeaderCountdown();
       }
     }
+    const maintChanged = (data.maintenance && typeof syncSystemMaintenanceState === 'function')
+      ? syncSystemMaintenanceState(data.maintenance, { rerender: false })
+      : false;
     if (data.unchanged) {
       if (data.managerRamMb) {
         const ramStr = data.managerRamMb + ' MB';
@@ -1169,6 +1214,7 @@ async function refreshHome() {
         if (r2) r2.textContent = ramStr;
         if (r3) r3.textContent = ramStr;
       }
+      if (maintChanged) renderHome();
       updateUserHeaderCountdown();
       return;
     }
@@ -1337,7 +1383,7 @@ async function cleanDeadBots() {
 
   if (deadBots.length === 0) {
     if (unreachables.length === 0) {
-      showToast('✨ Hạm đội hoạt động hoàn hảo! Không có bot chết hay mất kết nối nào.', 'success', 3500);
+      showToast('✅ Tất cả bot đang hoạt động ổn định! Không có bot mất kết nối.', 'success', 3500);
       return;
     }
     // BUG-26: không còn mở confirm xóa toàn bộ unreachable. Chỉ cảnh báo kèm bằng
@@ -1403,6 +1449,11 @@ function toggleEditSecretKeyVisibility() {
 }
 
 function openBot(id) {
+  const lockInfo = (typeof getWorkerLockInfo === 'function') ? getWorkerLockInfo() : null;
+  if (lockInfo && lockInfo.locked && lockInfo.reason === 'maintenance') {
+    if (typeof showToast === 'function') showToast('🛠️ Hệ thống đang bảo trì: ' + lockInfo.message, 'warning', 4500);
+    return;
+  }
   const requestedId=String(id);
   const selected=bots.find(item=>String(item.workerId||item.id)===requestedId)
     || bots.find(item=>String(item.botNumber)===requestedId);
@@ -1574,6 +1625,11 @@ window.addEventListener('popstate',()=>{
 });
 
 async function runAllAction(action) {
+  const lockInfo = typeof getWorkerLockInfo === 'function' ? getWorkerLockInfo() : { locked: false, message: '' };
+  if (lockInfo.locked) {
+    showToast(lockInfo.message || 'Hệ thống đang tạm khóa điều khiển worker.', 'warning');
+    return;
+  }
   if(allLifecycleActionInFlight) return;
   allLifecycleActionInFlight=true;
   const buttonMap={start:'allStartButton',stop:'allStopButton',restart:'allRestartButton'};
@@ -1582,7 +1638,12 @@ async function runAllAction(action) {
     const result=await requestJson('/api/manager/all/'+encodeURIComponent(action),{method:'POST',timeoutMs:30000});
     const data=result.data||{};
     if(!result.ok) throw new Error(data.error||'Thao tác thất bại.');
-    const summary=(data.results||[]).map(x=>x.label+': '+(x.ok?'OK':'FAIL')).join(' | ');
+    const items=Array.isArray(data.result?.results)?data.result.results:(Array.isArray(data.results)?data.results:[]);
+    const summary=items.map(x=>{
+      const label=x.label||(bots.find(b=>String(b.id)===String(x.workerId))?.label)||('Bot '+(x.workerId||'?'));
+      const status=x.ok?(x.pending?'PENDING':'OK'):'FAIL';
+      return label+': '+status;
+    }).join(' | ');
     showToast(summary||data.message||'Đã thực hiện.');
     await refreshHome();
   } catch(err) {
@@ -1590,6 +1651,7 @@ async function runAllAction(action) {
   } finally {
     allLifecycleActionInFlight=false;
     Object.values(buttonMap).forEach(id=>{const button=document.getElementById(id);if(button)button.disabled=false;});
+    if (typeof renderSystemMaintenanceBanner === 'function') renderSystemMaintenanceBanner();
   }
 }
 

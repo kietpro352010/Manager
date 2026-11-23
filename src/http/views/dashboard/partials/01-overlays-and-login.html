@@ -192,6 +192,17 @@
             </label>
             <input id="regLicenseKey" type="text" placeholder="Nhập mã Key để kích hoạt gói ngay..." style="text-transform:uppercase;border-color:rgba(56,189,248,0.3);">
           </div>
+          <div id="inAppRegCaptchaWrap" class="form-row" style="margin-bottom:0;display:none;">
+            <label for="inAppRegCaptchaAnswer" style="display:flex;justify-content:space-between;align-items:center;">
+              <span>🛡️ MÃ XÁC THỰC CAPTCHA</span>
+              <button type="button" class="small" onclick="refreshInAppRegisterCaptcha()" style="padding:2px 8px;font-size:11px;">↻ Đổi mã</button>
+            </label>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <div id="inAppRegCaptchaImgContainer" onclick="refreshInAppRegisterCaptcha()" style="cursor:pointer;min-height:38px;display:flex;align-items:center;border-radius:6px;overflow:hidden;background:rgba(15,23,42,0.8);border:1px solid var(--border);padding:2px 6px;"></div>
+              <input id="inAppRegCaptchaToken" type="hidden">
+              <input id="inAppRegCaptchaAnswer" type="text" autocomplete="off" placeholder="Nhập mã..." style="flex:1;min-width:90px;">
+            </div>
+          </div>
           <button id="regSubmitBtn" type="submit" class="primary" style="padding:12px;font-size:14.5px;font-weight:750;letter-spacing:0.4px;background:#059669;border-color:#10b981;">
             📝 TẠO TÀI KHOẢN &amp; VÀO HỆ THỐNG
           </button>

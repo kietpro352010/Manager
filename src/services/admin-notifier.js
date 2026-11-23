@@ -3,6 +3,43 @@
 const { AsyncLocalStorage } = require('node:async_hooks');
 const { EmbedBuilder } = require('discord.js');
 const { decryptSecret } = require('../utils/secrets');
+const { redactStringSecrets } = require('../utils/logger');
+const { resolveAndValidateHost } = require('./proxy-validation');
+
+const MAX_NOTIFIER_QUEUE_SIZE = 500;
+const ALLOWED_DISCORD_WEBHOOK_HOSTS = new Set([
+  'discord.com',
+  'canary.discord.com',
+  'ptb.discord.com',
+  'discordapp.com',
+  'canary.discordapp.com',
+  'ptb.discordapp.com'
+]);
+
+function validateDiscordWebhookUrl(rawUrl) {
+  const raw = String(rawUrl || '').trim();
+  if (!raw) return '';
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch (_) {
+    throw new Error('Discord Webhook URL không hợp lệ.');
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error('Discord Webhook URL bắt buộc phải dùng HTTPS.');
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('Discord Webhook URL không được chứa thông tin đăng nhập.');
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (!ALLOWED_DISCORD_WEBHOOK_HOSTS.has(host)) {
+    throw new Error('Discord Webhook URL phải trỏ tới tên miền discord.com hoặc discordapp.com hợp lệ.');
+  }
+  if (!/^\/api(?:\/v\d+)?\/webhooks\/\d+\/[A-Za-z0-9_.-]+$/.test(parsed.pathname)) {
+    throw new Error('Định dạng đường dẫn Discord Webhook URL không hợp lệ.');
+  }
+  return raw;
+}
 
 function escapeTelegramHtml(str) {
   if (str === undefined || str === null) return '';
@@ -12,11 +49,9 @@ function escapeTelegramHtml(str) {
     .replace(/>/g, '&gt;');
 }
 
-const SENSITIVE_KEY_REGEX = /((?:token|secret|password|key|apiKey|authorization|cookie|session)\s*[:=]\s*)([^\s&"']+)/gi;
-
 function redactSensitiveText(text) {
   if (text === undefined || text === null) return '';
-  return String(text).replace(SENSITIVE_KEY_REGEX, '$1[REDACTED]');
+  return redactStringSecrets(String(text));
 }
 
 function redactSensitiveValue(key, val, depth = 0, seen = new WeakSet()) {
@@ -68,9 +103,15 @@ class AdminNotifier {
     this.userAlertCache = new Map();
     this.sentUserAlerts = [];
     this._auditPersistContext = new AsyncLocalStorage();
+    this._dispatchContext = new AsyncLocalStorage();
     this.telegramBotToken = String(telegramBotToken || process.env.TELEGRAM_BOT_TOKEN || '').trim();
     this.telegramChatId = String(telegramChatId || process.env.TELEGRAM_CHAT_ID || '').trim();
-    this.discordWebhookUrl = String(process.env.DISCORD_WEBHOOK_URL || '').trim();
+    const initialWebhookUrl = String(process.env.DISCORD_WEBHOOK_URL || '').trim();
+    try {
+      this.discordWebhookUrl = initialWebhookUrl ? validateDiscordWebhookUrl(initialWebhookUrl) : '';
+    } catch (_) {
+      this.discordWebhookUrl = '';
+    }
     this.webhookEnabled = true;
     this.webhookRules = {
       notifyOnOffline: true,
@@ -139,7 +180,16 @@ class AdminNotifier {
         } catch (_) {}
       }
       if (resolvedDiscordUrl || !hasCiphertext) {
-        this.discordWebhookUrl = resolvedDiscordUrl;
+        if (!resolvedDiscordUrl) {
+          this.discordWebhookUrl = '';
+        } else {
+          try {
+            this.discordWebhookUrl = validateDiscordWebhookUrl(resolvedDiscordUrl);
+          } catch (err) {
+            this.discordWebhookUrl = '';
+            this.logger?.warn?.('discord_webhook_invalid_url_ignored', { error: err.message });
+          }
+        }
       }
     }
     if (webhookCfg.enabled !== undefined) {
@@ -189,8 +239,11 @@ class AdminNotifier {
   }
 
   async sendAlert({ source = 'Manager', event = 'error', message = '', error = null, details = {}, level = 'error', bypassInGameFilter = false, skipDm = false } = {}) {
-    // Filter out ordinary in-game events unless explicitly flagged as a verified AFK lifecycle alert
-    if (!bypassInGameFilter) {
+    // Filter out ordinary in-game events from Minecraft worker sources unless explicitly flagged as a verified AFK lifecycle alert
+    const sourceLower = String(source || '').toLowerCase();
+    const isMinecraftWorkerSource = /(?:worker|bot|kingmc|minecraft|afk)/i.test(sourceLower);
+    const effectiveBypass = Boolean(bypassInGameFilter && isMinecraftWorkerSource);
+    if (isMinecraftWorkerSource && !effectiveBypass) {
       const filterHaystack = `${event} ${message} ${details?.lastKickReason || ''} ${details?.state || ''}`.toLowerCase();
       if (
         filterHaystack.includes('kick') ||
@@ -273,13 +326,15 @@ class AdminNotifier {
           },
           timestamp: now
         };
+        if (this.pendingBatch.length >= MAX_NOTIFIER_QUEUE_SIZE) this.pendingBatch.shift();
         this.pendingBatch.push(noticeItem);
-        if (this.batchTimer) clearTimeout(this.batchTimer);
-        this.batchTimer = setTimeout(() => {
-          this.batchTimer = null;
-          void this.flushBatch();
-        }, this.batchWaitMs);
-        this.batchTimer.unref?.();
+        if (!this.batchTimer) {
+          this.batchTimer = setTimeout(() => {
+            this.batchTimer = null;
+            void this.flushBatch();
+          }, this.batchWaitMs);
+          this.batchTimer.unref?.();
+        }
       }
 
       this.scheduleThrottleCheck();
@@ -289,14 +344,22 @@ class AdminNotifier {
     this.alertTimestamps.push(now);
 
     const item = { source, event, message: `${message}${repeatNote}`, error, details, level, skipDm: Boolean(skipDm), timestamp: now };
+    if (this.pendingBatch.length >= MAX_NOTIFIER_QUEUE_SIZE) this.pendingBatch.shift();
     this.pendingBatch.push(item);
 
-    if (this.batchTimer) clearTimeout(this.batchTimer);
-    this.batchTimer = setTimeout(() => {
-      this.batchTimer = null;
+    if (this.pendingBatch.length >= 25) {
+      if (this.batchTimer) {
+        clearTimeout(this.batchTimer);
+        this.batchTimer = null;
+      }
       void this.flushBatch();
-    }, this.batchWaitMs);
-    this.batchTimer.unref?.();
+    } else if (!this.batchTimer) {
+      this.batchTimer = setTimeout(() => {
+        this.batchTimer = null;
+        void this.flushBatch();
+      }, this.batchWaitMs);
+      this.batchTimer.unref?.();
+    }
   }
 
   scheduleThrottleCheck() {
@@ -338,12 +401,19 @@ class AdminNotifier {
     }
   }
 
+  _enqueueBounded(targetQueue, entry) {
+    while (targetQueue.length >= MAX_NOTIFIER_QUEUE_SIZE) {
+      targetQueue.shift();
+    }
+    targetQueue.push(entry);
+  }
+
   async flushBatch() {
     if (this.pendingBatch.length === 0) return;
     const items = this.pendingBatch.splice(0, this.pendingBatch.length);
 
     if (items.length === 1) {
-      this.queue.push(items[0]);
+      this._enqueueBounded(this.queue, items[0]);
       return this.processQueue();
     }
 
@@ -367,7 +437,7 @@ class AdminNotifier {
       }
     };
 
-    this.queue.push(batchItem);
+    this._enqueueBounded(this.queue, batchItem);
     return this.processQueue();
   }
 
@@ -393,10 +463,10 @@ class AdminNotifier {
 
         if (channels.includes('dm') && !item.skipDm) {
           try {
-            await this.dispatchDm(item);
+            await this._dispatchContext.run(true, () => this.dispatchDm(item));
           } catch (err) {
-            if (err.code !== 50007) {
-              this.logger?.warn?.('admin_dm_dispatch_failed', { adminUserId: this.adminUserId, error: err.message });
+            if (err.code !== 50007 && err.code !== 50001 && err.code !== 10013) {
+              this.logger?.warn?.('admin_dm_dispatch_failed', { adminUserId: this.adminUserId, error: redactSensitiveText(err.message) });
               failedChannels.push('dm');
             }
           }
@@ -404,19 +474,23 @@ class AdminNotifier {
 
         if (channels.includes('telegram')) {
           try {
-            await this.dispatchTelegram(item);
+            await this._dispatchContext.run(true, () => this.dispatchTelegram(item));
           } catch (err) {
-            this.logger?.warn?.('telegram_alert_dispatch_failed', { error: err.message });
-            failedChannels.push('telegram');
+            this.logger?.warn?.('telegram_alert_dispatch_failed', { error: redactSensitiveText(err.message), status: err.status });
+            if (!err.permanent) {
+              failedChannels.push('telegram');
+            }
           }
         }
 
         if (channels.includes('webhook')) {
           try {
-            await this.dispatchDiscordWebhook(item);
+            await this._dispatchContext.run(true, () => this.dispatchDiscordWebhook(item));
           } catch (err) {
-            this.logger?.warn?.('discord_webhook_dispatch_failed', { error: err.message });
-            failedChannels.push('webhook');
+            this.logger?.warn?.('discord_webhook_dispatch_failed', { error: redactSensitiveText(err.message), status: err.status });
+            if (!err.permanent) {
+              failedChannels.push('webhook');
+            }
           }
         }
 
@@ -457,7 +531,7 @@ class AdminNotifier {
       scheduledAt
     };
 
-    this.retryQueue.push(retryEntry);
+    this._enqueueBounded(this.retryQueue, retryEntry);
     this.scheduleRetry();
   }
 
@@ -495,7 +569,7 @@ class AdminNotifier {
     this.retryQueue = remaining;
 
     for (const entry of readyEntries) {
-      this.queue.push(entry);
+      this._enqueueBounded(this.queue, entry);
     }
 
     if (readyEntries.length > 0) {
@@ -551,8 +625,8 @@ class AdminNotifier {
     if (isBatch && Array.isArray(items)) {
       const embed = new EmbedBuilder()
         .setColor(color)
-        .setTitle(`${icon} [BÁO ĐỘNG HỆ THỐNG] Tổng hợp ${batchCount} sự cố dồn dập`)
-        .setDescription(`Hệ thống ghi nhận **${batchCount}** sự cố dồn dập trong 3.5 giây vừa qua:`)
+        .setTitle(`${icon} [BÁO ĐỘNG HỆ THỐNG] Tổng hợp ${batchCount} sự cố dồn dập`.slice(0, 256))
+        .setDescription(`Hệ thống ghi nhận **${batchCount}** sự cố dồn dập trong 3.5 giây vừa qua:`.slice(0, 4096))
         .setTimestamp();
 
       const lines = items.slice(0, 10).map((it, idx) => {
@@ -562,24 +636,26 @@ class AdminNotifier {
       if (items.length > 10) lines.push(`*...và ${items.length - 10} cảnh báo khác.*`);
 
       embed.addFields([
-        { name: '📋 Danh sách sự cố', value: lines.join('\n').slice(0, 1024), inline: false },
-        { name: '⏰ Thời gian', value: `${timeStr}\n(<t:${unix}:R>)`, inline: true },
-        { name: '📍 Nguồn liên quan', value: `\`${String(source).slice(0, 500)}\``, inline: true }
+        { name: '📋 Danh sách sự cố', value: (lines.join('\n') || '—').slice(0, 1024), inline: false },
+        { name: '⏰ Thời gian', value: `${timeStr}\n(<t:${unix}:R>)`.slice(0, 1024), inline: true },
+        { name: '📍 Nguồn liên quan', value: `\`${String(source).slice(0, 500)}\``.slice(0, 1024), inline: true }
       ]);
       embed.setFooter({ text: 'KingMC AFK System Monitor • Gom cảnh báo tự động' });
       return await user.send({ embeds: [embed] });
     }
 
+    const safeSource = String(source || 'Manager').slice(0, 200);
+    const safeEvent = String(event || 'alert').slice(0, 200);
     const embed = new EmbedBuilder()
       .setColor(color)
-      .setTitle(`${icon} [BÁO ĐỘNG: ${source.toUpperCase()}] ${event}`)
-      .setDescription(message ? `**Nội dung:** ${redactSensitiveText(message).slice(0, 1000)}` : 'Đã phát hiện sự cố hệ thống.')
+      .setTitle(`${icon} [BÁO ĐỘNG: ${safeSource.toUpperCase()}] ${safeEvent}`.slice(0, 256))
+      .setDescription((message ? `**Nội dung:** ${redactSensitiveText(message)}` : 'Đã phát hiện sự cố hệ thống.').slice(0, 4096))
       .setTimestamp();
 
     const fields = [
-      { name: '📍 Nguồn / Hệ thống', value: `\`${source}\``, inline: true },
-      { name: '⏰ Thời gian', value: `${timeStr}\n(<t:${unix}:R>)`, inline: true },
-      { name: '🏷️ Phân loại', value: `\`${event}\``, inline: true }
+      { name: '📍 Nguồn / Hệ thống', value: `\`${safeSource}\``.slice(0, 1024), inline: true },
+      { name: '⏰ Thời gian', value: `${timeStr}\n(<t:${unix}:R>)`.slice(0, 1024), inline: true },
+      { name: '🏷️ Phân loại', value: `\`${safeEvent}\``.slice(0, 1024), inline: true }
     ];
 
     const safeDetails = redactSensitiveObject(details);
@@ -653,25 +729,45 @@ class AdminNotifier {
     }
 
     const url = `https://api.telegram.org/bot${encodeURIComponent(this.telegramBotToken)}/sendMessage`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: this.telegramChatId,
-        text: text.slice(0, 4000),
-        parse_mode: 'HTML'
-      }),
-      signal: AbortSignal.timeout(8000)
-    });
-
-    if (!res.ok) {
-      throw new Error(`Telegram API responded with HTTP ${res.status}`);
+    let res;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: this.telegramChatId,
+          text: text.slice(0, 4000),
+          parse_mode: 'HTML'
+        }),
+        redirect: 'error',
+        signal: AbortSignal.timeout(8000)
+      });
+    } catch (fetchErr) {
+      throw new Error(redactSensitiveText(fetchErr?.message || 'Telegram request failed'));
     }
-    return res;
+
+    await res.body?.cancel?.().catch(() => {});
+    if (!res.ok) {
+      const err = new Error(`Telegram API responded with HTTP ${res.status}`);
+      err.status = res.status;
+      err.permanent = res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429;
+      throw err;
+    }
+    return { ok: true, status: res.status };
   }
 
   async dispatchDiscordWebhook(item) {
     if (!this.discordWebhookUrl || this.webhookEnabled === false) return;
+    let validatedWebhookUrl;
+    try {
+      validatedWebhookUrl = validateDiscordWebhookUrl(this.discordWebhookUrl);
+      const parsedWebhook = new URL(validatedWebhookUrl);
+      await resolveAndValidateHost(parsedWebhook.hostname, { allowLocal: false });
+    } catch (err) {
+      err.permanent = true;
+      throw err;
+    }
+
     const { source, event, message, details, level, isBatch, batchCount, items } = item;
     const color = level === 'error' ? 0xef4444 : level === 'warn' ? 0xf59e0b : 0x3b82f6;
     const icon = level === 'error' ? '🚨' : level === 'warn' ? '⚠️' : 'ℹ️';
@@ -685,7 +781,7 @@ class AdminNotifier {
       if (items.length > 10) lines.push(`*...và ${items.length - 10} cảnh báo khác.*`);
       embedPayload = {
         color,
-        title: `${icon} [BÁO ĐỘNG HỆ THỐNG] Tổng hợp ${batchCount} sự cố dồn dập`,
+        title: `${icon} [BÁO ĐỘNG HỆ THỐNG] Tổng hợp ${batchCount} sự cố dồn dập`.slice(0, 256),
         description: lines.join('\n').slice(0, 3900),
         timestamp: new Date().toISOString()
       };
@@ -705,23 +801,37 @@ class AdminNotifier {
       }
       embedPayload = {
         color,
-        title: `${icon} [${String(source || 'Manager').toUpperCase()}] ${String(event || 'alert')}`.slice(0, 250),
+        title: `${icon} [${String(source || 'Manager').toUpperCase()}] ${String(event || 'alert')}`.slice(0, 256),
         description: redactSensitiveText(message || 'Cảnh báo hệ thống.').slice(0, 3900),
         fields,
         timestamp: new Date().toISOString()
       };
     }
 
-    const res = await fetch(this.discordWebhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ embeds: [embedPayload] }),
-      signal: AbortSignal.timeout(8000)
-    });
-    if (!res.ok) {
-      throw new Error(`Discord Webhook responded with HTTP ${res.status}`);
+    let res;
+    try {
+      res = await fetch(validatedWebhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          allowed_mentions: { parse: [] },
+          embeds: [embedPayload]
+        }),
+        redirect: 'error',
+        signal: AbortSignal.timeout(8000)
+      });
+    } catch (fetchErr) {
+      throw new Error(redactSensitiveText(fetchErr?.message || 'Discord webhook request failed'));
     }
-    return res;
+
+    await res.body?.cancel?.().catch(() => {});
+    if (!res.ok) {
+      const err = new Error(`Discord Webhook responded with HTTP ${res.status}`);
+      err.status = res.status;
+      err.permanent = res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429;
+      throw err;
+    }
+    return { ok: true, status: res.status };
   }
 
   // --------------------------------------------------------------------------
@@ -801,12 +911,16 @@ class AdminNotifier {
       if (!user || typeof user.send !== 'function') return false;
       const embed = new EmbedBuilder()
         .setColor(color)
-        .setTitle(String(title || '🔔 Thông Báo Trạng Thái Bot').slice(0, 250))
-        .setDescription(String(description || '').slice(0, 3900))
+        .setTitle(String(title || '🔔 Thông Báo Trạng Thái Bot').slice(0, 256))
+        .setDescription(String(description || '').slice(0, 4096))
         .setTimestamp()
         .setFooter({ text: 'KingMC AFK Bot Cloud • Thông báo riêng tự động cho chủ Bot' });
       if (Array.isArray(fields) && fields.length > 0) {
-        embed.addFields(fields.slice(0, 8));
+        embed.addFields(fields.slice(0, 8).map((f) => ({
+          name: String(f?.name || '—').slice(0, 256),
+          value: String(f?.value || '—').slice(0, 1024),
+          inline: Boolean(f?.inline)
+        })));
       }
       await user.send({ embeds: [embed] });
       return true;
@@ -1062,14 +1176,18 @@ class AdminNotifier {
       strEvent.startsWith('admin_dm_') ||
       strEvent.startsWith('user_dm_') ||
       strEvent.startsWith('telegram_alert_') ||
-      strEvent.startsWith('discord_webhook_')
+      strEvent.startsWith('discord_webhook_') ||
+      strEvent.startsWith('audit_log_') ||
+      strEvent.startsWith('add_audit_')
     );
     try {
       const originalError = logger.error;
       if (typeof originalError === 'function') {
-        logger.error = (event, fields = {}) => {
-          originalError(event, fields);
+        logger.error = (...args) => {
+          originalError.apply(logger, args);
           try {
+            if (this._auditPersistContext?.getStore() || this._dispatchContext?.getStore()) return;
+            const [event, fields = {}] = args;
             const strEvent = String(event || '').toLowerCase();
             if (isInternalAlertEvent(strEvent)) return;
             const strMsg = String(fields?.message || fields?.error || '').toLowerCase();
@@ -1090,9 +1208,11 @@ class AdminNotifier {
 
       const originalWarn = logger.warn;
       if (typeof originalWarn === 'function') {
-        logger.warn = (event, fields = {}) => {
-          originalWarn(event, fields);
+        logger.warn = (...args) => {
+          originalWarn.apply(logger, args);
           try {
+            if (this._auditPersistContext?.getStore() || this._dispatchContext?.getStore()) return;
+            const [event, fields = {}] = args;
             const strEvent = String(event || '').toLowerCase();
             if (isInternalAlertEvent(strEvent)) return;
             const strMsg = String(fields?.message || fields?.error || '').toLowerCase();
@@ -1116,4 +1236,10 @@ class AdminNotifier {
   }
 }
 
-module.exports = { AdminNotifier, escapeTelegramHtml, redactSensitiveText, redactSensitiveObject };
+module.exports = {
+  AdminNotifier,
+  escapeTelegramHtml,
+  redactSensitiveText,
+  redactSensitiveObject,
+  validateDiscordWebhookUrl
+};

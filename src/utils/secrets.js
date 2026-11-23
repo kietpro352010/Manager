@@ -44,8 +44,21 @@ function isUnsupportedCredentialCiphertext(value) {
   return typeof value === 'string' && /^enc:v[0-9]+:/i.test(value) && !isStoredCredentialCiphertext(value);
 }
 
+let ephemeralNonprodKey = null;
+
+function getEphemeralNonprodKey() {
+  if (!ephemeralNonprodKey) {
+    ephemeralNonprodKey = crypto.randomBytes(32);
+  }
+  return ephemeralNonprodKey;
+}
+
 function getLegacyCredentialKeys(primaryKey, previousKey) {
-  const allowLegacyStaticKeys = process.env.KBOT_LEGACY_SECRET_WINDOW === '1' || (process.env.NODE_ENV !== 'production' && !process.env.KBOT_STRICT_PRODUCTION);
+  const rawNodeEnv = String(process.env.NODE_ENV || '').trim().toLowerCase();
+  const allowLegacyStaticKeys = process.env.KBOT_LEGACY_SECRET_WINDOW === '1' ||
+    rawNodeEnv === 'test' ||
+    rawNodeEnv === 'development';
+  const isStrictProd = rawNodeEnv === 'production' || Boolean(process.env.KBOT_STRICT_PRODUCTION);
   const sources = [
     primaryKey,
     process.env.MANAGER_MASTER_KEY,
@@ -61,6 +74,7 @@ function getLegacyCredentialKeys(primaryKey, previousKey) {
     (process.env.SUPABASE_SECRET_KEY ? 'kbot-cred-v1:' + String(process.env.SUPABASE_SECRET_KEY).trim() : ''),
     (process.env.SUPABASE_SERVICE_ROLE_KEY ? 'kbot-cred-v1:' + String(process.env.SUPABASE_SERVICE_ROLE_KEY).trim() : ''),
     (process.env.SUPABASE_KEY ? 'kbot-cred-v1:' + String(process.env.SUPABASE_KEY).trim() : ''),
+    ...(!isStrictProd && ephemeralNonprodKey ? [ephemeralNonprodKey] : []),
     ...(allowLegacyStaticKeys ? [
       'kbot_enterprise_stable_encryption_key_v11',
       'kbot_dev_test_nonprod_key',
@@ -142,11 +156,11 @@ function encryptUserPassword(value, key = null) {
       if (fallback && !/replace-with|example|changeme/i.test(fallback)) {
         activeKey = toKeyBuffer('kbot-cred-v1:' + fallback);
       } else {
-        const isStrictProd = process.env.NODE_ENV === 'production' || Boolean(process.env.KBOT_STRICT_PRODUCTION);
+        const isStrictProd = String(process.env.NODE_ENV || '').trim().toLowerCase() === 'production' || Boolean(process.env.KBOT_STRICT_PRODUCTION);
         if (isStrictProd) {
           throw new Error('Khóa mã hóa chưa được cấu hình, từ chối mã hóa bằng khóa mặc định trong môi trường chạy thật.');
         }
-        activeKey = toKeyBuffer('kbot_dev_test_nonprod_key');
+        activeKey = getEphemeralNonprodKey();
       }
     }
   }
@@ -211,20 +225,20 @@ function hashPassword(password, salt = null) {
   return `scrypt$N=16384,r=8,p=1$${actualSalt}$${derived.toString('hex')}`;
 }
 
-function verifyPassword(password, storedValue, key = null, previousKey = null) {
-  const stored = String(storedValue || '').trim();
-  const candidate = String(password || '');
-  if (!stored || !candidate) return false;
+async function hashPasswordAsync(password, salt = null) {
+  const actualSalt = salt && typeof salt === 'string' && salt.length >= 8
+    ? salt
+    : crypto.randomBytes(16).toString('hex');
+  const derived = await new Promise((resolve, reject) => {
+    crypto.scrypt(String(password), actualSalt, 64, { N: 16384, r: 8, p: 1 }, (err, key) => {
+      if (err) reject(err);
+      else resolve(key);
+    });
+  });
+  return `scrypt$N=16384,r=8,p=1$${actualSalt}$${derived.toString('hex')}`;
+}
 
-  if (isStoredCredentialCiphertext(stored)) {
-    const plain = decryptUserPassword(stored, key, previousKey);
-    return plain !== null && timingSafeStringEquals(candidate, plain);
-  }
-
-  if (!stored.startsWith('scrypt$')) {
-    return timingSafeStringEquals(candidate, stored);
-  }
-
+function parseScryptHashRecord(stored) {
   const parts = stored.split('$');
   let salt;
   let expectedHex;
@@ -241,20 +255,69 @@ function verifyPassword(password, storedValue, key = null, previousKey = null) {
     salt = parts[4];
     expectedHex = parts[5];
   } else {
-    return false;
+    return null;
   }
 
   if (!Number.isSafeInteger(options.N) || options.N < 1024 || options.N > 262144 ||
       !Number.isSafeInteger(options.r) || options.r < 1 || options.r > 16 ||
       !Number.isSafeInteger(options.p) || options.p < 1 || options.p > 4 ||
       !salt || !/^[a-f0-9]+$/i.test(expectedHex || '') || expectedHex.length % 2 !== 0) {
-    return false;
+    return null;
   }
 
+  return { salt, expected: Buffer.from(expectedHex, 'hex'), options };
+}
+
+function verifyPassword(password, storedValue, key = null, previousKey = null) {
+  const stored = String(storedValue || '').trim();
+  const candidate = String(password || '');
+  if (!stored || !candidate) return false;
+
+  if (isStoredCredentialCiphertext(stored)) {
+    const plain = decryptUserPassword(stored, key, previousKey);
+    return plain !== null && timingSafeStringEquals(candidate, plain);
+  }
+
+  if (!stored.startsWith('scrypt$')) {
+    return timingSafeStringEquals(candidate, stored);
+  }
+
+  const parsed = parseScryptHashRecord(stored);
+  if (!parsed) return false;
+
   try {
-    const expected = Buffer.from(expectedHex, 'hex');
-    const actual = crypto.scryptSync(candidate, salt, expected.length, options);
-    return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+    const actual = crypto.scryptSync(candidate, parsed.salt, parsed.expected.length, parsed.options);
+    return parsed.expected.length === actual.length && crypto.timingSafeEqual(parsed.expected, actual);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function verifyPasswordAsync(password, storedValue, key = null, previousKey = null) {
+  const stored = String(storedValue || '').trim();
+  const candidate = String(password || '');
+  if (!stored || !candidate) return false;
+
+  if (isStoredCredentialCiphertext(stored)) {
+    const plain = decryptUserPassword(stored, key, previousKey);
+    return plain !== null && timingSafeStringEquals(candidate, plain);
+  }
+
+  if (!stored.startsWith('scrypt$')) {
+    return timingSafeStringEquals(candidate, stored);
+  }
+
+  const parsed = parseScryptHashRecord(stored);
+  if (!parsed) return false;
+
+  try {
+    const actual = await new Promise((resolve, reject) => {
+      crypto.scrypt(candidate, parsed.salt, parsed.expected.length, parsed.options, (err, derivedKey) => {
+        if (err) reject(err);
+        else resolve(derivedKey);
+      });
+    });
+    return parsed.expected.length === actual.length && crypto.timingSafeEqual(parsed.expected, actual);
   } catch (_) {
     return false;
   }
@@ -284,9 +347,13 @@ module.exports = {
   encryptUserPassword,
   decryptUserPassword,
   hashPassword,
+  hashPasswordAsync,
   hashAdminPassword: hashPassword,
+  hashAdminPasswordAsync: hashPasswordAsync,
   verifyPassword,
+  verifyPasswordAsync,
   verifyAdminPassword: verifyPassword,
+  verifyAdminPasswordAsync: verifyPasswordAsync,
   verifyUserPassword: verifyPassword,
   timingSafeStringEquals,
   safeEqual,

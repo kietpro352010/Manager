@@ -12,6 +12,39 @@ async function readJson(response) {
   }
 }
 
+function redactUrlForLog(rawUrl) {
+  const str = String(rawUrl || '');
+  try {
+    const u = new URL(str);
+    if (u.username || u.password) {
+      u.username = u.username ? '***' : '';
+      u.password = u.password ? '***' : '';
+    }
+    u.search = '';
+    u.hash = '';
+    return u.toString();
+  } catch (_) {
+    return str
+      .replace(/([a-zA-Z0-9+.-]+:\/\/[^\s:@]+:)[^\s@]+(@)/g, '$1***$2')
+      .split('?')[0]
+      .split('#')[0];
+  }
+}
+
+function parseRetryAfterMs(headerVal) {
+  if (!headerVal) return 0;
+  const numSec = Number(headerVal);
+  if (Number.isFinite(numSec) && numSec > 0) {
+    return Math.round(numSec * 1000);
+  }
+  const dateMs = Date.parse(String(headerVal));
+  if (Number.isFinite(dateMs)) {
+    const diff = dateMs - Date.now();
+    return diff > 0 ? diff : 0;
+  }
+  return 0;
+}
+
 function sleepAbortable(ms, signal) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -35,9 +68,17 @@ function sleepAbortable(ms, signal) {
   });
 }
 
-async function fetchWithRetry(url, options = {}, { maxRetries = 3, initialDelayMs = 400, maxDelayMs = 3000, timeoutMs = 15000, logger = console } = {}) {
-  const attemptsLimit = Math.max(1, Number(maxRetries) || 1);
+async function fetchWithRetry(
+  url,
+  options = {},
+  { maxRetries = 3, initialDelayMs = 400, maxDelayMs = 3000, timeoutMs = 15000, retryNonIdempotent = false, logger = console } = {}
+) {
+  const method = String(options.method || 'GET').trim().toUpperCase();
+  const isIdempotent = ['GET', 'HEAD', 'OPTIONS'].includes(method);
+  const attemptsLimit = (isIdempotent || retryNonIdempotent) ? Math.max(1, Number(maxRetries) || 1) : 1;
+  const safeUrlLog = redactUrlForLog(url);
   let attempt = 0;
+
   while (attempt < attemptsLimit) {
     if (options.signal?.aborted) {
       throw options.signal.reason || Object.assign(new Error('HTTP request aborted'), { name: 'AbortError' });
@@ -56,7 +97,7 @@ async function fetchWithRetry(url, options = {}, { maxRetries = 3, initialDelayM
           controller.abort(new Error(`HTTP request timeout after ${timeoutMs}ms`));
         }, timeoutMs);
         timeoutId.unref?.();
-        onCallerAbort = () => controller.abort(options.signal.reason || new Error('HTTP request aborted'));
+        onCallerAbort = () => controller.abort(options.signal.reason || Object.assign(new Error('HTTP request aborted'), { name: 'AbortError' }));
         options.signal.addEventListener('abort', onCallerAbort, { once: true });
         signal = controller.signal;
       } else if (timeoutSignal) {
@@ -69,18 +110,21 @@ async function fetchWithRetry(url, options = {}, { maxRetries = 3, initialDelayM
         signal = controller.signal;
       }
       const res = await fetch(url, { ...options, signal });
+      if (options.signal?.aborted) {
+        await res.body?.cancel?.().catch(() => {});
+        throw options.signal.reason || Object.assign(new Error('HTTP request aborted'), { name: 'AbortError' });
+      }
       if (attempt < attemptsLimit && [408, 429, 500, 502, 503, 504].includes(res.status)) {
-        if (options.signal?.aborted) return res;
         let delay = Math.min(maxDelayMs, initialDelayMs * Math.pow(2, attempt - 1)) + Math.floor(Math.random() * 200);
         if (res.status === 429) {
-          const retryAfter = Number(res.headers?.get?.('retry-after'));
-          if (Number.isFinite(retryAfter) && retryAfter > 0) {
-            delay = Math.min(maxDelayMs, Math.max(delay, Math.round(retryAfter * 1000)));
+          const retryAfterMs = parseRetryAfterMs(res.headers?.get?.('retry-after'));
+          if (retryAfterMs > 0) {
+            delay = Math.min(maxDelayMs, Math.max(delay, retryAfterMs));
           }
         }
         await res.body?.cancel?.().catch(() => {});
         if (logger && typeof logger.warn === 'function') {
-          logger.warn(`[HTTP RETRY] HTTP ${res.status} khi gọi ${String(url).split('?')[0]}. Thử lại lần ${attempt}/${attemptsLimit} sau ${delay}ms...`);
+          logger.warn(`[HTTP RETRY] HTTP ${res.status} khi gọi ${safeUrlLog}. Thử lại lần ${attempt}/${attemptsLimit} sau ${delay}ms...`);
         }
         await sleepAbortable(delay, options.signal);
         continue;
@@ -90,12 +134,17 @@ async function fetchWithRetry(url, options = {}, { maxRetries = 3, initialDelayM
       if (options.signal?.aborted) {
         throw err;
       }
+      const errCode = String(err?.cause?.code || err?.code || '').toUpperCase();
+      const isPermanentTls = /^(?:CERT_|UNABLE_TO_VERIFY_|ERR_TLS_|DEPTH_ZERO_SELF_SIGNED_CERT|SELF_SIGNED_CERT_IN_CHAIN)/.test(errCode);
+      if (isPermanentTls) {
+        throw err;
+      }
       const isAbort = err.name === 'AbortError' || err.name === 'TimeoutError' || /timeout|aborted/i.test(err.message);
       const isConnError = /fetch failed|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT/i.test(err.message);
       if (attempt < attemptsLimit && (isAbort || isConnError)) {
         const delay = Math.min(maxDelayMs, initialDelayMs * Math.pow(2, attempt - 1)) + Math.floor(Math.random() * 200);
         if (logger && typeof logger.warn === 'function') {
-          logger.warn(`[HTTP RETRY] Lỗi mạng (${err.message}) khi gọi ${String(url).split('?')[0]}. Thử lại lần ${attempt}/${attemptsLimit} sau ${delay}ms...`);
+          logger.warn(`[HTTP RETRY] Lỗi mạng (${redactUrlForLog(err.message)}) khi gọi ${safeUrlLog}. Thử lại lần ${attempt}/${attemptsLimit} sau ${delay}ms...`);
         }
         await sleepAbortable(delay, options.signal);
         continue;
@@ -110,10 +159,27 @@ async function fetchWithRetry(url, options = {}, { maxRetries = 3, initialDelayM
   }
 }
 
+function acceptsGzipEncoding(req) {
+  const header = String(req?.headers?.['accept-encoding'] || '');
+  let gzipQuality = null;
+  let wildcardQuality = null;
+  for (const entry of header.split(',')) {
+    const [rawName, ...params] = entry.trim().toLowerCase().split(';');
+    const name = rawName.trim();
+    if (!name) continue;
+    const qParam = params.find((p) => /^\s*q\s*=/.test(p));
+    const quality = qParam ? Number(qParam.split('=')[1]) : 1;
+    if (!Number.isFinite(quality) || quality < 0 || quality > 1) continue;
+    if (name === 'gzip') gzipQuality = quality;
+    else if (name === '*') wildcardQuality = quality;
+  }
+  if (gzipQuality !== null) return gzipQuality > 0;
+  return wildcardQuality !== null && wildcardQuality > 0;
+}
+
 function createGzipMiddleware({ minLength = 512, level = 5 } = {}) {
   return function gzipMiddleware(req, res, next) {
-    const acceptEncoding = String(req.headers['accept-encoding'] || '').toLowerCase();
-    if (!acceptEncoding.includes('gzip')) return next();
+    if (!acceptsGzipEncoding(req)) return next();
 
     const originalSend = res.send;
     res.send = function (body) {
@@ -158,10 +224,10 @@ function createGzipMiddleware({ minLength = 512, level = 5 } = {}) {
           res.removeHeader('Content-Length');
           return originalSend.call(this, gzipped);
         } catch (_) {
-          return originalSend.call(this, buffer);
+          return originalSend.call(this, body);
         }
       }
-      return originalSend.call(this, buffer);
+      return originalSend.call(this, body);
     };
     next();
   };

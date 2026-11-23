@@ -1,13 +1,19 @@
 'use strict';
 
-const dns = require('node:dns').promises;
 const net = require('node:net');
 const { encryptUserPassword, decryptUserPassword, isStoredCredentialCiphertext } = require('../utils/secrets');
-const { isPrivateOrBlockedIp, isLocalOrPrivateHost } = require('./proxy-validation');
+const { redactStringSecrets } = require('../utils/logger');
+const { isPrivateOrBlockedIp, isLocalOrPrivateHost, resolveAndValidateHost } = require('./proxy-validation');
+
+let undiciLib = null;
+try {
+  undiciLib = require('undici');
+} catch (_) {}
 
 const DEFAULT_PANEL_URL = 'https://wispbyte.com/client';
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+const MAX_RESPONSE_BYTES = 512 * 1024; // 512 KB cap
 
 function isPrivateOrBlockedIpAddress(ip) {
   return isPrivateOrBlockedIp(ip);
@@ -20,6 +26,12 @@ function validatePanelUrl(urlStr) {
     parsed = new URL(raw);
   } catch {
     throw new Error('Panel URL không đúng định dạng URL.');
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('Panel URL không được chứa thông tin đăng nhập (username/password).');
+  }
+  if (parsed.hostname.includes('%') || raw.includes('%25')) {
+    throw new Error('Panel URL chứa ký tự zone ID không hợp lệ.');
   }
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '').replace(/\.+$/, '').toLowerCase();
   if (
@@ -52,20 +64,13 @@ function validatePanelUrl(urlStr) {
 async function assertPublicPanelHost(urlStr) {
   const parsed = new URL(urlStr);
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '').replace(/\.+$/, '').toLowerCase();
-  if (net.isIP(hostname)) {
-    if (isPrivateOrBlockedIpAddress(hostname)) {
-      throw new Error('Panel URL không được trỏ tới dải IP mạng nội bộ.');
+  try {
+    return await resolveAndValidateHost(hostname, { allowLocal: false });
+  } catch (err) {
+    if (/Không thể phân giải DNS|Lỗi phân giải DNS/i.test(err.message)) {
+      throw new Error('Không thể phân giải DNS cho Panel URL.');
     }
-    return;
-  }
-  const records = await dns.lookup(hostname, { all: true }).catch(() => null);
-  if (!Array.isArray(records) || records.length === 0) {
-    throw new Error('Không thể phân giải DNS cho Panel URL.');
-  }
-  for (const rec of records) {
-    if (rec?.address && isPrivateOrBlockedIpAddress(rec.address)) {
-      throw new Error('Panel URL phân giải sang địa chỉ IP nội bộ (SSRF blocked).');
-    }
+    throw new Error('Panel URL phân giải sang địa chỉ IP nội bộ (SSRF blocked).');
   }
 }
 
@@ -73,6 +78,39 @@ function maskCookie(cookie) {
   if (!cookie || typeof cookie !== 'string') return '';
   if (cookie.length <= 8) return '********';
   return cookie.slice(0, 4) + '****' + cookie.slice(-4);
+}
+
+async function readResponseTextCapped(res, maxBytes = MAX_RESPONSE_BYTES) {
+  if (!res) return '';
+  if (res.body && typeof res.body.getReader === 'function') {
+    const reader = res.body.getReader();
+    const chunks = [];
+    let totalBytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        const buf = Buffer.isBuffer(value) ? value : Buffer.from(value);
+        if (totalBytes + buf.length > maxBytes) {
+          const remaining = maxBytes - totalBytes;
+          if (remaining > 0) chunks.push(buf.subarray(0, remaining));
+          await reader.cancel().catch(() => {});
+          break;
+        }
+        chunks.push(buf);
+        totalBytes += buf.length;
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
+    }
+    return Buffer.concat(chunks).toString('utf8');
+  }
+  if (typeof res.text === 'function') {
+    const text = await res.text().catch(() => '');
+    return String(text || '').slice(0, maxBytes);
+  }
+  return '';
 }
 
 class WispbyteKeepAliveManager {
@@ -92,67 +130,80 @@ class WispbyteKeepAliveManager {
     this.discordClient = null;
     this.adminRoleId = config.adminRoleId || '';
     this.isChecking = false;
+    this._accountsLock = Promise.resolve();
+  }
+
+  _withAccountsLock(fn) {
+    const run = this._accountsLock.then(() => fn());
+    this._accountsLock = run.catch(() => {});
+    return run;
+  }
+
+  _decryptStoredAccounts(saved) {
+    return saved.map((a) => {
+      const copy = { ...a };
+      if (copy.cookie && isStoredCredentialCiphertext(copy.cookie)) {
+        const rawCipher = copy.cookie;
+        try {
+          const decrypted = decryptUserPassword(rawCipher, this.encryptionKey);
+          if (typeof decrypted === 'string' && decrypted.length > 0) {
+            copy.cookie = decrypted;
+          } else {
+            copy._rawCookieCiphertext = rawCipher;
+            copy._decryptFailed = true;
+            copy.cookie = '';
+          }
+        } catch (_) {
+          copy._rawCookieCiphertext = rawCipher;
+          copy._decryptFailed = true;
+          copy.cookie = '';
+        }
+      }
+      return copy;
+    });
+  }
+
+  _getEnvFallbackAccounts() {
+    let accounts = [];
+    if (this.accountsJson) {
+      try {
+        const parsed = JSON.parse(this.accountsJson);
+        if (Array.isArray(parsed)) accounts = parsed;
+      } catch (_) {}
+    }
+
+    if (accounts.length === 0 && this.defaultCookie) {
+      accounts.push({
+        id: 'primary',
+        name: 'Primary Wispbyte Host',
+        cookie: this.defaultCookie,
+        panelUrl: this.defaultPanelUrl,
+        renewCount: 0,
+        lastStatus: 'idle',
+        lastPingAt: null,
+        lastMessage: 'Configured from environment'
+      });
+    }
+    return accounts;
+  }
+
+  async getAccountsStrict() {
+    if (this.store && typeof this.store.getSetting === 'function') {
+      const saved = await this.store.getSetting('wispbyte_accounts', { bypassCache: true });
+      if (Array.isArray(saved)) {
+        return this._decryptStoredAccounts(saved);
+      }
+    }
+    return this._getEnvFallbackAccounts();
   }
 
   async getAccounts() {
-    let accounts = [];
-
-    // 1. Check Supabase manager_settings first
-    if (this.store && typeof this.store.getSetting === 'function') {
-      try {
-        const saved = await this.store.getSetting('wispbyte_accounts', { bypassCache: true });
-        if (Array.isArray(saved) && saved.length > 0) {
-          accounts = saved.map((a) => {
-            const copy = { ...a };
-            if (copy.cookie && isStoredCredentialCiphertext(copy.cookie)) {
-              const rawCipher = copy.cookie;
-              try {
-                const decrypted = decryptUserPassword(rawCipher, this.encryptionKey);
-                if (typeof decrypted === 'string' && decrypted.length > 0) {
-                  copy.cookie = decrypted;
-                } else {
-                  copy._rawCookieCiphertext = rawCipher;
-                  copy._decryptFailed = true;
-                  copy.cookie = '';
-                }
-              } catch (_) {
-                copy._rawCookieCiphertext = rawCipher;
-                copy._decryptFailed = true;
-                copy.cookie = '';
-              }
-            }
-            return copy;
-          });
-        }
-      } catch (err) {
-        this.logger.warn?.('wispbyte_get_accounts_store_failed', { error: err.message });
-      }
+    try {
+      return await this.getAccountsStrict();
+    } catch (err) {
+      this.logger.warn?.('wispbyte_get_accounts_store_failed', { error: err.message });
+      return this._getEnvFallbackAccounts();
     }
-
-    // 2. If no DB accounts, parse from WISPBYTE_ACCOUNTS JSON or single WISPBYTE_COOKIE
-    if (accounts.length === 0) {
-      if (this.accountsJson) {
-        try {
-          const parsed = JSON.parse(this.accountsJson);
-          if (Array.isArray(parsed)) accounts = parsed;
-        } catch (_) {}
-      }
-
-      if (accounts.length === 0 && this.defaultCookie) {
-        accounts.push({
-          id: 'primary',
-          name: 'Primary Wispbyte Host',
-          cookie: this.defaultCookie,
-          panelUrl: this.defaultPanelUrl,
-          renewCount: 0,
-          lastStatus: 'idle',
-          lastPingAt: null,
-          lastMessage: 'Configured from environment'
-        });
-      }
-    }
-
-    return accounts;
   }
 
   async getPublicAccounts() {
@@ -195,44 +246,51 @@ class WispbyteKeepAliveManager {
     if (/[\r\n]/.test(cleanCookie)) {
       throw new Error('Cookie must not contain CRLF control characters.');
     }
+    if (!/^[\x20-\x7e]+$/.test(cleanCookie)) {
+      throw new Error('Cookie must contain only printable ASCII characters.');
+    }
 
     const rawPanelUrl = String(panelUrl || this.defaultPanelUrl || DEFAULT_PANEL_URL).trim();
     const cleanPanelUrl = validatePanelUrl(rawPanelUrl);
 
-    const accounts = await this.getAccounts();
-    const existingIndex = accounts.findIndex((a) => a.id === accId);
-    const updated = {
-      id: accId,
-      name: String(name || accId).trim().slice(0, 48),
-      cookie: cleanCookie,
-      panelUrl: cleanPanelUrl,
-      renewCount: existingIndex >= 0 ? (accounts[existingIndex].renewCount || 0) : 0,
-      lastStatus: existingIndex >= 0 ? accounts[existingIndex].lastStatus : 'idle',
-      lastPingAt: existingIndex >= 0 ? accounts[existingIndex].lastPingAt : null,
-      lastMessage: 'Saved, ready for ping'
-    };
+    return this._withAccountsLock(async () => {
+      const accounts = await this.getAccountsStrict();
+      const existingIndex = accounts.findIndex((a) => a.id === accId);
+      const updated = {
+        id: accId,
+        name: String(name || accId).trim().slice(0, 48),
+        cookie: cleanCookie,
+        panelUrl: cleanPanelUrl,
+        renewCount: existingIndex >= 0 ? (accounts[existingIndex].renewCount || 0) : 0,
+        lastStatus: existingIndex >= 0 ? accounts[existingIndex].lastStatus : 'idle',
+        lastPingAt: existingIndex >= 0 ? accounts[existingIndex].lastPingAt : null,
+        lastMessage: 'Saved, ready for ping'
+      };
 
-    if (existingIndex >= 0) {
-      accounts[existingIndex] = updated;
-    } else {
-      accounts.push(updated);
-    }
+      if (existingIndex >= 0) {
+        accounts[existingIndex] = updated;
+      } else {
+        accounts.push(updated);
+      }
 
-    await this.saveAccounts(accounts);
-    return {
-      ...updated,
-      cookie: maskCookie(cleanCookie),
-      cookieMasked: true
-    };
+      await this.saveAccounts(accounts);
+      return {
+        ...updated,
+        cookie: maskCookie(cleanCookie),
+        cookieMasked: true
+      };
+    });
   }
 
   async deleteAccount(id) {
     const accId = String(id || '').trim().toLowerCase();
-    const accounts = await this.getAccounts();
-    const filtered = accounts.filter((a) => a.id !== accId);
-    if (filtered.length === accounts.length) return false;
-    await this.saveAccounts(filtered);
-    return true;
+    return this._withAccountsLock(async () => {
+      const accounts = await this.getAccountsStrict();
+      const filtered = accounts.filter((a) => a.id !== accId);
+      if (filtered.length === accounts.length) return false;
+      await this.saveAccounts(filtered);
+      return true;
+    });
   }
 
   async pingAccount(account) {
@@ -278,13 +336,36 @@ class WispbyteKeepAliveManager {
         message: 'Cookie contains CRLF control characters'
       };
     }
+    if (!/^[\x20-\x7e]+$/.test(cookieHeader)) {
+      return {
+        id: account.id,
+        name: account.name || account.id,
+        success: false,
+        status: 'error',
+        message: 'Cookie contains invalid non-printable ASCII characters'
+      };
+    }
 
+    let pinnedAgent = null;
     try {
-      if (this.fetch === global.fetch) {
-        await assertPublicPanelHost(targetUrl);
+      const resolved = await assertPublicPanelHost(targetUrl);
+      if (this.fetch === global.fetch && undiciLib?.Agent && resolved?.ip) {
+        const pinnedIp = resolved.ip;
+        const pinnedFamily = resolved.family || net.isIP(pinnedIp) || 4;
+        pinnedAgent = new undiciLib.Agent({
+          connect: {
+            lookup: (_host, opts, cb) => {
+              if (opts && opts.all) {
+                return cb(null, [{ address: pinnedIp, family: pinnedFamily }]);
+              }
+              return cb(null, pinnedIp, pinnedFamily);
+            }
+          }
+        });
       }
+
       this.logger.info?.('wispbyte_manager_ping_start', { accountId: account.id, targetUrl });
-      const res = await this.fetch(targetUrl, {
+      const fetchOpts = {
         method: 'GET',
         headers: {
           'Cookie': cookieHeader,
@@ -295,10 +376,14 @@ class WispbyteKeepAliveManager {
         },
         redirect: 'manual',
         signal: AbortSignal.timeout(15000)
-      });
+      };
+      if (pinnedAgent) {
+        fetchOpts.dispatcher = pinnedAgent;
+      }
 
-      const location = res.headers.get('location') || '';
-      const html = await res.text().catch(() => '');
+      const res = await this.fetch(targetUrl, fetchOpts);
+      const location = redactStringSecrets(res.headers.get('location') || '');
+      const html = await readResponseTextCapped(res, MAX_RESPONSE_BYTES);
 
       if (res.status === 301 || res.status === 302 || res.status === 303 || res.status === 307 || res.status === 308) {
         const locLower = location.toLowerCase();
@@ -309,6 +394,23 @@ class WispbyteKeepAliveManager {
             success: false,
             status: 'expired',
             message: `Session cookie expired (redirected to ${location})`
+          };
+        }
+        if (
+          locLower.includes('maintenance') ||
+          locLower.includes('suspended') ||
+          locLower.includes('banned') ||
+          locLower.includes('cdn-cgi') ||
+          locLower.includes('challenge') ||
+          locLower.includes('captcha') ||
+          locLower.includes('error')
+        ) {
+          return {
+            id: account.id,
+            name: account.name || account.id,
+            success: false,
+            status: 'error',
+            message: `Panel unavailable or blocked (HTTP ${res.status} -> ${location})`
           };
         }
         return {
@@ -322,8 +424,33 @@ class WispbyteKeepAliveManager {
 
       if (res.status === 200) {
         const lower = html.toLowerCase();
-        if ((lower.includes('login with discord') || lower.includes('sign in to your account'))
-            && !lower.includes('logout') && !lower.includes('servers')) {
+        if (
+          lower.includes('cdn-cgi/challenge') ||
+          lower.includes('cf-browser-verification') ||
+          lower.includes('just a moment...') ||
+          lower.includes('attention required! | cloudflare') ||
+          lower.includes('under maintenance') ||
+          lower.includes('maintenance mode') ||
+          lower.includes('account suspended') ||
+          lower.includes('has been suspended') ||
+          lower.includes('you have been banned') ||
+          lower.includes('account banned')
+        ) {
+          return {
+            id: account.id,
+            name: account.name || account.id,
+            success: false,
+            status: 'error',
+            message: 'Client panel returned Cloudflare challenge or maintenance/suspended notice'
+          };
+        }
+
+        const looksLikeLogin =
+          lower.includes('login with discord') ||
+          lower.includes('sign in to your account') ||
+          lower.includes('name="password"') ||
+          lower.includes('/auth/login');
+        if (looksLikeLogin && !lower.includes('logout')) {
           return {
             id: account.id,
             name: account.name || account.id,
@@ -364,8 +491,12 @@ class WispbyteKeepAliveManager {
         name: account.name || account.id,
         success: false,
         status: 'error',
-        message: `Connection error: ${err.message}`
+        message: `Connection error: ${redactStringSecrets(err.message)}`
       };
+    } finally {
+      if (pinnedAgent && typeof pinnedAgent.close === 'function') {
+        await pinnedAgent.close().catch(() => {});
+      }
     }
   }
 
@@ -376,7 +507,7 @@ class WispbyteKeepAliveManager {
 
     this.isChecking = true;
     try {
-      const accounts = await this.getAccounts();
+      const accounts = await this.getAccountsStrict();
       if (accounts.length === 0) {
         return { success: true, total: 0, results: [], message: 'No Wispbyte accounts configured.' };
       }
@@ -386,7 +517,9 @@ class WispbyteKeepAliveManager {
       const now = new Date().toISOString();
 
       const statusById = new Map();
-      for (const acc of accounts) {
+      for (let i = 0; i < accounts.length; i++) {
+        const acc = accounts[i];
+        const snapshotCookie = acc.cookie;
         const res = await this.pingAccount(acc);
         acc.lastPingAt = now;
         acc.lastStatus = res.status;
@@ -395,21 +528,40 @@ class WispbyteKeepAliveManager {
           acc.renewCount = (acc.renewCount || 0) + 1;
         }
         statusById.set(acc.id, {
+          snapshotCookie,
           lastPingAt: acc.lastPingAt,
           lastStatus: acc.lastStatus,
           lastMessage: acc.lastMessage,
           renewCount: acc.renewCount
         });
         results.push({ ...res, lastPingAt: now, renewCount: acc.renewCount });
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+        if (i < accounts.length - 1) {
+          await new Promise((resolve) => {
+            const t = setTimeout(resolve, 2000);
+            t.unref?.();
+          });
+        }
       }
 
-      // Re-read fresh accounts before saving so concurrent admin add/update/delete isn't overwritten
-      const latestAccounts = await this.getAccounts();
-      const mergedAccounts = latestAccounts.length > 0
-        ? latestAccounts.map((acc) => (statusById.has(acc.id) ? { ...acc, ...statusById.get(acc.id) } : acc))
-        : accounts;
-      await this.saveAccounts(mergedAccounts);
+      // Re-read fresh accounts strictly inside lock so concurrent admin updates/deletes are never overwritten or resurrected
+      await this._withAccountsLock(async () => {
+        const latestAccounts = await this.getAccountsStrict();
+        const mergedAccounts = latestAccounts.map((acc) => {
+          const update = statusById.get(acc.id);
+          if (!update) return acc;
+          if (acc._decryptFailed || acc.cookie !== update.snapshotCookie) {
+            return acc;
+          }
+          return {
+            ...acc,
+            lastPingAt: update.lastPingAt,
+            lastStatus: update.lastStatus,
+            lastMessage: update.lastMessage,
+            renewCount: update.renewCount
+          };
+        });
+        await this.saveAccounts(mergedAccounts);
+      });
 
       const okCount = results.filter((r) => r.success).length;
       const expiredList = results.filter((r) => r.status === 'expired');
@@ -490,3 +642,4 @@ class WispbyteKeepAliveManager {
 module.exports = WispbyteKeepAliveManager;
 module.exports.validatePanelUrl = validatePanelUrl;
 module.exports.maskCookie = maskCookie;
+module.exports.assertPublicPanelHost = assertPublicPanelHost;

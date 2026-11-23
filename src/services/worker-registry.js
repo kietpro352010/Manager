@@ -2,9 +2,39 @@
 
 const crypto = require('node:crypto');
 const AsyncKeyLock = require('./async-key-lock');
-const { isLocalOrPrivateHost, validateProxyUrl } = require('./proxy-validation');
+const { isLocalOrPrivateHost, resolveAndValidateHost, validateProxyUrl } = require('./proxy-validation');
 const { encryptSecret, decryptSecret, generateWorkerSecret } = require('../utils/secrets');
 const { extractChatMessage } = require('../utils/text-format');
+
+async function validateWorkerServiceUrl(rawUrl) {
+  const urlStr = String(rawUrl || '').trim().replace(/\/+$/, '');
+  if (!urlStr) return '';
+  let parsed;
+  try {
+    parsed = new URL(urlStr);
+  } catch {
+    throw new Error('Worker URL must use HTTPS.');
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('Worker URL must not contain credentials.');
+  }
+  if (parsed.hostname.includes('%')) {
+    throw new Error('Worker URL contains an invalid zone identifier.');
+  }
+  const allowLocalBotUrls = process.env.ALLOW_LOCAL_BOT_URLS === 'true' || process.env.NODE_ENV !== 'production';
+  const hostLower = parsed.hostname.toLowerCase();
+  const isLoopback = hostLower === 'localhost' || hostLower === '127.0.0.1' || hostLower === '::1' || hostLower === '[::1]';
+  if (parsed.protocol === 'https:') {
+    if (!allowLocalBotUrls || !isLoopback) {
+      await resolveAndValidateHost(parsed.hostname, { allowLocal: false });
+    }
+    return urlStr;
+  }
+  if (parsed.protocol === 'http:' && isLoopback && allowLocalBotUrls) {
+    return urlStr;
+  }
+  throw new Error('Worker URL must use HTTPS.');
+}
 
 function safeDecryptJson(ciphertext, key) {
   if (!ciphertext) return null;
@@ -129,7 +159,15 @@ function validateWorkerStatus(rawStatus, source = 'worker') {
         feet: sanitizeItemEntry(rawInv.armor.feet)
       };
     }
-    if (rawInv.offhand !== undefined) sanitizedInventory.offhand = rawInv.offhand ? String(rawInv.offhand).slice(0, 64) : null;
+    if (rawInv.offhand !== undefined) {
+      if (rawInv.offhand === null) {
+        sanitizedInventory.offhand = null;
+      } else if (typeof rawInv.offhand === 'object' && !Array.isArray(rawInv.offhand)) {
+        sanitizedInventory.offhand = sanitizeItemEntry(rawInv.offhand);
+      } else {
+        sanitizedInventory.offhand = String(rawInv.offhand).slice(0, 64) || null;
+      }
+    }
     const selHotbar = asInteger(rawInv.selectedHotbar, 0, 8);
     if (selHotbar !== null) sanitizedInventory.selectedHotbar = selHotbar;
     for (const metricKey of ['health', 'food', 'totemCount', 'goldenAppleCount', 'foodCount']) {
@@ -180,7 +218,7 @@ function validateWorkerStatus(rawStatus, source = 'worker') {
     maintenanceStart: String(status.maintenanceStart || '').slice(0, 5),
     maintenanceEnd: String(status.maintenanceEnd || '').slice(0, 5),
     locationState: String(status.locationState || '').slice(0, 32) || 'unknown',
-    tps: typeof status.tps === 'number' && Number.isFinite(status.tps) ? Math.max(0, Math.min(20, status.tps)) : null,
+    tps: asNumber(status.tps, 0, 20),
     cpuPercent: asNumber(status.cpuPercent, 0, 100),
     rssMb: asNumber(status.rssMb, 0, 65536),
     heapUsedMb: asNumber(status.heapUsedMb, 0, 65536),
@@ -188,6 +226,7 @@ function validateWorkerStatus(rawStatus, source = 'worker') {
     food: asNumber(status.food, 0, 20),
     totemCount: asInteger(status.totemCount, 0, 1000),
     goldenAppleCount: asInteger(status.goldenAppleCount, 0, 1000),
+    foodCount: asInteger(status.foodCount, 0, 6400),
     position,
     dimension: String(status.dimension || '').slice(0, 40),
     serverHost: String(status.serverHost || status.server || '').trim().slice(0, 128) || null,
@@ -228,6 +267,8 @@ class WorkerRegistry {
     this.workerSettingsRev = new Map(); // botId -> integer settings revision counter
     this.botLogRev = new Map(); // botId -> integer log revision counter
     this.botChatLogRev = new Map(); // botId -> integer chat log revision counter
+    this._secretRefreshPromises = new Map(); // botId -> in-flight credential lookup promise
+    this._lastBypassReloadAt = new Map(); // botId -> ms (throttle 1-shot bypassCache reload on secret mismatch)
     this.statusLock = new AsyncKeyLock();
   }
 
@@ -300,6 +341,25 @@ class WorkerRegistry {
     return crypto.createHash('sha1').update(keyParts).digest('hex').slice(0, 16);
   }
 
+  clearBotMemory(workerId, { preserveSettingsRev = false } = {}) {
+    const id = String(workerId || '').trim().toLowerCase();
+    if (!id) return;
+    this.summaryCache.delete(id);
+    this.summaryRequestSeq.delete(id);
+    this.summaryLastAppliedSeq.delete(id);
+    this.botLogsCache.delete(id);
+    this.botChatLogsCache.delete(id);
+    this.botLogRev.delete(id);
+    this.botChatLogRev.delete(id);
+    this.secretCache.delete(id);
+    this.liveHeartbeats.delete(id);
+    this.lastDbStatusPersistAt.delete(id);
+    this.lastDbStatusFingerprint.delete(id);
+    this.workerStateRev.delete(id);
+    if (!preserveSettingsRev) this.workerSettingsRev.delete(id);
+    this._lastBypassReloadAt.delete(id);
+  }
+
   pruneStaleMemory() {
     const now = Date.now();
     for (const [botId, entry] of this.summaryCache.entries()) {
@@ -329,41 +389,41 @@ class WorkerRegistry {
         this.liveHeartbeats.delete(botId);
       }
     }
-    if (this.summaryRequestSeq.size > 500) {
+    for (const [botId, reloadedAt] of this._lastBypassReloadAt.entries()) {
+      if (now - Number(reloadedAt || 0) > 600000) {
+        this._lastBypassReloadAt.delete(botId);
+      }
+    }
+    if (this.summaryRequestSeq.size > 500 || this.lastDbStatusPersistAt.size > 500) {
       for (const botId of this.summaryRequestSeq.keys()) {
         if (!this.summaryCache.has(botId) && !this.liveHeartbeats.has(botId)) {
           this.summaryRequestSeq.delete(botId);
           this.summaryLastAppliedSeq.delete(botId);
         }
       }
+      for (const botId of this.lastDbStatusPersistAt.keys()) {
+        if (!this.summaryCache.has(botId) && !this.liveHeartbeats.has(botId)) {
+          this.lastDbStatusPersistAt.delete(botId);
+          this.lastDbStatusFingerprint.delete(botId);
+        }
+      }
     }
   }
 
   async add({ workerId, name, provider, serviceUrl = '', serviceId = '', secret: customSecret }) {
-    const botNumber = await this.store.nextBotNumber();
-    const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
-    const defaultId = pad(botNumber);
-    const id = String(workerId || '').trim().toLowerCase() || defaultId;
-    const label = String(name || `KingMC Bot ${botNumber}`).trim().slice(0, 64);
+    const requestedId = String(workerId || '').trim().toLowerCase();
     const host = String(provider || 'wispbyte').trim().toLowerCase();
     let url = String(serviceUrl || '').trim().replace(/\/+$/, '');
     const renderServiceId = String(serviceId || '').trim();
 
-    if (!ID_PATTERN.test(id)) throw new Error('Worker ID must be 2–40 lowercase letters, numbers, underscores, or hyphens.');
+    if (requestedId && !ID_PATTERN.test(requestedId)) {
+      throw new Error('Worker ID must be 2–40 lowercase letters, numbers, underscores, or hyphens.');
+    }
     if (!['render', 'wispbyte'].includes(host)) throw new Error('Provider must be render or wispbyte.');
     if (host === 'render' && !url && !renderServiceId) throw new Error('Render workers need a service URL or Render service ID.');
-    if (url && !/^https:\/\//i.test(url) && !/^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(url)) {
-      throw new Error('Worker URL must use HTTPS.');
+    if (url) {
+      url = await validateWorkerServiceUrl(url);
     }
-
-    if (host === 'render' && !url && renderServiceId) {
-      if (!this.renderApi) throw new Error('Configure Render API key or provide worker HTTPS URL.');
-      const service = await this.renderApi.getService(renderServiceId);
-      url = String(service.url || '').replace(/\/+$/, '');
-      if (!url) throw new Error('The selected Render service has no public HTTPS URL.');
-    }
-
-    if (await this.store.get(id)) throw new Error(`Worker ${id} already exists.`);
 
     if (customSecret !== undefined && customSecret !== null) {
       const trimmedSecret = typeof customSecret === 'string' ? customSecret.trim() : String(customSecret).trim();
@@ -372,6 +432,25 @@ class WorkerRegistry {
       }
     }
 
+    if (requestedId && await this.store.get(requestedId)) {
+      throw new Error(`Worker ${requestedId} already exists.`);
+    }
+
+    if (host === 'render' && !url && renderServiceId) {
+      if (!this.renderApi) throw new Error('Configure Render API key or provide worker HTTPS URL.');
+      const service = await this.renderApi.getService(renderServiceId);
+      url = await validateWorkerServiceUrl(service.url || '');
+      if (!url) throw new Error('The selected Render service has no public HTTPS URL.');
+    }
+
+    const botNumber = await this.store.nextBotNumber();
+    const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
+    const defaultId = pad(botNumber);
+    const id = requestedId || defaultId;
+    if (!ID_PATTERN.test(id)) throw new Error('Worker ID must be 2–40 lowercase letters, numbers, underscores, or hyphens.');
+    if (await this.store.get(id)) throw new Error(`Worker ${id} already exists.`);
+
+    const label = String(name || `KingMC Bot ${botNumber}`).trim().slice(0, 64);
     const secret = (customSecret !== undefined && customSecret !== null) ? String(customSecret).trim() : generateWorkerSecret();
     const now = new Date();
     const record = {
@@ -391,33 +470,23 @@ class WorkerRegistry {
     };
 
     await this.store.create(record);
+    this.clearBotMemory(id);
     this.secretCache.set(id, { secret, enabled: true, cachedAt: Date.now() });
     return { worker: this.publicView(record), secret };
   }
 
   async remove(workerId) {
     const id = String(workerId || '').trim().toLowerCase();
-    const existing = await this.store.get(id);
-    const removed = await this.store.remove(id);
-    if (removed) {
-      await this.accessStore?.removeWorkerAssignments?.(id);
-      this.summaryCache.delete(id);
-      this.summaryRequestSeq.delete(id);
-      this.summaryLastAppliedSeq.delete(id);
-      this.botLogsCache.delete(id);
-      this.botChatLogsCache.delete(id);
-      this.botLogRev.delete(id);
-      this.botChatLogRev.delete(id);
-      this.secretCache.delete(id);
-      this.liveHeartbeats.delete(id);
-      this.lastDbStatusPersistAt.delete(id);
-      this.lastDbStatusFingerprint.delete(id);
-      this.workerStateRev.delete(id);
-      this.workerSettingsRev.delete(id);
-      // Do NOT shift remaining workers' botNumber on deletion (botNumber is a stable identity
-      // backed by manager_bot_number_seq; shifting it causes cross-tenant IDOR & UNIQUE collisions).
-    }
-    return removed;
+    return this.statusLock.run(id, async () => {
+      const removed = await this.store.remove(id);
+      if (removed) {
+        await this.accessStore?.removeWorkerAssignments?.(id);
+        this.clearBotMemory(id);
+        // Do NOT shift remaining workers' botNumber on deletion (botNumber is a stable identity
+        // backed by manager_bot_number_seq; shifting it causes cross-tenant IDOR & UNIQUE collisions).
+      }
+      return removed;
+    });
   }
 
   async reindexAfterRemoval(removedBotNumber) {
@@ -465,8 +534,11 @@ class WorkerRegistry {
     return this.computeReachable(merged);
   }
 
-  async find(workerId) {
-    const record = await this.store.get(String(workerId || '').trim().toLowerCase());
+  async find(workerId, opts = {}) {
+    const id = String(workerId || '').trim().toLowerCase();
+    const record = opts?.bypassCache
+      ? await this.store.get(id, { bypassCache: true })
+      : await this.store.get(id);
     return this.applyLiveTelemetry(record);
   }
 
@@ -481,16 +553,16 @@ class WorkerRegistry {
     return (await this.store.list()).map((record) => this.publicView(this.applyLiveTelemetry(record)));
   }
 
-  async credential(workerId) {
+  async credential(workerId, { bypassCache = false } = {}) {
     const id = String(workerId || '').trim().toLowerCase();
     const cached = this.secretCache.get(id);
     const now = Date.now();
     let preservedGrace = null;
-    if (cached) {
+    if (cached && typeof cached === 'object' && cached.previousSecret && cached.graceUntil && now < cached.graceUntil) {
+      preservedGrace = { previousSecret: cached.previousSecret, graceUntil: cached.graceUntil };
+    }
+    if (!bypassCache && cached) {
       const isExpired = cached.cachedAt && (now - cached.cachedAt > SECRET_CACHE_TTL_MS);
-      if (typeof cached === 'object' && cached.previousSecret && cached.graceUntil && now < cached.graceUntil) {
-        preservedGrace = { previousSecret: cached.previousSecret, graceUntil: cached.graceUntil };
-      }
       if (!isExpired) {
         if (typeof cached === 'object') {
           if (cached.enabled === false) return null;
@@ -499,21 +571,38 @@ class WorkerRegistry {
         return cached;
       }
     }
-    const record = await this.find(id);
-    if (!record || record.enabled === false) {
-      this.secretCache.delete(id);
-      return null;
+
+    const inflightKey = `${id}:${bypassCache ? 'bypass' : 'std'}`;
+    if (this._secretRefreshPromises.has(inflightKey)) {
+      return this._secretRefreshPromises.get(inflightKey);
     }
-    const secret = safeDecryptText(record.secretCiphertext, this.encryptionKey);
-    if (secret) {
-      this.secretCache.set(id, {
-        secret,
-        ...(preservedGrace || {}),
-        enabled: Boolean(record.enabled),
-        cachedAt: Date.now()
-      });
-    }
-    return secret || null;
+
+    const refreshPromise = (async () => {
+      const record = await this.find(id, { bypassCache });
+      if (!record || record.enabled === false) {
+        this.secretCache.delete(id);
+        return null;
+      }
+      const secret = safeDecryptText(record.secretCiphertext, this.encryptionKey);
+      const latestCached = this.secretCache.get(id);
+      const latestGrace = (latestCached && typeof latestCached === 'object' && latestCached.previousSecret && latestCached.graceUntil && Date.now() < latestCached.graceUntil)
+        ? { previousSecret: latestCached.previousSecret, graceUntil: latestCached.graceUntil }
+        : preservedGrace;
+      if (secret) {
+        this.secretCache.set(id, {
+          secret,
+          ...(latestGrace || {}),
+          enabled: Boolean(record.enabled),
+          cachedAt: Date.now()
+        });
+      }
+      return secret || null;
+    })().finally(() => {
+      this._secretRefreshPromises.delete(inflightKey);
+    });
+
+    this._secretRefreshPromises.set(inflightKey, refreshPromise);
+    return refreshPromise;
   }
 
   async rotateSecret(workerId) {
@@ -566,55 +655,55 @@ class WorkerRegistry {
   }
 
   async resetData(workerId) {
-    const record = await this.find(workerId);
-    if (!record || !record.enabled) throw new Error(`Worker ${workerId} is not registered or is disabled.`);
-    await this.store.resetData(record.workerId);
-    this.summaryCache.delete(record.workerId);
-    this.botLogsCache.delete(record.workerId);
-    this.botChatLogsCache.delete(record.workerId);
-    this.secretCache.delete(record.workerId);
-    this.liveHeartbeats.delete(record.workerId);
-    this.lastDbStatusPersistAt.delete(record.workerId);
-    this.lastDbStatusFingerprint.delete(record.workerId);
-    this.bumpRevision(record.workerId);
-    this.bumpSettingsRevision(record.workerId);
-    return this.publicView(await this.find(record.workerId));
+    const id = String(workerId || '').trim().toLowerCase();
+    return this.statusLock.run(id, async () => {
+      const record = await this.find(id, { bypassCache: true });
+      if (!record || !record.enabled) throw new Error(`Worker ${workerId} is not registered or is disabled.`);
+      await this.store.resetData(record.workerId);
+      this.clearBotMemory(record.workerId, { preserveSettingsRev: true });
+      this.bumpRevision(record.workerId);
+      this.bumpSettingsRevision(record.workerId);
+      return this.publicView(await this.find(record.workerId, { bypassCache: true }));
+    });
   }
 
   async authenticate(workerId, presentedSecret) {
     if (!workerId || typeof presentedSecret !== 'string') return false;
     const id = String(workerId).trim().toLowerCase();
+    const right = Buffer.from(presentedSecret, 'utf8');
+    const matchesSecret = (candidate) => {
+      if (!candidate || typeof candidate !== 'string') return false;
+      const left = Buffer.from(candidate, 'utf8');
+      return left.length === right.length && crypto.timingSafeEqual(left, right);
+    };
+
     const cached = this.secretCache.get(id);
     const now = Date.now();
     if (cached && typeof cached === 'object') {
       if (cached.enabled === false) return false;
       const isExpired = cached.cachedAt && (now - cached.cachedAt > SECRET_CACHE_TTL_MS);
-      if (!isExpired && cached.secret) {
-        const left = Buffer.from(cached.secret, 'utf8');
-        const right = Buffer.from(presentedSecret, 'utf8');
-        if (left.length === right.length && crypto.timingSafeEqual(left, right)) {
-          return true;
-        }
+      if (!isExpired && matchesSecret(cached.secret)) {
+        return true;
       }
-      if (cached.previousSecret && cached.graceUntil && now < cached.graceUntil) {
-        const prevLeft = Buffer.from(cached.previousSecret, 'utf8');
-        const right = Buffer.from(presentedSecret, 'utf8');
-        if (prevLeft.length === right.length && crypto.timingSafeEqual(prevLeft, right)) {
-          return true;
-        }
+      if (cached.previousSecret && cached.graceUntil && now < cached.graceUntil && matchesSecret(cached.previousSecret)) {
+        return true;
       }
     }
     const expected = await this.credential(id).catch(() => null);
-    if (!expected) return false;
-    const left = Buffer.from(expected, 'utf8');
-    const right = Buffer.from(presentedSecret, 'utf8');
-    if (left.length === right.length && crypto.timingSafeEqual(left, right)) {
+    if (matchesSecret(expected)) return true;
+    const freshCached = this.secretCache.get(id);
+    if (freshCached?.enabled === false) return false;
+    if (freshCached?.previousSecret && freshCached?.graceUntil && now < freshCached.graceUntil && matchesSecret(freshCached.previousSecret)) {
       return true;
     }
-    const freshCached = this.secretCache.get(id);
-    if (freshCached?.previousSecret && freshCached?.graceUntil && now < freshCached.graceUntil) {
-      const prevLeft = Buffer.from(freshCached.previousSecret, 'utf8');
-      if (prevLeft.length === right.length && crypto.timingSafeEqual(prevLeft, right)) {
+    // 1-shot throttled bypassCache reload when cache may be stale after rotation in another instance/admin action
+    const lastReloadAt = this._lastBypassReloadAt.get(id) || 0;
+    if (now - lastReloadAt >= 5000) {
+      this._lastBypassReloadAt.set(id, now);
+      const reloaded = await this.credential(id, { bypassCache: true }).catch(() => null);
+      if (matchesSecret(reloaded)) return true;
+      const postReloadCached = this.secretCache.get(id);
+      if (postReloadCached?.previousSecret && postReloadCached?.graceUntil && Date.now() < postReloadCached.graceUntil && matchesSecret(postReloadCached.previousSecret)) {
         return true;
       }
     }
@@ -660,6 +749,11 @@ class WorkerRegistry {
 
   async updateStatus(workerId, status, source) {
     const id = String(workerId || '').trim().toLowerCase();
+    const rawStatus = status && typeof status === 'object' && !Array.isArray(status) ? status : {};
+    // Allocate request sequence BEFORE entering statusLock so out-of-order concurrent calls preserve chronological arrival order (WORKER-CHAN-06).
+    const requestSeq = (this.summaryRequestSeq.get(id) || 0) + 1;
+    this.summaryRequestSeq.set(id, requestSeq);
+
     return this.statusLock.run(id, async () => {
       // 1. Kiểm tra worker tồn tại và đang enabled - không tự kích hoạt lại worker đã bị disable (Audit A-13)
       const existing = await this.find(id);
@@ -669,22 +763,51 @@ class WorkerRegistry {
       }
 
       // 2. Sequence check chống out-of-order race conditions ghi đè kết quả cũ (Audit A-08)
-      const currentSeq = (this.summaryRequestSeq.get(id) || 0) + 1;
-      this.summaryRequestSeq.set(id, currentSeq);
-
       const lastApplied = this.summaryLastAppliedSeq.get(id) || 0;
-      if (currentSeq <= lastApplied) {
+      if (requestSeq <= lastApplied) {
         return this.publicView(existing);
       }
 
-      const safeStatus = validateWorkerStatus(status, source);
-      if (safeStatus.state === 'unknown' && existing.status?.state && !status?.state) {
+      const safeStatus = validateWorkerStatus(rawStatus, source);
+      if (safeStatus.state === 'unknown' && existing.status?.state && !rawStatus.state) {
         safeStatus.state = existing.status.state;
       }
 
+      // Preserve omitted partial telemetry fields from existing.status (WORKER-CHAN-03 / WORKER-CHAN-14)
+      if (existing.status && typeof existing.status === 'object') {
+        const ex = existing.status;
+        if (!Object.hasOwn(rawStatus, 'online') && !Object.hasOwn(rawStatus, 'connected') && ex.online !== undefined) {
+          safeStatus.online = Boolean(ex.online);
+        }
+        if (!Object.hasOwn(rawStatus, 'username') && ex.username) {
+          safeStatus.username = ex.username;
+        }
+        if (!Object.hasOwn(rawStatus, 'serverHost') && !Object.hasOwn(rawStatus, 'server')) {
+          if (ex.serverHost) safeStatus.serverHost = ex.serverHost;
+          if (ex.server) safeStatus.server = ex.server;
+        }
+        if (!Object.hasOwn(rawStatus, 'proxyEnabled') && ex.proxyEnabled !== undefined) {
+          safeStatus.proxyEnabled = Boolean(ex.proxyEnabled);
+        }
+        if (!Object.hasOwn(rawStatus, 'dimension') && ex.dimension) {
+          safeStatus.dimension = ex.dimension;
+        }
+        if (!Object.hasOwn(rawStatus, 'locationState') && ex.locationState) {
+          safeStatus.locationState = ex.locationState;
+        }
+        for (const numKey of ['health', 'food', 'tps', 'pingMs', 'totemCount', 'goldenAppleCount', 'foodCount', 'uptimeSeconds']) {
+          if (!Object.hasOwn(rawStatus, numKey) && ex[numKey] !== undefined && ex[numKey] !== null) {
+            safeStatus[numKey] = ex[numKey];
+          }
+        }
+        if (!Object.hasOwn(rawStatus, 'connectedAt') && ex.connectedAt) {
+          safeStatus.connectedAt = ex.connectedAt;
+        }
+      }
+
       // Preserve manuallyStopped flag across status reports if not explicitly provided
-      if (status.manuallyStopped !== undefined) {
-        safeStatus.manuallyStopped = Boolean(status.manuallyStopped);
+      if (rawStatus.manuallyStopped !== undefined) {
+        safeStatus.manuallyStopped = Boolean(rawStatus.manuallyStopped);
       } else if (existing.status?.manuallyStopped !== undefined) {
         safeStatus.manuallyStopped = Boolean(existing.status.manuallyStopped);
       }
@@ -697,14 +820,14 @@ class WorkerRegistry {
       }
 
       // Preserve rich telemetry if incoming report is lightweight/partial
-      if ((status?.isLightweight === true || status?.isPartial === true || status?.inventory === undefined) && existing.status) {
+      if ((rawStatus.isLightweight === true || rawStatus.isPartial === true || rawStatus.inventory === undefined) && existing.status) {
         if (safeStatus.inventory === undefined && existing.status.inventory !== undefined) {
           safeStatus.inventory = existing.status.inventory;
         }
         if (safeStatus.currentWindow === undefined && existing.status.currentWindow !== undefined) {
           safeStatus.currentWindow = existing.status.currentWindow;
         }
-        if (!safeStatus.position && existing.status.position) {
+        if (!Object.hasOwn(rawStatus, 'position') && !safeStatus.position && existing.status.position) {
           safeStatus.position = existing.status.position;
         }
       }
@@ -726,7 +849,7 @@ class WorkerRegistry {
         }
       }
 
-      this.summaryLastAppliedSeq.set(id, currentSeq);
+      this.summaryLastAppliedSeq.set(id, requestSeq);
       this.summaryCache.set(id, { timestamp: Date.now(), data: safeStatus });
       this.liveHeartbeats.set(id, managerNow);
 
@@ -867,6 +990,7 @@ class WorkerRegistry {
   }
 
   publicView(record) {
+    if (!record || typeof record !== 'object') return null;
     const { secretCiphertext, _id, ...safe } = record;
     const settings = record.settings || {};
     safe.alias = String(settings.alias || record.alias || record.name || '');
@@ -966,35 +1090,34 @@ class WorkerRegistry {
   }
 
   async updateSettings(workerId, rawPatch = {}) {
-    const worker = await this.find(workerId);
-    if (!worker) throw new Error('Worker is not registered.');
-    const nested = (rawPatch && typeof rawPatch.settings === 'object' && !Array.isArray(rawPatch.settings))
-      ? rawPatch.settings
-      : {};
-    const patch = { ...nested, ...(rawPatch || {}) };
-    const next = {};
-    const recordPatch = {};
-    if (Object.hasOwn(patch, 'alias')) {
-      const alias = String(patch.alias || '').trim().slice(0, 64);
-      next.alias = alias;
-    }
-    if (Object.hasOwn(patch, 'tags')) {
-      const tags = Array.isArray(patch.tags)
-        ? [...new Set(patch.tags.map((tag) => String(tag || '').trim().toLowerCase().replace(/^#/, '').slice(0, 32)).filter(Boolean))].slice(0, 20)
-        : [];
-      next.tags = tags;
-    }
-    if (Object.hasOwn(patch, 'rentable')) next.rentable = patch.rentable !== false;
-    if (Object.hasOwn(patch, 'serviceUrl')) {
-      const serviceUrl = String(patch.serviceUrl || '').trim().replace(/\/+$/, '');
-      if (serviceUrl && !/^https:\/\//i.test(serviceUrl) && !/^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(serviceUrl)) {
-        throw new Error('Worker URL must use HTTPS.');
+    const id = String(workerId || '').trim().toLowerCase();
+    return this.statusLock.run(id, async () => {
+      const worker = await this.find(id, { bypassCache: true });
+      if (!worker) throw new Error('Worker is not registered.');
+      const nested = (rawPatch && typeof rawPatch.settings === 'object' && !Array.isArray(rawPatch.settings))
+        ? rawPatch.settings
+        : {};
+      const patch = { ...nested, ...(rawPatch || {}) };
+      const next = {};
+      const recordPatch = {};
+      if (Object.hasOwn(patch, 'alias')) {
+        const alias = String(patch.alias || '').trim().slice(0, 64);
+        next.alias = alias;
       }
-      if (!serviceUrl && worker.provider === 'render' && !worker.renderServiceId) {
-        throw new Error('Render workers need a service URL or Render service ID.');
+      if (Object.hasOwn(patch, 'tags')) {
+        const tags = Array.isArray(patch.tags)
+          ? [...new Set(patch.tags.map((tag) => String(tag || '').trim().toLowerCase().replace(/^#/, '').slice(0, 32)).filter(Boolean))].slice(0, 20)
+          : [];
+        next.tags = tags;
       }
-      recordPatch.serviceUrl = serviceUrl;
-    }
+      if (Object.hasOwn(patch, 'rentable')) next.rentable = patch.rentable !== false;
+      if (Object.hasOwn(patch, 'serviceUrl')) {
+        const serviceUrl = await validateWorkerServiceUrl(patch.serviceUrl || '');
+        if (!serviceUrl && worker.provider === 'render' && !worker.renderServiceId) {
+          throw new Error('Render workers need a service URL or Render service ID.');
+        }
+        recordPatch.serviceUrl = serviceUrl;
+      }
     if (Object.hasOwn(patch, 'afkMode')) {
       next.afkMode = 'still';
       next.afkManaged = true;
@@ -1171,17 +1294,20 @@ class WorkerRegistry {
       autoChatSchedules: next.autoChatSchedules ?? worker.settings?.autoChatSchedules ?? [],
       botSchedules: next.botSchedules ?? worker.settings?.botSchedules ?? []
     };
+    });
   }
 
   async setEnabled(workerId, enabled) {
     const id = String(workerId || '').trim().toLowerCase();
-    const isEnabled = Boolean(enabled);
-    const updated = await this.store.update(id, { enabled: isEnabled });
-    if (!isEnabled) {
-      this.secretCache.delete(id);
-      this.summaryCache.delete(id);
-    }
-    return updated;
+    return this.statusLock.run(id, async () => {
+      const isEnabled = Boolean(enabled);
+      const updated = await this.store.update(id, { enabled: isEnabled });
+      if (!isEnabled) {
+        this.secretCache.delete(id);
+        this.summaryCache.delete(id);
+      }
+      return updated;
+    });
   }
 
   // Ergonomic helper delegates

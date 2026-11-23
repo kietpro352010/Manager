@@ -1,23 +1,90 @@
 'use strict';
 
-function cleanText(input) {
-  return String(input || '')
+const { redactStringSecrets } = require('./logger');
+
+const PROTECTED_AMP_TOKEN_PREFIX = '\u0000KBOT_AMP_';
+
+function stripMinecraftFormatting(input, { preserveUrlsAndEntities = true } = {}) {
+  let text = String(input || '').replace(/\u0000/g, '');
+  text = text
     .replace(/§x(§[0-9a-f]){6}/gi, '')
-    .replace(/&x(&[0-9a-f]){6}/gi, '')
-    .replace(/&#[0-9a-f]{6}/gi, '')
     .replace(/§#[0-9a-f]{6}/gi, '')
     .replace(/§[0-9a-fk-or]/gi, '')
-    .replace(/&[0-9a-fk-or]/gi, '')
-    .replace(/§./g, '')
+    .replace(/§./g, '');
+
+  if (!preserveUrlsAndEntities) {
+    return text;
+  }
+
+  const protectedSpans = [];
+  text = text.replace(
+    /https?:\/\/[^\s]+|&(?:[a-zA-Z][a-zA-Z0-9]{1,10}|#\d{1,7}|#x[0-9a-fA-F]{1,6});|[?&][a-zA-Z0-9_]+=(?:[^\s&]*)?|\b[A-Z0-9]{1,6}&[A-Z0-9]{1,6}\b/g,
+    (match) => {
+      const idx = protectedSpans.push(match) - 1;
+      return `${PROTECTED_AMP_TOKEN_PREFIX}${idx}\u0000`;
+    }
+  );
+
+  text = text
+    .replace(/&x(&[0-9a-f]){6}/gi, '')
+    .replace(/&#[0-9a-f]{6}/gi, '')
+    .replace(/&[0-9a-fk-or]/gi, '');
+
+  text = text.replace(/\u0000KBOT_AMP_(\d+)\u0000/g, (_m, idx) => protectedSpans[Number(idx)] || '');
+  return text;
+}
+
+function cleanText(input) {
+  return stripMinecraftFormatting(input, { preserveUrlsAndEntities: true })
     .replace(/[\u00a0\u200b\ufeff]/g, ' ')
     .normalize('NFC')
     .trim();
+}
+
+function walkChatNode(node, depth = 0) {
+  if (!node || depth > 32) return '';
+  if (typeof node === 'string') return node;
+  if (Array.isArray(node)) {
+    return node.slice(0, 64).map((item) => walkChatNode(item, depth + 1)).join('');
+  }
+  if (typeof node !== 'object') return '';
+
+  let text = typeof node.text === 'string' ? node.text : '';
+  if (typeof node.translate === 'string') {
+    const renderedWith = Array.isArray(node.with)
+      ? node.with.slice(0, 32).map((item) => walkChatNode(item, depth + 1))
+      : [];
+    if (renderedWith.length > 0 && /%(?:\d+\$)?s/.test(node.translate)) {
+      let argIdx = 0;
+      text += node.translate.replace(/%(?:(\d+)\$)?s/g, (_m, pos) => {
+        const index = pos ? Number(pos) - 1 : argIdx++;
+        return renderedWith[index] ?? '';
+      });
+    } else {
+      text += node.translate;
+      if (renderedWith.length > 0) {
+        const nonEmpty = renderedWith.filter(Boolean).join(' ');
+        if (nonEmpty) text += (text ? ' ' : '') + nonEmpty;
+      }
+    }
+  } else if (Array.isArray(node.with)) {
+    text += node.with.slice(0, 32).map((item) => walkChatNode(item, depth + 1)).join('');
+  }
+
+  if (Array.isArray(node.extra)) {
+    text += node.extra.slice(0, 64).map((item) => walkChatNode(item, depth + 1)).join('');
+  }
+  return text;
 }
 
 function extractChatMessage(raw) {
   if (!raw) return '';
   if (typeof raw === 'object' && typeof raw.toPlainText === 'function') {
     return cleanText(raw.toPlainText());
+  }
+  if (typeof raw === 'object') {
+    const walked = cleanText(walkChatNode(raw));
+    if (walked.length > 0) return walked;
   }
   let str = typeof raw === 'string' ? raw : '';
   if (!str && typeof raw === 'object') {
@@ -30,17 +97,7 @@ function extractChatMessage(raw) {
   if (typeof str === 'string' && (str.startsWith('{') || str.startsWith('['))) {
     try {
       const parsed = JSON.parse(str);
-      const parts = [];
-      const walk = (node) => {
-        if (!node) return;
-        if (typeof node === 'string') { parts.push(node); return; }
-        if (typeof node.text === 'string') parts.push(node.text);
-        if (Array.isArray(node.extra)) {
-          for (const item of node.extra) walk(item);
-        }
-      };
-      walk(parsed);
-      const combined = cleanText(parts.join(''));
+      const combined = cleanText(walkChatNode(parsed));
       if (combined.length > 0) return combined;
     } catch (_) {}
   }
@@ -49,7 +106,7 @@ function extractChatMessage(raw) {
 
 function diagnoseErrorMessage(rawError) {
   if (!rawError) return 'Không có lỗi ghi nhận.';
-  const raw = String(rawError?.message || rawError || '').trim();
+  const raw = redactStringSecrets(String(rawError?.message || rawError || '').trim());
   const lower = raw.toLowerCase();
 
   // 1. Lỗi mạng / Proxy phản hồi quá hạn / Từ chối kết nối
@@ -93,11 +150,17 @@ function diagnoseErrorMessage(rawError) {
   if (lower.includes('disconnect.quitting') || lower.includes('quitting') || lower.includes('client quit')) {
     return 'Bot đã ngắt kết nối theo yêu cầu của hệ thống điều phối.';
   }
+  const safeCleanError = redactStringSecrets(
+    stripMinecraftFormatting(raw, { preserveUrlsAndEntities: false })
+      .replace(/[\u00a0\u200b\ufeff]/g, ' ')
+      .normalize('NFC')
+      .trim()
+  );
   if (lower.includes('kicked') || lower.includes('bị kick') || lower.includes('timed out')) {
-    return `Bot bị đẩy khỏi server: ${cleanText(raw).slice(0, 140)}`;
+    return `Bot bị đẩy khỏi server: ${safeCleanError.slice(0, 140)}`;
   }
 
-  return cleanText(raw).slice(0, 200);
+  return safeCleanError.slice(0, 200);
 }
 
 function formatRelativeTime(dateOrMs) {
@@ -146,4 +209,3 @@ module.exports = {
   formatDuration,
   formatBytes
 };
-

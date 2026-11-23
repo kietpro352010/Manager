@@ -1,0 +1,3151 @@
+'use strict';
+
+const assert = require('node:assert');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const http = require('node:http');
+const path = require('node:path');
+const express = require('express');
+
+const AsyncKeyLock = require('../src/services/async-key-lock');
+const { AccessControl } = require('../src/services/access-control');
+const { Link4mService } = require('../src/services/link4m-service');
+const CommandBroker = require('../src/services/command-broker');
+const SupabaseCommandStore = require('../src/storage/supabase-command-store');
+const FleetOperations = require('../src/services/fleet-operations');
+const { EntitlementService, isWorkerStopConfirmed } = require('../src/services/entitlement-service');
+const { createApp } = require('../src/http/app');
+const { createWorkerApi } = require('../src/http/routes/worker-api');
+const { createUserApi } = require('../src/http/routes/user-api');
+
+function createSilentLogger() {
+  return {
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+    debug: () => {}
+  };
+}
+
+function createInMemoryTableStore() {
+  const tables = {
+    users: new Map(),
+    settings: new Map(),
+    linkAttempts: new Map(),
+    audit: []
+  };
+
+  const store = {
+    tables,
+    async getAccess(userId) {
+      const rec = tables.users.get(String(userId));
+      return rec ? { ...rec, workerIds: [...(rec.workerIds || [])] } : null;
+    },
+    async listAccess() {
+      return [...tables.users.values()].map((rec) => ({
+        ...rec,
+        workerIds: [...(rec.workerIds || [])],
+        stopPendingWorkers: Array.isArray(rec.stopPendingWorkers) ? [...rec.stopPendingWorkers] : []
+      }));
+    },
+    async setAccess(userId, values) {
+      const key = String(userId);
+      const current = tables.users.get(key) || { userId: key, id: key };
+      const next = {
+        ...current,
+        ...values,
+        userId: key,
+        workerIds: Array.isArray(values.workerIds) ? [...values.workerIds] : [...(current.workerIds || [])],
+        stopPendingWorkers: Array.isArray(values.stopPendingWorkers) ? [...values.stopPendingWorkers] : []
+      };
+      tables.users.set(key, next);
+      return { ...next };
+    },
+    async getSetting(key) {
+      const val = tables.settings.get(String(key));
+      return val ? { ...val } : null;
+    },
+    async setSetting(key, value) {
+      const saved = { ...value, updatedAt: new Date().toISOString() };
+      tables.settings.set(String(key), saved);
+      return { ...saved };
+    },
+    async findActiveLinkAttempt(userId, now = new Date()) {
+      const nowMs = new Date(now).getTime();
+      const matches = [...tables.linkAttempts.values()]
+        .filter((a) => a.userId === String(userId) && a.status === 'pending' && new Date(a.expiresAt).getTime() > nowMs)
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      return matches[0] ? { ...matches[0] } : null;
+    },
+    async getLinkAttempt(attemptId) {
+      const found = tables.linkAttempts.get(String(attemptId));
+      return found ? { ...found } : null;
+    },
+    async getLinkAttemptByTokenHash(tokenHash) {
+      const found = [...tables.linkAttempts.values()].find((a) => a.tokenHash === tokenHash);
+      return found ? { ...found } : null;
+    },
+    async getLatestLinkAttempt(userId) {
+      const matches = [...tables.linkAttempts.values()]
+        .filter((a) => a.userId === String(userId))
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      return matches[0] ? { ...matches[0] } : null;
+    },
+    async countLinkRewards(userId, since) {
+      const sinceMs = new Date(since).getTime();
+      return [...tables.linkAttempts.values()].filter(
+        (a) => a.userId === String(userId) && a.status === 'rewarded' && a.rewardedAt && new Date(a.rewardedAt).getTime() >= sinceMs
+      ).length;
+    },
+    async lastLinkReward(userId) {
+      const matches = [...tables.linkAttempts.values()]
+        .filter((a) => a.userId === String(userId) && a.status === 'rewarded' && a.rewardedAt)
+        .sort((a, b) => new Date(b.rewardedAt).getTime() - new Date(a.rewardedAt).getTime());
+      return matches[0] ? { ...matches[0] } : null;
+    },
+    async createLinkAttempt(record) {
+      const copy = { ...record };
+      tables.linkAttempts.set(String(record.attemptId), copy);
+      return { ...copy };
+    },
+    async setLinkAttemptProviderUrl(attemptId, providerUrl) {
+      const row = tables.linkAttempts.get(String(attemptId));
+      if (!row || row.status !== 'pending') return false;
+      row.providerUrl = providerUrl;
+      return true;
+    },
+    async expireLinkAttempt(attemptId) {
+      const row = tables.linkAttempts.get(String(attemptId));
+      if (row && row.status === 'pending') row.status = 'expired';
+    },
+    async expireLinkAttempts(userId, now = new Date()) {
+      const nowMs = new Date(now).getTime();
+      for (const row of tables.linkAttempts.values()) {
+        if (row.userId === String(userId) && row.status === 'pending' && new Date(row.expiresAt).getTime() <= nowMs) {
+          row.status = 'expired';
+        }
+      }
+    },
+    async claimLinkAttempt(attemptId, tokenHash) {
+      const row = tables.linkAttempts.get(String(attemptId));
+      if (!row || row.status !== 'pending' || row.tokenHash !== tokenHash) return null;
+      row.status = 'processing';
+      row.processingAt = new Date().toISOString();
+      return { ...row };
+    },
+    async completeLink4mReward(attemptId, userId, values) {
+      const row = tables.linkAttempts.get(String(attemptId));
+      if (!row || row.status !== 'processing') return null;
+      row.status = 'rewarded';
+      row.rewardedAt = new Date().toISOString();
+      await store.setAccess(userId, values);
+      return { ...row };
+    },
+    async resetLinkAttempt(attemptId) {
+      const row = tables.linkAttempts.get(String(attemptId));
+      if (row && row.status === 'processing') {
+        row.status = 'pending';
+        row.processingAt = null;
+      }
+    },
+    async addAudit(entry) {
+      tables.audit.push({ ...entry, createdAt: new Date().toISOString() });
+      return true;
+    }
+  };
+
+  return store;
+}
+
+async function testIndexJsLink4mWiring() {
+  console.log('1. Verifying src/index.js Link4M & Service DI Wiring...');
+  const indexPath = path.resolve(__dirname, '../src/index.js');
+  const source = fs.readFileSync(indexPath, 'utf8');
+
+  const runtimeSettingsMatch = source.match(/new ManagerRuntimeSettings\(\s*\{[\s\S]*?\}\s*\)/);
+  assert.ok(runtimeSettingsMatch, 'index.js must instantiate ManagerRuntimeSettings');
+  assert.match(runtimeSettingsMatch[0], /link4mApiToken\s*:\s*config\.link4mApiToken/, 'ManagerRuntimeSettings must receive initial link4mApiToken');
+  assert.match(runtimeSettingsMatch[0], /link4mSecretKey\s*:\s*config\.link4mSecretKey/, 'ManagerRuntimeSettings must receive initial link4mSecretKey');
+
+  const runtimeConfigMatch = source.match(/const runtimeConfig\s*=\s*\{[\s\S]*?\n\s*\};/);
+  assert.ok(runtimeConfigMatch, 'index.js must define runtimeConfig');
+  assert.match(
+    runtimeConfigMatch[0],
+    /link4mApiToken\s*:\s*integrationSettings\.link4mApiToken\s*\|\|\s*config\.link4mApiToken/,
+    'runtimeConfig must forward link4mApiToken'
+  );
+  assert.match(
+    runtimeConfigMatch[0],
+    /link4mSecretKey\s*:\s*integrationSettings\.link4mSecretKey\s*\|\|\s*config\.link4mSecretKey/,
+    'runtimeConfig must forward link4mSecretKey'
+  );
+
+  const link4mCtorMatch = source.match(/new Link4mService\(\s*\{[\s\S]*?\}\s*\)/);
+  assert.ok(link4mCtorMatch, 'index.js must instantiate Link4mService');
+  assert.match(link4mCtorMatch[0], /\bstore\s*:\s*accessStore\b/, 'Link4mService must receive store: accessStore');
+  assert.match(link4mCtorMatch[0], /\baccessControl\b/, 'Link4mService must receive accessControl');
+  assert.match(link4mCtorMatch[0], /\buserLock\b/, 'Link4mService must receive userLock');
+  assert.match(link4mCtorMatch[0], /\bconfig\s*:\s*runtimeConfig\b/, 'Link4mService must receive config: runtimeConfig');
+  assert.match(link4mCtorMatch[0], /\blogger\b/, 'Link4mService must receive logger');
+  assert.match(source, /await\s+link4mService\.initialize\(\)/, 'index.js must invoke await link4mService.initialize()');
+
+  const entitlementCtorMatch = source.match(/new EntitlementService\(\s*\{[\s\S]*?\}\s*\)/);
+  assert.ok(entitlementCtorMatch, 'index.js must instantiate EntitlementService');
+  assert.match(entitlementCtorMatch[0], /\baccessControl\b/, 'EntitlementService must receive accessControl');
+  assert.match(entitlementCtorMatch[0], /\buserLock\b/, 'EntitlementService must receive userLock');
+
+  const createAppMatch = source.match(/createApp\(\s*\{[\s\S]*?\}\s*\)/);
+  assert.ok(createAppMatch, 'index.js must pass services to createApp');
+  assert.match(createAppMatch[0], /\blink4mService\b/, 'createApp must receive link4mService');
+  assert.match(createAppMatch[0], /\bentitlementService\b/, 'createApp must receive entitlementService');
+
+  console.log('✅ 1. src/index.js Link4M & Service DI Wiring verified.');
+}
+
+async function testRealLink4mAccessControlAndLockWiring() {
+  console.log('2. Testing Real AccessControl + AsyncKeyLock + Link4mService Wiring & Concurrency...');
+  const store = createInMemoryTableStore();
+  const logger = createSilentLogger();
+  const userLock = new AsyncKeyLock();
+  const accessControl = new AccessControl({ store });
+
+  const nowMs = Date.now();
+  const initialActiveExpiryMs = nowMs + 2 * 3600 * 1000;
+
+  await store.setAccess('user_active_1', {
+    userId: 'user_active_1',
+    username: 'alice',
+    role: 'user',
+    status: 'active',
+    isPermanent: false,
+    expiresAt: new Date(initialActiveExpiryMs).toISOString(),
+    workerIds: ['bot-01'],
+    planName: 'Standard'
+  });
+
+  await store.setAccess('user_expired_1', {
+    userId: 'user_expired_1',
+    username: 'bob',
+    role: 'user',
+    status: 'expired',
+    isPermanent: false,
+    expiresAt: new Date(nowMs - 3 * 3600 * 1000).toISOString(),
+    workerIds: ['bot-02'],
+    planName: 'Standard'
+  });
+
+  await store.setAccess('user_webhook_1', {
+    userId: 'user_webhook_1',
+    username: 'carol',
+    role: 'user',
+    status: 'active',
+    isPermanent: false,
+    expiresAt: new Date(nowMs + 1 * 3600 * 1000).toISOString(),
+    workerIds: ['bot-03'],
+    planName: 'Standard'
+  });
+
+  let fetchCalls = 0;
+  const capturedReturnUrls = [];
+  const fakeFetch = async (requestUrl) => {
+    fetchCalls += 1;
+    await new Promise((r) => setTimeout(r, 15));
+    const parsed = new URL(String(requestUrl));
+    const targetReturnUrl = parsed.searchParams.get('url');
+    capturedReturnUrls.push(targetReturnUrl);
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ shortenedUrl: `https://link4m.co/short/s${fetchCalls}` })
+    };
+  };
+
+  const runtimeConfig = {
+    publicBaseUrl: 'https://mgr.kingmc.test',
+    link4mApiToken: 'token_test_123',
+    link4mSecretKey: 'secret_webhook_456',
+    link4mRewardEnabled: true,
+    link4mRewardHours: 6,
+    link4mDailyLimit: 2
+  };
+
+  const link4mService = new Link4mService({
+    store,
+    accessControl,
+    userLock,
+    config: runtimeConfig,
+    logger,
+    fetchImpl: fakeFetch
+  });
+
+  await link4mService.initialize();
+  const storedRuntime = await store.getSetting('link4m_runtime');
+  assert.strictEqual(storedRuntime.enabled, true, 'initialize() must persist enabled setting');
+  assert.strictEqual(storedRuntime.rewardHours, 6, 'initialize() must persist rewardHours setting');
+  assert.strictEqual(storedRuntime.dailyLimit, 2, 'initialize() must persist dailyLimit setting');
+
+  // Re-initializing (e.g. manager restart with existing manager_settings row) hydrates runtime config from DB
+  await link4mService.initialize();
+
+  const pub = link4mService.publicConfig();
+  assert.strictEqual(pub.providerConfigured, true);
+  assert.strictEqual(pub.webhookConfigured, true);
+  assert.strictEqual(pub.callbackConfigured, true);
+
+  const initialQuota = await link4mService.getDailyQuotaStatus('user_active_1');
+  const initialStatus = await link4mService.status('user_active_1');
+  assert.deepStrictEqual(initialStatus, initialQuota, 'status() and getDailyQuotaStatus() must match');
+  assert.strictEqual(initialQuota.ok, true);
+  assert.strictEqual(initialQuota.eligible, true);
+  assert.strictEqual(initialQuota.usedToday, 0);
+  assert.strictEqual(initialQuota.remainingToday, 2);
+  assert.strictEqual(initialQuota.accessActive, true);
+
+  // Concurrent startAttempt & status/getDailyQuotaStatus calls serialize cleanly via userLock
+  const [start1, start2, concurrentStatus, concurrentQuota] = await Promise.all([
+    link4mService.startAttempt('user_active_1', '127.0.0.1'),
+    link4mService.startAttempt('user_active_1', '127.0.0.1'),
+    link4mService.status('user_active_1'),
+    link4mService.getDailyQuotaStatus('user_active_1')
+  ]);
+  assert.strictEqual(concurrentStatus.ok, true);
+  assert.strictEqual(concurrentQuota.ok, true);
+  assert.strictEqual(fetchCalls, 1, 'userLock must prevent duplicate shortlink creation under concurrency');
+  assert.strictEqual(start1.attemptId, start2.attemptId);
+  assert.strictEqual(start1.providerUrl, 'https://link4m.co/short/s1');
+  assert.strictEqual(start1.reused, false);
+  assert.strictEqual(start2.reused, true);
+
+  const returnParams = new URL(capturedReturnUrls[0]).searchParams;
+  const attemptId1 = returnParams.get('attempt');
+  const nonce1 = returnParams.get('token');
+  assert.strictEqual(attemptId1, start1.attemptId);
+  assert.ok(nonce1 && nonce1.length > 10);
+
+  // Fast solve guard (<12s) must reject
+  await assert.rejects(
+    () => link4mService.verifyAndClaimReward(nonce1, attemptId1),
+    /quá nhanh/,
+    'Fast claim under MIN_SOLVE_MS must be rejected'
+  );
+
+  // Advance attempt creation time in table by 15s to simulate valid solve
+  store.tables.linkAttempts.get(attemptId1).createdAt = new Date(Date.now() - 15000);
+
+  // Run concurrent verifyAndClaimReward + getDailyQuotaStatus under userLock
+  const [claimA, claimB, quotaConcurrent] = await Promise.all([
+    link4mService.verifyAndClaimReward(nonce1, attemptId1),
+    link4mService.verifyAndClaimReward(nonce1, attemptId1),
+    link4mService.getDailyQuotaStatus('user_active_1')
+  ]);
+  assert.strictEqual(claimA.ok, true);
+  assert.strictEqual(claimB.ok, true);
+  assert.strictEqual(quotaConcurrent.ok, true);
+  assert.strictEqual([claimA.replayed, claimB.replayed].filter((v) => v === false).length, 1, 'Exactly one concurrent claim must grant the reward');
+  assert.strictEqual([claimA.replayed, claimB.replayed].filter((v) => v === true).length, 1, 'Concurrent duplicate claim must replay idempotently');
+
+  const updatedActive = await store.getAccess('user_active_1');
+  const actualExpiryMs = Date.parse(updatedActive.expiresAt);
+  const expectedExpiryMs = initialActiveExpiryMs + 6 * 3600 * 1000;
+  assert.strictEqual(actualExpiryMs, expectedExpiryMs, 'Active user expiry must extend exactly +6h from existing expiresAt');
+  assert.deepStrictEqual(updatedActive.workerIds, ['bot-01'], 'Assigned workers must remain intact');
+
+  const quotaAfter = await link4mService.getDailyQuotaStatus('user_active_1');
+  assert.strictEqual(quotaAfter.usedToday, 1);
+  assert.strictEqual(quotaAfter.remainingToday, 1);
+  assert.strictEqual(quotaAfter.eligible, false, 'Cooldown after claim must prevent immediate second claim');
+  assert.ok(quotaAfter.cooldownRemainingMs > 0);
+
+  // Expired user flow: startAttempt -> verifyAndClaimReward revives to 'active' and extends from NOW
+  const expStart = await link4mService.startAttempt('user_expired_1', '127.0.0.1');
+  const expNonce = new URL(capturedReturnUrls[1]).searchParams.get('token');
+  store.tables.linkAttempts.get(expStart.attemptId).createdAt = new Date(Date.now() - 15000);
+
+  const beforeClaimMs = Date.now();
+  const expClaim = await link4mService.verifyAndClaimReward(expNonce, expStart.attemptId);
+  assert.strictEqual(expClaim.ok, true);
+  assert.strictEqual(expClaim.replayed, false);
+  const revivedUser = await store.getAccess('user_expired_1');
+  assert.strictEqual(revivedUser.status, 'active', 'Expired user must reactivate on reward claim');
+  assert.ok(Date.parse(revivedUser.expiresAt) >= beforeClaimMs + 6 * 3600 * 1000 - 1000, 'Expired user expiry must extend from now');
+  assert.deepStrictEqual(revivedUser.workerIds, ['bot-02']);
+
+  // Webhook flow using forwarded link4mSecretKey & createLinkAttempt alias
+  const whStart = await link4mService.createLinkAttempt('user_webhook_1', '127.0.0.1');
+  assert.strictEqual(whStart.ok, true);
+  store.tables.linkAttempts.get(whStart.attemptId).createdAt = new Date(Date.now() - 15000);
+  const badSig = crypto.createHmac('sha256', 'wrong_secret').update(whStart.attemptId).digest('hex');
+  await assert.rejects(
+    () => link4mService.completeWebhook({
+      query: { attempt: whStart.attemptId },
+      body: {},
+      get: (h) => (h === 'x-link4m-secret' ? 'wrong_secret' : badSig)
+    }),
+    /Xác thực Webhook Link4M thất bại/
+  );
+  const validSig = crypto.createHmac('sha256', runtimeConfig.link4mSecretKey).update(whStart.attemptId).digest('hex');
+  const whRes = await link4mService.completeWebhook({
+    query: { attempt: whStart.attemptId },
+    body: {},
+    get: (h) => {
+      if (h === 'x-link4m-secret') return runtimeConfig.link4mSecretKey;
+      if (h === 'x-link4m-signature') return validSig;
+      return '';
+    }
+  });
+  assert.strictEqual(whRes.replayed, false);
+  assert.strictEqual(whRes.rewardHours, 6);
+
+  console.log('✅ 2. Real AccessControl + AsyncKeyLock + Link4mService Wiring & Concurrency verified.');
+}
+
+function testIsWorkerStopConfirmedContract() {
+  console.log('3. Testing isWorkerStopConfirmed Edge Cases...');
+
+  const rejectedPayloads = [
+    undefined,
+    null,
+    false,
+    'stopped',
+    {},
+    { ok: true },
+    { delivered: true },
+    { ok: true, delivered: true },
+    { delivered: true, result: { ok: true } },
+    { delivered: false },
+    { delivered: false, timedOut: true },
+    { ok: false },
+    { pending: true },
+    { pending: true, state: 'stopped' },
+    { timedOut: true },
+    { timedOut: true, state: 'stopped' },
+    { ok: true, queued: true },
+    { delivered: true, queued: true },
+    { delivered: true, pending: true },
+    { delivered: true, timedOut: true },
+    { delivered: true, result: { queued: true } },
+    { delivered: true, result: { pending: true } },
+    { delivered: true, result: { timedOut: true } },
+    { delivered: true, result: { ok: false } },
+    { delivered: true, result: { ok: false, state: 'online' } },
+    { delivered: true, result: { ok: false, state: 'stopped' } },
+    { state: 'connecting' },
+    { state: 'online' },
+    { delivered: true, result: { state: 'online', connected: true } },
+    { delivered: true, result: { ok: true, state: 'online', connected: true } },
+    { delivered: true, result: { ok: true, state: 'connecting' } },
+    { delivered: true, result: { ok: true, state: 'authenticating' } },
+    { delivered: true, result: { ok: true, state: 'entering' } },
+    { delivered: true, result: { ok: true, state: 'starting' } },
+    { delivered: true, result: { ok: true, state: 'maintenance' } },
+    { delivered: true, result: { ok: true, state: 'error' } },
+    { delivered: true, result: { ok: true, worker: { state: 'online', online: true } } },
+    { delivered: true, result: { ok: true, status: { state: 'starting', connected: false } } },
+    { delivered: true, result: { ok: true, state: 'stopped', connected: true } },
+    { delivered: true, result: { ok: true, state: 'stopped', online: true } },
+    { delivered: true, state: 'stopped', result: { state: 'connecting' } }
+  ];
+
+  for (const payload of rejectedPayloads) {
+    assert.strictEqual(
+      isWorkerStopConfirmed(payload),
+      false,
+      `Expected isWorkerStopConfirmed(${JSON.stringify(payload)}) to be false`
+    );
+  }
+
+  const confirmedPayloads = [
+    { ok: true, stopped: true },
+    { state: 'stopped' },
+    { state: 'offline' },
+    { delivered: true, result: { state: 'stopped', connected: false } },
+    { delivered: true, result: { ok: true, state: 'offline', connected: false, online: false } },
+    { delivered: true, result: { ok: true, worker: { state: 'stopped', online: false, connected: false } } },
+    { delivered: true, result: { ok: true, status: { state: 'offline', online: false } } },
+    { ok: true, state: 'stopped', connected: false }
+  ];
+
+  for (const payload of confirmedPayloads) {
+    assert.strictEqual(
+      isWorkerStopConfirmed(payload),
+      true,
+      `Expected isWorkerStopConfirmed(${JSON.stringify(payload)}) to be true`
+    );
+  }
+
+  console.log('✅ 3. isWorkerStopConfirmed Contract verified.');
+}
+
+async function testGracefulStopConfirmationStateMachine() {
+  console.log('4. Testing EntitlementService STOP Confirmation Edge Cases...');
+  const logger = createSilentLogger();
+
+  const cases = [
+    { name: 'delivered:true without state', response: { delivered: true } },
+    { name: 'ok:true delivered:true without state', response: { ok: true, delivered: true } },
+    { name: 'pending response', response: { pending: true } },
+    { name: 'timedOut response', response: { delivered: false, timedOut: true } },
+    { name: 'queued with ok:true', response: { ok: true, queued: true } },
+    { name: 'queued with delivered:true', response: { delivered: true, queued: true } },
+    { name: 'state connecting bare', response: { state: 'connecting' } },
+    { name: 'state online bare', response: { state: 'online' } },
+    { name: 'delivered with result.state online & connected (no ok field)', response: { delivered: true, result: { state: 'online', connected: true } } },
+    { name: 'delivered but state online & connected', response: { delivered: true, result: { ok: true, state: 'online', connected: true } } },
+    { name: 'delivered but result.ok false & state online', response: { delivered: true, result: { ok: false, state: 'online' } } },
+    { name: 'delivered but state connecting', response: { delivered: true, result: { ok: true, state: 'connecting' } } }
+  ];
+
+  for (const testCase of cases) {
+    // Test via fleetOperations.stopWorker
+    {
+      const store = createInMemoryTableStore();
+      await store.setAccess('usr_edge', {
+        userId: 'usr_edge',
+        username: 'edge',
+        status: 'active',
+        isPermanent: false,
+        expiresAt: new Date(Date.now() - 7 * 3600 * 1000).toISOString(),
+        workerIds: ['bot-edge-1']
+      });
+
+      const svc = new EntitlementService({
+        store,
+        registry: { find: async () => ({ workerId: 'bot-edge-1', status: { state: 'online', online: true } }) },
+        logger
+      });
+
+      const summary = await svc.checkExpiredUsersAndGracefulStop({
+        fleetOperations: { stopWorker: async () => testCase.response }
+      });
+
+      const saved = await store.getAccess('usr_edge');
+      assert.strictEqual(summary.expired, 0, `${testCase.name} (fleetOperations): must not count as expired`);
+      assert.strictEqual(saved.status, 'expiring', `${testCase.name} (fleetOperations): status must remain expiring`);
+      assert.deepStrictEqual(saved.stopPendingWorkers, ['bot-edge-1'], `${testCase.name} (fleetOperations): worker must stay in stopPendingWorkers`);
+    }
+
+    // Test via broker.dispatch fallback
+    {
+      const store = createInMemoryTableStore();
+      await store.setAccess('usr_edge_broker', {
+        userId: 'usr_edge_broker',
+        username: 'edge_broker',
+        status: 'active',
+        isPermanent: false,
+        expiresAt: new Date(Date.now() - 7 * 3600 * 1000).toISOString(),
+        workerIds: ['bot-edge-2']
+      });
+
+      const svc = new EntitlementService({
+        store,
+        registry: { find: async () => ({ workerId: 'bot-edge-2', status: { state: 'online', online: true } }) },
+        logger
+      });
+
+      const summary = await svc.checkExpiredUsersAndGracefulStop({
+        broker: { dispatch: async () => testCase.response }
+      });
+
+      const saved = await store.getAccess('usr_edge_broker');
+      assert.strictEqual(summary.expired, 0, `${testCase.name} (broker): must not count as expired`);
+      assert.strictEqual(saved.status, 'expiring', `${testCase.name} (broker): status must remain expiring`);
+      assert.deepStrictEqual(saved.stopPendingWorkers, ['bot-edge-2'], `${testCase.name} (broker): worker must stay in stopPendingWorkers`);
+    }
+  }
+
+  // Confirmed stopped result transitions to 'expired' and clears stopPendingWorkers
+  {
+    const store = createInMemoryTableStore();
+    await store.setAccess('usr_confirm', {
+      userId: 'usr_confirm',
+      username: 'confirm_user',
+      status: 'expiring',
+      isPermanent: false,
+      expiresAt: new Date(Date.now() - 7 * 3600 * 1000).toISOString(),
+      workerIds: ['bot-confirm-1'],
+      stopPendingWorkers: ['bot-confirm-1']
+    });
+
+    const svc = new EntitlementService({
+      store,
+      registry: { find: async () => ({ workerId: 'bot-confirm-1', status: { state: 'online', online: true } }) },
+      logger
+    });
+
+    const summary = await svc.checkExpiredUsersAndGracefulStop({
+      fleetOperations: { stopWorker: async () => ({ delivered: true, result: { state: 'stopped', connected: false } }) }
+    });
+
+    const saved = await store.getAccess('usr_confirm');
+    assert.strictEqual(summary.expired, 1);
+    assert.strictEqual(saved.status, 'expired');
+    assert.deepStrictEqual(saved.stopPendingWorkers, []);
+  }
+
+  // Cached worker pre-state guard: stale state:'stopped' with online:true OR connected:true MUST NOT skip RPC
+  {
+    const store = createInMemoryTableStore();
+    await store.setAccess('usr_stale_online', {
+      userId: 'usr_stale_online',
+      username: 'stale_online',
+      status: 'active',
+      isPermanent: false,
+      expiresAt: new Date(Date.now() - 7 * 3600 * 1000).toISOString(),
+      workerIds: ['bot-stale-1', 'bot-stale-2']
+    });
+
+    const stopCalls = [];
+    const svc = new EntitlementService({
+      store,
+      registry: {
+        find: async (id) => (
+          id === 'bot-stale-1'
+            ? { workerId: 'bot-stale-1', status: { state: 'stopped', online: true } }
+            : { workerId: 'bot-stale-2', status: { state: 'offline', connected: true } }
+        )
+      },
+      logger
+    });
+
+    await svc.checkExpiredUsersAndGracefulStop({
+      fleetOperations: {
+        stopWorker: async (id) => {
+          stopCalls.push(id);
+          return { delivered: true, result: { ok: true, state: 'online', connected: true } };
+        }
+      }
+    });
+
+    assert.deepStrictEqual(stopCalls, ['bot-stale-1', 'bot-stale-2'], 'Stale online/connected workers must not skip STOP RPC');
+    const saved = await store.getAccess('usr_stale_online');
+    assert.strictEqual(saved.status, 'expiring');
+    assert.deepStrictEqual(saved.stopPendingWorkers, ['bot-stale-1', 'bot-stale-2']);
+  }
+
+  // Multi-worker partial stop retains only the unconfirmed worker and clears once retried
+  {
+    const store = createInMemoryTableStore();
+    await store.setAccess('usr_partial', {
+      userId: 'usr_partial',
+      username: 'partial',
+      status: 'active',
+      isPermanent: false,
+      expiresAt: new Date(Date.now() - 7 * 3600 * 1000).toISOString(),
+      workerIds: ['bot-p1', 'bot-p2']
+    });
+
+    let allowBot2Stop = false;
+    const calledIds = [];
+    const svc = new EntitlementService({
+      store,
+      registry: { find: async () => ({ status: { state: 'online', online: true } }) },
+      logger
+    });
+
+    await svc.checkExpiredUsersAndGracefulStop({
+      fleetOperations: {
+        stopWorker: async (id) => {
+          calledIds.push(id);
+          if (id === 'bot-p1') return { delivered: true, result: { state: 'stopped', connected: false } };
+          return allowBot2Stop
+            ? { delivered: true, result: { state: 'offline', connected: false } }
+            : { delivered: false, timedOut: true };
+        }
+      }
+    });
+
+    let saved = await store.getAccess('usr_partial');
+    assert.strictEqual(saved.status, 'expiring');
+    assert.deepStrictEqual(saved.stopPendingWorkers, ['bot-p2']);
+
+    allowBot2Stop = true;
+    calledIds.length = 0;
+    await svc.checkExpiredUsersAndGracefulStop({
+      fleetOperations: {
+        stopWorker: async (id) => {
+          calledIds.push(id);
+          return { delivered: true, result: { state: 'offline', connected: false } };
+        }
+      }
+    });
+
+    assert.deepStrictEqual(calledIds, ['bot-p2'], 'Retry cycle must only stop remaining unconfirmed workers');
+    saved = await store.getAccess('usr_partial');
+    assert.strictEqual(saved.status, 'expired');
+    assert.deepStrictEqual(saved.stopPendingWorkers, []);
+  }
+
+  console.log('✅ 4. EntitlementService STOP Confirmation Edge Cases verified.');
+}
+
+async function testRealBrokerFleetEntitlementWiring() {
+  console.log('5. Testing Real CommandBroker + FleetOperations + EntitlementService Wiring...');
+  const store = createInMemoryTableStore();
+  const logger = createSilentLogger();
+  const userLock = new AsyncKeyLock();
+  const accessControl = new AccessControl({ store });
+
+  await store.setAccess('usr_wisp', {
+    userId: 'usr_wisp',
+    username: 'wisp_user',
+    status: 'active',
+    isPermanent: false,
+    expiresAt: new Date(Date.now() - 7 * 3600 * 1000).toISOString(),
+    workerIds: ['bot-wisp-1']
+  });
+
+  const workerState = {
+    workerId: 'bot-wisp-1',
+    enabled: true,
+    provider: 'wispbyte',
+    lastHeartbeat: new Date().toISOString(),
+    status: { state: 'online', online: true }
+  };
+
+  const registry = {
+    find: async (id) => (id === 'bot-wisp-1' ? { ...workerState, status: { ...workerState.status } } : null),
+    list: async () => [{ ...workerState }],
+    updateStatus: async (_id, status) => {
+      workerState.status = { ...workerState.status, ...status };
+      return workerState;
+    },
+    resetData: async () => ({ ok: true })
+  };
+
+  const commandQueue = [];
+  const commandStore = {
+    enqueue: async (cmd) => {
+      const entry = { ...cmd, status: 'queued' };
+      commandQueue.push(entry);
+      return entry;
+    },
+    take: async (workerId) => {
+      const next = commandQueue.find((c) => c.workerId === workerId && c.status === 'queued');
+      if (!next) return null;
+      next.status = 'delivered';
+      return { ...next };
+    },
+    complete: async (_workerId, commandId, result) => {
+      const item = commandQueue.find((c) => c.commandId === commandId);
+      if (item) {
+        item.status = 'completed';
+        item.result = result;
+      }
+      return Boolean(item);
+    },
+    expire: async (commandId) => {
+      const item = commandQueue.find((c) => c.commandId === commandId);
+      if (item && item.status !== 'completed') item.status = 'expired';
+      return Boolean(item);
+    },
+    clearWorker: async () => true
+  };
+
+  const broker = new CommandBroker({
+    registry,
+    commandStore,
+    config: { commandResultTimeoutMs: 40, workerPollWaitMs: 100 },
+    logger
+  });
+  const fleetOperations = new FleetOperations({ registry, broker, logger });
+  const entitlementService = new EntitlementService({
+    store,
+    registry,
+    accessControl,
+    userLock,
+    logger
+  });
+
+  const keepAlive = setInterval(() => {}, 25);
+  try {
+    // Tick 1: Worker does not report result -> broker times out -> stays 'expiring'
+    const tick1 = await entitlementService.checkExpiredUsersAndGracefulStop({ broker, fleetOperations });
+    assert.strictEqual(tick1.expired, 0);
+    let userAfterTick1 = await store.getAccess('usr_wisp');
+    assert.strictEqual(userAfterTick1.status, 'expiring');
+    assert.deepStrictEqual(userAfterTick1.stopPendingWorkers, ['bot-wisp-1']);
+
+    // Tick 2: Worker polls command and reports stopped state -> transitions to 'expired'
+    const tick2Promise = entitlementService.checkExpiredUsersAndGracefulStop({ broker, fleetOperations });
+    await new Promise((r) => setTimeout(r, 10));
+    const polledCmd = await broker.poll('bot-wisp-1', { waitMs: 100 });
+    assert.ok(polledCmd && polledCmd.action === 'stop', 'Worker must receive queued stop command via broker.poll');
+    await broker.reportResult('bot-wisp-1', polledCmd.commandId, {
+      ok: true,
+      state: 'stopped',
+      connected: false,
+      online: false
+    });
+
+    const tick2 = await tick2Promise;
+    assert.strictEqual(tick2.expired, 1);
+    const userAfterTick2 = await store.getAccess('usr_wisp');
+    assert.strictEqual(userAfterTick2.status, 'expired');
+    assert.deepStrictEqual(userAfterTick2.stopPendingWorkers, []);
+  } finally {
+    clearInterval(keepAlive);
+  }
+
+  console.log('✅ 5. Real CommandBroker + FleetOperations + EntitlementService Wiring verified.');
+}
+
+async function testCoordinatorCrossCuttingContracts() {
+  console.log('6. Testing Cross-Cutting Parity Contracts (Link4M init, Broker poll status, Worker API, Admin/Panel/Renderer)...');
+  const http = require('node:http');
+  const express = require('express');
+  const { createWorkerApi } = require('../src/http/routes/worker-api');
+  const adminCommand = require('../src/discord/commands/admin');
+  const { resolveLinkedUser, checkBotOwnership, handlePanelInteraction } = require('../src/discord/handlers/panel-handler');
+  const { renderBotDetail } = require('../src/discord/panels/renderer');
+  const SupabaseDashboardStore = require('../src/storage/supabase-dashboard-store');
+  const logger = createSilentLogger();
+
+  // 6a. Link4mService.initialize() populates memory config even on first boot when disabled/custom
+  const memStore = createInMemoryTableStore();
+  const l4mDisabledFirstBoot = new Link4mService({
+    store: memStore,
+    accessControl: new AccessControl({ store: memStore, adminRoleId: '11111111111111111', userRoleId: '22222222222222222' }),
+    userLock: new AsyncKeyLock(),
+    config: {
+      publicBaseUrl: 'https://mgr.kingmc.test',
+      link4mApiToken: 'tok_x',
+      link4mSecretKey: 'sec_x',
+      link4mRewardEnabled: false,
+      link4mRewardHours: 8,
+      link4mDailyLimit: 3
+    },
+    logger
+  });
+  await l4mDisabledFirstBoot.initialize();
+  const disabledPub = l4mDisabledFirstBoot.publicConfig();
+  assert.strictEqual(disabledPub.enabled, false, 'First boot with link4mRewardEnabled=false must stay disabled in memory');
+  assert.strictEqual(disabledPub.rewardHours, 8);
+  assert.strictEqual(disabledPub.dailyLimit, 3);
+  await assert.rejects(() => l4mDisabledFirstBoot.startAttempt('u1', '127.0.0.1'));
+
+  // 6b. CommandBroker.acceptResult forwards action & updates registry for flat worker status without clobbering on errors
+  const statusUpdates = [];
+  const clearedWorkers = [];
+  const resetWorkers = [];
+  const brokerRegistry = {
+    async updateStatus(id, status, source) {
+      statusUpdates.push({ id, status, source });
+      return { workerId: id, status };
+    },
+    async resetData(id) { resetWorkers.push(id); },
+    async authenticate() { return true; },
+    async find(id) { return { workerId: id, botNumber: 1, enabled: true, provider: 'wispbyte' }; }
+  };
+  const pollCommandStore = {
+    async enqueue(c) { return c; },
+    async take() { return null; },
+    async complete() { return true; },
+    async expire() {},
+    async get() { return null; },
+    async clearWorker(id) { clearedWorkers.push(id); }
+  };
+  const pollBroker = new CommandBroker({
+    registry: brokerRegistry,
+    commandStore: pollCommandStore,
+    config: { commandResultTimeoutMs: 5000, workerPollWaitMs: 500 },
+    logger
+  });
+  await pollBroker.acceptResult('bot-01', {
+    commandId: '11111111-1111-4111-8111-111111111111',
+    action: 'reset',
+    result: { ok: true, state: 'offline', online: false, connected: false }
+  });
+  assert.deepStrictEqual(resetWorkers, ['bot-01'], 'acceptResult must forward payload.action for reset parity');
+  assert.deepStrictEqual(clearedWorkers, ['bot-01']);
+  assert.strictEqual(statusUpdates.length, 1);
+  assert.strictEqual(statusUpdates[0].status.state, 'offline');
+  await pollBroker.acceptResult('bot-01', {
+    commandId: 'cmd_22222222-2222-4222-8222-222222222222',
+    action: 'chat',
+    result: { ok: false, error: 'chat_timeout' }
+  });
+  assert.strictEqual(statusUpdates.length, 1, 'Error-only result must NOT overwrite worker status with unknown');
+
+  // 6c. worker-api routes: /poll passes { waitMs }, /result accepts cmd_ UUID, /report passes telemetry object with botNumber
+  const pollWaitArgs = [];
+  const recordedPositions = [];
+  const routeBroker = {
+    async poll(workerId, opts) {
+      pollWaitArgs.push({ workerId, opts });
+      return null;
+    },
+    async acceptResult(workerId, body) {
+      return Boolean(workerId && body.commandId);
+    }
+  };
+  const workerApiApp = express();
+  workerApiApp.use(express.json());
+  const workerRouter = createWorkerApi({
+    registry: {
+      async authenticate() { return true; },
+      async find(id) { return { workerId: id, botNumber: 1, enabled: true }; },
+      async updateStatus() { return { workerId: 'bot-01', status: {} }; }
+    },
+    broker: routeBroker,
+    workerStore: {
+      async recordPositionChange(telemetry) {
+        recordedPositions.push(telemetry);
+        return { ok: true };
+      }
+    },
+    config: { workerPollWaitMs: 15000, botSecretKey: 'global_sec' },
+    logger
+  });
+  workerApiApp.use('/api/v1/workers/:workerId', workerRouter);
+  workerApiApp.use('/api/worker', workerRouter);
+  const srv = await new Promise((resolve, reject) => {
+    const server = workerApiApp.listen(0, '127.0.0.1', () => resolve(server));
+    server.on('error', reject);
+  });
+  try {
+    const port = srv.address().port;
+    const base = `http://127.0.0.1:${port}/api/v1/workers`;
+    const pollRes = await fetch(`${base}/bot-01/poll`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-worker-secret': 'global_sec' },
+      body: JSON.stringify({ waitMs: 321, status: { state: 'online' } })
+    });
+    assert.strictEqual(pollRes.status, 200);
+    assert.deepStrictEqual(pollWaitArgs[0].opts, { waitMs: 321 }, '/poll must pass { waitMs } object to broker.poll');
+
+    const cmdResultRes = await fetch(`${base}/bot-01/result`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-worker-secret': 'global_sec' },
+      body: JSON.stringify({ commandId: 'cmd_33333333-3333-4333-8333-333333333333', result: { ok: true } })
+    });
+    assert.strictEqual(cmdResultRes.status, 200);
+    const cmdResultJson = await cmdResultRes.json();
+    assert.strictEqual(cmdResultJson.accepted, true, '/result must accept cmd_<uuid> command IDs');
+
+    const reportRes = await fetch(`http://127.0.0.1:${port}/api/worker/report`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-worker-secret': 'global_sec' },
+      body: JSON.stringify({
+        workerId: 'bot-01',
+        status: { state: 'online', position: { x: 120.5, y: 64, z: -30.2 }, dimension: 'overworld' }
+      })
+    });
+    assert.strictEqual(reportRes.status, 200);
+    assert.strictEqual(recordedPositions.length, 1);
+    assert.strictEqual(recordedPositions[0].botId, '1', '/report must pass numeric botNumber to recordPositionChange');
+    assert.deepStrictEqual(recordedPositions[0].position, { x: 120.5, y: 64, z: -30.2 });
+  } finally {
+    srv.closeAllConnections?.();
+    await new Promise((resolve) => srv.close(resolve));
+  }
+
+  // 6d. /admin setup persists discord_access (matching index.js startup load)
+  const savedSettings = new Map();
+  const fakeAdminInteraction = {
+    user: { id: '99999999999999999' },
+    guildId: '88888888888888888',
+    guild: { ownerId: '99999999999999999' },
+    options: {
+      getSubcommand: () => 'setup',
+      getRole: (name) => ({ id: name === 'admin_role' ? '33333333333333333' : '44444444444444444' }),
+      getUser: () => null
+    }
+  };
+  await adminCommand.execute(fakeAdminInteraction, {
+    config: { adminUserId: '99999999999999999', discordGuildId: '88888888888888888' },
+    accessStore: {
+      async getUserByDiscordId() { return null; },
+      async setSetting(k, v) { savedSettings.set(k, v); }
+    },
+    accessControl: new AccessControl({ store: memStore })
+  });
+  assert.ok(savedSettings.has('discord_access'), '/admin setup must persist discord_access setting');
+  assert.strictEqual(savedSettings.has('discord_roles'), false);
+
+  // 6e. Panel handler ownership casing, adminRole resolution, expired user denial, and timeout notice
+  assert.strictEqual(checkBotOwnership({ role: 'user', assignedBotIds: ['BOT-01'] }, 'bot-01'), true);
+  const roleCtrl = new AccessControl({ store: memStore, adminRoleId: '55555555555555555', userRoleId: '66666666666666666' });
+  const linkedAdmin = await resolveLinkedUser({
+    guildId: '88888888888888888',
+    user: { id: '77777777777777777' },
+    member: { roles: ['55555555555555555'] },
+    guild: { id: '88888888888888888', ownerId: '00000000000000000' }
+  }, {
+    config: { discordGuildId: '88888888888888888' },
+    accessStore: { async getUserByDiscordId() { return null; } },
+    accessControl: roleCtrl
+  });
+  assert.strictEqual(linkedAdmin?.role, 'admin', 'resolveLinkedUser must recognize adminRoleId');
+
+  const panelReplies = [];
+  const makeButtonInteraction = (userId, customId) => ({
+    guildId: '88888888888888888',
+    guild: { id: '88888888888888888', ownerId: '00000000000000000' },
+    user: { id: userId },
+    member: { roles: ['66666666666666666'] },
+    isButton: () => true,
+    isStringSelectMenu: () => false,
+    isModalSubmit: () => false,
+    customId,
+    deferred: false,
+    replied: false,
+    async deferUpdate() { this.deferred = true; },
+    async editReply(msg) { panelReplies.push(msg); return msg; },
+    async update(msg) { panelReplies.push(msg); return msg; },
+    async reply(msg) { panelReplies.push(msg); return msg; }
+  });
+  await handlePanelInteraction(makeButtonInteraction('11122233344455566', 'bot:start:bot-01'), {
+    config: { discordGuildId: '88888888888888888' },
+    accessStore: {
+      async getUserByDiscordId() {
+        return { userId: 'u_exp', username: 'expuser', role: 'user', status: 'expired', assignedBotIds: ['bot-01'] };
+      }
+    },
+    accessControl: roleCtrl,
+    registry: {
+      async find(id) { return { workerId: id, status: { online: false, state: 'offline' } }; },
+      getLogs: () => []
+    },
+    broker: { async dispatch() { throw new Error('must_not_dispatch_for_expired'); } }
+  });
+  assert.ok(panelReplies[0]?.embeds?.[0]?.data?.title?.includes('HẾT HẠN'), 'Expired Discord user must be blocked before dispatching bot command');
+
+  panelReplies.length = 0;
+  await handlePanelInteraction(makeButtonInteraction('11122233344455577', 'bot:stop:bot-01'), {
+    config: { discordGuildId: '88888888888888888' },
+    accessStore: {
+      async getUserByDiscordId() {
+        return { userId: 'u_ok', username: 'okuser', role: 'user', status: 'active', isPermanent: true, assignedBotIds: ['bot-01'] };
+      }
+    },
+    accessControl: roleCtrl,
+    registry: {
+      async find(id) { return { workerId: id, status: { online: true, state: 'online' } }; },
+      getLogs: () => []
+    },
+    broker: { async dispatch() { return { delivered: false, timedOut: true, commandId: 'c1' }; } }
+  });
+  assert.ok(
+    panelReplies[0]?.embeds?.[0]?.data?.description?.includes('⚠️') &&
+    !panelReplies[0]?.embeds?.[0]?.data?.description?.includes('✅ Đã thực thi lệnh'),
+    'Timed-out poll dispatch must render warning notice, never false success'
+  );
+
+  // 6f. Renderer allows STOP during 'error' reconnect state
+  const errDetail = renderBotDetail({
+    user: { username: 'okuser', role: 'user' },
+    worker: { workerId: 'bot-01', botNumber: 1, status: { online: false, state: 'error' } },
+    logs: []
+  });
+  const errStopBtn = errDetail.components[0].components.find((b) => b.data.custom_id === 'bot:stop:bot-01');
+  assert.strictEqual(errStopBtn.data.disabled, false, 'STOP button must remain enabled in error state');
+
+  // 6g. SupabaseDashboardStore resolves linked 'admin' without a row in manager_users
+  const adminDashStore = new SupabaseDashboardStore({
+    from: (tbl) => {
+      const chain = {
+        _expr: '',
+        select() { return chain; },
+        or(expr) { chain._expr = String(expr || ''); return chain; },
+        eq(col, val) { if (!chain._expr) chain._expr = `${col}=${val}`; return chain; },
+        async maybeSingle() {
+          if (tbl === 'manager_discord_links' && chain._expr.includes('admin_discord_1')) {
+            return { data: { discord_user_id: 'admin_discord_1', manager_user_id: 'usr_admin', username: 'admin', status: 'active' }, error: null };
+          }
+          if (tbl === 'manager_settings' && chain._expr.includes('discord_link:admin_discord_2')) {
+            return { data: { value: { username: 'admin' }, updated_at: new Date().toISOString() }, error: null };
+          }
+          return { data: null, error: null };
+        }
+      };
+      return chain;
+    }
+  });
+  const resolvedAdmin = await adminDashStore.getUserByDiscordId('admin_discord_1');
+  assert.strictEqual(resolvedAdmin?.role, 'admin');
+  assert.strictEqual(resolvedAdmin?.username, 'admin');
+  const resolvedAdminSetting = await adminDashStore.getUserByDiscordId('admin_discord_2');
+  assert.strictEqual(resolvedAdminSetting?.role, 'admin');
+  assert.strictEqual(resolvedAdminSetting?.username, 'admin');
+
+  console.log('✅ 6. Cross-Cutting Parity Contracts verified.');
+}
+
+async function testLink4mInitFailureDegradedVisibility() {
+  console.log('7. Testing Link4mService Init Failure Degraded State & Health/Ready Surfacing...');
+  const errors = [];
+  const store = createInMemoryTableStore();
+  await store.setAccess('usr_l4m_deg', {
+    userId: 'usr_l4m_deg',
+    username: 'l4muser',
+    role: 'user',
+    status: 'active',
+    isPermanent: false
+  });
+  store.getSetting = async () => {
+    throw new Error('supabase_settings_read_failed');
+  };
+
+  const accessControl = new AccessControl({ store });
+  const link4mService = new Link4mService({
+    store,
+    accessControl,
+    config: {
+      enabled: true,
+      apiToken: 'tok_test',
+      publicBaseUrl: 'https://manager.example.com'
+    },
+    logger: {
+      info: () => {},
+      warn: () => {},
+      error: (msg, meta) => errors.push({ msg, meta }),
+      debug: () => {}
+    }
+  });
+
+  await assert.rejects(() => link4mService.initialize(), /supabase_settings_read_failed/);
+  assert.strictEqual(errors[0]?.msg, 'link4m_initialize_error');
+
+  const degradedHealth = link4mService.health();
+  assert.strictEqual(degradedHealth.ok, false);
+  assert.strictEqual(degradedHealth.status, 'degraded');
+  assert.strictEqual(degradedHealth.degraded, true);
+  assert.strictEqual(degradedHealth.initialized, false);
+  assert.ok(degradedHealth.error.includes('supabase_settings_read_failed'));
+
+  const cfg = link4mService.publicConfig();
+  assert.strictEqual(cfg.degraded, true);
+  assert.strictEqual(cfg.initialized, false);
+  assert.strictEqual(cfg.enabled, false);
+
+  const st = await link4mService.status('usr_l4m_deg');
+  assert.strictEqual(st.eligible, false);
+  assert.strictEqual(st.degraded, true);
+
+  await assert.rejects(() => link4mService.startAttempt('usr_l4m_deg', '127.0.0.1'), /lỗi khởi tạo|khởi tạo/i);
+
+  const indexSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'index.js'), 'utf8');
+  assert.ok(indexSource.includes('link4m_initialization_failed'), 'src/index.js must log explicit error on Link4M init failure');
+
+  const app = createApp({
+    store,
+    link4mService,
+    registry: { store: {} },
+    config: { discordToken: '' }
+  });
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, resolve));
+  try {
+    const port = server.address().port;
+    const healthRes = await fetch(`http://127.0.0.1:${port}/health`);
+    const healthJson = await healthRes.json();
+    assert.strictEqual(healthRes.status, 200);
+    assert.strictEqual(healthJson.status, 'degraded');
+    assert.strictEqual(healthJson.degraded, true);
+    assert.strictEqual(healthJson.checks.link4m.ok, false);
+    assert.ok(healthJson.warnings.some((w) => w.includes('supabase_settings_read_failed')));
+
+    const readyRes = await fetch(`http://127.0.0.1:${port}/ready`);
+    const readyJson = await readyRes.json();
+    assert.strictEqual(readyRes.status, 200);
+    assert.strictEqual(readyJson.status, 'degraded');
+    assert.strictEqual(readyJson.degraded, true);
+    assert.strictEqual(readyJson.checks.link4m.ok, false);
+    assert.ok(readyJson.warnings.some((w) => w.includes('supabase_settings_read_failed')));
+
+    await link4mService.configure({ enabled: true, rewardHours: 12, dailyLimit: 2 });
+    const recoveredHealth = await (await fetch(`http://127.0.0.1:${port}/health`)).json();
+    const recoveredReady = await (await fetch(`http://127.0.0.1:${port}/ready`)).json();
+    assert.strictEqual(recoveredHealth.status, 'healthy');
+    assert.strictEqual(recoveredHealth.degraded, false);
+    assert.strictEqual(recoveredReady.status, 'ready');
+    assert.deepStrictEqual(recoveredReady.warnings, []);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  console.log('✅ 7. Link4M Degraded Initialization Visibility verified.');
+}
+
+async function testCommandResetErrorVisibility() {
+  console.log('8. Testing CommandBroker Reset Partial State-Sync Error Propagation...');
+
+  // 8a. Polling transport + worker-api /result + pending.finish + user-api /bot/:id/reset
+  const pollErrors = [];
+  let completeCalledOnSyncFail = false;
+  const brokerPoll = new CommandBroker({
+    registry: {
+      resetData: async () => { throw new Error('db_reset_write_failed'); },
+      updateStatus: async () => {}
+    },
+    commandStore: {
+      complete: async () => {
+        completeCalledOnSyncFail = true;
+        return { commandId: 'cmd_reset_fail', action: 'reset' };
+      },
+      clearWorker: async () => { throw new Error('queue_clear_failed'); }
+    },
+    config: { commandResultTimeoutMs: 5000 },
+    logger: {
+      info: () => {},
+      warn: () => {},
+      error: (msg, meta) => pollErrors.push({ msg, meta })
+    }
+  });
+
+  let pendingOutcome = null;
+  brokerPoll.pendingResults.set('cmd_11111111-1111-4111-8111-111111111111', {
+    workerId: 'bot-reset-1',
+    action: 'reset',
+    command: { action: 'reset' },
+    finish: (payload) => { pendingOutcome = payload; }
+  });
+
+  const workerApp = express();
+  workerApp.use(express.json());
+  workerApp.use('/api/v1/workers/:workerId', createWorkerApi({
+    registry: {
+      authenticate: async (workerId) => ({ workerId, secret: 'sec' }),
+      touchHeartbeat: async () => ({})
+    },
+    broker: brokerPoll,
+    config: { botSecret: 'sec' }
+  }));
+
+  const workerServer = http.createServer(workerApp);
+  await new Promise((resolve) => workerServer.listen(0, resolve));
+  try {
+    const port = workerServer.address().port;
+    const resultRes = await fetch(`http://127.0.0.1:${port}/api/v1/workers/bot-reset-1/result`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-worker-id': 'bot-reset-1',
+        'x-worker-secret': 'sec'
+      },
+      body: JSON.stringify({
+        commandId: 'cmd_11111111-1111-4111-8111-111111111111',
+        action: 'reset',
+        result: { ok: true, state: 'stopped' }
+      })
+    });
+    const resultBody = await resultRes.json();
+    assert.strictEqual(resultRes.status, 500, '/result must return HTTP 500 when reset state sync fails');
+    assert.strictEqual(resultBody.ok, false);
+    assert.strictEqual(resultBody.error, 'RESET_STATE_SYNC_FAILED');
+    assert.strictEqual(resultBody.stateSyncPending, true);
+    assert.strictEqual(resultBody.executionCompleted, true);
+    assert.strictEqual(resultBody.partialResetFailures.length, 2);
+    assert.strictEqual(completeCalledOnSyncFail, false, 'complete() must NOT run when reset state sync fails');
+    assert.strictEqual(pendingOutcome?.ok, false, 'pending waiter must receive ok:false when reset sync fails');
+    assert.strictEqual(pendingOutcome?.error, 'RESET_STATE_SYNC_FAILED');
+    assert.ok(pollErrors.some((e) => e.msg === 'command_reset_partial_sync_failed'));
+  } finally {
+    await new Promise((resolve) => workerServer.close(resolve));
+  }
+
+  // 8b. user-api POST /bot/:id/reset surfaces failed dispatch result as HTTP 500
+  const userApp = express();
+  userApp.use(express.json());
+  userApp.use((req, _res, next) => {
+    req.managerAuthSession = { username: 'tester', userId: 'usr_t', role: 'admin', status: 'active' };
+    next();
+  });
+  userApp.use('/api', createUserApi({
+    store: { addAudit: async () => true },
+    registry: {
+      find: async () => ({ workerId: 'bot-reset-1', botNumber: 1, status: { state: 'online' } })
+    },
+    broker: {
+      dispatch: async () => ({
+        delivered: true,
+        result: { ok: false, error: 'RESET_STATE_SYNC_FAILED', detail: 'db_reset_write_failed' }
+      })
+    },
+    logger: createSilentLogger()
+  }));
+
+  const userServer = http.createServer(userApp);
+  await new Promise((resolve) => userServer.listen(0, resolve));
+  try {
+    const port = userServer.address().port;
+    const actionRes = await fetch(`http://127.0.0.1:${port}/api/bot/bot-reset-1/reset`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}'
+    });
+    const actionBody = await actionRes.json();
+    assert.strictEqual(actionRes.status, 500, '/api/bot/:id/reset must return HTTP 500 when reset state sync fails');
+    assert.strictEqual(actionBody.ok, false);
+    assert.strictEqual(actionBody.code, 'RESET_STATE_SYNC_FAILED');
+  } finally {
+    await new Promise((resolve) => userServer.close(resolve));
+  }
+
+  // 8c. dispatchRender HTTP transport throws RESET_STATE_SYNC_FAILED if registry sync fails
+  const renderErrors = [];
+  const brokerRender = new CommandBroker({
+    registry: {
+      credential: () => 'sec',
+      resetData: async () => { throw new Error('render_reset_sync_boom'); },
+      updateStatus: async () => {}
+    },
+    commandStore: {
+      clearWorker: async () => true
+    },
+    config: { botSecret: 'sec', commandResultTimeoutMs: 5000 },
+    logger: {
+      info: () => {},
+      warn: () => {},
+      error: (msg, meta) => renderErrors.push({ msg, meta })
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ ok: true, result: { ok: true, state: 'stopped' } })
+    })
+  });
+
+  await assert.rejects(
+    () => brokerRender.dispatchRender(
+      { workerId: 'bot-render-1', provider: 'render', serviceUrl: 'https://worker.example.com', secret: 'sec' },
+      { commandId: 'cmd_r1', action: 'reset', payload: {} }
+    ),
+    (err) => err && err.code === 'RESET_STATE_SYNC_FAILED' && Array.isArray(err.partialResetFailures) && err.partialResetFailures.length === 1
+  );
+  assert.ok(renderErrors.some((e) => e.msg === 'command_reset_partial_sync_failed'));
+
+  console.log('✅ 8. CommandBroker Reset Error Visibility verified.');
+}
+
+async function testResetTwoPhaseExecutionAndIndependentRetry() {
+  console.log('9. Testing Two-Phase Polling RESET (execution_completed -> state_sync_pending -> independent retry)...');
+
+  const commands = new Map([
+    ['cmd_22222222-2222-4222-8222-222222222222', {
+      commandId: 'cmd_22222222-2222-4222-8222-222222222222',
+      workerId: 'bot-two-phase',
+      action: 'reset',
+      status: 'delivered',
+      result: null,
+      completedAt: null
+    }],
+    ['cmd_queued_other', {
+      commandId: 'cmd_queued_other',
+      workerId: 'bot-two-phase',
+      action: 'status',
+      status: 'queued',
+      result: null,
+      completedAt: null
+    }]
+  ]);
+
+  const callOrder = [];
+  let shouldFailResetData = true;
+  let resetDataCalls = 0;
+  let clearWorkerCalls = 0;
+  let updateStatusCalls = 0;
+  const infoLogs = [];
+  const errorLogs = [];
+
+  const twoPhaseStore = {
+    async get(cid) {
+      const row = commands.get(cid);
+      return row ? { ...row, result: row.result ? { ...row.result } : null } : null;
+    },
+    async complete() {
+      throw new Error('complete() must not be called directly for reset command');
+    },
+    async clearWorker(wid, { excludeCommandIds = [] } = {}) {
+      callOrder.push('clearWorker');
+      clearWorkerCalls += 1;
+      for (const [id, row] of commands.entries()) {
+        if (row.workerId !== wid) continue;
+        if (excludeCommandIds.includes(id)) continue;
+        if (['execution_completed', 'state_sync_pending', 'state_sync_failed'].includes(row.status)) continue;
+        commands.delete(id);
+      }
+    },
+    async recordExecutionCompleted(wid, cid, result, opts = {}) {
+      callOrder.push('recordExecutionCompleted');
+      const row = commands.get(cid);
+      if (!row || row.workerId !== wid) return { ok: false, reason: 'not_found' };
+      if (row.status === 'completed') return { ok: true, alreadyCompleted: true, status: 'completed', command: row };
+      row.status = 'execution_completed';
+      row.completedAt = null;
+      row.result = {
+        ...(result || {}),
+        _stateSync: {
+          ...(row.result?._stateSync || {}),
+          pending: true,
+          executionCompleted: true,
+          candidateStatus: opts.candidateStatus || null,
+          statusSource: opts.statusSource || 'manager-command-poll',
+          pendingSteps: opts.pendingSteps || null,
+          leaseOwner: opts.leaseOwner || null,
+          leaseUntil: opts.leaseOwner ? new Date(Date.now() + 15000).toISOString() : null
+        }
+      };
+      return { ok: true, alreadyCompleted: false, status: 'execution_completed', command: { ...row } };
+    },
+    async markStateSyncPending(wid, cid, { result, syncState, terminalFailed = false } = {}) {
+      callOrder.push(terminalFailed ? 'markStateSyncFailed' : 'markStateSyncPending');
+      const row = commands.get(cid);
+      if (!row || row.workerId !== wid) return false;
+      row.status = terminalFailed ? 'state_sync_failed' : 'state_sync_pending';
+      row.completedAt = null;
+      const base = (result && typeof result === 'object') ? { ...result } : { ...(row.result || {}) };
+      delete base._stateSync;
+      row.result = { ...base, _stateSync: { ...syncState } };
+      return true;
+    },
+    async finalizeCompleted(wid, cid, result, { leaseOwner = null } = {}) {
+      callOrder.push('finalizeCompleted');
+      const row = commands.get(cid);
+      if (!row || row.workerId !== wid) return false;
+      if (row.status === 'completed') return true;
+      const currentOwner = row.result?._stateSync?.leaseOwner;
+      if (leaseOwner && currentOwner && currentOwner !== leaseOwner) return false;
+      row.status = 'completed';
+      row.completedAt = new Date().toISOString();
+      const base = (result && typeof result === 'object') ? { ...result } : { ...(row.result || {}) };
+      delete base._stateSync;
+      row.result = base;
+      return true;
+    },
+    async claimPendingStateSyncBatch(leaseOwner, limit = 10, leaseSeconds = 60) {
+      const now = Date.now();
+      const claimed = [];
+      for (const row of commands.values()) {
+        if (claimed.length >= limit) break;
+        if (!['state_sync_pending', 'execution_completed'].includes(row.status)) continue;
+        const sync = row.result?._stateSync || {};
+        if (sync.nextRetryAt && Date.parse(sync.nextRetryAt) > now) continue;
+        if (sync.leaseUntil && Date.parse(sync.leaseUntil) > now) continue;
+        row.status = 'state_sync_pending';
+        row.result = {
+          ...(row.result || {}),
+          _stateSync: {
+            ...sync,
+            leaseOwner,
+            leaseUntil: new Date(now + leaseSeconds * 1000).toISOString()
+          }
+        };
+        claimed.push({ ...row, result: { ...row.result, _stateSync: { ...row.result._stateSync } } });
+      }
+      return claimed;
+    }
+  };
+
+  const broker = new CommandBroker({
+    registry: {
+      async resetData() {
+        callOrder.push('resetData');
+        resetDataCalls += 1;
+        if (shouldFailResetData) throw new Error('transient_supabase_timeout');
+        return { ok: true };
+      },
+      async updateStatus() {
+        callOrder.push('updateStatus');
+        updateStatusCalls += 1;
+        return { ok: true };
+      }
+    },
+    commandStore: twoPhaseStore,
+    config: { commandResultTimeoutMs: 5000, maxStateSyncAttempts: 3 },
+    logger: {
+      info: (msg, meta) => infoLogs.push({ msg, meta }),
+      warn: () => {},
+      error: (msg, meta) => errorLogs.push({ msg, meta })
+    }
+  });
+
+  // Step 1: Worker posts /result (note: omitting action forces storedCommand.get() lookup BEFORE transition)
+  const firstOutcome = await broker.reportResult('bot-two-phase', 'cmd_22222222-2222-4222-8222-222222222222', {
+    ok: true,
+    state: 'stopped',
+    connected: false
+  });
+  assert.strictEqual(firstOutcome.ok, false);
+  assert.strictEqual(firstOutcome.error, 'RESET_STATE_SYNC_FAILED');
+  assert.strictEqual(firstOutcome.executionCompleted, true);
+  assert.strictEqual(firstOutcome.stateSyncPending, true);
+
+  // Verify execution_completed ran BEFORE sync, and row transitioned to state_sync_pending (NOT completed)
+  assert.deepStrictEqual(callOrder, [
+    'recordExecutionCompleted',
+    'resetData',
+    'clearWorker',
+    'updateStatus',
+    'markStateSyncPending'
+  ]);
+  const pendingRow = commands.get('cmd_22222222-2222-4222-8222-222222222222');
+  assert.strictEqual(pendingRow.status, 'state_sync_pending');
+  assert.strictEqual(pendingRow.completedAt, null);
+  assert.deepStrictEqual(pendingRow.result._stateSync.pendingSteps, ['registry.resetData']);
+  assert.strictEqual(commands.has('cmd_queued_other'), false, 'Other queued command was still cleared by clearWorker');
+  assert.strictEqual(clearWorkerCalls, 1);
+  assert.strictEqual(updateStatusCalls, 1);
+
+  // Before nextRetryAt arrives, poller skips without duplicating work
+  const earlyTick = await broker.processPendingStateSyncs();
+  assert.strictEqual(earlyTick.processed, 0);
+
+  // Step 2: DB recovers; make retry due and invoke processOutboxBatch (Worker NEVER sends /result again)
+  shouldFailResetData = false;
+  pendingRow.result._stateSync.nextRetryAt = new Date(Date.now() - 1000).toISOString();
+  await broker.processOutboxBatch();
+
+  const recoveredRow = commands.get('cmd_22222222-2222-4222-8222-222222222222');
+  assert.strictEqual(recoveredRow.status, 'completed', 'Independent background retry must finalize command as completed');
+  assert.ok(recoveredRow.completedAt, 'completedAt must be set once state sync finishes');
+  assert.strictEqual(recoveredRow.result._stateSync, undefined, 'Internal _stateSync metadata must be stripped on completion');
+  assert.strictEqual(resetDataCalls, 2, 'Only failed step resetData was retried once');
+  assert.strictEqual(clearWorkerCalls, 1, 'Already-succeeded clearWorker was NOT redundantly re-run');
+  assert.strictEqual(updateStatusCalls, 1, 'Already-succeeded updateStatus was NOT redundantly re-run');
+  assert.ok(infoLogs.some((l) => l.msg === 'command_reset_state_sync_recovered'));
+
+  // Step 3: Duplicate /result replay after terminal completion is idempotent without re-running resetData
+  const replay = await broker.reportResult('bot-two-phase', 'cmd_22222222-2222-4222-8222-222222222222', {
+    ok: true,
+    state: 'stopped'
+  });
+  assert.strictEqual(replay.ok, true);
+  assert.strictEqual(replay.alreadyCompleted, true);
+  assert.strictEqual(resetDataCalls, 2);
+
+  // Step 4: Exhaustion transitions state_sync_pending -> state_sync_failed after maxStateSyncAttempts
+  const cidExhaust = 'cmd_33333333-3333-4333-8333-333333333333';
+  commands.set(cidExhaust, {
+    commandId: cidExhaust,
+    workerId: 'bot-two-phase',
+    action: 'reset',
+    status: 'delivered',
+    result: null,
+    completedAt: null
+  });
+  shouldFailResetData = true;
+  await broker.reportResult('bot-two-phase', cidExhaust, { ok: true, state: 'stopped' });
+  commands.get(cidExhaust).result._stateSync.nextRetryAt = new Date(Date.now() - 1000).toISOString();
+  await broker.processPendingStateSyncs();
+  commands.get(cidExhaust).result._stateSync.nextRetryAt = new Date(Date.now() - 1000).toISOString();
+  const thirdAttempt = await broker.processPendingStateSyncs();
+  assert.strictEqual(thirdAttempt.failed, 1);
+  assert.strictEqual(commands.get(cidExhaust).status, 'state_sync_failed');
+  assert.ok(errorLogs.some((l) => l.msg === 'command_reset_state_sync_exhausted'));
+
+  const noopAfterExhaust = await broker.processPendingStateSyncs();
+  assert.strictEqual(noopAfterExhaust.processed, 0);
+
+  console.log('✅ 9. Two-Phase Polling RESET & Independent Retry verified.');
+}
+
+function createInMemoryPostgresCommandDb() {
+  const rows = new Map();
+  const rpcCalls = [];
+
+  function cloneSync(row) {
+    return row ? JSON.parse(JSON.stringify(row)) : null;
+  }
+
+  function makeClient() {
+    return {
+      async rpc(fnName, params = {}) {
+        rpcCalls.push({ fnName, params: JSON.parse(JSON.stringify(params)) });
+        const nowMs = Date.now();
+        const nowIso = new Date(nowMs).toISOString();
+
+        if (fnName === 'manager_record_command_execution') {
+          const row = rows.get(params.p_command_id);
+          if (!row || row.worker_id !== params.p_worker_id) {
+            return { data: { ok: false, reason: 'not_found' }, error: null };
+          }
+          if (row.status === 'completed') {
+            return { data: { ok: true, alreadyCompleted: true, status: 'completed', command: cloneSync(row) }, error: null };
+          }
+          if (row.status === 'state_sync_failed') {
+            return { data: { ok: false, reason: 'state_sync_failed', status: 'state_sync_failed' }, error: null };
+          }
+          if (!['delivered', 'queued', 'execution_completed', 'state_sync_pending'].includes(row.status)) {
+            return { data: { ok: false, reason: 'invalid_status', status: row.status }, error: null };
+          }
+          const existingSync = row.result?._stateSync || {};
+          const existingLeaseUntil = existingSync.leaseUntil ? Date.parse(existingSync.leaseUntil) : null;
+          if (
+            ['execution_completed', 'state_sync_pending'].includes(row.status) &&
+            existingSync.leaseOwner &&
+            existingLeaseUntil > nowMs &&
+            (!params.p_lease_owner || existingSync.leaseOwner !== params.p_lease_owner)
+          ) {
+            return {
+              data: {
+                ok: false,
+                reason: 'state_sync_in_progress',
+                status: row.status,
+                fencingToken: Number(existingSync.fencingToken || 0)
+              },
+              error: null
+            };
+          }
+          const leaseSecs = Math.max(1, Math.min(3600, Number(params.p_lease_seconds) || 60));
+          const leaseUntil = params.p_lease_owner ? new Date(nowMs + leaseSecs * 1000).toISOString() : null;
+          const nextToken = params.p_lease_owner
+            ? Number(existingSync.fencingToken || 0) + 1
+            : Number(existingSync.fencingToken || 0);
+          const incomingSync = params.p_result?._stateSync || {};
+          const cleanBase = { ...(params.p_result || row.result || {}) };
+          delete cleanBase._stateSync;
+          row.status = 'execution_completed';
+          row.completed_at = null;
+          row.result = {
+            ...cleanBase,
+            _stateSync: {
+              ...existingSync,
+              ...incomingSync,
+              pending: true,
+              executionCompleted: true,
+              attempts: Number(existingSync.attempts ?? incomingSync.attempts ?? 0),
+              leaseOwner: params.p_lease_owner || null,
+              leaseUntil,
+              fencingToken: nextToken,
+              updatedAt: nowIso
+            }
+          };
+          return {
+            data: {
+              ok: true,
+              alreadyCompleted: false,
+              status: 'execution_completed',
+              fencingToken: nextToken,
+              leaseUntil,
+              command: cloneSync(row)
+            },
+            error: null
+          };
+        }
+
+        if (fnName === 'manager_renew_command_sync_lease') {
+          const row = rows.get(params.p_command_id);
+          if (!params.p_lease_owner) return { data: { ok: false, lost: true, reason: 'invalid_lease_owner' }, error: null };
+          if (!row || row.worker_id !== params.p_worker_id) return { data: { ok: false, lost: true, reason: 'not_found' }, error: null };
+          if (!['execution_completed', 'state_sync_pending'].includes(row.status)) {
+            return { data: { ok: false, lost: true, reason: 'invalid_status', status: row.status }, error: null };
+          }
+          const sync = row.result?._stateSync || {};
+          const token = Number(sync.fencingToken || 0);
+          const leaseUntilMs = sync.leaseUntil ? Date.parse(sync.leaseUntil) : null;
+          if ((sync.leaseOwner || null) !== params.p_lease_owner) {
+            return { data: { ok: false, lost: true, reason: 'lease_owner_mismatch', currentOwner: sync.leaseOwner || null, currentFencingToken: token }, error: null };
+          }
+          if (params.p_fencing_token !== null && params.p_fencing_token !== undefined && token !== Number(params.p_fencing_token)) {
+            return { data: { ok: false, lost: true, reason: 'fencing_token_mismatch', currentOwner: sync.leaseOwner, currentFencingToken: token }, error: null };
+          }
+          if (!leaseUntilMs || leaseUntilMs <= nowMs) {
+            return { data: { ok: false, lost: true, reason: 'lease_expired', currentOwner: sync.leaseOwner, currentFencingToken: token }, error: null };
+          }
+          const leaseSecs = Math.max(1, Math.min(3600, Number(params.p_lease_seconds) || 60));
+          const nextLeaseUntil = new Date(nowMs + leaseSecs * 1000).toISOString();
+          row.result._stateSync = { ...sync, leaseUntil: nextLeaseUntil, updatedAt: nowIso };
+          return {
+            data: { ok: true, lost: false, leaseOwner: sync.leaseOwner, leaseUntil: nextLeaseUntil, fencingToken: token },
+            error: null
+          };
+        }
+
+        if (fnName === 'manager_verify_command_sync_lease') {
+          const row = rows.get(params.p_command_id);
+          if (!params.p_lease_owner) return { data: { ok: false, held: false, reason: 'invalid_lease_owner' }, error: null };
+          if (!row || row.worker_id !== params.p_worker_id) return { data: { ok: false, held: false, reason: 'not_found' }, error: null };
+          if (!['execution_completed', 'state_sync_pending'].includes(row.status)) {
+            return { data: { ok: false, held: false, reason: 'invalid_status', status: row.status }, error: null };
+          }
+          const sync = row.result?._stateSync || {};
+          const token = Number(sync.fencingToken || 0);
+          const leaseUntilMs = sync.leaseUntil ? Date.parse(sync.leaseUntil) : null;
+          if ((sync.leaseOwner || null) !== params.p_lease_owner) {
+            return { data: { ok: false, held: false, reason: 'lease_owner_mismatch', currentOwner: sync.leaseOwner || null, currentFencingToken: token }, error: null };
+          }
+          if (params.p_fencing_token !== null && params.p_fencing_token !== undefined && token !== Number(params.p_fencing_token)) {
+            return { data: { ok: false, held: false, reason: 'fencing_token_mismatch', currentOwner: sync.leaseOwner, currentFencingToken: token }, error: null };
+          }
+          if (!leaseUntilMs || leaseUntilMs <= nowMs) {
+            return { data: { ok: false, held: false, reason: 'lease_expired', currentOwner: sync.leaseOwner, currentFencingToken: token }, error: null };
+          }
+          return {
+            data: { ok: true, held: true, leaseOwner: sync.leaseOwner, leaseUntil: sync.leaseUntil, fencingToken: token },
+            error: null
+          };
+        }
+
+        if (fnName === 'manager_mark_command_sync_pending') {
+          const row = rows.get(params.p_command_id);
+          if (!row || row.worker_id !== params.p_worker_id) return { data: false, error: null };
+          if (!['queued', 'delivered', 'execution_completed', 'state_sync_pending'].includes(row.status)) {
+            return { data: false, error: null };
+          }
+          const sync = row.result?._stateSync || {};
+          const owner = sync.leaseOwner || null;
+          const token = Number(sync.fencingToken || 0);
+          if (params.p_lease_owner !== null && params.p_lease_owner !== undefined && owner && owner !== params.p_lease_owner) {
+            return { data: false, error: null };
+          }
+          if (params.p_fencing_token !== null && params.p_fencing_token !== undefined && token > 0 && token !== Number(params.p_fencing_token)) {
+            return { data: false, error: null };
+          }
+          const nextSync = {
+            ...(params.p_sync_state || {}),
+            fencingToken: Math.max(token, Number(params.p_sync_state?.fencingToken || 0), Number(params.p_fencing_token || 0))
+          };
+          row.status = params.p_terminal_failed ? 'state_sync_failed' : 'state_sync_pending';
+          row.completed_at = null;
+          row.result = { ...(row.result || {}), _stateSync: nextSync };
+          return { data: true, error: null };
+        }
+
+        if (fnName === 'manager_finalize_command_sync') {
+          const row = rows.get(params.p_command_id);
+          if (!row || row.worker_id !== params.p_worker_id) return { data: false, error: null };
+          if (row.status === 'completed') return { data: true, error: null };
+          if (!['queued', 'delivered', 'execution_completed', 'state_sync_pending'].includes(row.status)) {
+            return { data: false, error: null };
+          }
+          const sync = row.result?._stateSync || {};
+          const owner = sync.leaseOwner || null;
+          const token = Number(sync.fencingToken || 0);
+          if (params.p_lease_owner !== null && params.p_lease_owner !== undefined && owner && owner !== params.p_lease_owner) {
+            return { data: false, error: null };
+          }
+          if (params.p_fencing_token !== null && params.p_fencing_token !== undefined && token > 0 && token !== Number(params.p_fencing_token)) {
+            return { data: false, error: null };
+          }
+          const base = { ...(params.p_result || row.result || {}) };
+          delete base._stateSync;
+          row.status = 'completed';
+          row.result = base;
+          row.completed_at = nowIso;
+          return { data: true, error: null };
+        }
+
+        if (fnName === 'manager_claim_pending_command_syncs') {
+          if (!params.p_lease_owner) return { data: [], error: null };
+          const limit = Math.max(1, Math.min(100, Number(params.p_limit) || 10));
+          const leaseSecs = Math.max(1, Math.min(3600, Number(params.p_lease_seconds) || 60));
+          const leaseUntil = new Date(nowMs + leaseSecs * 1000).toISOString();
+          const claimed = [];
+          const sorted = [...rows.values()].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+          for (const row of sorted) {
+            if (claimed.length >= limit) break;
+            if (!['state_sync_pending', 'execution_completed'].includes(row.status)) continue;
+            const sync = row.result?._stateSync || {};
+            if (sync.nextRetryAt && Date.parse(sync.nextRetryAt) > nowMs) continue;
+            if (sync.leaseUntil && Date.parse(sync.leaseUntil) > nowMs) continue;
+            const nextToken = Number(sync.fencingToken || 0) + 1;
+            row.status = 'state_sync_pending';
+            row.result = {
+              ...(row.result || {}),
+              _stateSync: {
+                ...sync,
+                pending: true,
+                leaseOwner: params.p_lease_owner,
+                leaseUntil,
+                fencingToken: nextToken,
+                updatedAt: nowIso
+              }
+            };
+            claimed.push(cloneSync(row));
+          }
+          return { data: claimed, error: null };
+        }
+
+        return { data: null, error: { code: 'PGRST202', message: `Could not find the function public.${fnName}` } };
+      },
+      from(table) {
+        const filters = {};
+        let inVals = null;
+        let notExcluded = new Set();
+        let mode = 'select';
+        const chain = {
+          select: () => chain,
+          delete: () => { mode = 'delete'; return chain; },
+          eq: (c, v) => { filters[c] = v; return chain; },
+          in: (_c, vals) => { inVals = vals; return chain; },
+          not: (_c, _op, val) => {
+            const inner = String(val || '').replace(/^\(|\)$/g, '');
+            for (const part of inner.split(',')) {
+              const cleaned = part.trim().replace(/^"|"$/g, '');
+              if (cleaned) notExcluded.add(cleaned);
+            }
+            return chain;
+          },
+          limit: () => chain,
+          maybeSingle: async () => {
+            if (table !== 'manager_commands') return { data: null, error: null };
+            const found = [...rows.values()].find((r) =>
+              (!filters.command_id || r.command_id === filters.command_id) &&
+              (!filters.worker_id || r.worker_id === filters.worker_id)
+            );
+            return { data: cloneSync(found), error: null };
+          },
+          then(resolve, reject) {
+            Promise.resolve().then(() => {
+              if (mode === 'delete' && table === 'manager_commands') {
+                for (const [id, r] of rows.entries()) {
+                  if (filters.worker_id && r.worker_id !== filters.worker_id) continue;
+                  if (inVals && !inVals.includes(r.status)) continue;
+                  if (notExcluded.has(id)) continue;
+                  rows.delete(id);
+                }
+                return { data: [], error: null };
+              }
+              return { data: [], error: null };
+            }).then(resolve, reject);
+          }
+        };
+        return chain;
+      }
+    };
+  }
+
+  return { rows, rpcCalls, makeClient };
+}
+
+async function testLongRunningResetLeaseRenewalBlocksConcurrentSteal() {
+  console.log('10. Testing Long-Running RESET Lease Renewal & Multi-Instance Exclusion...');
+  const db = createInMemoryPostgresCommandDb();
+  const cmdId = '44444444-4444-4444-8444-444444444444';
+  db.rows.set(cmdId, {
+    command_id: cmdId,
+    worker_id: 'bot-lease-long',
+    action: 'reset',
+    status: 'delivered',
+    result: null,
+    created_at: new Date().toISOString(),
+    completed_at: null
+  });
+  db.rows.set('44444444-4444-4444-8444-000000000001', {
+    command_id: '44444444-4444-4444-8444-000000000001',
+    worker_id: 'bot-lease-long',
+    action: 'status',
+    status: 'queued',
+    created_at: new Date().toISOString()
+  });
+
+  const storeA = new SupabaseCommandStore(db.makeClient());
+  const storeB = new SupabaseCommandStore(db.makeClient());
+
+  let resetCallsA = 0;
+  let resetCallsB = 0;
+  let concurrentStealClaims = 0;
+
+  const brokerB = new CommandBroker({
+    registry: {
+      resetData: async () => { resetCallsB += 1; },
+      updateStatus: async () => {}
+    },
+    commandStore: storeB,
+    config: { stateSyncLeaseSeconds: 1 },
+    logger: createSilentLogger()
+  });
+
+  const brokerA = new CommandBroker({
+    registry: {
+      resetData: async () => {
+        resetCallsA += 1;
+        // Wait 1450ms (> 1s lease!): active lease renewal every ~333ms keeps lease alive so brokerB cannot steal!
+        await new Promise((r) => setTimeout(r, 750));
+        const midSteal1 = await brokerB.processPendingStateSyncs();
+        concurrentStealClaims += midSteal1.processed;
+        await new Promise((r) => setTimeout(r, 700));
+        const midSteal2 = await brokerB.processPendingStateSyncs();
+        concurrentStealClaims += midSteal2.processed;
+      },
+      updateStatus: async () => {}
+    },
+    commandStore: storeA,
+    config: { stateSyncLeaseSeconds: 1 },
+    logger: createSilentLogger()
+  });
+
+  const outcome = await brokerA.reportResult('bot-lease-long', cmdId, { ok: true, state: 'stopped', connected: false });
+  assert.strictEqual(outcome.ok, true, 'Slow reset with active lease renewal must complete cleanly');
+  assert.strictEqual(concurrentStealClaims, 0, 'Broker B must NEVER steal an actively renewed lease');
+  assert.strictEqual(resetCallsA, 1);
+  assert.strictEqual(resetCallsB, 0);
+
+  const renewCalls = db.rpcCalls.filter((c) => c.fnName === 'manager_renew_command_sync_lease');
+  const verifyCalls = db.rpcCalls.filter((c) => c.fnName === 'manager_verify_command_sync_lease');
+  assert.ok(renewCalls.length >= 2, `Expected >=2 background lease renewals during 1.45s sync, got ${renewCalls.length}`);
+  assert.ok(verifyCalls.length >= 4, `Expected pre-step & pre-write lease checks (>=4), got ${verifyCalls.length}`);
+  assert.strictEqual(db.rows.get(cmdId).status, 'completed');
+  assert.strictEqual(db.rows.has('44444444-4444-4444-8444-000000000001'), false, 'Queued command cleared cleanly');
+
+  console.log('✅ 10. Long-Running RESET Lease Renewal & Multi-Instance Exclusion verified.');
+}
+
+async function testStalledLeaseExpiryTakeoverAndFencingRejection() {
+  console.log('11. Testing Stalled Holder Takeover After Lease Expiry, Pre-Step Abort & Fencing Rejection...');
+  const db = createInMemoryPostgresCommandDb();
+  const cmdId = '55555555-5555-4555-8555-555555555555';
+  db.rows.set(cmdId, {
+    command_id: cmdId,
+    worker_id: 'bot-lease-stale',
+    action: 'reset',
+    status: 'delivered',
+    result: null,
+    created_at: new Date().toISOString(),
+    completed_at: null
+  });
+
+  const rawStoreA = new SupabaseCommandStore(db.makeClient());
+  // Simulate Manager A experiencing a renewal partition / freeze while its resetData stalls > lease
+  const partitionedStoreA = Object.create(rawStoreA);
+  partitionedStoreA.renewStateSyncLease = async () => ({ ok: false, lost: true, reason: 'partitioned_timeout' });
+
+  const storeB = new SupabaseCommandStore(db.makeClient());
+
+  let clearWorkerCallsA = 0;
+  let updateStatusCallsA = 0;
+  let resetCallsB = 0;
+  const errorLogsA = [];
+
+  const brokerB = new CommandBroker({
+    registry: {
+      resetData: async () => { resetCallsB += 1; },
+      updateStatus: async () => {}
+    },
+    commandStore: {
+      claimPendingStateSyncBatch: (...args) => storeB.claimPendingStateSyncBatch(...args),
+      renewStateSyncLease: (...args) => storeB.renewStateSyncLease(...args),
+      verifyStateSyncLease: (...args) => storeB.verifyStateSyncLease(...args),
+      clearWorker: (...args) => storeB.clearWorker(...args),
+      finalizeCompleted: (...args) => storeB.finalizeCompleted(...args),
+      markStateSyncPending: (...args) => storeB.markStateSyncPending(...args)
+    },
+    config: { stateSyncLeaseSeconds: 1 },
+    logger: createSilentLogger()
+  });
+
+  let clearCalledWrapped = false;
+  const wrappedStoreA = {
+    get: (...args) => rawStoreA.get(...args),
+    recordExecutionCompleted: (...args) => rawStoreA.recordExecutionCompleted(...args),
+    renewStateSyncLease: (...args) => partitionedStoreA.renewStateSyncLease(...args),
+    verifyStateSyncLease: (...args) => rawStoreA.verifyStateSyncLease(...args),
+    clearWorker: async (...args) => {
+      clearCalledWrapped = true;
+      clearWorkerCallsA += 1;
+      return rawStoreA.clearWorker(...args);
+    },
+    finalizeCompleted: (...args) => rawStoreA.finalizeCompleted(...args),
+    markStateSyncPending: (...args) => rawStoreA.markStateSyncPending(...args)
+  };
+
+  let brokerBOutcome = null;
+  const brokerA = new CommandBroker({
+    registry: {
+      resetData: async () => {
+        // Stall past the 1s lease so Manager B safely takes over mid-flight
+        await new Promise((r) => setTimeout(r, 1200));
+        brokerBOutcome = await brokerB.processPendingStateSyncs();
+      },
+      updateStatus: async () => { updateStatusCallsA += 1; }
+    },
+    commandStore: wrappedStoreA,
+    config: { stateSyncLeaseSeconds: 1 },
+    logger: {
+      info: () => {},
+      warn: () => {},
+      error: (msg, meta) => errorLogsA.push({ msg, meta })
+    }
+  });
+
+  const outcomeA = await brokerA.reportResult('bot-lease-stale', cmdId, { ok: true, state: 'stopped' });
+  assert.strictEqual(brokerBOutcome?.completed, 1, 'Manager B must reclaim & complete after Manager A lease expires');
+  assert.strictEqual(resetCallsB, 1);
+  assert.strictEqual(outcomeA.ok, false);
+  assert.strictEqual(outcomeA.error, 'STATE_SYNC_LEASE_LOST');
+  assert.strictEqual(outcomeA.leaseLost, true);
+  assert.strictEqual(clearCalledWrapped, false, 'Stalled Manager A MUST abort BEFORE clearWorker after lease loss');
+  assert.strictEqual(clearWorkerCallsA, 0);
+  assert.strictEqual(updateStatusCallsA, 0);
+  assert.ok(errorLogsA.some((e) => e.msg === 'command_reset_lease_lost'));
+  assert.strictEqual(db.rows.get(cmdId).status, 'completed');
+
+  // Verify fencing token rejection if stalled Manager A directly tries stale finalize or markPending
+  const rowStaleTest = '55555555-5555-4555-8555-666666666666';
+  db.rows.set(rowStaleTest, {
+    command_id: rowStaleTest,
+    worker_id: 'bot-fence',
+    action: 'reset',
+    status: 'state_sync_pending',
+    result: {
+      ok: true,
+      _stateSync: {
+        pending: true,
+        leaseOwner: 'mgr_new_owner',
+        leaseUntil: new Date(Date.now() + 60000).toISOString(),
+        fencingToken: 2
+      }
+    },
+    created_at: new Date().toISOString(),
+    completed_at: null
+  });
+  const staleFinalize = await storeB.finalizeCompleted('bot-fence', rowStaleTest, { ok: true }, { leaseOwner: 'mgr_old_owner', fencingToken: 1 });
+  assert.strictEqual(staleFinalize, false, 'Stale fencingToken/owner finalizeCompleted MUST be rejected');
+  const staleMark = await storeB.markStateSyncPending('bot-fence', rowStaleTest, { leaseOwner: 'mgr_old_owner', fencingToken: 1, syncState: { pending: true } });
+  assert.strictEqual(staleMark, false, 'Stale fencingToken/owner markStateSyncPending MUST be rejected');
+
+  // Concurrent simultaneous race on due pending sync: only ONE broker claims & executes
+  const raceCmdId = '55555555-5555-4555-8555-777777777777';
+  db.rows.set(raceCmdId, {
+    command_id: raceCmdId,
+    worker_id: 'bot-race',
+    action: 'reset',
+    status: 'state_sync_pending',
+    result: {
+      ok: true,
+      _stateSync: {
+        pending: true,
+        leaseOwner: null,
+        leaseUntil: null,
+        nextRetryAt: new Date(Date.now() - 1000).toISOString(),
+        fencingToken: 1,
+        pendingSteps: ['registry.resetData', 'commandStore.clearWorker', 'registry.updateStatus']
+      }
+    },
+    created_at: new Date().toISOString(),
+    completed_at: null
+  });
+  let totalRaceResets = 0;
+  const raceBroker1 = new CommandBroker({
+    registry: { resetData: async () => { totalRaceResets += 1; }, updateStatus: async () => {} },
+    commandStore: new SupabaseCommandStore(db.makeClient()),
+    logger: createSilentLogger()
+  });
+  const raceBroker2 = new CommandBroker({
+    registry: { resetData: async () => { totalRaceResets += 1; }, updateStatus: async () => {} },
+    commandStore: new SupabaseCommandStore(db.makeClient()),
+    logger: createSilentLogger()
+  });
+  const [race1, race2] = await Promise.all([
+    raceBroker1.processPendingStateSyncs(),
+    raceBroker2.processPendingStateSyncs()
+  ]);
+  assert.strictEqual(race1.completed + race2.completed, 1, 'Exactly one instance must claim and finish concurrent pending sync');
+  assert.strictEqual(totalRaceResets, 1);
+
+  console.log('✅ 11. Stalled Lease Expiry Takeover, Fencing & Concurrent Race verified.');
+}
+
+async function testManagerRestartMidFlightRecovery() {
+  console.log('12. Testing Manager Restart Recovery of Expired Mid-Flight Execution...');
+  const db = createInMemoryPostgresCommandDb();
+  const cmdId = '66666666-6666-4666-8666-666666666666';
+  db.rows.set(cmdId, {
+    command_id: cmdId,
+    worker_id: 'bot-restart',
+    action: 'reset',
+    status: 'execution_completed',
+    result: {
+      ok: true,
+      state: 'stopped',
+      _stateSync: {
+        pending: true,
+        executionCompleted: true,
+        attempts: 0,
+        fencingToken: 1,
+        leaseOwner: 'mgr_crashed_old',
+        leaseUntil: new Date(Date.now() - 10000).toISOString(),
+        nextRetryAt: new Date(Date.now() - 10000).toISOString(),
+        candidateStatus: { state: 'stopped', online: false },
+        statusSource: 'manager-command-poll',
+        pendingSteps: ['registry.resetData', 'commandStore.clearWorker', 'registry.updateStatus']
+      }
+    },
+    created_at: new Date(Date.now() - 30000).toISOString(),
+    completed_at: null
+  });
+
+  const restartedStore = new SupabaseCommandStore(db.makeClient());
+  let resetDone = false;
+  let statusDone = false;
+  const restartedBroker = new CommandBroker({
+    registry: {
+      resetData: async (wid) => { assert.strictEqual(wid, 'bot-restart'); resetDone = true; },
+      updateStatus: async (wid) => { assert.strictEqual(wid, 'bot-restart'); statusDone = true; }
+    },
+    commandStore: restartedStore,
+    logger: createSilentLogger()
+  });
+
+  await restartedBroker.processOutboxBatch();
+  assert.strictEqual(resetDone, true);
+  assert.strictEqual(statusDone, true);
+  const finalRow = db.rows.get(cmdId);
+  assert.strictEqual(finalRow.status, 'completed');
+  assert.ok(finalRow.completed_at);
+  assert.strictEqual(finalRow.result._stateSync, undefined);
+
+  console.log('✅ 12. Manager Restart Mid-Flight Recovery verified.');
+}
+
+async function testFailClosedMissingAtomicRpcAndHealthReadiness() {
+  console.log('13. Testing Fail-Closed Atomic RPC Enforcement & /health /ready Degraded Surface...');
+  let fallbackTableReads = 0;
+  const missingRpcClient = {
+    adapter: {
+      url: 'https://supabase.test',
+      isEnabled: () => true,
+      getHeaders: () => ({}),
+      fetchWithRetry: async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ paths: {} })
+      })
+    },
+    async rpc(fnName) {
+      return { data: null, error: { code: 'PGRST202', message: `Could not find ${fnName}` } };
+    },
+    from: () => ({
+      select: () => {
+        fallbackTableReads += 1;
+        return {
+          limit: async () => ({ data: [], error: null }),
+          eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }),
+          in: () => ({
+            lte: async () => ({ data: [], error: null }),
+            order: () => ({ limit: async () => ({ data: [], error: null }) })
+          }),
+          lt: async () => ({ data: [], error: null })
+        };
+      },
+      update: () => ({
+        in: () => ({ lte: async () => ({ data: [], error: null }) })
+      }),
+      delete: () => ({
+        in: () => ({ lt: async () => ({ data: [], error: null }) }),
+        lt: async () => ({ data: [], error: null })
+      })
+    })
+  };
+
+  const errLogs = [];
+  const origConsoleErr = console.error;
+  console.error = () => {};
+  const prodStore = new SupabaseCommandStore(missingRpcClient);
+  try {
+    await prodStore.initialize();
+  } finally {
+    console.error = origConsoleErr;
+  }
+
+  const broker = new CommandBroker({
+    registry: { resetData: async () => {}, updateStatus: async () => {} },
+    commandStore: prodStore,
+    logger: {
+      info: () => {},
+      warn: () => {},
+      error: (msg, meta) => errLogs.push({ msg, meta })
+    }
+  });
+
+  // Two background ticks must both fail closed without querying/updating non-atomically, logging once
+  const tick1 = await broker.processPendingStateSyncs();
+  const tick2 = await broker.processPendingStateSyncs();
+  assert.strictEqual(tick1.blocked, true);
+  assert.strictEqual(tick1.error, 'ATOMIC_STATE_SYNC_RPC_REQUIRED');
+  assert.strictEqual(tick2.blocked, true);
+  assert.strictEqual(fallbackTableReads, 1, 'Only initial limit(0) ping allowed; NO fallback SELECT polling');
+  assert.strictEqual(
+    errLogs.filter((e) => e.msg === 'command_reset_atomic_rpc_missing').length,
+    1,
+    'Missing atomic RPC error log must not spam on repeated ticks'
+  );
+
+  // /health and /ready surface degraded state cleanly
+  const app = createApp({
+    store: { adapter: { testConnection: async () => ({ ok: true }) } },
+    registry: { store: {} },
+    broker,
+    commandStore: prodStore,
+    config: { discordToken: '' }
+  });
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, resolve));
+  try {
+    const port = server.address().port;
+    const hRes = await fetch(`http://127.0.0.1:${port}/health`);
+    const hJson = await hRes.json();
+    assert.strictEqual(hRes.status, 200);
+    assert.strictEqual(hJson.status, 'degraded');
+    assert.strictEqual(hJson.degraded, true);
+    assert.strictEqual(hJson.checks.commandSyncRpc.ok, false);
+    assert.strictEqual(hJson.checks.commandSyncRpc.retryEnabled, false);
+    assert.ok(hJson.warnings.some((w) => w.startsWith('command_sync_rpc_missing:')));
+
+    const rRes = await fetch(`http://127.0.0.1:${port}/ready`);
+    const rJson = await rRes.json();
+    assert.strictEqual(rRes.status, 200);
+    assert.strictEqual(rJson.status, 'degraded');
+    assert.strictEqual(rJson.degraded, true);
+    assert.strictEqual(rJson.checks.commandSyncRpc.ok, false);
+    assert.ok(rJson.warnings.some((w) => w.startsWith('command_sync_rpc_missing:')));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  console.log('✅ 13. Fail-Closed Atomic RPC Enforcement & Health/Readiness verified.');
+}
+
+async function testSessionRevocationFailClosedMiddleware() {
+  console.log('14. Testing Session Revocation, Deleted/Disabled Cache Eviction & Multi-Process Fail-Closed Middleware...');
+  const { encryptUserPassword } = require('../src/utils/secrets');
+  const usersByName = new Map();
+  const usersById = new Map();
+
+  const aliceRec = {
+    id: 'usr_alice',
+    userId: 'usr_alice',
+    username: 'alice',
+    password: encryptUserPassword('alice-pass-123'),
+    role: 'user',
+    status: 'active',
+    isPermanent: false,
+    expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    workerIds: ['01']
+  };
+  usersByName.set('alice', aliceRec);
+  usersById.set('usr_alice', aliceRec);
+
+  const memStore = {
+    async getUser(username) {
+      const u = usersByName.get(String(username || '').toLowerCase());
+      return u ? { ...u, workerIds: [...u.workerIds] } : null;
+    },
+    async getAccess(identifier) {
+      const key = String(identifier || '');
+      const u = usersById.get(key) || usersByName.get(key.toLowerCase());
+      return u ? { ...u, workerIds: [...u.workerIds] } : null;
+    },
+    async setAccess(identifier, values) {
+      const key = String(identifier || '');
+      const cur = usersById.get(key) || usersByName.get(key.toLowerCase());
+      if (!cur) return null;
+      const next = { ...cur, ...values };
+      usersById.set(cur.id, next);
+      usersByName.set(cur.username.toLowerCase(), next);
+      return { ...next };
+    },
+    async removeAccess(identifier) {
+      const key = String(identifier || '');
+      const cur = usersById.get(key) || usersByName.get(key.toLowerCase());
+      if (!cur) return false;
+      usersById.delete(cur.id);
+      usersByName.delete(cur.username.toLowerCase());
+      return true;
+    },
+    async addAudit() {},
+    invalidateCache() {}
+  };
+
+  // A. Local/cached middleware mode: evicts activeSessions immediately when user is disabled, deleted, or getAccess fails
+  const appLocal = createApp({
+    store: memStore,
+    registry: {
+      store: {},
+      list: async () => [],
+      getAdminPassword: () => null,
+      verifyBotSecretSync: () => false
+    },
+    broker: {},
+    config: { adminUsername: 'admin', adminPassword: 'admin-secret-password', discordToken: '' },
+    logger: createSilentLogger()
+  });
+
+  const serverLocal = http.createServer(appLocal);
+  await new Promise((resolve) => serverLocal.listen(0, resolve));
+  try {
+    const port = serverLocal.address().port;
+    const base = `http://127.0.0.1:${port}`;
+
+    // Login user -> active session cached
+    const loginRes = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'alice-pass-123' })
+    });
+    const loginJson = await loginRes.json();
+    assert.strictEqual(loginJson.ok, true);
+    const aliceToken = loginJson.token;
+    assert.ok(aliceToken);
+
+    const meActive = await fetch(`${base}/api/auth/me`, {
+      headers: { authorization: `Bearer ${aliceToken}` }
+    });
+    assert.strictEqual(meActive.status, 200);
+
+    // Expired non-disabled user stays allowed so they can renew via Link4M / key
+    await memStore.setAccess('usr_alice', { status: 'expired' });
+    const meExpired = await fetch(`${base}/api/auth/me`, {
+      headers: { authorization: `Bearer ${aliceToken}` }
+    });
+    assert.strictEqual(meExpired.status, 200);
+    const meExpiredJson = await meExpired.json();
+    assert.strictEqual(meExpiredJson.user.status, 'expired');
+
+    // Login as env-var admin and disable alice via Admin API
+    const adminLoginRes = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: 'admin-secret-password' })
+    });
+    const adminToken = (await adminLoginRes.json()).token;
+    assert.ok(adminToken);
+
+    const disableRes = await fetch(`${base}/api/manager/users/usr_alice`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ status: 'disabled' })
+    });
+    assert.strictEqual(disableRes.status, 200);
+
+    const meDisabled = await fetch(`${base}/api/auth/me`, {
+      headers: { authorization: `Bearer ${aliceToken}` }
+    });
+    assert.strictEqual(meDisabled.status, 401, 'Disabled user token must be rejected immediately');
+
+    // Env admin cached session remains intact
+    const meAdmin = await fetch(`${base}/api/auth/me`, {
+      headers: { authorization: `Bearer ${adminToken}` }
+    });
+    assert.strictEqual(meAdmin.status, 200);
+
+    // Re-enable, login again, delete user, verify fail-closed + error fail-closed
+    await memStore.setAccess('usr_alice', { status: 'active' });
+    const relogin = await (await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'alice-pass-123' })
+    })).json();
+    const deleteRes = await fetch(`${base}/api/manager/users`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ action: 'delete', userId: 'usr_alice' })
+    });
+    assert.strictEqual(deleteRes.status, 200);
+
+    const meDeleted = await fetch(`${base}/api/auth/me`, {
+      headers: { authorization: `Bearer ${relogin.token}` }
+    });
+    assert.strictEqual(meDeleted.status, 401, 'Deleted user token must be rejected immediately');
+  } finally {
+    await new Promise((resolve) => serverLocal.close(resolve));
+  }
+
+  // B. Multi-process DB auth mode: Manager A warms activeSessions, Manager B deletes user in DB -> Manager A rejects immediately
+  const sharedDbSessions = new Map();
+  let bobDbUser = {
+    id: 'usr_bob',
+    userId: 'usr_bob',
+    username: 'bob',
+    password: encryptUserPassword('bob-pass-123'),
+    role: 'user',
+    status: 'active',
+    isPermanent: true,
+    assignedBotIds: ['02'],
+    workerIds: ['02']
+  };
+  let getAccessThrows = false;
+  const dbBackedStore = {
+    adapter: {
+      isEnabled: () => true,
+      async createManagerUserSession(session) {
+        sharedDbSessions.set(session.tokenHash, { ...session });
+        return true;
+      },
+      async fetchManagerAuthorization(tokenHash) {
+        if (getAccessThrows) throw new Error('simulated_db_error');
+        const s = sharedDbSessions.get(tokenHash) || null;
+        return {
+          ok: Boolean(s),
+          session: s ? { ...s } : null,
+          user: bobDbUser ? { ...bobDbUser } : null
+        };
+      },
+      async revokeUserSessions(userId) {
+        for (const [k, s] of sharedDbSessions.entries()) {
+          if (s.userId === userId || s.username === userId) sharedDbSessions.delete(k);
+        }
+        return { ok: true, revokedCount: 1 };
+      },
+      async deleteSession(tokenHash) {
+        return sharedDbSessions.delete(tokenHash);
+      }
+    },
+    async getUser(username) {
+      return bobDbUser && username === 'bob' ? { ...bobDbUser } : null;
+    },
+    async getAccess(userId) {
+      if (getAccessThrows) throw new Error('simulated_db_error');
+      return bobDbUser && (userId === 'usr_bob' || userId === 'bob') ? { ...bobDbUser } : null;
+    },
+    async addAudit() {},
+    invalidateCache() {}
+  };
+
+  const appProcA = createApp({
+    store: dbBackedStore,
+    registry: { store: {}, list: async () => [], getAdminPassword: () => null, verifyBotSecretSync: () => false },
+    broker: {},
+    config: { adminUsername: 'admin', adminPassword: 'admin-secret-password', discordToken: '' },
+    logger: createSilentLogger()
+  });
+  const serverProcA = http.createServer(appProcA);
+  await new Promise((resolve) => serverProcA.listen(0, resolve));
+  try {
+    const baseA = `http://127.0.0.1:${serverProcA.address().port}`;
+    const loginBob = await (await fetch(`${baseA}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'bob', password: 'bob-pass-123' })
+    })).json();
+    assert.strictEqual(loginBob.ok, true);
+
+    assert.strictEqual((await fetch(`${baseA}/api/auth/me`, {
+      headers: { authorization: `Bearer ${loginBob.token}` }
+    })).status, 200);
+
+    // Transient DB lookup error fails closed
+    getAccessThrows = true;
+    assert.strictEqual((await fetch(`${baseA}/api/auth/me`, {
+      headers: { authorization: `Bearer ${loginBob.token}` }
+    })).status, 401);
+    getAccessThrows = false;
+    assert.strictEqual((await fetch(`${baseA}/api/auth/me`, {
+      headers: { authorization: `Bearer ${loginBob.token}` }
+    })).status, 200);
+
+    // Simulate external Manager B deleting bob + revoking DB session WITHOUT calling Proc A directly
+    bobDbUser = null;
+    sharedDbSessions.clear();
+
+    const afterExternalDelete = await fetch(`${baseA}/api/auth/me`, {
+      headers: { authorization: `Bearer ${loginBob.token}` }
+    });
+    assert.strictEqual(afterExternalDelete.status, 401, 'Manager A must reject session immediately when DB auth loses user');
+  } finally {
+    await new Promise((resolve) => serverProcA.close(resolve));
+  }
+
+  console.log('✅ 14. Session Revocation, Cache Eviction & Multi-Process Fail-Closed Middleware verified.');
+}
+
+async function testPublicLoginViewSecurityAccessibilityAndApiContract() {
+  const vm = require('node:vm');
+  const { PUBLIC_LOGIN_HTML } = require('../src/http/views/login-html');
+
+  // 1. Static security, a11y, reduced-motion, and emoji invariants
+  const scriptMatch = PUBLIC_LOGIN_HTML.match(/<script>([\s\S]*?)<\/script>/);
+  assert.ok(scriptMatch && scriptMatch[1], 'PUBLIC_LOGIN_HTML must contain an inline <script>');
+  const scriptCode = scriptMatch[1];
+  const htmlWithoutScript = PUBLIC_LOGIN_HTML.replace(/<script>[\s\S]*?<\/script>/g, '');
+
+  new vm.Script(scriptCode); // Throws SyntaxError if malformed
+
+  assert.strictEqual(/\p{Extended_Pictographic}/u.test(PUBLIC_LOGIN_HTML), false, 'PUBLIC_LOGIN_HTML must not contain raw emoji pictographs');
+  assert.strictEqual(/\.innerHTML\b/.test(scriptCode), false, 'Login script must not use .innerHTML');
+  assert.strictEqual(/\son[a-z]+\s*=/i.test(htmlWithoutScript), false, 'Login HTML must not use inline on* event handlers');
+  assert.strictEqual(PUBLIC_LOGIN_HTML.includes('animation-duration: 0.01ms'), false, 'Must not apply blanket 0.01ms reduced-motion override');
+  assert.ok(PUBLIC_LOGIN_HTML.includes('@media (prefers-reduced-motion: no-preference)'), 'Animations must opt in under prefers-reduced-motion: no-preference');
+  assert.strictEqual(PUBLIC_LOGIN_HTML.includes('>Hệ Thống Trực Tuyến 24/7<'), false, 'Header pill must start with neutral telemetry check state instead of static online text');
+
+  // Required ARIA tablist/tab/tabpanel attributes
+  for (const snippet of [
+    'role="tablist"',
+    'id="tabPublicLoginBtn"',
+    'aria-controls="publicLoginForm"',
+    'id="tabPublicRegisterBtn"',
+    'aria-controls="publicRegisterForm"',
+    'id="publicLoginForm" role="tabpanel" aria-labelledby="tabPublicLoginBtn"',
+    'id="publicRegisterForm" class="hidden" role="tabpanel" aria-labelledby="tabPublicRegisterBtn" hidden'
+  ]) {
+    assert.ok(PUBLIC_LOGIN_HTML.includes(snippet), `Missing ARIA/HTML contract snippet: ${snippet}`);
+  }
+
+  // 2. Real HTTP backend setup (GET /, /api/public/system-info, /health, /api/auth/register, /api/auth/login)
+  const usersByName = new Map();
+  const usersById = new Map();
+  const memStore = {
+    async listAccess() { return [...usersById.values()]; },
+    async getUser(username) {
+      return usersByName.get(String(username || '').toLowerCase()) || null;
+    },
+    async getAccess(identifier) {
+      const k = String(identifier || '');
+      return usersById.get(k) || usersByName.get(k.toLowerCase()) || null;
+    },
+    async setAccess(identifier, values) {
+      const existing = usersById.get(identifier) || {};
+      const next = { ...existing, ...values };
+      usersById.set(next.id || identifier, next);
+      if (next.username) usersByName.set(next.username.toLowerCase(), next);
+      return { ...next };
+    },
+    async registerTrialUser({ userId, username, password, trialDays, planName }) {
+      const clean = String(username || '').toLowerCase();
+      if (usersByName.has(clean)) {
+        throw new Error('Tên đăng nhập đã có người sử dụng.');
+      }
+      const user = {
+        id: userId,
+        userId,
+        username: clean,
+        password,
+        role: 'user',
+        status: 'active',
+        isPermanent: false,
+        isTrial: true,
+        expiresAt: new Date(Date.now() + (trialDays || 1) * 86400000).toISOString(),
+        assignedBotIds: ['bot-trial-01'],
+        botCount: 1,
+        planName: planName || 'FREE TRIAL',
+        createdAt: new Date().toISOString()
+      };
+      usersById.set(userId, user);
+      usersByName.set(clean, user);
+      return { ok: true, workerId: 'bot-trial-01', user };
+    },
+    async addAudit() {},
+    invalidateCache() {}
+  };
+
+  const app = createApp({
+    store: memStore,
+    registry: {
+      store: {},
+      list: async () => [],
+      getAdminPassword: () => null,
+      verifyBotSecretSync: () => false
+    },
+    broker: {},
+    config: { adminUsername: 'admin', adminPassword: 'admin-secret-password', discordToken: '', trialDays: 3 },
+    logger: createSilentLogger()
+  });
+
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    const getRootRes = await fetch(`${baseUrl}/`);
+    assert.strictEqual(getRootRes.status, 200);
+    const rootHtml = await getRootRes.text();
+    assert.strictEqual(rootHtml, PUBLIC_LOGIN_HTML, 'GET / must serve updated PUBLIC_LOGIN_HTML');
+
+    // Minimal DOM simulator for executing the extracted <script> cleanly
+    function runLoginDomScript({ reducedMotion = false, fetchOverride = null } = {}) {
+      const elementsById = new Map();
+      function makeEl(tagName, id = '', initialAttrs = {}, initialClasses = []) {
+        const listeners = new Map();
+        const attrs = new Map(Object.entries(initialAttrs));
+        if (id) attrs.set('id', id);
+        const classes = new Set(initialClasses);
+        const el = {
+          tagName: tagName.toUpperCase(),
+          id,
+          children: [],
+          parentNode: null,
+          hidden: Boolean(attrs.has('hidden')),
+          value: attrs.get('value') || '',
+          type: attrs.get('type') || 'text',
+          checked: Boolean(attrs.has('checked')),
+          disabled: false,
+          placeholder: attrs.get('placeholder') || '',
+          style: {},
+          playbackRate: 1,
+          paused: false,
+          width: 0,
+          height: 0,
+          _text: '',
+          content: null,
+          classList: {
+            add: (...names) => names.forEach((n) => n && classes.add(n)),
+            remove: (...names) => names.forEach((n) => classes.delete(n)),
+            toggle: (name, force) => {
+              const has = classes.has(name);
+              const next = force === undefined ? !has : Boolean(force);
+              if (next) classes.add(name);
+              else classes.delete(name);
+              return next;
+            },
+            contains: (name) => classes.has(name)
+          },
+          get className() { return [...classes].join(' '); },
+          set className(val) {
+            classes.clear();
+            String(val || '').split(/\s+/).filter(Boolean).forEach((c) => classes.add(c));
+          },
+          get textContent() {
+            if (el.children.length === 0) return el._text;
+            return el.children.map((c) => c.textContent || c._text || '').join('');
+          },
+          set textContent(v) {
+            el.children = [];
+            el._text = String(v ?? '');
+          },
+          setAttribute: (k, v) => {
+            attrs.set(k, String(v));
+            if (k === 'hidden') el.hidden = true;
+          },
+          getAttribute: (k) => (attrs.has(k) ? attrs.get(k) : null),
+          removeAttribute: (k) => {
+            attrs.delete(k);
+            if (k === 'hidden') el.hidden = false;
+          },
+          hasAttribute: (k) => attrs.has(k),
+          appendChild: (child) => {
+            if (child && typeof child === 'object') {
+              child.parentNode = el;
+              el.children.push(child);
+            }
+            return child;
+          },
+          replaceChildren: (...nodes) => {
+            el.children = [];
+            el._text = '';
+            nodes.forEach((n) => el.appendChild(n));
+          },
+          cloneNode: () => {
+            const copy = makeEl(el.tagName, '', Object.fromEntries(attrs), [...classes]);
+            copy._text = el._text;
+            copy.children = el.children.map((c) => (c.cloneNode ? c.cloneNode(true) : { ...c }));
+            return copy;
+          },
+          addEventListener: (ev, fn) => {
+            if (!listeners.has(ev)) listeners.set(ev, []);
+            listeners.get(ev).push(fn);
+          },
+          dispatchEvent: (ev) => {
+            const eventObj = { preventDefault: () => {}, ...(ev || {}) };
+            for (const fn of (listeners.get(eventObj.type) || [])) {
+              fn(eventObj);
+            }
+          },
+          focus: () => { doc.activeElement = el; },
+          play: () => { el.paused = false; return Promise.resolve(); },
+          pause: () => { el.paused = true; },
+          getContext: () => ({
+            clearRect: () => { ctxStats.clears++; },
+            beginPath: () => {},
+            arc: () => {},
+            fill: () => {},
+            moveTo: () => {},
+            lineTo: () => {},
+            stroke: () => {},
+            createLinearGradient: () => ({ addColorStop: () => {} })
+          }),
+          querySelector: (sel) => {
+            const matches = el.querySelectorAll(sel);
+            return matches[0] || null;
+          },
+          querySelectorAll: (sel) => {
+            const found = [];
+            const walk = (node) => {
+              for (const c of (node.children || [])) {
+                if (sel === '[role="tab"]' && c.getAttribute && c.getAttribute('role') === 'tab') found.push(c);
+                else if (sel === '.btn-icon' && c.classList && c.classList.contains('btn-icon')) found.push(c);
+                else if (sel === '.btn-label' && c.classList && c.classList.contains('btn-label')) found.push(c);
+                else if (sel === '.icon-eye' && c.classList && c.classList.contains('icon-eye')) found.push(c);
+                else if (sel === '.icon-eye-off' && c.classList && c.classList.contains('icon-eye-off')) found.push(c);
+                walk(c);
+              }
+            };
+            walk(el);
+            return found;
+          }
+        };
+        if (id) elementsById.set(id, el);
+        return el;
+      }
+
+      const ctxStats = { clears: 0, rafScheduled: 0, rafCancelled: 0, replacedLocation: null, requests: [] };
+      const tabList = makeEl('div', '', { role: 'tablist' }, ['auth-tabs']);
+      const tabLogin = makeEl('button', 'tabPublicLoginBtn', { role: 'tab', 'aria-selected': 'true', 'aria-controls': 'publicLoginForm', tabindex: '0', 'data-auth-tab': 'login' }, ['auth-tab-btn', 'active']);
+      const tabReg = makeEl('button', 'tabPublicRegisterBtn', { role: 'tab', 'aria-selected': 'false', 'aria-controls': 'publicRegisterForm', tabindex: '-1', 'data-auth-tab': 'register' }, ['auth-tab-btn']);
+      tabList.appendChild(tabLogin);
+      tabList.appendChild(tabReg);
+
+      const loginForm = makeEl('form', 'publicLoginForm', { role: 'tabpanel', 'aria-labelledby': 'tabPublicLoginBtn' });
+      const regForm = makeEl('form', 'publicRegisterForm', { role: 'tabpanel', 'aria-labelledby': 'tabPublicRegisterBtn', hidden: '' }, ['hidden']);
+
+      const pubUser = makeEl('input', 'publicUsername', { type: 'text' });
+      const pubPass = makeEl('input', 'publicPassword', { type: 'password' });
+      const pubPassToggle = makeEl('button', 'pubPassToggle', { 'data-toggle-target': 'publicPassword', 'aria-pressed': 'false' }, ['password-toggle-btn']);
+      pubPassToggle.appendChild(makeEl('svg', '', {}, ['ui-icon', 'icon-eye']));
+      pubPassToggle.appendChild(makeEl('svg', '', {}, ['ui-icon', 'icon-eye-off', 'hidden']));
+
+      const pubKey = null; // FRONTEND-09: dead #publicLicenseKey removed from login view
+      const pubRemember = makeEl('input', 'publicRememberMe', { type: 'checkbox', checked: '' });
+      const pubBtn = makeEl('button', 'publicSubmitBtn', { type: 'submit' }, ['primary-cta']);
+      pubBtn.appendChild(makeEl('span', '', {}, ['btn-icon']));
+      pubBtn.appendChild(makeEl('span', '', {}, ['btn-label']));
+
+      const regUser = makeEl('input', 'regUsername', { type: 'text' });
+      const regPass = makeEl('input', 'regPassword', { type: 'password' });
+      const regPass2 = makeEl('input', 'regPasswordConfirm', { type: 'password' });
+      const regKey = makeEl('input', 'regLicenseKey', { type: 'text' }, ['key-input']);
+      const regBtn = makeEl('button', 'publicRegSubmitBtn', { type: 'submit' }, ['primary-cta']);
+      regBtn.appendChild(makeEl('span', '', {}, ['btn-icon']));
+      regBtn.appendChild(makeEl('span', '', {}, ['btn-label']));
+
+      makeEl('p', 'publicUsernameErr', { hidden: '' });
+      makeEl('p', 'publicPasswordErr', { hidden: '' });
+      makeEl('p', 'regUsernameErr', { hidden: '' });
+      makeEl('p', 'regPasswordErr', { hidden: '' });
+      makeEl('p', 'regPasswordConfirmErr', { hidden: '' });
+
+      makeEl('div', 'publicLoginAlert', { hidden: '' }, ['login-alert', 'hidden']);
+      makeEl('div', 'publicTrialCalloutBadge');
+      makeEl('div', 'publicTrialCalloutText');
+      makeEl('span', 'regLicenseKeyHint');
+      // FRONTEND-09: dead #serverStatusPill/#serverStatusText removed from login view
+
+      const canvas = makeEl('canvas', 'publicStarfieldCanvas');
+      const video = makeEl('video', 'publicGalaxyVideo');
+
+      for (const tplId of ['tplIconLogin', 'tplIconRegister', 'tplIconSpinner', 'tplIconWarn', 'tplIconLock', 'tplIconSuccess']) {
+        const tpl = makeEl('template', tplId);
+        const svgChild = makeEl('svg');
+        tpl.content = { firstElementChild: svgChild };
+      }
+
+      const motionListeners = [];
+      let currentReducedMotion = reducedMotion;
+      const motionQueryObj = {
+        get matches() { return currentReducedMotion; },
+        addEventListener: (ev, fn) => { if (ev === 'change') motionListeners.push(fn); }
+      };
+
+      const docListeners = [];
+      const doc = {
+        hidden: false,
+        activeElement: null,
+        getElementById: (id) => elementsById.get(id) || null,
+        querySelector: (sel) => (sel.includes('tablist') ? tabList : null),
+        querySelectorAll: (sel) => (sel.includes('password-toggle-btn') ? [pubPassToggle] : []),
+        createElement: (tag) => makeEl(tag),
+        createTextNode: (txt) => ({ nodeType: 3, textContent: String(txt), cloneNode: function() { return { ...this }; } }),
+        addEventListener: (ev, fn) => docListeners.push({ ev, fn })
+      };
+
+      const storageMap = new Map();
+      const win = {
+        innerWidth: 1280,
+        innerHeight: 800,
+        location: { search: '', replace: (u) => { ctxStats.replacedLocation = u; } },
+        matchMedia: () => motionQueryObj,
+        addEventListener: () => {}
+      };
+      win.window = win;
+
+      let nextRafId = 1;
+      const sandbox = {
+        window: win,
+        document: doc,
+        navigator: { userAgent: 'Mozilla/5.0' },
+        URLSearchParams,
+        localStorage: {
+          setItem: (k, v) => storageMap.set(k, String(v)),
+          getItem: (k) => storageMap.get(k) || null
+        },
+        fetch: async (url, opts) => {
+          ctxStats.requests.push({ url, opts });
+          if (fetchOverride) return fetchOverride(url, opts);
+          return fetch(`${baseUrl}${url}`, opts);
+        },
+        requestAnimationFrame: () => {
+          ctxStats.rafScheduled += 1;
+          return nextRafId++;
+        },
+        cancelAnimationFrame: () => {
+          ctxStats.rafCancelled += 1;
+        },
+        setTimeout,
+        clearTimeout,
+        console,
+        Math, Number, String, Boolean, JSON, Array, Promise, Error
+      };
+
+      vm.runInNewContext(scriptCode, sandbox);
+      return {
+        sandbox, win, doc, elementsById, tabList, tabLogin, tabReg, loginForm, regForm,
+        pubUser, pubPass, pubPassToggle, pubKey, pubBtn, regUser, regPass, regPass2, regKey, regBtn,
+        canvas, video, ctxStats, storageMap,
+        triggerReducedMotionChange: (nextVal) => {
+          currentReducedMotion = nextVal;
+          motionListeners.forEach((fn) => fn({ matches: nextVal }));
+        }
+      };
+    }
+
+    // 2a. Reduced Motion initially ON -> never schedules animation frame & pauses video
+    const simReduced = runLoginDomScript({
+      reducedMotion: true,
+      fetchOverride: async () => { throw new Error('offline'); }
+    });
+    assert.strictEqual(simReduced.ctxStats.rafScheduled, 0, 'Reduced motion ON must not start canvas RAF loop');
+    assert.strictEqual(simReduced.video.paused, true, 'Reduced motion ON must pause background video');
+    await new Promise((r) => setTimeout(r, 30));
+    assert.strictEqual(simReduced.ctxStats.requests.some((r) => r.url === '/health'), false, 'FRONTEND-09: login page must not poll /health');
+
+    // 2b. Reduced Motion initially OFF -> runs loop, then switching ON dynamically stops loop & clears canvas
+    const simDynamic = runLoginDomScript({
+      reducedMotion: false,
+      fetchOverride: async (url) => {
+        if (url === '/api/public/system-info') {
+          return {
+            ok: true,
+            json: async () => ({
+              ok: true,
+              trialGiftEnabled: true,
+              trialDays: '<img src=x onerror=alert(1)>',
+              totalBots: 5,
+              onlineBots: 3
+            })
+          };
+        }
+        return { ok: false, json: async () => ({}) };
+      }
+    });
+    assert.ok(simDynamic.ctxStats.rafScheduled >= 1, 'Motion allowed should start canvas animation loop');
+    simDynamic.triggerReducedMotionChange(true);
+    assert.ok(simDynamic.ctxStats.rafCancelled >= 1, 'Switching to reduced motion must cancel animation frame');
+    assert.strictEqual(simDynamic.video.paused, true, 'Switching to reduced motion must pause video');
+    assert.ok(simDynamic.ctxStats.clears >= 1, 'Switching to reduced motion must clear starfield canvas');
+
+    await new Promise((r) => setTimeout(r, 30));
+    // Verify XSS mitigation & safe DOM rendering for malicious trialDays
+    const trialNode = simDynamic.elementsById.get('publicTrialCalloutText');
+    assert.strictEqual(trialNode.children.some((c) => c.tagName === 'IMG'), false, 'Must not inject HTML tags from trialDays');
+    assert.ok(trialNode.textContent.includes('1 NGÀY DÙNG THỬ MIỄN PHÍ'), 'Malformed trialDays must clamp safely to 1');
+
+    // 2c. Keyboard ARIA tabs & password toggle checks
+    simDynamic.tabLogin.focus();
+    simDynamic.tabList.dispatchEvent({ type: 'keydown', key: 'ArrowRight' });
+    assert.strictEqual(simDynamic.tabReg.getAttribute('aria-selected'), 'true');
+    assert.strictEqual(simDynamic.tabReg.getAttribute('tabindex'), '0');
+    assert.strictEqual(simDynamic.tabLogin.getAttribute('aria-selected'), 'false');
+    assert.strictEqual(simDynamic.tabLogin.getAttribute('tabindex'), '-1');
+    assert.strictEqual(simDynamic.regForm.hidden, false);
+    assert.strictEqual(simDynamic.loginForm.hidden, true);
+    assert.strictEqual(simDynamic.doc.activeElement, simDynamic.tabReg);
+
+    simDynamic.pubPassToggle.dispatchEvent({ type: 'click' });
+    assert.strictEqual(simDynamic.pubPass.type, 'text');
+    assert.strictEqual(simDynamic.pubPassToggle.getAttribute('aria-pressed'), 'true');
+    assert.strictEqual(simDynamic.pubPassToggle.children.length, 2, 'Password toggle must preserve SVG icons instead of overwriting textContent');
+
+    // 2d. Real HTTP Register & Login end-to-end compatibility check against real createApp server
+    const simReal = runLoginDomScript({ reducedMotion: true });
+    await new Promise((r) => setTimeout(r, 40));
+
+    simReal.regUser.value = 'webtest_user';
+    simReal.regPass.value = 'SecretPass123';
+    simReal.regPass2.value = 'SecretPass123';
+    await simReal.sandbox.handlePublicRegisterSubmit();
+
+    const regReq = simReal.ctxStats.requests.find((r) => r.url === '/api/auth/register');
+    assert.ok(regReq, 'Must submit to /api/auth/register');
+    const regBody = JSON.parse(regReq.opts.body);
+    assert.strictEqual(regBody.username, 'webtest_user');
+    assert.strictEqual(regBody.password, 'SecretPass123');
+    assert.strictEqual(regBody.confirmPassword, 'SecretPass123', 'Register request must include confirmPassword required by auth-api.js');
+    assert.strictEqual(regBody.key, '', 'Register request must include key field expected by auth-api.js');
+    assert.strictEqual(simReal.storageMap.get('kingmc_session') || null, null, 'FRONTEND-09: must not write session token to localStorage');
+    await new Promise((r) => setTimeout(r, 420));
+    assert.strictEqual(simReal.ctxStats.replacedLocation, '/', 'Successful web registration must redirect to /');
+    assert.ok(await memStore.getUser('webtest_user'), 'User must actually be persisted in backend store after web submit');
+
+    // Verify real login submit sends credentials + rememberMe and authenticates via HttpOnly cookie
+    simReal.ctxStats.replacedLocation = null;
+    simReal.pubUser.value = 'webtest_user';
+    simReal.pubPass.value = 'SecretPass123';
+    await simReal.sandbox.handlePublicLoginSubmit();
+    const loginReq = simReal.ctxStats.requests.find((r) => r.url === '/api/auth/login');
+    assert.ok(loginReq, 'Must submit to /api/auth/login');
+    const loginBody = JSON.parse(loginReq.opts.body);
+    assert.strictEqual(loginBody.username, 'webtest_user');
+    assert.strictEqual(loginBody.password, 'SecretPass123');
+    assert.strictEqual(loginBody.rememberMe, true);
+    await new Promise((r) => setTimeout(r, 360));
+    assert.strictEqual(simReal.ctxStats.replacedLocation, '/', 'Successful web login must redirect to /');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  console.log('✅ 15. Public Login Security, Telemetry, Reduced-Motion, ARIA Tabs & API Contract verified.');
+}
+
+async function testGracePeriodAndDataRetentionLifecycle() {
+  console.log('16. Testing Milestone 1: 6h Grace Period, 100% Data Retention, Control Lockout & Manual Reset...');
+  const store = createInMemoryTableStore();
+  const logger = createSilentLogger();
+  const userLock = new AsyncKeyLock();
+  const accessControl = new AccessControl({ store });
+
+  const now = Date.now();
+  const workerData = {
+    workerId: 'bot-grace-01',
+    botNumber: 1,
+    enabled: true,
+    serverHost: 'mc.kingmc.vn',
+    serverPort: 25565,
+    settings: {
+      mcCredentialsCiphertext: 'cipher_token_abc_123',
+      mcUsername: 'KingBot1'
+    },
+    status: { state: 'online', online: true, health: 20 }
+  };
+
+  const registry = {
+    find: async (id) => (id === 'bot-grace-01' ? { ...workerData, settings: { ...workerData.settings }, status: { ...workerData.status } } : null),
+    list: async () => [{ ...workerData }],
+    summary: () => ({ data: null }),
+    updateStatus: async (id, st) => { workerData.status = { ...workerData.status, ...st }; return workerData; },
+    resetData: async (id) => {
+      workerData.settings = {};
+      workerData.status = { state: 'stopped', online: false };
+      return { ok: true };
+    }
+  };
+
+  // User in 6h Grace Period (expired 30 minutes ago, < 6 hours)
+  await store.setAccess('usr_grace_test', {
+    userId: 'usr_grace_test',
+    username: 'grace_user',
+    role: 'user',
+    status: 'active',
+    isPermanent: false,
+    expiresAt: new Date(now - 30 * 60 * 1000).toISOString(),
+    workerIds: ['bot-grace-01']
+  });
+
+  const stopDispatches = [];
+  const mockBroker = {
+    dispatch: async (workerId, action, payload) => {
+      stopDispatches.push({ workerId, action, payload });
+      return { delivered: true, ok: true, result: { ok: true, state: 'stopped', connected: false } };
+    }
+  };
+
+  const stopCalls = [];
+  const mockFleetOps = {
+    stopWorker: async (workerId, reason) => {
+      stopCalls.push({ workerId, reason });
+      return { delivered: true, ok: true, result: { ok: true, state: 'stopped', connected: false } };
+    }
+  };
+
+  const entitlementService = new EntitlementService({
+    store,
+    registry,
+    accessControl,
+    userLock,
+    logger
+  });
+
+  // Verify DEFAULT_GRACE_PERIOD_MS constant is 6 hours
+  const { DEFAULT_GRACE_PERIOD_MS } = require('../src/services/entitlement-service');
+  assert.strictEqual(DEFAULT_GRACE_PERIOD_MS, 6 * 60 * 60 * 1000, 'DEFAULT_GRACE_PERIOD_MS must equal 6 hours in ms');
+
+  // STEP A: Run checkExpiredUsersAndGracefulStop for user in 6h grace period (< 6h)
+  const graceSummary = await entitlementService.checkExpiredUsersAndGracefulStop({
+    broker: mockBroker,
+    fleetOperations: mockFleetOps
+  });
+
+  assert.strictEqual(graceSummary.expired, 0, 'Grace period user must not be counted as expired');
+  assert.strictEqual(stopCalls.length, 0, 'No stopWorker RPC must be issued during 6h grace period');
+  assert.strictEqual(stopDispatches.length, 0, 'No broker stop dispatch must be issued during 6h grace period');
+
+  const userAfterGraceCheck = await store.getAccess('usr_grace_test');
+  assert.strictEqual(userAfterGraceCheck.status, 'grace_period', 'User status must transition to grace_period');
+  assert.strictEqual(userAfterGraceCheck.inGracePeriod, true, 'User must have inGracePeriod = true');
+
+  // STEP B: 100% Data Retention Check during grace period
+  const workerAfterGrace = await registry.find('bot-grace-01');
+  assert.strictEqual(workerAfterGrace.settings.mcCredentialsCiphertext, 'cipher_token_abc_123', 'Minecraft credentials must NOT be erased during grace period');
+  assert.strictEqual(workerAfterGrace.serverHost, 'mc.kingmc.vn', 'Server host must remain intact');
+  assert.strictEqual(workerAfterGrace.status.online, true, 'Bot must remain online during grace period');
+
+  // STEP C: API Access Control via Express router
+  let unassignedCallWorkerId = null;
+  store.removeWorkerAssignments = async (wId) => { unassignedCallWorkerId = wId; return { ok: true }; };
+  store.addAudit = async () => ({ ok: true });
+
+  const testApp = express();
+  testApp.use(express.json());
+  testApp.use((req, res, next) => {
+    req.managerAuthSession = {
+      userId: 'usr_grace_test',
+      username: 'grace_user',
+      role: 'user',
+      status: userAfterGraceCheck.status,
+      inGracePeriod: userAfterGraceCheck.inGracePeriod,
+      assignedBotIds: ['bot-grace-01'],
+      expiresAtRental: userAfterGraceCheck.expiresAt
+    };
+    next();
+  });
+  testApp.use('/api/user', createUserApi({
+    store,
+    registry,
+    broker: mockBroker,
+    entitlementService,
+    logger
+  }));
+
+  const testServer = http.createServer(testApp);
+  await new Promise((resolve) => testServer.listen(0, '127.0.0.1', resolve));
+  const testPort = testServer.address().port;
+  const testBaseUrl = `http://127.0.0.1:${testPort}`;
+
+  try {
+    // 1. GET requests must be ALLOWED
+    const getRes = await fetch(`${testBaseUrl}/api/user/bot/bot-grace-01/snapshot`);
+    assert.strictEqual(getRes.status, 200, 'GET /bot/:id/snapshot must be allowed for user in grace period');
+    const getJson = await getRes.json();
+    assert.strictEqual(getJson.ok, true);
+
+    // 2. POST bot control requests must be BLOCKED with 403 Forbidden
+    const postStartRes = await fetch(`${testBaseUrl}/api/user/bot/bot-grace-01/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    assert.strictEqual(postStartRes.status, 403, 'POST /bot/:id/start must return 403 Forbidden');
+    const postStartJson = await postStartRes.json();
+    assert.strictEqual(postStartJson.ok, false);
+    assert.ok(postStartJson.error.includes('hết hạn'), 'Error message must state bot package expired');
+    assert.ok(postStartJson.error.includes('vô hiệu hóa'), 'Error message must state control disabled');
+
+    const postSendRes = await fetch(`${testBaseUrl}/api/user/bot/bot-grace-01/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'Hello' })
+    });
+    assert.strictEqual(postSendRes.status, 403, 'POST /bot/:id/send must return 403 Forbidden');
+
+    // STEP D: User past 6h grace period (> 6h expired)
+    await store.setAccess('usr_post_grace', {
+      userId: 'usr_post_grace',
+      username: 'post_grace_user',
+      role: 'user',
+      status: 'grace_period',
+      inGracePeriod: true,
+      isPermanent: false,
+      expiresAt: new Date(now - 7 * 3600 * 1000).toISOString(), // 7 hours ago (> 6h)
+      workerIds: ['bot-grace-01']
+    });
+
+    const expiredSummary = await entitlementService.checkExpiredUsersAndGracefulStop({
+      fleetOperations: mockFleetOps
+    });
+
+    assert.strictEqual(expiredSummary.expired, 1, 'Post-grace user must transition to expired');
+    assert.strictEqual(stopCalls.length, 1, 'stopWorker must be called when grace period expires');
+    assert.strictEqual(stopCalls[0].reason, 'Gói thuê đã hết hạn ân hạn 6 giờ');
+
+    const userAfterExpired = await store.getAccess('usr_post_grace');
+    assert.strictEqual(userAfterExpired.status, 'expired', 'User status must transition to expired');
+    assert.strictEqual(userAfterExpired.inGracePeriod, false);
+
+    // 100% Data Retention check on expired user
+    assert.strictEqual(unassignedCallWorkerId, null, 'removeWorkerAssignments must NEVER be called on expiration');
+
+    // STEP E: Admin Manual Reset (/bot/:id/reset-customer)
+    const { createAdminApi } = require('../src/http/routes/admin-api');
+    let auditLogRecord = null;
+    const adminStore = {
+      ...store,
+      async removeWorkerAssignments(id) { unassignedCallWorkerId = id; return { ok: true }; },
+      async addAudit(entry) { auditLogRecord = entry; return { ok: true }; }
+    };
+
+    const adminApp = express();
+    adminApp.use(express.json());
+    adminApp.use((req, res, next) => {
+      req.managerAuthSession = { username: 'superadmin', role: 'admin' };
+      next();
+    });
+    adminApp.use('/api/admin', createAdminApi({
+      store: adminStore,
+      registry,
+      broker: mockBroker,
+      logger
+    }));
+
+    const adminServer = http.createServer(adminApp);
+    await new Promise((resolve) => adminServer.listen(0, '127.0.0.1', resolve));
+    const adminPort = adminServer.address().port;
+
+    try {
+      const resetRes = await fetch(`http://127.0.0.1:${adminPort}/api/admin/bot/bot-grace-01/reset-customer`, {
+        method: 'POST'
+      });
+      assert.strictEqual(resetRes.status, 200, 'POST /reset-customer must return HTTP 200');
+      const resetJson = await resetRes.json();
+      assert.strictEqual(resetJson.ok, true);
+
+      // Verify unassignment was called
+      assert.strictEqual(unassignedCallWorkerId, 'bot-grace-01', 'Admin manual reset MUST call removeWorkerAssignments');
+
+      // Verify audit log
+      assert.ok(auditLogRecord, 'Admin reset must write audit log');
+      assert.strictEqual(auditLogRecord.action, 'ADMIN_RESET_BOT_CUSTOMER');
+      assert.strictEqual(auditLogRecord.details.reason, 'admin_manually_reset_customer_bot');
+    } finally {
+      await new Promise((resolve) => adminServer.close(resolve));
+    }
+
+  } finally {
+    await new Promise((resolve) => testServer.close(resolve));
+  }
+
+  console.log('✅ 16. Milestone 1: 6h Grace Period, 100% Data Retention, Control Lockout & Manual Reset verified.');
+}
+
+let completedAll = false;
+process.on('beforeExit', (code) => {
+  if (code === 0 && !completedAll) {
+    console.error('❌ SERVICES WIRING TEST EXITED EARLY BEFORE COMPLETION');
+    process.exit(1);
+  }
+});
+
+async function runTests() {
+  console.log('--- [MANAGER SERVICES WIRING & RELIABILITY TESTS] ---');
+  await testIndexJsLink4mWiring();
+  await testRealLink4mAccessControlAndLockWiring();
+  testIsWorkerStopConfirmedContract();
+  await testGracefulStopConfirmationStateMachine();
+  await testRealBrokerFleetEntitlementWiring();
+  await testCoordinatorCrossCuttingContracts();
+  await testLink4mInitFailureDegradedVisibility();
+  await testCommandResetErrorVisibility();
+  await testResetTwoPhaseExecutionAndIndependentRetry();
+  await testLongRunningResetLeaseRenewalBlocksConcurrentSteal();
+  await testStalledLeaseExpiryTakeoverAndFencingRejection();
+  await testManagerRestartMidFlightRecovery();
+  await testFailClosedMissingAtomicRpcAndHealthReadiness();
+  await testSessionRevocationFailClosedMiddleware();
+  await testPublicLoginViewSecurityAccessibilityAndApiContract();
+  await testGracePeriodAndDataRetentionLifecycle();
+  completedAll = true;
+  console.log('🎉 ALL MANAGER SERVICES WIRING TESTS PASSED 100%!');
+}
+
+runTests().catch((err) => {
+  console.error('❌ SERVICES WIRING TEST FAILED:', err);
+  process.exit(1);
+});

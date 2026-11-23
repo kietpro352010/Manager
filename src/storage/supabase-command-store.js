@@ -130,6 +130,8 @@ class SupabaseCommandStore {
       ...this.stateSyncRpcState,
       ok: missing.length === 0,
       checked: true,
+      rpcVerified: true,
+      probeError: null,
       missingRpcs: missing,
       error: missing.length > 0 ? 'ATOMIC_STATE_SYNC_RPC_REQUIRED' : null,
       message: missing.length > 0 ? `Missing atomic state-sync RPC(s): ${missing.join(', ')}` : null,
@@ -169,10 +171,13 @@ class SupabaseCommandStore {
         headers: typeof this.adapter.getHeaders === 'function' ? this.adapter.getHeaders() : {}
       }, { timeoutMs: 8000, maxRetries: 1 });
       if (!specRes || !specRes.ok) {
+        await specRes?.body?.cancel?.().catch(() => {});
         this.stateSyncRpcState = {
           ...this.stateSyncRpcState,
+          ok: false,
           checked: true,
           rpcVerified: false,
+          error: 'STATE_SYNC_PROBE_FAILED',
           probeError: specRes ? `HTTP ${specRes.status}` : 'spec_fetch_failed',
           updatedAt: new Date().toISOString()
         };
@@ -183,8 +188,10 @@ class SupabaseCommandStore {
       if (!paths) {
         this.stateSyncRpcState = {
           ...this.stateSyncRpcState,
+          ok: false,
           checked: true,
           rpcVerified: false,
+          error: 'STATE_SYNC_PROBE_FAILED',
           probeError: 'invalid_openapi_spec',
           updatedAt: new Date().toISOString()
         };
@@ -205,8 +212,10 @@ class SupabaseCommandStore {
     } catch (err) {
       this.stateSyncRpcState = {
         ...this.stateSyncRpcState,
+        ok: false,
         checked: true,
         rpcVerified: false,
+        error: 'STATE_SYNC_PROBE_FAILED',
         probeError: err?.message || String(err),
         updatedAt: new Date().toISOString()
       };
@@ -217,18 +226,22 @@ class SupabaseCommandStore {
 
   health() {
     const missingRpcs = [...(this.stateSyncRpcState.missingRpcs || [])];
-    const degraded = Boolean(missingRpcs.length > 0 && !this.allowUnsafeSingleInstanceFallback);
+    const probeFailed = Boolean(this.stateSyncRpcState.checked && !this.stateSyncRpcState.rpcVerified);
+    const degraded = Boolean((missingRpcs.length > 0 || probeFailed) && !this.allowUnsafeSingleInstanceFallback);
+    const status = degraded
+      ? 'degraded'
+      : (this.stateSyncRpcState.checked && this.stateSyncRpcState.rpcVerified ? 'ready' : 'unknown');
     return {
       ok: !degraded,
       degraded,
-      status: degraded ? 'degraded' : (this.stateSyncRpcState.checked ? 'ready' : 'unknown'),
+      status,
       checked: Boolean(this.stateSyncRpcState.checked),
       rpcVerified: Boolean(this.stateSyncRpcState.rpcVerified),
       retryEnabled: !degraded,
       allowUnsafeSingleInstanceFallback: this.allowUnsafeSingleInstanceFallback,
       missingRpcs,
-      error: degraded ? (this.stateSyncRpcState.error || 'ATOMIC_STATE_SYNC_RPC_REQUIRED') : null,
-      message: degraded ? this.stateSyncRpcState.message : null,
+      error: degraded ? (this.stateSyncRpcState.error || (probeFailed ? 'STATE_SYNC_PROBE_FAILED' : 'ATOMIC_STATE_SYNC_RPC_REQUIRED')) : null,
+      message: degraded ? (this.stateSyncRpcState.message || (probeFailed ? `State sync RPC probe failed: ${this.stateSyncRpcState.probeError || 'unknown'}` : null)) : null,
       probeError: this.stateSyncRpcState.probeError || null
     };
   }
@@ -318,15 +331,17 @@ class SupabaseCommandStore {
             .maybeSingle();
 
           if (existing) {
-            const { data: updated, error: updErr } = await this.client.from(TABLE)
+            let updQuery = this.client.from(TABLE)
               .update({
                 payload: command.payload || {},
                 expires_at: expiresAt,
                 created_at: new Date().toISOString()
               })
-              .eq('command_id', existing.command_id)
-              .select('*')
-              .maybeSingle();
+              .eq('command_id', existing.command_id);
+            if (typeof updQuery?.eq === 'function') {
+              updQuery = updQuery.eq('status', 'queued');
+            }
+            const { data: updated, error: updErr } = await updQuery.select('*').maybeSingle();
             if (!updErr && updated) return fromRow(updated);
           }
         } catch (_) {}
@@ -501,6 +516,46 @@ class SupabaseCommandStore {
       });
       if (!error && data && typeof data === 'object') {
         this.markRpcVerified('manager_record_command_execution');
+        if (data.ok === false && data.reason === 'invalid_status' && data.status === 'expired') {
+          // Promote late expired reset command to delivered before retrying atomic execution recording (WORKER-CHAN-02).
+          const { data: promoted, error: promoteErr } = await this.client
+            .from(TABLE)
+            .update({ status: 'delivered' })
+            .eq('command_id', cid)
+            .eq('worker_id', wid)
+            .eq('status', 'expired')
+            .select('command_id')
+            .maybeSingle();
+          if (!promoteErr && promoted) {
+            const retryRes = await this.client.rpc('manager_record_command_execution', {
+              p_worker_id: wid,
+              p_command_id: cid,
+              p_result: rpcResultPayload,
+              p_lease_owner: leaseOwner,
+              p_lease_seconds: rpcLeaseSec
+            });
+            if (!retryRes.error && retryRes.data && typeof retryRes.data === 'object') {
+              if (retryRes.data.ok === false) {
+                return {
+                  ok: false,
+                  error: retryRes.data.reason === 'state_sync_in_progress' ? 'STATE_SYNC_IN_PROGRESS' : null,
+                  reason: retryRes.data.reason || 'not_found',
+                  status: retryRes.data.status || null,
+                  fencingToken: retryRes.data.fencingToken ?? null
+                };
+              }
+              const retryCmd = retryRes.data.command ? fromRow(retryRes.data.command) : null;
+              return {
+                ok: true,
+                alreadyCompleted: Boolean(retryRes.data.alreadyCompleted),
+                status: retryRes.data.status || EXECUTION_COMPLETED_STATUS,
+                fencingToken: retryRes.data.fencingToken ?? retryCmd?.result?._stateSync?.fencingToken ?? null,
+                leaseUntil: retryRes.data.leaseUntil || retryCmd?.result?._stateSync?.leaseUntil || leaseUntil,
+                command: retryCmd
+              };
+            }
+          }
+        }
         if (data.ok === false) {
           return {
             ok: false,
@@ -544,7 +599,7 @@ class SupabaseCommandStore {
     if (existing.status === STATE_SYNC_FAILED_STATUS) {
       return { ok: false, reason: 'state_sync_failed', status: STATE_SYNC_FAILED_STATUS };
     }
-    if (!['delivered', 'queued', EXECUTION_COMPLETED_STATUS, STATE_SYNC_PENDING_STATUS].includes(existing.status)) {
+    if (!['delivered', 'queued', 'expired', EXECUTION_COMPLETED_STATUS, STATE_SYNC_PENDING_STATUS].includes(existing.status)) {
       return { ok: false, reason: 'invalid_status', status: existing.status };
     }
 
@@ -586,7 +641,7 @@ class SupabaseCommandStore {
       })
       .eq('command_id', cid)
       .eq('worker_id', wid)
-      .in('status', ['delivered', 'queued', EXECUTION_COMPLETED_STATUS, STATE_SYNC_PENDING_STATUS])
+      .in('status', ['delivered', 'queued', 'expired', EXECUTION_COMPLETED_STATUS, STATE_SYNC_PENDING_STATUS])
       .select('*')
       .maybeSingle();
     if (updErr) throw new Error(updErr.message || 'recordExecutionCompleted update failed');
@@ -1003,11 +1058,9 @@ class SupabaseCommandStore {
   }
 
   async get(commandId) {
-    try {
-      const { data, error } = await this.client.from(TABLE).select('*').eq('command_id', String(commandId)).maybeSingle();
-      if (!error && data) return fromRow(data);
-    } catch (_) {}
-    return null;
+    const { data, error } = await this.client.from(TABLE).select('*').eq('command_id', String(commandId)).maybeSingle();
+    if (error && error.code !== 'PGRST116') throw error;
+    return data ? fromRow(data) : null;
   }
 
   async clearWorker(workerId, { excludeCommandIds = [] } = {}) {

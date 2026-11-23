@@ -2,8 +2,8 @@
 
 const { uptimeText } = require('./panels/renderer');
 
-async function collectSystemStatus(services) {
-  // 1. Worker fleet statistics
+async function collectSystemStatus(services, { intervalMs = 15 * 60 * 1000 } = {}) {
+  // 1. Worker Online/Offline statistics
   let allWorkers = [];
   try {
     if (services?.registry?.list) {
@@ -24,7 +24,46 @@ async function collectSystemStatus(services) {
   const totalWorkers = allWorkers.length;
   const offlineWorkers = Math.max(0, totalWorkers - onlineWorkers);
 
-  // 2. Database connection & latency probe
+  // 2. User subscription statistics (active vs expired)
+  let totalUsers = 0;
+  let activeUsers = 0;
+  let expiredUsers = 0;
+  let permanentUsers = 0;
+  let disabledUsers = 0;
+  const userStore = services?.accessStore?.listAccess ? services.accessStore : services?.store;
+  if (typeof userStore?.listAccess === 'function') {
+    try {
+      const users = await userStore.listAccess();
+      const nowMs = Date.now();
+      if (Array.isArray(users)) {
+        for (const u of users) {
+          if (!u) continue;
+          const role = String(u.role || 'user').trim().toLowerCase();
+          const uname = String(u.username || '').trim().toLowerCase();
+          if (role === 'admin' || uname === 'admin') continue;
+          totalUsers++;
+          const st = String(u.status || 'active').trim().toLowerCase();
+          if (st === 'disabled') {
+            disabledUsers++;
+            continue;
+          }
+          if (u.isPermanent === true) {
+            permanentUsers++;
+            activeUsers++;
+            continue;
+          }
+          const expMs = u.expiresAt ? Date.parse(u.expiresAt) : NaN;
+          if (st === 'expired' || st === 'grace_period' || (Number.isFinite(expMs) && expMs <= nowMs)) {
+            expiredUsers++;
+          } else if (Number.isFinite(expMs) && expMs > nowMs) {
+            activeUsers++;
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  // 3. Database connection & latency probe
   let dbOk = false;
   let dbLatencyMs = -1;
   const store = services?.accessStore?.adapter ? services.accessStore : (services?.store || services?.supabaseClient);
@@ -53,14 +92,14 @@ async function collectSystemStatus(services) {
     dbLatencyMs = 0;
   }
 
-  // 3. Discord Gateway client
+  // 4. Discord Gateway client
   const client = services?.discordClient || services?.client;
   const discordReady = Boolean(client?.isReady?.());
   const discordPing = (typeof client?.ws?.ping === 'number' && client.ws.ping >= 0)
     ? Math.round(client.ws.ping)
     : -1;
 
-  // 4. Host process memory & uptime
+  // 5. Host process memory & uptime
   const uptimeSec = process.uptime();
   const uptimeFormatted = uptimeText(uptimeSec);
   const mem = process.memoryUsage();
@@ -69,13 +108,27 @@ async function collectSystemStatus(services) {
   const platform = process.platform;
   const nodeVersion = process.version;
 
-  // 5. Public Web Dashboard URL
+  // 6. Check timestamps & schedule metadata
+  const checkedAtMs = Date.now();
+  const checkedAt = new Date(checkedAtMs).toISOString();
+  const checkedAtUnix = Math.floor(checkedAtMs / 1000);
+  const intervalSec = Math.max(60, Math.round((Number(intervalMs) || (15 * 60 * 1000)) / 1000));
+  const nextCheckAtUnix = checkedAtUnix + intervalSec;
+  const intervalMinutes = Math.max(1, Math.round(intervalSec / 60));
+
+  // 7. Public Web Dashboard URL
   const publicBaseUrl = services?.config?.publicBaseUrl || '';
 
   return {
+    managerOk: true,
     totalWorkers,
     onlineWorkers,
     offlineWorkers,
+    totalUsers,
+    activeUsers,
+    expiredUsers,
+    permanentUsers,
+    disabledUsers,
     dbOk,
     dbLatencyMs,
     discordReady,
@@ -86,7 +139,12 @@ async function collectSystemStatus(services) {
     heapUsedMb,
     platform,
     nodeVersion,
-    publicBaseUrl
+    publicBaseUrl,
+    checkedAt,
+    checkedAtMs,
+    checkedAtUnix,
+    nextCheckAtUnix,
+    intervalMinutes
   };
 }
 
@@ -97,12 +155,17 @@ class StatusMonitorService {
     this.timer = null;
     this.tracked = null;
     this.isUpdating = false;
+    this.stopped = false;
   }
 
-  async start() {
-    await this.loadTrackedMessage();
-    if (this.timer) clearInterval(this.timer);
+  ensureScheduled() {
+    this.stopped = false;
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
     this.timer = setInterval(() => {
+      if (this.stopped) return;
       this.updateMessage().catch((err) => {
         this.services?.logger?.warn?.('status_monitor_periodic_update_failed', { error: err.message });
       });
@@ -112,7 +175,20 @@ class StatusMonitorService {
     }
   }
 
+  async start() {
+    this.stopped = false;
+    await this.loadTrackedMessage();
+    if (this.stopped) return;
+    this.ensureScheduled();
+    if (this.tracked?.channelId && this.tracked?.messageId) {
+      void this.updateMessage().catch((err) => {
+        this.services?.logger?.warn?.('status_monitor_initial_update_failed', { error: err.message });
+      });
+    }
+  }
+
   stop() {
+    this.stopped = true;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
@@ -126,14 +202,18 @@ class StatusMonitorService {
         this.tracked = {
           guildId: stored.guildId || null,
           channelId: stored.channelId,
-          messageId: stored.messageId
+          messageId: stored.messageId,
+          ...(stored.updatedAt ? { updatedAt: stored.updatedAt } : {})
         };
       }
     } catch (_) {}
   }
 
   setTrackedMessage(tracked) {
-    this.tracked = tracked;
+    this.tracked = tracked || null;
+    if (this.tracked?.channelId && this.tracked?.messageId) {
+      this.ensureScheduled();
+    }
   }
 
   getTrackedMessage() {
@@ -141,36 +221,67 @@ class StatusMonitorService {
   }
 
   async updateMessage() {
-    if (this.isUpdating) return;
+    if (this.isUpdating || this.stopped) return;
     this.isUpdating = true;
     try {
       if (!this.tracked?.channelId || !this.tracked?.messageId) {
         await this.loadTrackedMessage();
       }
-      if (!this.tracked?.channelId || !this.tracked?.messageId) {
+      if (!this.tracked?.channelId || !this.tracked?.messageId || this.stopped) {
         return;
       }
 
       const client = this.services?.discordClient || this.services?.client;
       if (!client || !client.isReady?.()) return;
 
-      const channel = await client.channels.fetch(this.tracked.channelId).catch(() => null);
-      if (!channel || typeof channel.messages?.fetch !== 'function') return;
+      const channel = await client.channels.fetch(this.tracked.channelId);
+      if (!channel || this.stopped) {
+        if (!channel) {
+          this.tracked = null;
+        }
+        return;
+      }
 
-      const message = await channel.messages.fetch(this.tracked.messageId).catch(() => null);
-      if (!message || typeof message.edit !== 'function') return;
-
-      const statusData = await collectSystemStatus(this.services);
+      const statusData = await collectSystemStatus(this.services, { intervalMs: this.intervalMs });
       const { renderStatusMonitorPanel } = require('./panels/renderer');
       const view = renderStatusMonitorPanel(statusData);
-
-      await message.edit({
+      const payload = {
         embeds: view.embeds,
         components: view.components,
         allowedMentions: { parse: [] }
-      });
+      };
+
+      let edited = false;
+      if (typeof channel.messages?.edit === 'function') {
+        await channel.messages.edit(this.tracked.messageId, payload);
+        edited = true;
+      } else if (typeof channel.messages?.fetch === 'function') {
+        const message = await channel.messages.fetch(this.tracked.messageId);
+        if (!message || typeof message.edit !== 'function') {
+          this.tracked = null;
+          return;
+        }
+        await message.edit(payload);
+        edited = true;
+      }
+
+      if (edited && this.tracked) {
+        this.tracked = { ...this.tracked, updatedAt: statusData.checkedAt };
+        await this.services?.accessStore?.setSetting?.('discord_status_monitor', this.tracked).catch(() => null);
+      }
     } catch (err) {
-      this.services?.logger?.warn?.('status_monitor_update_error', { error: err.message });
+      const code = err?.code ?? err?.rawError?.code;
+      if (code === 10008 || code === 10003 || Number(err?.status) === 404) {
+        this.services?.logger?.warn?.('status_monitor_target_missing_cleared', {
+          code,
+          channelId: this.tracked?.channelId || null,
+          messageId: this.tracked?.messageId || null,
+          error: err.message
+        });
+        this.tracked = null;
+      } else {
+        this.services?.logger?.warn?.('status_monitor_update_error', { error: err.message });
+      }
     } finally {
       this.isUpdating = false;
     }

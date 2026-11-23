@@ -1925,8 +1925,61 @@ function validateRegisterFields() {
   return { ok: !firstInvalid, firstInvalid };
 }
 
+let _publicLoginLockoutTimer = null;
+
+function stopPublicLoginLockoutCountdown() {
+  if (_publicLoginLockoutTimer) {
+    clearInterval(_publicLoginLockoutTimer);
+    _publicLoginLockoutTimer = null;
+  }
+}
+
+function formatPublicCountdownVi(seconds) {
+  const total = Math.max(0, Math.ceil(Number(seconds) || 0));
+  if (total >= 3600) {
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    return h + ' giờ' + (m > 0 ? ' ' + m + ' phút' : '') + (s > 0 && m === 0 ? ' ' + s + ' giây' : '');
+  }
+  if (total >= 60) {
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return m + ' phút' + (s > 0 ? ' ' + s + ' giây' : '');
+  }
+  return total + ' giây';
+}
+
+function startPublicLoginLockoutCountdown(btn, retryAfterSeconds, errorMessage) {
+  stopPublicLoginLockoutCountdown();
+  let remaining = Math.max(1, Math.ceil(Number(retryAfterSeconds) || 0));
+  const renderTick = () => {
+    const waitText = formatPublicCountdownVi(remaining);
+    setLoginAlert('error', (errorMessage || 'Quá nhiều lần đăng nhập sai.') + ' (Mở khóa sau ' + waitText + ')', 'tplIconWarn');
+    if (btn) {
+      btn.disabled = true;
+      setSubmitButtonState(btn, 'idle', 'TẠM KHÓA (' + waitText + ')', 'tplIconLogin');
+    }
+  };
+  renderTick();
+  _publicLoginLockoutTimer = setInterval(() => {
+    remaining -= 1;
+    if (remaining <= 0) {
+      stopPublicLoginLockoutCountdown();
+      if (btn) {
+        btn.disabled = false;
+        setSubmitButtonState(btn, 'idle', 'ĐĂNG NHẬP VÀO HỆ THỐNG', 'tplIconLogin');
+      }
+      setLoginAlert('info', 'Đã hết thời gian tạm khóa. Bạn có thể thử đăng nhập lại.', 'tplIconWarn');
+      return;
+    }
+    renderTick();
+  }, 1000);
+}
+
 async function handlePublicLoginSubmit(e) {
   if (e) e.preventDefault();
+  stopPublicLoginLockoutCountdown();
   const check = validateLoginFields();
   if (!check.ok) {
     const uErr = document.getElementById('publicUsernameErr');
@@ -1939,8 +1992,6 @@ async function handlePublicLoginSubmit(e) {
 
   const u = document.getElementById('publicUsername').value.trim();
   const p = document.getElementById('publicPassword').value;
-  const keyEl = document.getElementById('publicLicenseKey');
-  const k = keyEl ? keyEl.value.trim() : '';
   const rememberEl = document.getElementById('publicRememberMe');
   const remember = rememberEl ? rememberEl.checked : true;
   const btn = document.getElementById('publicSubmitBtn');
@@ -1954,17 +2005,17 @@ async function handlePublicLoginSubmit(e) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
-      body: JSON.stringify({ username: u, password: p, key: k, licenseKey: k, rememberMe: remember })
+      body: JSON.stringify({ username: u, password: p, rememberMe: remember })
     });
     const data = await res.json().catch(() => ({}));
+    if (res.status === 429 && Number(data.retryAfterSeconds) > 0) {
+      startPublicLoginLockoutCountdown(btn, Number(data.retryAfterSeconds), data.error);
+      return;
+    }
     if (!res.ok || !data.ok) {
       throw new Error(data.error || 'Tên đăng nhập hoặc mật khẩu không đúng.');
     }
-    if (data && data.token) {
-      try {
-        localStorage.setItem('kingmc_session', data.token);
-      } catch (_) {}
-    }
+    stopPublicLoginLockoutCountdown();
     setLoginAlert('success', 'Đăng nhập thành công! Đang chuyển hướng...', 'tplIconSuccess');
     setSubmitButtonState(btn, 'success', 'ĐĂNG NHẬP THÀNH CÔNG!', 'tplIconLogin');
     setTimeout(() => { window.location.replace('/'); }, 300);
@@ -2021,11 +2072,6 @@ async function handlePublicRegisterSubmit(e) {
     if (!res.ok || !data.ok) {
       throw new Error(data.error || 'Không thể đăng ký tài khoản.');
     }
-    if (data && data.token) {
-      try {
-        localStorage.setItem('kingmc_session', data.token);
-      } catch (_) {}
-    }
     setLoginAlert('success', data.message || 'Đăng ký thành công! Đang chuyển hướng...', 'tplIconSuccess');
     setSubmitButtonState(btn, 'success', 'ĐĂNG KÝ THÀNH CÔNG!', 'tplIconRegister');
     setTimeout(() => { window.location.replace('/'); }, 350);
@@ -2035,15 +2081,6 @@ async function handlePublicRegisterSubmit(e) {
     setSubmitButtonState(btn, 'idle', 'HOÀN TẤT ĐĂNG KÝ VÀ BẮT ĐẦU', 'tplIconRegister');
     refreshRegisterCaptcha();
   }
-}
-
-function updateServerStatusPill(state, text) {
-  const pill = document.getElementById('serverStatusPill');
-  const label = document.getElementById('serverStatusText');
-  if (!pill || !label) return;
-  pill.classList.remove('is-checking', 'is-online', 'is-degraded', 'is-offline');
-  pill.classList.add(state);
-  label.textContent = text;
 }
 
 function renderTrialCallout(trialGiftEnabled, rawTrialDays) {
@@ -2086,26 +2123,9 @@ function parseBoundedInt(value, maxVal) {
   return num > maxVal ? maxVal : num;
 }
 
-async function pingServerHealth() {
-  try {
-    const hRes = await fetch('/health', { credentials: 'same-origin' });
-    const hData = await hRes.json().catch(() => ({}));
-    if (hRes.ok && hData && hData.ok) {
-      if (hData.degraded) {
-        updateServerStatusPill('is-degraded', 'Hoạt động giới hạn');
-      } else {
-        updateServerStatusPill('is-online', 'Hệ thống trực tuyến');
-      }
-      return;
-    }
-  } catch (_) {}
-  updateServerStatusPill('is-offline', 'Không thể kết nối máy chủ');
-}
-
 async function loadPublicSystemInfo() {
   try {
     let sysData = {};
-    let healthData = null;
     let loginCfgData = {};
     let sysOk = false;
 
@@ -2113,17 +2133,14 @@ async function loadPublicSystemInfo() {
     const bootData = bootRes && bootRes.ok ? await bootRes.json().catch(() => null) : null;
     if (bootData && bootData.ok && bootData.systemInfo) {
       sysData = bootData.systemInfo;
-      healthData = bootData.health || null;
       loginCfgData = bootData.loginConfig || {};
       sysOk = Boolean(sysData.ok);
     } else {
-      const [sysRes, healthRes, loginCfgRes] = await Promise.all([
+      const [sysRes, loginCfgRes] = await Promise.all([
         fetch('/api/public/system-info', { credentials: 'same-origin' }).catch(() => null),
-        fetch('/health', { credentials: 'same-origin' }).catch(() => null),
         fetch('/api/auth/login-config', { credentials: 'same-origin' }).catch(() => null)
       ]);
       sysData = sysRes ? await sysRes.json().catch(() => ({})) : {};
-      healthData = healthRes ? await healthRes.json().catch(() => ({})) : null;
       loginCfgData = loginCfgRes ? await loginCfgRes.json().catch(() => ({})) : {};
       sysOk = Boolean(sysRes && sysRes.ok && sysData && sysData.ok);
     }
@@ -2137,28 +2154,10 @@ async function loadPublicSystemInfo() {
 
     if (trialGiftEnabled !== undefined) {
       renderTrialCallout(trialGiftEnabled, trialDays);
-    }
-
-    if (sysOk) {
-      if (trialGiftEnabled === undefined && sysData.trialGiftEnabled !== undefined) {
-        renderTrialCallout(sysData.trialGiftEnabled, sysData.trialDays);
-      }
-
-      const totalBots = parseBoundedInt(sysData.totalBots, 99999);
-      const onlineBots = parseBoundedInt(sysData.onlineBots, totalBots || 99999);
-
-      if (healthData && healthData.degraded) {
-        updateServerStatusPill('is-degraded', 'Hoạt động giới hạn • ' + onlineBots + '/' + totalBots + ' Bot');
-      } else if (totalBots > 0) {
-        updateServerStatusPill('is-online', 'Trực tuyến • ' + onlineBots + '/' + totalBots + ' Bot');
-      } else {
-        updateServerStatusPill('is-online', 'Hệ thống trực tuyến');
-      }
-      return;
+    } else if (sysOk && sysData.trialGiftEnabled !== undefined) {
+      renderTrialCallout(sysData.trialGiftEnabled, sysData.trialDays);
     }
   } catch (_) {}
-
-  await pingServerHealth();
 }
 
 (function bindPublicAuthEvents() {
@@ -2220,6 +2219,9 @@ async function loadPublicSystemInfo() {
 (function checkUrlParams() {
   try {
     const params = new URLSearchParams(window.location.search);
+    if (params.get('tab') === 'register' && typeof switchPublicAuthTab === 'function') {
+      switchPublicAuthTab('register');
+    }
     const err = params.get('error');
     const reason = params.get('reason');
     if (err === 'locked' || reason === 'locked') {

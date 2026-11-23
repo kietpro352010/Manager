@@ -442,9 +442,14 @@ window.drawSparkleStar = drawSparkleStar;
   }
 
   function resize() {
+    var prevW = w;
+    var prevH = h;
     w = canvas.width = window.innerWidth;
     h = canvas.height = window.innerHeight;
     isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (window.innerWidth <= 768);
+    if ((prevW === 0 || prevH === 0 || rafId === null) && w > 0 && h > 0 && stars && stars.length) {
+      startCosmicLoop();
+    }
   }
   window.addEventListener('resize', resize, { passive: true });
   resize();
@@ -563,11 +568,21 @@ function initCosmicStars() {
       var rayAlpha1 = 0.045 + Math.sin(tOcean * 1.1) * 0.02;
       var rayAlpha2 = 0.035 + Math.cos(tOcean * 0.85) * 0.015;
 
-      var gRay1 = ctx.createLinearGradient(w * 0.05, 0, w * 0.45, h * 0.9);
-      gRay1.addColorStop(0, 'rgba(56, 189, 248, ' + rayAlpha1.toFixed(3) + ')');
-      gRay1.addColorStop(0.4, 'rgba(14, 165, 233, ' + (rayAlpha1 * 0.45).toFixed(3) + ')');
-      gRay1.addColorStop(1, 'rgba(4, 13, 26, 0)');
-      ctx.fillStyle = gRay1;
+      if (!render._oceanGradCache || render._oceanGradCache.w !== w || render._oceanGradCache.h !== h) {
+        var cg1 = ctx.createLinearGradient(w * 0.05, 0, w * 0.45, h * 0.9);
+        cg1.addColorStop(0, 'rgba(56, 189, 248, 1)');
+        cg1.addColorStop(0.4, 'rgba(14, 165, 233, 0.45)');
+        cg1.addColorStop(1, 'rgba(4, 13, 26, 0)');
+        var cg2 = ctx.createLinearGradient(w * 0.38, 0, w * 0.78, h * 0.9);
+        cg2.addColorStop(0, 'rgba(56, 189, 248, 1)');
+        cg2.addColorStop(0.5, 'rgba(2, 132, 199, 0.4)');
+        cg2.addColorStop(1, 'rgba(4, 13, 26, 0)');
+        render._oceanGradCache = { w: w, h: h, gRay1: cg1, gRay2: cg2 };
+      }
+
+      var prevAlpha = ctx.globalAlpha;
+      ctx.globalAlpha = rayAlpha1;
+      ctx.fillStyle = render._oceanGradCache.gRay1;
       ctx.beginPath();
       ctx.moveTo(w * 0.05, 0);
       ctx.lineTo(w * 0.38, 0);
@@ -576,11 +591,8 @@ function initCosmicStars() {
       ctx.closePath();
       ctx.fill();
 
-      var gRay2 = ctx.createLinearGradient(w * 0.38, 0, w * 0.78, h * 0.9);
-      gRay2.addColorStop(0, 'rgba(56, 189, 248, ' + rayAlpha2.toFixed(3) + ')');
-      gRay2.addColorStop(0.5, 'rgba(2, 132, 199, ' + (rayAlpha2 * 0.4).toFixed(3) + ')');
-      gRay2.addColorStop(1, 'rgba(4, 13, 26, 0)');
-      ctx.fillStyle = gRay2;
+      ctx.globalAlpha = rayAlpha2;
+      ctx.fillStyle = render._oceanGradCache.gRay2;
       ctx.beginPath();
       ctx.moveTo(w * 0.35, 0);
       ctx.lineTo(w * 0.62, 0);
@@ -588,12 +600,13 @@ function initCosmicStars() {
       ctx.lineTo(w * 0.58, h);
       ctx.closePath();
       ctx.fill();
+      ctx.globalAlpha = prevAlpha;
 
       for (var i = 0; i < stars.length; i++) {
         var s = stars[i];
-        s.y -= (0.42 + s.z * 0.24);
-        s.x += Math.sin(s.seed + s.y * 0.012) * 0.52;
-        s.a += s.da * 0.8;
+        s.y -= (0.42 + s.z * 0.24) * dt;
+        s.x += Math.sin(s.seed + s.y * 0.012) * 0.52 * dt;
+        s.a += s.da * 0.8 * dt;
         if (s.a > 0.9 || s.a < 0.2) s.da = -s.da;
 
         if (s.y < -25) {
@@ -637,10 +650,10 @@ function initCosmicStars() {
       // THEME 3: Violet Dusk - Floating mystic fireflies / embers meandering in twilight
       for (var i = 0; i < stars.length; i++) {
         var s = stars[i];
-        s.phase += 0.015;
-        s.x += Math.cos(s.seed + s.phase) * 0.45;
-        s.y += Math.sin(s.seed * 1.3 + s.phase * 0.8) * 0.35 - 0.08;
-        s.a += s.da * 0.6;
+        s.phase += 0.015 * dt;
+        s.x += Math.cos(s.seed + s.phase) * 0.45 * dt;
+        s.y += (Math.sin(s.seed * 1.3 + s.phase * 0.8) * 0.35 - 0.08) * dt;
+        s.a += s.da * 0.6 * dt;
         if (s.a > 0.85 || s.a < 0.16) s.da = -s.da;
         if (s.y < -20) s.y = h + 15;
         if (s.y > h + 20) s.y = -10;
@@ -687,9 +700,9 @@ function initCosmicStars() {
 
       for (var i = 0; i < stars.length; i++) {
         var s = stars[i];
-        s.y -= 0.08 * s.z;
-        s.x += Math.sin(s.seed + s.y * 0.006) * 0.16;
-        s.a += s.da * 0.5;
+        s.y -= 0.08 * s.z * dt;
+        s.x += Math.sin(s.seed + s.y * 0.006) * 0.16 * dt;
+        s.a += s.da * 0.5 * dt;
         if (s.a > 0.8 || s.a < 0.15) s.da = -s.da;
         if (s.y < -12) { s.y = h + 10; s.x = Math.random() * w; }
         if (s.x < -10) s.x = w + 5;
@@ -737,7 +750,7 @@ function initCosmicStars() {
       for (var i = 0; i < stars.length; i++) {
         var s = stars[i];
         s.y -= 0.22 * s.z * dt;
-        s.a += s.da;
+        s.a += s.da * dt;
         if (s.a > 0.95 || s.a < 0.2) s.da = -s.da;
         if (s.y < -15) {
           s.y = h + 15;
@@ -780,9 +793,9 @@ function initCosmicStars() {
         }
         for (var j = shootingStars.length - 1; j >= 0; j--) {
           var st = shootingStars[j];
-          st.x -= st.speed;
-          st.y += st.speed * 0.52;
-          st.a -= 0.02;
+          st.x -= st.speed * dt;
+          st.y += st.speed * 0.52 * dt;
+          st.a -= 0.02 * dt;
           if (st.a <= 0) {
             shootingStars.splice(j, 1);
             continue;
@@ -860,6 +873,7 @@ async function handleLoginSubmit(event) {
 
   const licenseKey = String(document.getElementById('loginLicenseKey')?.value || '').trim().toUpperCase();
   const rememberMe = !!document.getElementById('loginRememberMe')?.checked;
+  let lockoutHandled = false;
 
   try {
     const res = await requestJson('/api/auth/login', {
@@ -868,12 +882,59 @@ async function handleLoginSubmit(event) {
       body: JSON.stringify({ username, password, key: licenseKey, licenseKey, rememberMe })
     });
 
+    if (res.status === 429 && Number(res.data?.retryAfterSeconds) > 0) {
+      lockoutHandled = true;
+      let rem = Math.max(1, Math.ceil(Number(res.data.retryAfterSeconds)));
+      const baseErr = res.data?.error || 'Quá nhiều lần đăng nhập sai.';
+      if (window._gateLoginLockoutTimer) clearInterval(window._gateLoginLockoutTimer);
+      const tick = () => {
+        const label = rem >= 3600
+          ? (Math.floor(rem / 3600) + ' giờ ' + Math.floor((rem % 3600) / 60) + ' phút')
+          : (rem >= 60 ? (Math.floor(rem / 60) + ' phút ' + (rem % 60) + ' giây') : (rem + ' giây'));
+        if (alertEl) {
+          alertEl.textContent = '⚠️ ' + baseErr + ' (Mở khóa sau ' + label + ')';
+          alertEl.className = 'login-alert error';
+        }
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = '⏳ Tạm khóa (' + label + ')';
+        }
+      };
+      tick();
+      window._gateLoginLockoutTimer = setInterval(() => {
+        rem -= 1;
+        if (rem <= 0) {
+          clearInterval(window._gateLoginLockoutTimer);
+          window._gateLoginLockoutTimer = null;
+          if (btn) {
+            btn.disabled = false;
+            btn.textContent = '🚀 ĐĂNG NHẬP VÀO HỆ THỐNG';
+          }
+          if (alertEl) {
+            alertEl.textContent = 'Đã hết thời gian tạm khóa. Bạn có thể thử lại.';
+            alertEl.className = 'login-alert';
+          }
+          return;
+        }
+        tick();
+      }, 1000);
+      return;
+    }
+
     if (!res.ok) {
       throw new Error(res.data?.error || 'Tên đăng nhập hoặc mật khẩu không chính xác.');
     }
 
+    if (window._gateLoginLockoutTimer) {
+      clearInterval(window._gateLoginLockoutTimer);
+      window._gateLoginLockoutTimer = null;
+    }
+
     const data = res.data || {};
     currentUser = data.user || null;
+    if (data.maintenance && typeof syncSystemMaintenanceState === 'function') {
+      syncSystemMaintenanceState(data.maintenance, { rerender: false });
+    }
     if (alertEl) {
       alertEl.textContent = (data.partial ? '⚠️ ' : '✅ ') + (data.warning || data.message || 'Đăng nhập thành công!');
       alertEl.className = 'login-alert ' + (data.partial ? 'error' : 'success');
@@ -895,7 +956,7 @@ async function handleLoginSubmit(event) {
       alertEl.className = 'login-alert error';
     }
   } finally {
-    if (btn) {
+    if (btn && !lockoutHandled) {
       btn.disabled = false;
       btn.textContent = '🚀 ĐĂNG NHẬP VÀO HỆ THỐNG';
     }
@@ -949,6 +1010,7 @@ function applyUserRoleUI() {
 
   if (!currentUser) {
     appEl?.classList.add('user-mode');
+    document.body?.classList?.add('user-mode');
     appEl?.classList.remove('account-restricted-blur');
     lockedOverlay?.classList.add('hidden');
     expiredOverlay?.classList.add('hidden');
@@ -966,7 +1028,6 @@ function applyUserRoleUI() {
       const el = document.getElementById(id);
       if (el) el.textContent = '🔑';
     });
-    document.querySelectorAll('.admin-only').forEach(el => { el.style.display = 'none'; });
     return;
   }
 
@@ -1001,22 +1062,22 @@ function applyUserRoleUI() {
 
   if (isAdmin) {
     appEl?.classList.remove('user-mode');
+    document.body?.classList?.remove('user-mode');
     badges.forEach(b => {
       b.innerHTML = '👑 <strong>ADMIN (Toàn quyền)</strong>';
       b.style.background = 'rgba(234,179,8,0.2)';
       b.style.color = '#eab308';
       b.style.borderColor = 'rgba(234,179,8,0.4)';
     });
-    document.querySelectorAll('.admin-only').forEach(el => { el.style.display = ''; });
   } else {
     appEl?.classList.add('user-mode');
+    document.body?.classList?.add('user-mode');
     badges.forEach(b => {
       b.innerHTML = '👤 <strong>USER: ' + escapeHtml(currentUser.username) + '</strong>';
       b.style.background = 'rgba(56,189,248,0.2)';
       b.style.color = '#38bdf8';
       b.style.borderColor = 'rgba(56,189,248,0.4)';
     });
-    document.querySelectorAll('.admin-only').forEach(el => { el.style.display = 'none'; });
   }
 
   // Cập nhật Profile Buttons & Dropdowns góc trên bên phải
@@ -1069,6 +1130,12 @@ function applyUserRoleUI() {
     void loadLink4mAdminSetting();
   } else if (typeof loadLink4mStatus === 'function' && !isAdmin) {
     void loadLink4mStatus();
+  }
+  if (isAdmin && typeof loadMaintenanceAdminSetting === 'function') {
+    void loadMaintenanceAdminSetting();
+  }
+  if (typeof renderSystemMaintenanceBanner === 'function') {
+    renderSystemMaintenanceBanner();
   }
 }
 
@@ -1475,9 +1542,13 @@ async function exportAuditLogs(format) {
     return;
   }
   const reqFormat = String(format).toLowerCase() === 'jsonl' ? 'jsonl' : 'csv';
+  const q = encodeURIComponent((document.getElementById('auditLogSearchInput')?.value || '').trim());
+  const category = encodeURIComponent((document.getElementById('auditLogCategoryFilter')?.value || '').trim());
+  const status = encodeURIComponent((document.getElementById('auditLogStatusFilter')?.value || '').trim());
+  const logType = encodeURIComponent(typeof auditLogType !== 'undefined' ? auditLogType : 'all');
   showToast('Đang tải file xuất nhật ký (' + reqFormat.toUpperCase() + ')...');
   try {
-    const res = await fetch('/api/manager/audit-logs/export?format=' + encodeURIComponent(reqFormat), {
+    const res = await fetch('/api/manager/audit-logs/export?format=' + encodeURIComponent(reqFormat) + '&q=' + q + '&category=' + category + '&status=' + status + '&logType=' + logType, {
       method: 'GET',
       cache: 'no-store',
       credentials: 'same-origin'

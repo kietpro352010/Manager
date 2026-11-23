@@ -4,9 +4,9 @@ const { SlashCommandBuilder } = require('discord.js');
 const { renderStatusMonitorPanel, embed } = require('../panels/renderer');
 const { collectSystemStatus } = require('../status-monitor');
 
-function checkUserAdmin(interaction, services, user) {
+function checkUserAdmin(interaction, services, user, allowedGuildId) {
   const { isUserAdmin } = require('../handlers/interaction-handler');
-  return isUserAdmin(interaction, services, user);
+  return isUserAdmin(interaction, services, user, allowedGuildId);
 }
 
 const definition = new SlashCommandBuilder()
@@ -15,11 +15,13 @@ const definition = new SlashCommandBuilder()
 
 async function execute(interaction, services) {
   const { resolveLinkedUser } = require('../handlers/panel-handler');
+  const { getEffectiveAllowedGuildId } = require('../handlers/interaction-handler');
+  const allowedGuildId = await getEffectiveAllowedGuildId(services?.config, services);
   const user = (services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function')
     ? await resolveLinkedUser(interaction, services).catch(() => null)
     : null;
 
-  const isAdmin = checkUserAdmin(interaction, services, user);
+  const isAdmin = checkUserAdmin(interaction, services, user, allowedGuildId);
   if (!isAdmin) {
     return {
       embeds: [
@@ -32,7 +34,9 @@ async function execute(interaction, services) {
     };
   }
 
-  const statusData = await collectSystemStatus(services);
+  const statusData = await collectSystemStatus(services, {
+    intervalMs: services?.statusMonitor?.intervalMs || 15 * 60 * 1000
+  });
   const panel = renderStatusMonitorPanel(statusData);
 
   // If already deferred by interaction-handler (with ephemeral: false)
@@ -47,7 +51,7 @@ async function execute(interaction, services) {
         guildId: guildId || null,
         channelId,
         messageId,
-        updatedAt: new Date().toISOString()
+        updatedAt: statusData.checkedAt || new Date().toISOString()
       };
       if (services?.accessStore?.setSetting) {
         await services.accessStore.setSetting('discord_status_monitor', tracked).catch(() => null);

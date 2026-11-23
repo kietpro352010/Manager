@@ -31,23 +31,25 @@ class FleetOperations {
     return results;
   }
 
+  async _dispatchWorkerAction(worker, action, logEvent) {
+    try {
+      const result = await this.broker.dispatch(worker.workerId, action);
+      const detail = result?.result?.detail || result?.result || {};
+      return {
+        workerId: worker.workerId,
+        ok: Boolean(result && result.ok !== false && !result.timedOut && result.result?.ok !== false && detail.ok !== false),
+        pending: Boolean(result?.timedOut)
+      };
+    } catch (error) {
+      this.logger.warn(logEvent, { workerId: worker.workerId, error: error.message });
+      return { workerId: worker.workerId, ok: false, error: error.message };
+    }
+  }
+
   async stopAll() {
     return this.runExclusive(async () => {
       const workers = (await this.registry.list()).filter((w) => w.enabled);
-      const results = await this.runInParallel(workers, async (worker) => {
-        try {
-          const result = await this.broker.dispatch(worker.workerId, 'stop');
-          const detail = result.result?.detail || result.result || {};
-          return {
-            workerId: worker.workerId,
-            ok: !result.timedOut && result.result?.ok !== false && detail.ok !== false,
-            pending: Boolean(result.timedOut)
-          };
-        } catch (error) {
-          this.logger.warn('fleet_stop_failed', { workerId: worker.workerId, error: error.message });
-          return { workerId: worker.workerId, ok: false, error: error.message };
-        }
-      });
+      const results = await this.runInParallel(workers, (worker) => this._dispatchWorkerAction(worker, 'stop', 'fleet_stop_failed'));
       return { total: workers.length, results };
     });
   }
@@ -60,20 +62,7 @@ class FleetOperations {
         return w.status?.manuallyStopped !== true;
       });
 
-      const results = await this.runInParallel(eligible, async (worker) => {
-        try {
-          const result = await this.broker.dispatch(worker.workerId, 'start');
-          const detail = result.result?.detail || result.result || {};
-          return {
-            workerId: worker.workerId,
-            ok: !result.timedOut && result.result?.ok !== false && detail.ok !== false,
-            pending: Boolean(result.timedOut)
-          };
-        } catch (error) {
-          this.logger.warn('fleet_start_failed', { workerId: worker.workerId, error: error.message });
-          return { workerId: worker.workerId, ok: false, error: error.message };
-        }
-      });
+      const results = await this.runInParallel(eligible, (worker) => this._dispatchWorkerAction(worker, 'start', 'fleet_start_failed'));
       return { total: eligible.length, skipped: workers.length - eligible.length, results };
     });
   }
@@ -84,20 +73,7 @@ class FleetOperations {
         (worker) => worker.enabled && worker.reachable && worker.status?.state === 'error' && !worker.status?.restriction
       );
 
-      const results = await this.runInParallel(workers, async (worker) => {
-        try {
-          const result = await this.broker.dispatch(worker.workerId, 'restart');
-          const detail = result.result?.detail || result.result || {};
-          return {
-            workerId: worker.workerId,
-            ok: !result.timedOut && result.result?.ok !== false && detail.ok !== false,
-            pending: Boolean(result.timedOut)
-          };
-        } catch (error) {
-          this.logger.warn('fleet_reconnect_error_failed', { workerId: worker.workerId, error: error.message });
-          return { workerId: worker.workerId, ok: false, error: error.message };
-        }
-      });
+      const results = await this.runInParallel(workers, (worker) => this._dispatchWorkerAction(worker, 'restart', 'fleet_reconnect_error_failed'));
       return { total: workers.length, results };
     });
   }
@@ -105,20 +81,7 @@ class FleetOperations {
   async restartAll() {
     return this.runExclusive(async () => {
       const workers = (await this.registry.list()).filter((w) => w.enabled);
-      const results = await this.runInParallel(workers, async (worker) => {
-        try {
-          const result = await this.broker.dispatch(worker.workerId, 'restart');
-          const detail = result.result?.detail || result.result || {};
-          return {
-            workerId: worker.workerId,
-            ok: !result.timedOut && result.result?.ok !== false && detail.ok !== false,
-            pending: Boolean(result.timedOut)
-          };
-        } catch (error) {
-          this.logger.warn('fleet_restart_failed', { workerId: worker.workerId, error: error.message });
-          return { workerId: worker.workerId, ok: false, error: error.message };
-        }
-      });
+      const results = await this.runInParallel(workers, (worker) => this._dispatchWorkerAction(worker, 'restart', 'fleet_restart_failed'));
       return { total: workers.length, results };
     });
   }
@@ -134,6 +97,7 @@ class FleetOperations {
           retained.push(worker.workerId);
         } catch (error) {
           if (Number(error.status) === 404) {
+            await this.broker?.cancelWorker?.(worker.workerId);
             await this.registry.remove(worker.workerId);
             removed.push(worker.workerId);
           } else {

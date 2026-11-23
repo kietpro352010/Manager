@@ -46,13 +46,15 @@ const ACCESS_FIELDS = {
   allowAccountChange: 'allow_account_change', lockReason: 'lock_reason',
   botAliases: 'bot_aliases', botCount: 'bot_count',
   registrationIp: 'registration_ip', deviceFingerprint: 'device_fingerprint', registrationUserAgent: 'registration_user_agent',
-  discordUserId: 'discord_user_id'
+  discordUserId: 'discord_user_id',
+  lastLoginIp: 'last_login_ip', lastLoginAt: 'last_login_at', isTrial: 'is_trial', trialBotId: 'trial_bot_id'
 };
 
 const KEY_FIELDS = {
   keyId: 'key_id', codeHash: 'code_hash', codeSuffix: 'code_suffix', status: 'status', days: 'days',
   isPermanent: 'is_permanent', botCount: 'bot_count', workerIds: 'worker_ids', botIds: 'bot_ids',
   allowAccountChange: 'allow_account_change', note: 'note', planName: 'plan_name',
+  durationDays: 'duration_days', durationMs: 'duration_ms',
   maxUses: 'max_uses', usedCount: 'used_count', usedUsers: 'used_users', expiresAt: 'expires_at',
   createdBy: 'created_by', createdAt: 'created_at', lastUsedAt: 'last_used_at', lastUsedBy: 'last_used_by',
   id: 'id', code: 'code', key: 'key', used: 'used', usedBy: 'used_by', usedAt: 'used_at'
@@ -347,8 +349,9 @@ class SupabaseDashboardStore {
 
   async getAccess(userId, { bypassCache = false } = {}) {
     if (!userId) return null;
+    const normCacheKey = `access:${String(userId).trim().toLowerCase()}`;
     if (!bypassCache) {
-      const cached = this.getCached(`access:${userId}`);
+      const cached = this.getCached(normCacheKey);
       if (cached) return cached;
     }
 
@@ -375,7 +378,7 @@ class SupabaseDashboardStore {
         createdAt: userData.created_at,
         updatedAt: userData.updated_at
       };
-      this.setCached(`access:${userId}`, result);
+      this.setCached(normCacheKey, result);
       return result;
     }
 
@@ -384,7 +387,7 @@ class SupabaseDashboardStore {
       const { data, error } = await this.client.from(ACCESS).select('*').eq('user_id', userId).maybeSingle();
       if (!error && data) {
         const result = { ...mapFrom(data, ACCESS_FIELDS), workerIds: await this.assignedWorkerIds(userId) };
-        this.setCached(`access:${userId}`, result);
+        this.setCached(normCacheKey, result);
         return result;
       }
     } catch (_) {}
@@ -412,76 +415,100 @@ class SupabaseDashboardStore {
       }
     } catch (_) {}
 
-    // 1. Thử đọc từ manager_users
-    try {
-      let { data: users, error } = await this.client.from(USERS).select(USER_LIST_ACCESS_COLUMNS).order('created_at', { ascending: false });
-      if (error && isMissingSchemaError(error)) {
-        // Fallback without last_login_ip / last_login_at if columns do not exist yet on target schema
-        const fallbackCols = USER_LIST_ACCESS_COLUMNS.split(',').filter(c => !['last_login_ip', 'last_login_at'].includes(c.trim())).join(',');
-        const fallbackRes = await this.client.from(USERS).select(fallbackCols).order('created_at', { ascending: false });
-        if (!fallbackRes.error && Array.isArray(fallbackRes.data)) {
-          users = fallbackRes.data;
-          error = null;
-        }
+    const fetchPaged = async (cols) => {
+      const firstQ = this.client.from(USERS).select(cols).order('created_at', { ascending: false });
+      if (typeof firstQ.range !== 'function') {
+        return await firstQ;
       }
-      if (!error && Array.isArray(users) && users.length > 0) {
-        const result = users.map((u) => {
-          const uNameLower = String(u.username || '').trim().toLowerCase();
-          const uId = String(u.id || '').trim();
-          const dId = String(u.discord_user_id || discordLinkMap.get(uNameLower) || discordLinkMap.get(uId) || '').trim();
-          return {
-            userId: u.id || ('usr_' + u.username),
-            username: u.username,
-            role: u.role || 'user',
-            status: u.status || 'active',
-            isPermanent: Boolean(u.is_permanent),
-            expiresAt: u.expires_at,
-            planName: u.plan_name || 'Gói mặc định',
-            note: u.note || '',
-            allowAccountChange: u.allow_account_change !== false,
-            lockReason: u.lock_reason || '',
-            botCount: u.bot_count || 1,
-            botAliases: u.bot_aliases || {},
-            registrationIp: u.registration_ip || '',
-            deviceFingerprint: u.device_fingerprint || '',
-            discordUserId: dId,
-            lastLoginIp: u.last_login_ip || '',
-            lastLoginAt: u.last_login_at || null,
-            workerIds: Array.isArray(u.assigned_bot_ids) ? u.assigned_bot_ids.map(String) : [],
-            createdAt: u.created_at,
-            updatedAt: u.updated_at
-          };
-        });
-        this.setCached('access:all', result);
-        return result;
+      const rows = [];
+      for (let page = 0; page < 50; page += 1) {
+        const from = page * 1000;
+        const to = from + 999;
+        const q = this.client.from(USERS).select(cols).order('created_at', { ascending: false }).range(from, to);
+        const { data, error } = await q;
+        if (error) return { data: null, error };
+        if (Array.isArray(data) && data.length > 0) rows.push(...data);
+        if (!Array.isArray(data) || data.length < 1000) break;
       }
-    } catch (_) {}
+      return { data: rows, error: null };
+    };
 
-    // 2. Fallback đọc từ manager_access
-    try {
-      const [{ data: users, error: usersError }, { data: assignments, error: assignmentsError }] = await Promise.all([
-        this.client.from(ACCESS).select('*').order('updated_at', { ascending: false }),
-        this.client.from(ASSIGNMENTS).select('user_id,worker_id').order('assigned_at')
-      ]);
-      if (usersError) throw usersError;
-      const grouped = new Map();
-      for (const row of assignments || []) grouped.set(row.user_id, [...(grouped.get(row.user_id) || []), row.worker_id]);
-      const result = (users || []).map((row) => {
-        const mapped = mapFrom(row, ACCESS_FIELDS);
-        const uNameLower = String(mapped.username || '').trim().toLowerCase();
-        const uId = String(mapped.userId || '').trim();
-        const dId = String(mapped.discordUserId || discordLinkMap.get(uNameLower) || discordLinkMap.get(uId) || '').trim();
+    // 1. Đọc từ manager_users (fail-closed on non-missing-table errors)
+    let { data: users, error } = await fetchPaged(USER_LIST_ACCESS_COLUMNS);
+    if (error && isMissingSchemaError(error)) {
+      const fallbackCols = USER_LIST_ACCESS_COLUMNS.split(',').filter(c => !['last_login_ip', 'last_login_at'].includes(c.trim())).join(',');
+      const fallbackRes = await fetchPaged(fallbackCols);
+      if (!fallbackRes.error && Array.isArray(fallbackRes.data)) {
+        users = fallbackRes.data;
+        error = null;
+      } else {
+        error = fallbackRes.error || error;
+      }
+    }
+    if (error && !isMissingSchemaError(error)) {
+      throw error instanceof Error ? error : new Error(error.message || 'Lỗi tải danh sách người dùng từ Supabase.');
+    }
+    if (!error && Array.isArray(users) && users.length > 0) {
+      const result = users.map((u) => {
+        const uNameLower = String(u.username || '').trim().toLowerCase();
+        const uId = String(u.id || '').trim();
+        const dId = String(u.discord_user_id || discordLinkMap.get(uNameLower) || discordLinkMap.get(uId) || '').trim();
         return {
-          ...mapped,
+          userId: u.id || ('usr_' + u.username),
+          username: u.username,
+          role: u.role || 'user',
+          status: u.status || 'active',
+          isPermanent: Boolean(u.is_permanent),
+          expiresAt: u.expires_at,
+          planName: u.plan_name || 'Gói mặc định',
+          note: u.note || '',
+          allowAccountChange: u.allow_account_change !== false,
+          lockReason: u.lock_reason || '',
+          botCount: u.bot_count || 1,
+          botAliases: u.bot_aliases || {},
+          registrationIp: u.registration_ip || '',
+          deviceFingerprint: u.device_fingerprint || '',
           discordUserId: dId,
-          workerIds: grouped.get(row.user_id) || []
+          lastLoginIp: u.last_login_ip || '',
+          lastLoginAt: u.last_login_at || null,
+          workerIds: Array.isArray(u.assigned_bot_ids) ? u.assigned_bot_ids.map(String) : [],
+          createdAt: u.created_at,
+          updatedAt: u.updated_at
         };
       });
       this.setCached('access:all', result);
       return result;
-    } catch (_) {
-      return [];
     }
+
+    // 2. Fallback đọc từ manager_access khi manager_users chưa tồn tại hoặc trống
+    const [{ data: legacyUsers, error: usersError }, { data: assignments, error: assignmentsError }] = await Promise.all([
+      this.client.from(ACCESS).select('*').order('updated_at', { ascending: false }),
+      this.client.from(ASSIGNMENTS).select('user_id,worker_id').order('assigned_at')
+    ]);
+    if (usersError) {
+      if (isMissingSchemaError(usersError)) {
+        return Array.isArray(users) ? [] : [];
+      }
+      throw usersError instanceof Error ? usersError : new Error(usersError.message || 'Lỗi tải manager_access.');
+    }
+    if (assignmentsError && !isMissingSchemaError(assignmentsError)) {
+      throw assignmentsError instanceof Error ? assignmentsError : new Error(assignmentsError.message || 'Lỗi tải manager_assignments.');
+    }
+    const grouped = new Map();
+    for (const row of assignments || []) grouped.set(row.user_id, [...(grouped.get(row.user_id) || []), row.worker_id]);
+    const result = (legacyUsers || []).map((row) => {
+      const mapped = mapFrom(row, ACCESS_FIELDS);
+      const uNameLower = String(mapped.username || '').trim().toLowerCase();
+      const uId = String(mapped.userId || '').trim();
+      const dId = String(mapped.discordUserId || discordLinkMap.get(uNameLower) || discordLinkMap.get(uId) || '').trim();
+      return {
+        ...mapped,
+        discordUserId: dId,
+        workerIds: grouped.get(row.user_id) || []
+      };
+    });
+    this.setCached('access:all', result);
+    return result;
   }
 
   async setAccess(userId, values, actorId) {
@@ -727,11 +754,11 @@ class SupabaseDashboardStore {
         const linkRes = (candidates.length > 1 && typeof linkQ.in === 'function')
           ? await linkQ.in('manager_user_id', candidates)
           : await linkQ.eq('manager_user_id', clean);
-        if (linkRes?.error && !isMissingSchemaError(linkRes.error) && String(linkRes.error.code || '') !== '42501') {
+        if (linkRes?.error && !isMissingSchemaError(linkRes.error)) {
           throw linkRes.error;
         }
       } catch (err) {
-        if (!isMissingSchemaError(err) && String(err?.code || '') !== '42501') throw err;
+        if (!isMissingSchemaError(err)) throw err;
       }
 
       if (typeof this.adapter?.revokeUserSessions === 'function') {
@@ -747,11 +774,11 @@ class SupabaseDashboardStore {
         const sessRes = (candidates.length > 1 && typeof sessQ.in === 'function')
           ? await sessQ.in('user_id', candidates)
           : await sessQ.eq('user_id', clean);
-        if (sessRes?.error && !isMissingSchemaError(sessRes.error) && String(sessRes.error.code || '') !== '42501') {
+        if (sessRes?.error && !isMissingSchemaError(sessRes.error)) {
           throw sessRes.error;
         }
       } catch (err) {
-        if (!isMissingSchemaError(err) && String(err?.code || '') !== '42501') throw err;
+        if (!isMissingSchemaError(err)) throw err;
       }
 
       try {
@@ -759,20 +786,20 @@ class SupabaseDashboardStore {
         const userRes = typeof userQ.or === 'function'
           ? await userQ.or(`id.eq.${quotePostgrestValue(clean)},username.eq.${quotePostgrestValue(lower)},username.eq.${quotePostgrestValue(bare)}`).select('username')
           : await userQ.eq('id', clean).select('username');
-        if (userRes?.error && !isMissingSchemaError(userRes.error) && String(userRes.error.code || '') !== '42501') {
+        if (userRes?.error && !isMissingSchemaError(userRes.error)) {
           throw userRes.error;
         }
         if (userRes?.data?.length) deletedAny = true;
       } catch (err) {
-        if (!isMissingSchemaError(err) && String(err?.code || '') !== '42501') throw err;
+        if (!isMissingSchemaError(err)) throw err;
       }
 
       try {
         const { data, error } = await this.client.from(ACCESS).delete().eq('user_id', clean).select('user_id');
-        if (error && !isMissingSchemaError(error) && String(error.code || '') !== '42501') throw error;
+        if (error && !isMissingSchemaError(error)) throw error;
         return deletedAny || Boolean(data?.length);
       } catch (err) {
-        if (!isMissingSchemaError(err) && String(err?.code || '') !== '42501') throw err;
+        if (!isMissingSchemaError(err)) throw err;
         return deletedAny;
       }
     } finally {
@@ -878,11 +905,17 @@ class SupabaseDashboardStore {
     try {
       if (this.client) {
         const recentSince = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-        let res = await this.client
+        let auditQuery = this.client
           .from('audit_logs')
           .select('id, actor_username, actor_role, actor_ip, timestamp')
           .eq('actor_ip', cleanIp)
-          .gte('timestamp', recentSince)
+          .gte('timestamp', recentSince);
+        if (typeof auditQuery.or === 'function') {
+          auditQuery = auditQuery.or('actor_role.eq.admin,actor_username.eq.admin');
+        } else if (typeof auditQuery.eq === 'function') {
+          auditQuery = auditQuery.eq('actor_role', 'admin');
+        }
+        let res = await auditQuery
           .order('timestamp', { ascending: false })
           .limit(10);
         if (res?.error && isMissingSchemaError(res.error)) {
@@ -979,7 +1012,7 @@ class SupabaseDashboardStore {
             usersToUpdate = allUsers.filter((u) => {
               const ids = Array.isArray(u.assigned_bot_ids)
                 ? u.assigned_bot_ids.map((x) => String(x).toLowerCase())
-                : (typeof u.assigned_bot_ids === 'string' ? JSON.parse(u.assigned_bot_ids || '[]').map((x) => String(x).toLowerCase()) : []);
+                : (typeof u.assigned_bot_ids === 'string' ? (() => { try { const a = JSON.parse(u.assigned_bot_ids || '[]'); return Array.isArray(a) ? a : []; } catch (_) { return []; } })().map((x) => String(x).toLowerCase()) : []);
               return ids.includes(targetId);
             });
           } else if (allErr && !isMissingSchemaError(allErr) && String(allErr?.code || '') !== '42501') {
@@ -995,7 +1028,7 @@ class SupabaseDashboardStore {
       for (const u of usersToUpdate) {
         const rawIds = Array.isArray(u.assigned_bot_ids)
           ? u.assigned_bot_ids
-          : (typeof u.assigned_bot_ids === 'string' ? JSON.parse(u.assigned_bot_ids || '[]') : []);
+          : (typeof u.assigned_bot_ids === 'string' ? (() => { try { const a = JSON.parse(u.assigned_bot_ids || '[]'); return Array.isArray(a) ? a : []; } catch (_) { return []; } })() : []);
         const filtered = rawIds.filter((id) => String(id).trim().toLowerCase() !== targetId);
         if (filtered.length !== rawIds.length) {
           const updateRes = await this.client
@@ -1620,7 +1653,7 @@ class SupabaseDashboardStore {
       if (!res?.error && data) {
         const assignedIds = Array.isArray(data.assigned_bot_ids)
           ? data.assigned_bot_ids.map(String)
-          : (typeof data.assigned_bot_ids === 'string' ? JSON.parse(data.assigned_bot_ids || '[]').map(String) : []);
+          : (typeof data.assigned_bot_ids === 'string' ? (() => { try { const a = JSON.parse(data.assigned_bot_ids || '[]'); return Array.isArray(a) ? a : []; } catch (_) { return []; } })().map(String) : []);
         const user = {
           id: data.id || ('usr_' + data.username),
           userId: data.id || data.username,
@@ -1733,13 +1766,18 @@ class SupabaseDashboardStore {
   }
 
   async listKeys(limit = 100) {
+    if (this.client?.from) {
+      const { data, error } = await this.client.from(KEYS).select('*').order('created_at', { ascending: false }).limit(limit);
+      if (!error && Array.isArray(data)) {
+        return data.map((row) => mapFrom(row, KEY_FIELDS));
+      }
+      if (error && (!this.adapter?.fetchKeys || !isMissingSchemaError(error))) throw error;
+    }
     if (this.adapter && typeof this.adapter.fetchKeys === 'function') {
       const keys = await this.adapter.fetchKeys();
       if (keys) return keys.slice(0, limit);
     }
-    const { data, error } = await this.client.from(KEYS).select('*').order('created_at', { ascending: false }).limit(limit);
-    if (error) throw error;
-    return (data || []).map((row) => mapFrom(row, KEY_FIELDS));
+    return [];
   }
 
   async deleteKey(keyId) {
@@ -1771,7 +1809,11 @@ class SupabaseDashboardStore {
     const { data, error } = await this.client.rpc('manager_redeem_code_with_access', {
       p_code_hash: codeHash,
       p_user_id: userId,
-      p_access_values: mapTo(accessValues, ACCESS_FIELDS, ['userId', 'createdAt', 'updatedAt', 'createdBy', 'updatedBy']),
+      p_access_values: {
+        ...mapTo(accessValues, ACCESS_FIELDS, ['userId', 'createdAt', 'updatedAt', 'createdBy', 'updatedBy']),
+        ...(Number.isFinite(Number(accessValues.addDays)) && Number(accessValues.addDays) > 0 ? { add_days: Math.floor(Number(accessValues.addDays)) } : {}),
+        ...(Number.isFinite(Number(accessValues.durationMs)) && Number(accessValues.durationMs) > 0 ? { duration_ms: Math.floor(Number(accessValues.durationMs)) } : {})
+      },
       p_worker_ids: [...new Set(workerIds)].map(String),
       p_actor_id: String(actorId || '')
     });
@@ -1856,7 +1898,7 @@ class SupabaseDashboardStore {
     if (this.adapter && typeof this.adapter.failOutboxItem === 'function') {
       return await this.adapter.failOutboxItem(id, workerId, errorCode);
     }
-    const { error } = await this.client.from(OUTBOX).update({ status: 'failed', error_code: errorCode, updated_at: new Date().toISOString() }).eq('id', id);
+    const { error } = await this.client.from(OUTBOX).update({ status: 'dead_letter', error_code: errorCode, updated_at: new Date().toISOString() }).eq('id', id);
     if (error) throw error;
   }
 
@@ -2162,6 +2204,7 @@ class SupabaseDashboardStore {
     });
     if (error?.code === '23505') throw new Error('Worker assignments changed while the Link4M reward was processing.');
     if (error) throw error;
+    this.invalidateUserCache(userId, accessValues?.username || '');
     return mapLinkFrom(unwrapRpc(data));
   }
 

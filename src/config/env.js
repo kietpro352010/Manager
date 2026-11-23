@@ -84,6 +84,11 @@ function loadConfig(env = process.env) {
   const { detectHostRuntime } = require('./host-runtime');
   const hostRuntime = detectHostRuntime(env);
 
+  const rawNodeEnv = String(env.NODE_ENV ?? '').trim().toLowerCase();
+  const isNodeTestContext = Boolean(env.NODE_TEST_CONTEXT || (!rawNodeEnv && process.env.NODE_TEST_CONTEXT));
+  const nodeEnv = rawNodeEnv || (isNodeTestContext ? 'test' : 'production');
+  const isProduction = nodeEnv === 'production';
+
   const encryptionKey = parseEncryptionKey(env);
   const previousEncryptionKey = parsePreviousEncryptionKey(env);
 
@@ -93,8 +98,13 @@ function loadConfig(env = process.env) {
   }
   const sessionSecret = rawSessionSecret ||
     crypto.createHash('sha256').update(Buffer.concat([encryptionKey, Buffer.from(':kbot_session_v11')])).digest('hex');
-  const captchaRequired = bool(env.CAPTCHA_REQUIRED, false);
-  const captchaSecret = String(env.CAPTCHA_SECRET || '').trim() || undefined;
+  const captchaRequired = bool(env.CAPTCHA_REQUIRED, isProduction);
+  const rawCaptchaSecret = String(env.CAPTCHA_SECRET || '').trim();
+  if (rawCaptchaSecret && rawCaptchaSecret.length < 16) {
+    throw new Error('CAPTCHA_SECRET must contain at least 16 characters when configured.');
+  }
+  const captchaSecret = rawCaptchaSecret ||
+    crypto.createHash('sha256').update(`${sessionSecret}:kbot_captcha_v1`).digest('hex');
 
   const adminRoleId = String(env.ADMIN_ROLE_ID || '').trim();
   const userRoleId = String(env.USER_ROLE_ID || '').trim();
@@ -131,18 +141,20 @@ function loadConfig(env = process.env) {
   }
 
   const supabaseUrl = required(env, 'SUPABASE_URL').replace(/\/+$/, '');
-  const isLocalOrTest = (env.NODE_ENV !== 'production') || /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(supabaseUrl);
+  const isLoopbackSupabase = /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(supabaseUrl);
+  const isLocalOrTest = !isProduction || isLoopbackSupabase;
   if (!/^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(supabaseUrl) && !isLocalOrTest) {
     throw new Error('SUPABASE_URL must be a valid HTTPS project URL.');
   }
 
   const supabaseSecretKey = required(env, 'SUPABASE_SECRET_KEY', ['SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_KEY']);
-  if (!isServerSupabaseKey(supabaseSecretKey) && env.NODE_ENV === 'production' && !bool(env.KBOT_ALLOW_ANON_KEY, false)) {
+  const allowLoopbackMockKey = !rawNodeEnv && isLoopbackSupabase;
+  if (!isServerSupabaseKey(supabaseSecretKey) && isProduction && !allowLoopbackMockKey && !bool(env.KBOT_ALLOW_ANON_KEY, false)) {
     throw new Error('Configure a server-only SUPABASE_SECRET_KEY or legacy SUPABASE_SERVICE_ROLE_KEY; publishable/anon keys are not accepted in production.');
   }
 
   return Object.freeze({
-    nodeEnv: env.NODE_ENV || 'production',
+    nodeEnv,
     host: env.HOST || '0.0.0.0',
     port: hostRuntime.port,
     platform: hostRuntime.platform,

@@ -6,12 +6,67 @@ const {
   encryptSecret,
   decryptSecret,
   decryptUserPassword,
-  hashAdminPassword,
+  hashAdminPasswordAsync,
   isStoredCredentialCiphertext
 } = require('../../utils/secrets');
 const { validateSafeBotUrl } = require('../../services/proxy-validation');
+const { resolveClientIp } = require('../../services/captcha');
+const { getMaintenanceState, setMaintenanceState } = require('../../utils/maintenance');
 const rawSchema = require('../../storage/schema-sql');
 const SCHEMA_SQL = typeof rawSchema === 'string' ? rawSchema : (rawSchema?.SCHEMA_SQL || '');
+
+function isLocalBotUrlAllowed() {
+  return process.env.ALLOW_LOCAL_BOT_URLS === 'true' || process.env.NODE_ENV !== 'production';
+}
+
+function isLoopbackBotUrl(rawUrl) {
+  return /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/.*)?$/i.test(String(rawUrl || '').trim());
+}
+
+async function validateWorkerBotUrl(rawUrl) {
+  const clean = String(rawUrl || '').trim().replace(/\/+$/, '');
+  if (!clean) return '';
+  let parsed;
+  try {
+    parsed = new URL(clean);
+  } catch {
+    throw new Error('URL bot không hợp lệ.');
+  }
+  const allowLocal = isLocalBotUrlAllowed();
+  const isLoop = isLoopbackBotUrl(clean);
+  if (parsed.protocol === 'http:') {
+    if (!(isLoop && allowLocal)) {
+      throw new Error('Worker URL bắt buộc phải dùng HTTPS (chỉ cho phép localhost/127.0.0.1 khi không phải production).');
+    }
+    return clean;
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error('Worker URL phải dùng giao thức https://.');
+  }
+  if (isLoop && allowLocal) {
+    return clean;
+  }
+  return validateSafeBotUrl(clean);
+}
+
+function validateHttpOrHttpsUrl(rawUrl, fieldLabel = 'URL') {
+  const clean = String(rawUrl || '').trim();
+  if (!clean) return '';
+  let parsed;
+  try {
+    parsed = new URL(clean);
+  } catch {
+    const err = new Error(`${fieldLabel} không hợp lệ.`);
+    err.status = 400;
+    throw err;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    const err = new Error(`${fieldLabel} chỉ được phép dùng giao thức http:// hoặc https://.`);
+    err.status = 400;
+    throw err;
+  }
+  return clean;
+}
 
 const USER_ALLOWED_FIELDS = [
   'status', 'expiresAt', 'planName', 'note', 'workerIds', 'assignedBotIds',
@@ -141,23 +196,60 @@ function createAdminApi({
 
   router.use(requireAdmin);
 
+  // Helper: revoke in-memory & DB sessions across both id and username
+  async function revokeAllUserSessions(targetIdOrUsername, knownUser = null) {
+    const targets = new Set();
+    if (targetIdOrUsername) targets.add(String(targetIdOrUsername));
+    const userObj = knownUser || await store.getUser?.(targetIdOrUsername, { bypassCache: true }).catch(() => null)
+      || await store.getAccess?.(targetIdOrUsername).catch(() => null);
+    if (userObj?.id) targets.add(String(userObj.id));
+    if (userObj?.userId) targets.add(String(userObj.userId));
+    if (userObj?.username) targets.add(String(userObj.username));
+    for (const target of targets) {
+      if (typeof invalidateUserSessions === 'function') invalidateUserSessions(target);
+      if (typeof store?.adapter?.revokeUserSessions === 'function') {
+        await store.adapter.revokeUserSessions(target).catch(() => null);
+      }
+    }
+  }
+
   // 1. USER MANAGEMENT
   router.get('/users', async (_req, res) => {
     try {
       const [storedUsers, workers] = await Promise.all([store.listAccess(), registry.list()]);
-      const users = storedUsers.map((user) => ({
-        ...user,
-        id: String(user.userId || user.id || ''),
-        discordUserId: String(user.discordUserId || user.discord_user_id || ''),
-        lastLoginIp: String(user.lastLoginIp || user.last_login_ip || user.registrationIp || user.registration_ip || ''),
-        lastLoginAt: user.lastLoginAt || user.last_login_at || null,
-        registrationIp: String(user.registrationIp || user.registration_ip || ''),
-        assignedBotIds: Array.isArray(user.workerIds)
+      const users = storedUsers.map((user) => {
+        const assignedBotIds = Array.isArray(user.workerIds)
           ? [...new Set(user.workerIds.map((workerId) => String(workerId).trim().toLowerCase()).filter(Boolean))]
-          : []
-      }));
-      // Build ownership map strictly in RAM (eliminates N+1 store.assignedUser() queries!)
+          : [];
+        return {
+          id: String(user.userId || user.id || ''),
+          userId: String(user.userId || user.id || ''),
+          username: String(user.username || ''),
+          role: String(user.role || 'user'),
+          status: String(user.status || 'active'),
+          planName: String(user.planName || user.plan_name || 'Standard'),
+          note: String(user.note || ''),
+          isPermanent: Boolean(user.isPermanent ?? user.is_permanent),
+          expiresAt: user.expiresAt || user.expires_at || null,
+          botCount: Number(user.botCount ?? user.bot_count ?? 1),
+          allowAccountChange: (user.allowAccountChange ?? user.allow_account_change) !== false,
+          lockReason: String(user.lockReason || user.lock_reason || ''),
+          botAliases: (user.botAliases && typeof user.botAliases === 'object' && !Array.isArray(user.botAliases))
+            ? user.botAliases
+            : (user.bot_aliases && typeof user.bot_aliases === 'object' ? user.bot_aliases : {}),
+          discordUserId: String(user.discordUserId || user.discord_user_id || ''),
+          lastLoginIp: String(user.lastLoginIp || user.last_login_ip || ''),
+          lastLoginAt: user.lastLoginAt || user.last_login_at || null,
+          registrationIp: String(user.registrationIp || user.registration_ip || ''),
+          createdAt: user.createdAt || user.created_at || null,
+          updatedAt: user.updatedAt || user.updated_at || null,
+          workerIds: assignedBotIds,
+          assignedBotIds
+        };
+      });
+      // Build ownership map strictly in RAM (match workerId first; botNumber only when unambiguous)
       const ownerByWorkerId = new Map();
+      const workerIdSet = new Set(workers.map((w) => String(w.workerId).trim().toLowerCase()));
       for (const user of users) {
         for (const wid of user.assignedBotIds) {
           if (!ownerByWorkerId.has(wid)) {
@@ -168,10 +260,22 @@ function createAdminApi({
       const botOwnership = {};
       for (const worker of workers) {
         const key = String(worker.workerId).trim().toLowerCase();
-        botOwnership[worker.workerId] = ownerByWorkerId.get(key) || ownerByWorkerId.get(String(worker.botNumber || '')) || null;
+        const numKey = worker.botNumber !== null && worker.botNumber !== undefined ? String(worker.botNumber) : '';
+        const numIsAmbiguous = Boolean(numKey && numKey !== key && workerIdSet.has(numKey));
+        botOwnership[worker.workerId] = ownerByWorkerId.get(key)
+          || (!numIsAmbiguous && numKey ? ownerByWorkerId.get(numKey) : null)
+          || null;
       }
-      const availableBots = workers.map((worker) => {
-        const mcUser = worker.status?.username || worker.settings?.account?.username || worker.settings?.username || '';
+      const encKey = registry?.encryptionKey || config?.encryptionKey;
+      const availableBots = await Promise.all(workers.map(async (worker) => {
+        let mcUser = worker.status?.username || worker.settings?.account?.username || worker.settings?.username || '';
+        if (!mcUser && worker.settings?.mcCredentialsCiphertext && encKey) {
+          mcUser = safeDecryptBotJson(worker.settings.mcCredentialsCiphertext, encKey)?.username || '';
+        }
+        if (!mcUser && typeof registry.privateSettings === 'function') {
+          const priv = await registry.privateSettings(worker.workerId).catch(() => null);
+          mcUser = priv?.username || '';
+        }
         return {
           id: String(worker.workerId),
           workerId: String(worker.workerId),
@@ -182,7 +286,7 @@ function createAdminApi({
           rentable: worker.rentable !== false,
           currentOwner: botOwnership[worker.workerId] || null
         };
-      });
+      }));
       return res.json({ ok: true, users, availableBots, botOwnership });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
@@ -200,22 +304,92 @@ function createAdminApi({
     }
     delete values.assignedBotIds;
 
-    if (values.expiresAt !== undefined && values.expiresAt !== null) {
-      if (values.expiresAt === '' || values.expiresAt === 'never' || values.expiresAt === 'permanent') {
+    // Never auto-promote isPermanent from empty or unparseable expiresAt (API-03)
+    if (Object.prototype.hasOwnProperty.call(values, 'expiresAt')) {
+      if (values.expiresAt === '' || values.expiresAt === null) {
         values.expiresAt = null;
-        values.isPermanent = true;
       } else {
         const parsed = Date.parse(values.expiresAt);
         if (!Number.isFinite(parsed)) {
-          throw new Error('Định dạng thời hạn (expiresAt) không hợp lệ.');
+          const err = new Error('Định dạng thời hạn (expiresAt) không hợp lệ.');
+          err.status = 400;
+          throw err;
+        }
+        const year = new Date(parsed).getUTCFullYear();
+        if (year < 1970 || year > 2100) {
+          const err = new Error('Năm hết hạn (expiresAt) phải từ 1970 đến 2100.');
+          err.status = 400;
+          throw err;
         }
         values.expiresAt = new Date(parsed).toISOString();
       }
     }
 
+    if (values.isPermanent !== undefined) {
+      if (typeof values.isPermanent !== 'boolean') {
+        const err = new Error('Trường isPermanent phải là kiểu boolean.');
+        err.status = 400;
+        throw err;
+      }
+    }
+
+    if (values.allowAccountChange !== undefined) {
+      if (typeof values.allowAccountChange !== 'boolean') {
+        const err = new Error('Trường allowAccountChange phải là kiểu boolean.');
+        err.status = 400;
+        throw err;
+      }
+    }
+
+    if (values.botAliases !== undefined && values.botAliases !== null) {
+      if (typeof values.botAliases !== 'object' || Array.isArray(values.botAliases)) {
+        const err = new Error('botAliases phải là đối tượng JSON hợp lệ.');
+        err.status = 400;
+        throw err;
+      }
+      const entries = Object.entries(values.botAliases);
+      if (entries.length > 100) {
+        const err = new Error('botAliases tối đa 100 mục.');
+        err.status = 400;
+        throw err;
+      }
+      const cleanAliases = {};
+      for (const [k, v] of entries) {
+        const cleanKey = String(k || '').trim().slice(0, 64);
+        if (!cleanKey) {
+          const err = new Error('Tên khóa trong botAliases không hợp lệ.');
+          err.status = 400;
+          throw err;
+        }
+        if (typeof v !== 'string' || v.length > 64) {
+          const err = new Error('Giá trị botAliases phải là chuỗi tối đa 64 ký tự.');
+          err.status = 400;
+          throw err;
+        }
+        cleanAliases[cleanKey] = v.trim();
+      }
+      values.botAliases = cleanAliases;
+    }
+
+    if (values.discordUserId !== undefined) {
+      if (values.discordUserId === null || String(values.discordUserId).trim() === '') {
+        values.discordUserId = '';
+      } else {
+        const snowflake = String(values.discordUserId).trim();
+        if (!/^\d{17,22}$/.test(snowflake)) {
+          const err = new Error('Discord User ID phải là chuỗi số snowflake 17-22 chữ số.');
+          err.status = 400;
+          throw err;
+        }
+        values.discordUserId = snowflake;
+      }
+    }
+
     if (values.workerIds !== undefined && values.workerIds !== null) {
       if (!Array.isArray(values.workerIds)) {
-        throw new Error('Danh sách bot (workerIds) phải là một mảng.');
+        const err = new Error('Danh sách bot (workerIds) phải là một mảng.');
+        err.status = 400;
+        throw err;
       }
       values.workerIds = values.workerIds.map((id) => String(id || '').trim()).filter(Boolean);
     }
@@ -224,7 +398,9 @@ function createAdminApi({
       const validStatuses = ['active', 'expired', 'disabled', 'grace_period'];
       const st = String(values.status || '').trim().toLowerCase();
       if (!validStatuses.includes(st)) {
-        throw new Error('Trạng thái người dùng không hợp lệ.');
+        const err = new Error('Trạng thái người dùng không hợp lệ.');
+        err.status = 400;
+        throw err;
       }
       values.status = st;
     }
@@ -232,7 +408,9 @@ function createAdminApi({
     if (values.botCount !== undefined) {
       const cnt = Number(values.botCount);
       if (!Number.isSafeInteger(cnt) || cnt < 0 || cnt > 100) {
-        throw new Error('Số lượng bot (botCount) phải là số nguyên từ 0 đến 100.');
+        const err = new Error('Số lượng bot (botCount) phải là số nguyên từ 0 đến 100.');
+        err.status = 400;
+        throw err;
       }
       values.botCount = cnt;
     }
@@ -247,18 +425,21 @@ function createAdminApi({
   router.post('/users', async (req, res) => {
     try {
       const { action, userId, values, id, ...rest } = req.body || {};
+      const actorIp = resolveClientIp(req) || '127.0.0.1';
       let targetUserId = userId || id;
 
       if (action === 'delete') {
         if (!targetUserId) return res.status(400).json({ ok: false, error: 'Thiếu userId cần xóa.' });
+        const existingUser = await store.getUser?.(targetUserId, { bypassCache: true }).catch(() => null)
+          || await store.getAccess?.(targetUserId).catch(() => null);
         await store.removeAccess(targetUserId);
-        if (typeof invalidateUserSessions === 'function') invalidateUserSessions(targetUserId);
+        await revokeAllUserSessions(targetUserId, existingUser);
         await store.addAudit({
           action: 'ADMIN_DELETE_USER',
           targetId: targetUserId,
           actorId: req.managerAuthSession.username,
           actorRole: 'admin',
-          actorIp: req.ip || '127.0.0.1'
+          actorIp
         });
         return res.json({ ok: true, message: 'Đã xóa người dùng thành công.' });
       }
@@ -280,7 +461,9 @@ function createAdminApi({
           return res.status(400).json({ ok: false, error: 'Mật khẩu phải dài từ 6 đến 256 ký tự.' });
         }
       }
-      if (!targetUserId) {
+      const isCreate = !targetUserId;
+      let prevUser = null;
+      if (isCreate) {
         const username = String(updateData.username || '').trim().toLowerCase();
         const password = String(updateData.password || '');
         if (!username || !password) {
@@ -289,14 +472,23 @@ function createAdminApi({
         targetUserId = `usr_${crypto.randomUUID()}`;
         updateData.username = username;
         updateData.role = 'user';
+      } else {
+        prevUser = await store.getUser?.(targetUserId, { bypassCache: true }).catch(() => null)
+          || await store.getAccess?.(targetUserId).catch(() => null);
       }
 
       await store.setAccess(targetUserId, updateData, req.managerAuthSession.username);
-      if (String(updateData.status || '').trim().toLowerCase() === 'disabled') {
-        if (typeof invalidateUserSessions === 'function') invalidateUserSessions(targetUserId);
-        if (typeof store.adapter?.revokeUserSessions === 'function') {
-          await store.adapter.revokeUserSessions(targetUserId).catch(() => null);
-        }
+      const prevBots = new Set(Array.isArray(prevUser?.workerIds) ? prevUser.workerIds.map((w) => String(w).toLowerCase()) : []);
+      const nextBots = Array.isArray(updateData.workerIds) ? new Set(updateData.workerIds.map((w) => String(w).toLowerCase())) : null;
+      const botsRevoked = Boolean(nextBots && [...prevBots].some((w) => !nextBots.has(w)));
+      const shouldRevokeSessions = !isCreate && (
+        String(updateData.status || '').trim().toLowerCase() === 'disabled' ||
+        updateData.password !== undefined ||
+        updateData.allowAccountChange === false ||
+        botsRevoked
+      );
+      if (shouldRevokeSessions) {
+        await revokeAllUserSessions(targetUserId, prevUser);
       }
       const auditDetails = { ...updateData };
       if (auditDetails.password) auditDetails.password = '[REDACTED]';
@@ -305,27 +497,31 @@ function createAdminApi({
         targetId: targetUserId,
         actorId: req.managerAuthSession.username,
         actorRole: 'admin',
-        actorIp: req.ip || '127.0.0.1',
+        actorIp,
         details: auditDetails
       });
       return res.json({ ok: true, message: 'Đã cập nhật thông tin người dùng.' });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      const status = error.status === 400 ? 400 : 500;
+      return res.status(status).json({ ok: false, error: error.message });
     }
   });
 
   router.all(['/users/:id', '/user/:id'], async (req, res) => {
     const { id } = req.params;
+    const actorIp = resolveClientIp(req) || '127.0.0.1';
     if (req.method === 'DELETE') {
       try {
+        const existingUser = await store.getUser?.(id, { bypassCache: true }).catch(() => null)
+          || await store.getAccess?.(id).catch(() => null);
         await store.removeAccess(id);
-        if (typeof invalidateUserSessions === 'function') invalidateUserSessions(id);
+        await revokeAllUserSessions(id, existingUser);
         await store.addAudit({
           action: 'ADMIN_DELETE_USER',
           targetId: id,
           actorId: req.managerAuthSession.username,
           actorRole: 'admin',
-          actorIp: req.ip || '127.0.0.1'
+          actorIp
         });
         return res.json({ ok: true, message: 'Đã xóa người dùng thành công.' });
       } catch (error) {
@@ -356,12 +552,20 @@ function createAdminApi({
           }
         }
 
+        const prevUser = await store.getUser?.(id, { bypassCache: true }).catch(() => null)
+          || await store.getAccess?.(id).catch(() => null);
+
         await store.setAccess(id, values, req.managerAuthSession.username);
-        if (String(values.status || '').trim().toLowerCase() === 'disabled') {
-          if (typeof invalidateUserSessions === 'function') invalidateUserSessions(id);
-          if (typeof store.adapter?.revokeUserSessions === 'function') {
-            await store.adapter.revokeUserSessions(id).catch(() => null);
-          }
+        const prevBots = new Set(Array.isArray(prevUser?.workerIds) ? prevUser.workerIds.map((w) => String(w).toLowerCase()) : []);
+        const nextBots = Array.isArray(values.workerIds) ? new Set(values.workerIds.map((w) => String(w).toLowerCase())) : null;
+        const botsRevoked = Boolean(nextBots && [...prevBots].some((w) => !nextBots.has(w)));
+        if (
+          String(values.status || '').trim().toLowerCase() === 'disabled' ||
+          values.password !== undefined ||
+          values.allowAccountChange === false ||
+          botsRevoked
+        ) {
+          await revokeAllUserSessions(id, prevUser);
         }
         const auditDetails = { ...values };
         if (auditDetails.password) auditDetails.password = '[REDACTED]';
@@ -370,12 +574,13 @@ function createAdminApi({
           targetId: id,
           actorId: req.managerAuthSession.username,
           actorRole: 'admin',
-          actorIp: req.ip || '127.0.0.1',
+          actorIp,
           details: auditDetails
         });
         return res.json({ ok: true, message: 'Đã cập nhật thông tin người dùng.' });
       } catch (error) {
-        return res.status(500).json({ ok: false, error: error.message });
+        const status = error.status === 400 ? 400 : 500;
+        return res.status(status).json({ ok: false, error: error.message });
       }
     }
 
@@ -408,7 +613,7 @@ function createAdminApi({
           targetId: user.id || id,
           actorId: req.managerAuthSession.username,
           actorRole: 'admin',
-          actorIp: req.ip || '127.0.0.1',
+          actorIp: resolveClientIp(req) || '127.0.0.1',
           details: { username: user.username }
         }).catch(() => {});
       }
@@ -440,6 +645,10 @@ function createAdminApi({
         if (!Number.isFinite(parsedMs)) {
           return res.status(400).json({ ok: false, error: 'Ngày hết hạn cố định không hợp lệ.' });
         }
+        const year = new Date(parsedMs).getUTCFullYear();
+        if (year < 1970 || year > 2100) {
+          return res.status(400).json({ ok: false, error: 'Năm hết hạn phải nằm trong khoảng 1970 đến 2100.' });
+        }
         newExpiry = new Date(parsedMs).toISOString();
         nextStatus = access.status === 'disabled' ? 'disabled' : (parsedMs > now ? 'active' : 'expired');
       } else {
@@ -452,6 +661,10 @@ function createAdminApi({
           ? Math.max(now, Number.isFinite(currentMs) ? currentMs : now)
           : (Number.isFinite(currentMs) ? currentMs : now);
         const targetMs = baseMs + addedDays * 86400000;
+        const year = new Date(targetMs).getUTCFullYear();
+        if (year < 1970 || year > 2100) {
+          return res.status(400).json({ ok: false, error: 'Năm hết hạn sau gia hạn vượt ngoài khoảng 1970 đến 2100.' });
+        }
         newExpiry = new Date(targetMs).toISOString();
         nextStatus = access.status === 'disabled' ? 'disabled' : (targetMs > now ? 'active' : 'expired');
       }
@@ -470,7 +683,7 @@ function createAdminApi({
           targetId: id,
           actorId: req.managerAuthSession.username,
           actorRole: 'admin',
-          actorIp: req.ip || '127.0.0.1',
+          actorIp: resolveClientIp(req) || '127.0.0.1',
           details: { isPermanent: isPerm, expiresAt: newExpiry, planName: planName || access.planName, status: nextStatus }
         }).catch(() => {});
       }
@@ -504,6 +717,10 @@ function createAdminApi({
         ? Math.max(now, Number.isFinite(currentMs) ? currentMs : now)
         : (Number.isFinite(currentMs) ? currentMs : now);
       const targetMs = baseMs + addedDays * 86400000;
+      const year = new Date(targetMs).getUTCFullYear();
+      if (year < 1970 || year > 2100) {
+        return res.status(400).json({ ok: false, error: 'Năm hết hạn sau gia hạn vượt ngoài khoảng 1970 đến 2100.' });
+      }
       const newExpiry = new Date(targetMs).toISOString();
       const nextStatus = user.status === 'disabled' ? 'disabled' : (targetMs > now ? 'active' : 'expired');
 
@@ -549,17 +766,27 @@ function createAdminApi({
       }
 
       const managerBaseUrl = String(config.publicBaseUrl || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+      const actorIp = resolveClientIp(req) || '127.0.0.1';
 
-      // Case 1: No URLs provided (manual / wispbyte worker)
+      // Case 1: No URLs provided (manual / wispbyte worker -> 1 slot)
       if (!rawUrls.length) {
         const result = await registry.add({
           workerId: explicitWorkerId,
           name: baseLabel || undefined,
           provider: explicitProvider || 'wispbyte',
-          serviceUrl: body.serviceUrl || '',
+          serviceUrl: body.serviceUrl ? await validateWorkerBotUrl(body.serviceUrl) : '',
           serviceId: body.serviceId || '',
           secret: explicitSecret
         });
+
+        await store.addAudit?.({
+          action: 'ADMIN_CREATE_BOT',
+          targetId: result.worker.workerId,
+          actorId: req.managerAuthSession.username,
+          actorRole: 'admin',
+          actorIp,
+          details: { provider: result.worker.provider, name: result.worker.name }
+        }).catch(() => null);
 
         const envConfig = `MANAGER_URL=${managerBaseUrl}\nWORKER_ID_1=${result.worker.workerId}\nWORKER_SECRET_1=${result.secret}`;
 
@@ -573,7 +800,7 @@ function createAdminApi({
         });
       }
 
-      // Case 2: One or more URLs provided (Render / Web workers with Dual-Slot auto detection)
+      // Case 2: One or more URLs / identifiers provided
       const added = [];
       const skipped = [];
       const envConfigs = [];
@@ -581,26 +808,29 @@ function createAdminApi({
 
       for (let i = 0; i < rawUrls.length; i++) {
         const rawUrl = String(rawUrls[i] || '').trim().replace(/\/+$/, '');
-        if (!rawUrl) continue;
+        if (!rawUrl) {
+          skipped.push({ url: rawUrls[i], slot: 0, reason: 'URL worker không được để trống.' });
+          continue;
+        }
 
         const isHttpUrl = /^https?:\/\//i.test(rawUrl);
         const provider = explicitProvider || (isHttpUrl ? 'render' : 'wispbyte');
-        let slots = 2; // Default dual-slot (1 worker = 2 bot) for Render / host instances
+        let slots = isHttpUrl ? 2 : 1; // Render / HTTP hosts default to dual-slot; manual wispbyte identifier creates 1 slot
 
         if (provider === 'render') {
-          if (!/^https:\/\//i.test(rawUrl) && !/^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(rawUrl)) {
-            skipped.push({ url: rawUrl, slot: 0, reason: 'Worker URL của Render bắt buộc phải sử dụng giao thức HTTPS (hoặc localhost/127.0.0.1 trong môi trường thử nghiệm).' });
+          if (!isHttpUrl) {
+            skipped.push({ url: rawUrl, slot: 0, reason: 'Render worker bắt buộc phải sử dụng URL HTTPS hợp lệ.' });
             continue;
           }
           try {
-            await validateSafeBotUrl(rawUrl);
+            await validateWorkerBotUrl(rawUrl);
           } catch (ssrfErr) {
             skipped.push({ url: rawUrl, slot: 0, reason: ssrfErr.message });
             continue;
           }
         } else if (isHttpUrl) {
           try {
-            await validateSafeBotUrl(rawUrl);
+            await validateWorkerBotUrl(rawUrl);
           } catch (ssrfErr) {
             skipped.push({ url: rawUrl, slot: 0, reason: ssrfErr.message });
             continue;
@@ -610,6 +840,7 @@ function createAdminApi({
             skipped.push({ url: rawUrl, slot: 0, reason: 'Identifier worker không hợp lệ.' });
             continue;
           }
+          slots = 1;
         }
 
         // Probe worker /health endpoint if accessible
@@ -685,13 +916,22 @@ function createAdminApi({
         }
       }
 
-      if (added.length === 0 && skipped.length > 0) {
+      if (added.length === 0) {
         return res.status(400).json({
           ok: false,
-          error: skipped[0].reason || 'Không thể thêm bot.',
+          error: skipped[0]?.reason || 'Không có URL hoặc worker hợp lệ để thêm.',
           skipped
         });
       }
+
+      await store.addAudit?.({
+        action: 'ADMIN_CREATE_BOT',
+        targetId: added.map((b) => b.workerId).join(','),
+        actorId: req.managerAuthSession.username,
+        actorRole: 'admin',
+        actorIp,
+        details: { addedCount: added.length, skippedCount: skipped.length }
+      }).catch(() => null);
 
       const totalEnv = envConfigs.join('\n\n');
       return res.status(201).json({
@@ -723,10 +963,14 @@ function createAdminApi({
       for (const item of botsToImport) {
         try {
           const rawUrl = String(item.url || item.serviceUrl || '').trim();
-          const safeUrl = rawUrl ? await validateSafeBotUrl(rawUrl) : '';
+          const provider = String(item.provider || 'wispbyte').trim().toLowerCase();
+          if (provider === 'render' && !rawUrl && !item.serviceId) {
+            throw new Error('Render worker cần có URL HTTPS hoặc Render service ID.');
+          }
+          const safeUrl = rawUrl ? await validateWorkerBotUrl(rawUrl) : '';
           const result = await registry.add({
             name: item.label || item.name,
-            provider: item.provider || 'wispbyte',
+            provider,
             serviceUrl: safeUrl,
             serviceId: item.serviceId || ''
           });
@@ -735,6 +979,14 @@ function createAdminApi({
           skipped.push({ item, reason: err.message });
         }
       }
+
+      await store.addAudit?.({
+        action: 'ADMIN_BATCH_IMPORT_BOTS',
+        actorId: req.managerAuthSession.username,
+        actorRole: 'admin',
+        actorIp: resolveClientIp(req) || '127.0.0.1',
+        details: { addedCount: added.length, skippedCount: skipped.length }
+      }).catch(() => null);
 
       return res.json({
         ok: true,
@@ -755,10 +1007,13 @@ function createAdminApi({
       if (!worker) return res.status(404).json({ ok: false, error: 'Không tìm thấy bot cần xóa.' });
 
       await registry.remove(worker.workerId);
+      await store?.removeWorkerAssignments?.(worker.workerId);
       await store.addAudit({
         action: 'ADMIN_DELETE_BOT',
         targetId: worker.workerId,
         actorId: req.managerAuthSession.username,
+        actorRole: 'admin',
+        actorIp: resolveClientIp(req) || '127.0.0.1',
         details: { botNumber: worker.botNumber, name: worker.name }
       });
 
@@ -792,11 +1047,8 @@ function createAdminApi({
         }
         const serviceUrl = rawServiceUrl.trim().replace(/\/+$/, '');
         if (serviceUrl) {
-          if (!/^https:\/\//i.test(serviceUrl) && !/^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(serviceUrl)) {
-            return res.status(400).json({ ok: false, error: 'Worker URL phải dùng HTTPS.' });
-          }
           try {
-            await validateSafeBotUrl(serviceUrl);
+            await validateWorkerBotUrl(serviceUrl);
           } catch (ssrfErr) {
             return res.status(400).json({ ok: false, error: ssrfErr.message || 'Worker URL bị chặn do chính sách bảo mật (SSRF).' });
           }
@@ -823,6 +1075,8 @@ function createAdminApi({
         action: 'ADMIN_UPDATE_BOT',
         targetId: worker.workerId,
         actorId: req.managerAuthSession.username,
+        actorRole: 'admin',
+        actorIp: resolveClientIp(req) || '127.0.0.1',
         details: {
           label: updated.alias || updated.name,
           tags: updated.tags || [],
@@ -872,6 +1126,8 @@ function createAdminApi({
         action: 'ADMIN_RESET_BOT_CUSTOMER',
         targetId: worker.workerId,
         actorId: req.managerAuthSession.username,
+        actorRole: 'admin',
+        actorIp: resolveClientIp(req) || '127.0.0.1',
         details: { reason: 'admin_manually_reset_customer_bot' }
       });
 
@@ -882,6 +1138,88 @@ function createAdminApi({
   });
 
   // 3. AUDIT LOGS
+  function filterAuditLogsList(logsArray, { q = '', category = '', status = '', logType = '' } = {}) {
+    let filtered = logsArray;
+    if (q) {
+      filtered = filtered.filter((log) => {
+        const actionStr = String(log.action || '').toLowerCase();
+        const labelStr = String(log.actionLabel || '').toLowerCase();
+        const actorStr = String(log.actor?.username || log.actorId || log.actor || log.user || '').toLowerCase();
+        const targetStr = (typeof log.target === 'object' ? JSON.stringify(log.target) : String(log.target || log.targetId || '')).toLowerCase();
+        const messageStr = String(log.message || log.msg || '').toLowerCase();
+        let detailsStr = '';
+        if (log.details) {
+          detailsStr = typeof log.details === 'object' ? JSON.stringify(log.details).toLowerCase() : String(log.details).toLowerCase();
+        }
+        return actionStr.includes(q) ||
+          labelStr.includes(q) ||
+          actorStr.includes(q) ||
+          targetStr.includes(q) ||
+          messageStr.includes(q) ||
+          detailsStr.includes(q);
+      });
+    }
+    if (category) {
+      filtered = filtered.filter((log) => String(log.category || log.details?.category || '').toLowerCase() === category);
+    }
+    if (status) {
+      filtered = filtered.filter((log) => String(log.status || log.details?.status || '').toLowerCase() === status);
+    }
+    if (logType && logType !== 'all') {
+      filtered = filtered.filter((log) => String(log.logType || log.details?.logType || '').toLowerCase() === logType);
+    }
+    return filtered;
+  }
+
+  async function queryAuditLogs({ page = 1, limit = 50, q = '', category = '', status = '', logType = '' } = {}) {
+    const startIndex = (page - 1) * limit;
+    if (typeof store.queryAudit === 'function') {
+      const resObj = await store.queryAudit({ page, limit, q, category, status, logType });
+      if (resObj && Array.isArray(resObj.logs)) {
+        const total = Number.isFinite(Number(resObj.total)) ? Number(resObj.total) : resObj.logs.length;
+        return { logs: resObj.logs, total, totalPages: Math.max(1, Math.ceil(total / limit)) };
+      }
+    }
+
+    if (store?.client && typeof store.client.from === 'function') {
+      try {
+        let query = store.client.from('audit_logs').select('*', { count: 'exact' });
+        if (category && typeof query?.eq === 'function') query = query.eq('category', category);
+        if (status && typeof query?.eq === 'function') query = query.eq('status', status);
+        if (logType && logType !== 'all' && typeof query?.eq === 'function') query = query.eq('log_type', logType);
+        if (typeof query?.order === 'function') query = query.order('created_at', { ascending: false });
+        if (!q && typeof query?.range === 'function') {
+          const { data, error, count } = await query.range(startIndex, startIndex + limit - 1);
+          if (!error && Array.isArray(data)) {
+            const total = Number.isFinite(Number(count)) ? Number(count) : data.length;
+            return { logs: data, total, totalPages: Math.max(1, Math.ceil(total / limit)) };
+          }
+        } else if (typeof query?.limit === 'function') {
+          const { data, error } = await query.limit(2000);
+          if (!error && Array.isArray(data)) {
+            const filtered = filterAuditLogsList(data, { q, category, status, logType });
+            return {
+              logs: filtered.slice(startIndex, startIndex + limit),
+              total: filtered.length,
+              totalPages: Math.max(1, Math.ceil(filtered.length / limit))
+            };
+          }
+        }
+      } catch (_) {}
+    }
+
+    const hasFilters = Boolean(q || category || status || logType);
+    const fetchLimit = hasFilters ? Math.min(2000, Math.max(500, page * limit)) : Math.min(500, page * limit);
+    const allLogs = await store.listAudit(fetchLimit);
+    const logsArray = Array.isArray(allLogs) ? allLogs : [];
+    const filtered = filterAuditLogsList(logsArray, { q, category, status, logType });
+    return {
+      logs: filtered.slice(startIndex, startIndex + limit),
+      total: filtered.length,
+      totalPages: Math.max(1, Math.ceil(filtered.length / limit))
+    };
+  }
+
   router.get('/audit-logs', async (req, res) => {
     try {
       const page = Math.max(1, parseInt(req.query?.page, 10) || 1);
@@ -891,64 +1229,10 @@ function createAdminApi({
       const status = String(req.query?.status || '').trim().toLowerCase();
       const logType = String(req.query?.logType || '').trim().toLowerCase();
 
-      const hasFilters = Boolean(q || category || status || logType);
-      const fetchLimit = hasFilters
-        ? Math.min(500, Math.max(200, page * limit))
-        : Math.min(500, page * limit);
-      const allLogs = await store.listAudit(fetchLimit);
-      const logsArray = Array.isArray(allLogs) ? allLogs : [];
-
-      let filtered = logsArray;
-
-      if (q) {
-        filtered = filtered.filter((log) => {
-          const actionStr = String(log.action || '').toLowerCase();
-          const labelStr = String(log.actionLabel || '').toLowerCase();
-          const actorStr = String(log.actor?.username || log.actorId || log.actor || log.user || '').toLowerCase();
-          const targetStr = (typeof log.target === 'object' ? JSON.stringify(log.target) : String(log.target || log.targetId || '')).toLowerCase();
-          const messageStr = String(log.message || log.msg || '').toLowerCase();
-          let detailsStr = '';
-          if (log.details) {
-            detailsStr = typeof log.details === 'object' ? JSON.stringify(log.details).toLowerCase() : String(log.details).toLowerCase();
-          }
-          return actionStr.includes(q) ||
-            labelStr.includes(q) ||
-            actorStr.includes(q) ||
-            targetStr.includes(q) ||
-            messageStr.includes(q) ||
-            detailsStr.includes(q);
-        });
-      }
-
-      if (category) {
-        filtered = filtered.filter((log) => {
-          const logCategory = String(log.category || log.details?.category || '').toLowerCase();
-          return logCategory === category;
-        });
-      }
-
-      if (status) {
-        filtered = filtered.filter((log) => {
-          const logStatus = String(log.status || log.details?.status || '').toLowerCase();
-          return logStatus === status;
-        });
-      }
-
-      if (logType && logType !== 'all') {
-        filtered = filtered.filter((log) => {
-          const logTypeVal = String(log.logType || log.details?.logType || '').toLowerCase();
-          return logTypeVal === logType;
-        });
-      }
-
-      const total = filtered.length;
-      const totalPages = Math.max(1, Math.ceil(total / limit));
-      const startIndex = (page - 1) * limit;
-      const paginatedLogs = filtered.slice(startIndex, startIndex + limit);
-
+      const { logs, total, totalPages } = await queryAuditLogs({ page, limit, q, category, status, logType });
       return res.json({
         ok: true,
-        logs: paginatedLogs,
+        logs,
         page,
         limit,
         total,
@@ -975,7 +1259,11 @@ function createAdminApi({
 
   router.get('/audit-logs/export', async (req, res) => {
     try {
-      const logs = await store.listAudit(1000);
+      const q = String(req.query?.q || '').trim().toLowerCase();
+      const category = String(req.query?.category || '').trim().toLowerCase();
+      const status = String(req.query?.status || '').trim().toLowerCase();
+      const logType = String(req.query?.logType || '').trim().toLowerCase();
+      const { logs } = await queryAuditLogs({ page: 1, limit: 1000, q, category, status, logType });
       const format = String(req.query?.format || 'json').toLowerCase();
       if (format === 'csv') {
         const headers = ['id', 'timestamp', 'log_type', 'category', 'actor', 'role', 'ip', 'action', 'target', 'status', 'details'];
@@ -1027,6 +1315,43 @@ function createAdminApi({
       if (customKey && numKeys !== 1) {
         return res.status(400).json({ ok: false, error: 'Mã tự đặt chỉ tạo được một mã mỗi lần.' });
       }
+
+      let parsedDays = 30;
+      if (days !== undefined && days !== null) {
+        if (typeof days === 'string' && days.trim() === '') {
+          return res.status(400).json({ ok: false, error: 'Số ngày sử dụng (days) phải là số nguyên từ 1 đến 36500.' });
+        }
+        const d = Number(days);
+        if (!Number.isInteger(d) || d < 1 || d > 36500) {
+          return res.status(400).json({ ok: false, error: 'Số ngày sử dụng (days) phải là số nguyên từ 1 đến 36500.' });
+        }
+        parsedDays = d;
+      }
+
+      let parsedBotCount = 1;
+      if (botCount !== undefined && botCount !== null) {
+        if (typeof botCount === 'string' && botCount.trim() === '') {
+          return res.status(400).json({ ok: false, error: 'Số lượng bot (botCount) phải là số nguyên từ 1 đến 100.' });
+        }
+        const b = Number(botCount);
+        if (!Number.isInteger(b) || b < 1 || b > 100) {
+          return res.status(400).json({ ok: false, error: 'Số lượng bot (botCount) phải là số nguyên từ 1 đến 100.' });
+        }
+        parsedBotCount = b;
+      }
+
+      let parsedMaxUses = 1;
+      if (maxUses !== undefined && maxUses !== null) {
+        if (typeof maxUses === 'string' && maxUses.trim() === '') {
+          return res.status(400).json({ ok: false, error: 'Số lượt sử dụng (maxUses) phải là số nguyên từ 1 đến 100000.' });
+        }
+        const m = Number(maxUses);
+        if (!Number.isInteger(m) || m < 1 || m > 100000) {
+          return res.status(400).json({ ok: false, error: 'Số lượt sử dụng (maxUses) phải là số nguyên từ 1 đến 100000.' });
+        }
+        parsedMaxUses = m;
+      }
+
       let expiresAt = null;
       if (validDays !== undefined && validDays !== null && String(validDays).trim() !== '') {
         const daysValid = Number(validDays);
@@ -1039,11 +1364,11 @@ function createAdminApi({
 
       for (let i = 0; i < numKeys; i++) {
         const key = await entitlementService.createCode({
-          days: (Number.isInteger(Number(days)) && Number(days) >= 1 && Number(days) <= 36500) ? Number(days) : 30,
+          days: parsedDays,
           permanent: Boolean(permanent),
-          botCount: (Number.isInteger(Number(botCount)) && Number(botCount) >= 1 && Number(botCount) <= 100) ? Number(botCount) : 1,
+          botCount: parsedBotCount,
           workerIds: Array.isArray(workerIds) ? workerIds : [],
-          maxUses: (Number.isInteger(Number(maxUses)) && Number(maxUses) >= 1) ? Number(maxUses) : 1,
+          maxUses: parsedMaxUses,
           planName: planName || 'Standard',
           customCode: customKey,
           expiresAt,
@@ -1052,9 +1377,18 @@ function createAdminApi({
         generated.push(key);
       }
 
+      await store.addAudit?.({
+        action: 'ADMIN_CREATE_KEY',
+        actorId: req.managerAuthSession.username,
+        actorRole: 'admin',
+        actorIp: resolveClientIp(req) || '127.0.0.1',
+        details: { count: generated.length, days: parsedDays, botCount: parsedBotCount, maxUses: parsedMaxUses, permanent: Boolean(permanent) }
+      }).catch(() => null);
+
       return res.status(201).json({ ok: true, message: `Đã tạo ${generated.length} mã Giftcode thành công.`, keys: generated });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      const isValidation = /không hợp lệ|phải là|bắt buộc|tối đa|trùng|tồn tại|chỉ|fixed/i.test(error.message || '');
+      return res.status(isValidation ? 400 : 500).json({ ok: false, error: error.message });
     }
   });
 
@@ -1167,8 +1501,8 @@ function createAdminApi({
     }
   });
 
-  router.post('/supabase/config', async (req, res) => {
-    return res.json({ ok: true, message: 'Đã cập nhật cấu hình Supabase.' });
+  router.post('/supabase/config', async (_req, res) => {
+    return res.status(501).json({ ok: false, error: 'Cập nhật cấu hình Supabase lúc runtime không được hỗ trợ.' });
   });
 
   // 6. CLOUD BACKUPS
@@ -1181,11 +1515,61 @@ function createAdminApi({
     }
   });
 
+  async function fetchAllKeysForBackup() {
+    if (store?.client && typeof store.client.from === 'function') {
+      try {
+        const pageSize = 500;
+        const all = [];
+        for (let offset = 0; offset < 50000; offset += pageSize) {
+          const { data, error } = await store.client
+            .from('manager_keys')
+            .select('*')
+            .order('created_at', { ascending: false })
+            .range(offset, offset + pageSize - 1);
+          if (error) throw error;
+          if (!Array.isArray(data) || data.length === 0) break;
+          all.push(...data);
+          if (data.length < pageSize) break;
+        }
+        return all;
+      } catch (_) {}
+    }
+    if (entitlementService?.listCodes) {
+      return await entitlementService.listCodes(5000);
+    }
+    return [];
+  }
+
+  async function fetchAllSettingsForBackup() {
+    if (store?.client && typeof store.client.from === 'function') {
+      try {
+        const { data, error } = await store.client.from('manager_settings').select('key,value');
+        if (!error && Array.isArray(data)) {
+          const out = {};
+          for (const row of data) {
+            if (row?.key) out[row.key] = row.value;
+          }
+          return out;
+        }
+      } catch (_) {}
+    }
+    if (typeof store?.getSetting === 'function') {
+      const settingsObj = {};
+      for (const k of ['system_settings', 'system_announcement', 'system_maintenance', 'webhook_settings', 'discord_access', 'link4m_runtime']) {
+        const val = await store.getSetting(k).catch(() => null);
+        if (val !== null && val !== undefined) settingsObj[k] = val;
+      }
+      return settingsObj;
+    }
+    return {};
+  }
+
   async function buildBackupPayload() {
-    const [workers, accessUsers, keys] = await Promise.all([
+    const [workers, accessUsers, keys, settings] = await Promise.all([
       registry.list(),
       store.listAccess(),
-      entitlementService?.listCodes ? entitlementService.listCodes(500) : []
+      fetchAllKeysForBackup(),
+      fetchAllSettingsForBackup()
     ]);
     // Preserve encrypted passwords in backups so restore never wipes user login credentials
     let rawPasswordMap = new Map();
@@ -1209,6 +1593,7 @@ function createAdminApi({
       registry: workers,
       users: usersWithCreds,
       keys: Array.isArray(keys) ? keys : [],
+      settings: settings && typeof settings === 'object' ? settings : {},
       timestamp: new Date().toISOString()
     };
   }
@@ -1222,7 +1607,7 @@ function createAdminApi({
         action: 'ADMIN_CREATE_BACKUP',
         actorId: req.managerAuthSession.username,
         actorRole: 'admin',
-        actorIp: req.ip || '127.0.0.1',
+        actorIp: resolveClientIp(req) || '127.0.0.1',
         details: { filename: name, users: payload.users.length, workers: payload.registry.length, keys: payload.keys.length }
       });
       return res.json({ ok: true, message: 'Đã tạo bản sao lưu thành công.', filename: name, backup: { filename: name } });
@@ -1251,7 +1636,7 @@ function createAdminApi({
         }
       }
 
-      const summary = { workersRestored: 0, usersRestored: 0, keysRestored: 0, warnings: [] };
+      const summary = { workersRestored: 0, usersRestored: 0, keysRestored: 0, settingsRestored: 0, warnings: [] };
 
       // 1. Restore registry (idempotent: updates existing or recreates deleted workers)
       if (Array.isArray(backup.registry)) {
@@ -1265,11 +1650,21 @@ function createAdminApi({
             }
           }
         }
-      } else if (backup.registry && typeof registry.saveConfig === 'function') {
-        await registry.saveConfig(backup.registry);
+      } else if (backup.registry && typeof backup.registry === 'object' && typeof registry.saveConfig === 'function') {
+        for (const [wid, bot] of Object.entries(backup.registry)) {
+          const targetId = bot?.workerId || wid;
+          if (targetId && bot && typeof bot === 'object') {
+            try {
+              await registry.saveConfig(targetId, { ...bot, workerId: targetId });
+              summary.workersRestored += 1;
+            } catch (botErr) {
+              summary.warnings.push(`worker:${targetId}: ${botErr.message}`);
+            }
+          }
+        }
       }
 
-      // 2. Restore users
+      // 2. Restore users & revoke existing sessions so restored status/credentials apply immediately (API-04)
       if (Array.isArray(backup.users)) {
         for (const u of backup.users) {
           const userId = u.userId || u.id || u.username;
@@ -1282,6 +1677,7 @@ function createAdminApi({
               } else if (typeof store.createUser === 'function') {
                 await store.createUser(u);
               }
+              await revokeAllUserSessions(userId, u);
               summary.usersRestored += 1;
             } catch (userErr) {
               summary.warnings.push(`user:${userId}: ${userErr.message}`);
@@ -1295,14 +1691,14 @@ function createAdminApi({
         for (const k of backup.keys) {
           try {
             if (store.client && typeof store.client.from === 'function') {
-              const keyId = k.keyId || k.id || `key_${crypto.randomUUID()}`;
+              const keyId = k.keyId || k.key_id || k.id || `key_${crypto.randomUUID()}`;
               const rawCode = String(k.code || k.key || k.keyCode || '').trim();
               const normalizedCode = rawCode.toUpperCase().replace(/[^A-Z0-9-]/g, '');
               const computedHash = normalizedCode
                 ? crypto.createHash('sha256').update(normalizedCode).digest('hex')
                 : '';
               const row = {
-                id: keyId,
+                id: k.id || keyId,
                 key_id: keyId,
                 code: rawCode,
                 code_hash: k.codeHash || k.code_hash || computedHash,
@@ -1335,6 +1731,29 @@ function createAdminApi({
         }
       }
 
+      // 4. Restore manager_settings when present (API-14)
+      if (backup.settings && typeof backup.settings === 'object' && !Array.isArray(backup.settings)) {
+        for (const [settingKey, settingVal] of Object.entries(backup.settings)) {
+          if (!settingKey || settingVal === undefined) continue;
+          try {
+            if (typeof store?.setSetting === 'function') {
+              await store.setSetting(settingKey, settingVal);
+              summary.settingsRestored += 1;
+            } else if (store?.client && typeof store.client.from === 'function') {
+              const { error } = await store.client.from('manager_settings').upsert({
+                key: settingKey,
+                value: settingVal,
+                updated_at: new Date().toISOString()
+              }, { onConflict: 'key' });
+              if (error) throw error;
+              summary.settingsRestored += 1;
+            }
+          } catch (setErr) {
+            summary.warnings.push(`setting:${settingKey}: ${setErr.message}`);
+          }
+        }
+      }
+
       store?.invalidateCache?.();
       registry?.store?.invalidateCache?.();
 
@@ -1342,7 +1761,7 @@ function createAdminApi({
         action: 'ADMIN_RESTORE_BACKUP',
         actorId: req.managerAuthSession.username,
         actorRole: 'admin',
-        actorIp: req.ip || '127.0.0.1',
+        actorIp: resolveClientIp(req) || '127.0.0.1',
         details: { filename, ...summary }
       });
       return res.json({ ok: true, message: 'Đã khôi phục dữ liệu từ bản sao lưu.', summary });
@@ -1404,36 +1823,7 @@ function createAdminApi({
     return set;
   }
 
-  // 7. FLEET BULK CONTROLS (F-05: supports tag filter & unpacked settings)
-  router.post('/all/send', async (req, res) => {
-    const message = String(req.body?.text || req.body?.message || '').trim();
-    if (!message) return res.status(400).json({ ok: false, error: 'Tin nhắn không được để trống.' });
-    const tag = req.body?.tag || '';
-
-    try {
-      const [allWorkers, assignedSet] = await Promise.all([
-        registry.list(),
-        tag ? getAssignedWorkerIdSet() : Promise.resolve(new Set())
-      ]);
-      const matched = filterWorkersByTag(allWorkers, tag, assignedSet);
-      const onlineTargets = matched.filter((w) => w.status?.state === 'online');
-      const results = await Promise.allSettled(
-        onlineTargets.map((w) => broker.dispatch(w.workerId, 'chat', { message }))
-      );
-      const okCount = results.filter((r) => r.status === 'fulfilled' && r.value?.delivered !== false && r.value?.result?.ok !== false).length;
-      const failedCount = onlineTargets.length - okCount;
-      return res.json({
-        ok: true,
-        total: onlineTargets.length,
-        okCount,
-        failedCount,
-        message: `Đã phát tin nhắn tới ${okCount}/${onlineTargets.length} bot đang online.`
-      });
-    } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
-    }
-  });
-
+  // 7. BULK SETTINGS & LIFECYCLE CONTROLS
   router.post('/all/settings', async (req, res) => {
     try {
       const body = req.body || {};
@@ -1458,12 +1848,14 @@ function createAdminApi({
       const targets = filterWorkersByTag(allWorkers, tag, assignedSet);
       let okCount = 0;
       let failedCount = 0;
-      for (const worker of targets) {
-        try {
-          await registry.updateSettings(worker.workerId, settingsPatch);
-          okCount += 1;
-        } catch (_) {
-          failedCount += 1;
+      for (let i = 0; i < targets.length; i += 8) {
+        const chunk = targets.slice(i, i + 8);
+        const settled = await Promise.allSettled(
+          chunk.map((worker) => registry.updateSettings(worker.workerId, settingsPatch))
+        );
+        for (const r of settled) {
+          if (r.status === 'fulfilled') okCount += 1;
+          else failedCount += 1;
         }
       }
       return res.json({
@@ -1480,7 +1872,7 @@ function createAdminApi({
 
   router.post('/all/:action', async (req, res, next) => {
     const { action } = req.params;
-    if (['send', 'settings'].includes(action)) return next();
+    if (action === 'settings') return next();
     try {
       if (action === 'start') {
         const result = await fleetOperations.startAll({ respectManuallyStopped: false });
@@ -1525,11 +1917,58 @@ function createAdminApi({
         endDate,
         updatedAt
       };
-      store.cachedAnnouncement = record;
       if (store && typeof store.setSetting === 'function') {
         await store.setSetting('system_announcement', record);
       }
+      store.cachedAnnouncement = record;
       return res.json({ ok: true, message: 'Đã cập nhật thông báo hệ thống.', announcement: record });
+    } catch (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+  });
+
+  // 8.5. SYSTEM MAINTENANCE MODE (Lock / Reopen user worker controls)
+  router.get('/maintenance', async (_req, res) => {
+    try {
+      const maintenance = await getMaintenanceState(store);
+      return res.json({ ok: true, maintenance });
+    } catch (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+  });
+
+  router.post('/maintenance', async (req, res) => {
+    try {
+      const body = req.body || {};
+      const actor = req.managerAuthSession?.username || 'admin';
+      const maintenance = await setMaintenanceState(
+        store,
+        {
+          enabled: body.enabled,
+          message: body.message
+        },
+        actor
+      );
+      if (typeof store?.addAudit === 'function') {
+        await store.addAudit({
+          action: 'ADMIN_SET_MAINTENANCE',
+          targetId: 'system',
+          actorId: actor,
+          actorRole: 'admin',
+          actorIp: resolveClientIp(req) || '127.0.0.1',
+          details: {
+            enabled: maintenance.enabled,
+            message: maintenance.message
+          }
+        }).catch(() => {});
+      }
+      return res.json({
+        ok: true,
+        maintenance,
+        message: maintenance.enabled
+          ? 'Đã BẬT chế độ bảo trì — tạm khóa thao tác worker đối với người dùng.'
+          : 'Đã TẮT chế độ bảo trì — đã mở lại thao tác worker cho người dùng.'
+      });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
     }
@@ -1557,13 +1996,22 @@ function createAdminApi({
     return base;
   }
 
+  function maskWebhookView(webhook) {
+    return {
+      ...webhook,
+      discordUrl: webhook.discordUrl ? '********' : '',
+      telegramToken: webhook.telegramToken ? '********' : ''
+    };
+  }
+
   router.get('/webhook', async (_req, res) => {
     try {
       const webhook = await loadWebhookSettings();
+      const masked = maskWebhookView(webhook);
       return res.json({
         ok: true,
-        webhook,
-        webhookUrl: webhook.discordUrl
+        webhook: masked,
+        webhookUrl: masked.discordUrl
       });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
@@ -1572,18 +2020,27 @@ function createAdminApi({
 
   router.post('/webhook', async (req, res) => {
     try {
+      const saved = await loadWebhookSettings();
       const incoming = req.body?.webhook && typeof req.body.webhook === 'object' ? req.body.webhook : (req.body || {});
       const normalized = normalizeWebhookSettings(incoming);
+      if (normalized.discordUrl === '********') normalized.discordUrl = saved.discordUrl;
+      if (normalized.telegramToken === '********') normalized.telegramToken = saved.telegramToken;
       if (normalized.discordUrl) {
         normalized.discordUrl = validateDiscordWebhookUrl(normalized.discordUrl);
       }
       const encKey = registry?.encryptionKey || config?.encryptionKey;
+      if ((normalized.discordUrl || normalized.telegramToken) && !encKey) {
+        return res.status(500).json({
+          ok: false,
+          error: 'Chưa cấu hình MANAGER_ENCRYPTION_KEY nên không thể mã hóa và lưu thông tin Webhook/Token an toàn.'
+        });
+      }
       const toPersist = {
         enabled: normalized.enabled,
-        discordUrl: encKey ? '' : normalized.discordUrl,
-        discordUrlCiphertext: normalized.discordUrl && encKey ? encryptSecret(normalized.discordUrl, encKey) : null,
-        telegramToken: encKey ? '' : normalized.telegramToken,
-        telegramTokenCiphertext: normalized.telegramToken && encKey ? encryptSecret(normalized.telegramToken, encKey) : null,
+        discordUrl: '',
+        discordUrlCiphertext: normalized.discordUrl ? encryptSecret(normalized.discordUrl, encKey) : null,
+        telegramToken: '',
+        telegramTokenCiphertext: normalized.telegramToken ? encryptSecret(normalized.telegramToken, encKey) : null,
         telegramChatId: normalized.telegramChatId,
         notifyOnOffline: normalized.notifyOnOffline,
         notifyOnRecover: normalized.notifyOnRecover,
@@ -1601,11 +2058,12 @@ function createAdminApi({
       } else if (adminNotifier && typeof adminNotifier.setTelegramConfig === 'function') {
         adminNotifier.setTelegramConfig(normalized.telegramToken, normalized.telegramChatId);
       }
+      const masked = maskWebhookView(normalized);
       return res.json({
         ok: true,
         message: 'Đã lưu cấu hình Webhook thông báo thành công.',
-        webhook: normalized,
-        webhookUrl: normalized.discordUrl
+        webhook: masked,
+        webhookUrl: masked.discordUrl
       });
     } catch (error) {
       const status = /Webhook URL|không đúng định dạng|HTTPS/i.test(error.message) ? 400 : 500;
@@ -1617,10 +2075,14 @@ function createAdminApi({
     try {
       const saved = await loadWebhookSettings();
       const incoming = req.body?.webhook && typeof req.body.webhook === 'object' ? req.body.webhook : (req.body || {});
+      const incomingDiscord = incoming.discordUrl !== undefined || incoming.webhookUrl !== undefined
+        ? (incoming.discordUrl ?? incoming.webhookUrl)
+        : undefined;
+      const incomingToken = incoming.telegramToken;
       const target = normalizeWebhookSettings({
         ...saved,
-        ...(incoming.discordUrl !== undefined || incoming.webhookUrl !== undefined ? { discordUrl: incoming.discordUrl ?? incoming.webhookUrl } : {}),
-        ...(incoming.telegramToken !== undefined ? { telegramToken: incoming.telegramToken } : {}),
+        ...(incomingDiscord !== undefined && incomingDiscord !== '********' ? { discordUrl: incomingDiscord } : {}),
+        ...(incomingToken !== undefined && incomingToken !== '********' ? { telegramToken: incomingToken } : {}),
         ...(incoming.telegramChatId !== undefined ? { telegramChatId: incoming.telegramChatId } : {})
       });
       if (target.discordUrl) {
@@ -1703,7 +2165,9 @@ function createAdminApi({
       if (typeof store.getSetting === 'function') {
         persisted = await store.getSetting('system_settings').catch(() => null);
       } else if (store.client) {
-        const { data } = await store.client.from('manager_settings').select('value').eq('key', 'system_settings').maybeSingle().catch(() => ({}));
+        const { data } = await Promise.resolve(
+          store.client.from('manager_settings').select('value').eq('key', 'system_settings').maybeSingle()
+        ).catch(() => ({}));
         persisted = data?.value;
       }
 
@@ -1740,7 +2204,9 @@ function createAdminApi({
     try {
       const rawPatch = req.body || {};
       const patch = {};
-      if (rawPatch.publicBaseUrl !== undefined) patch.publicBaseUrl = String(rawPatch.publicBaseUrl || '').trim().slice(0, 512);
+      if (rawPatch.publicBaseUrl !== undefined) {
+        patch.publicBaseUrl = validateHttpOrHttpsUrl(String(rawPatch.publicBaseUrl || '').trim().slice(0, 512), 'publicBaseUrl');
+      }
       if (rawPatch.trialGiftEnabled !== undefined) patch.trialGiftEnabled = Boolean(rawPatch.trialGiftEnabled);
       if (rawPatch.trialDays !== undefined) {
         const daysNum = Number(rawPatch.trialDays);
@@ -1757,7 +2223,9 @@ function createAdminApi({
         const modeVal = String(rawPatch.link4mMode || 'api').trim().toLowerCase();
         patch.link4mMode = ['api', 'custom_url'].includes(modeVal) ? modeVal : 'api';
       }
-      if (rawPatch.link4mUrl !== undefined) patch.link4mUrl = String(rawPatch.link4mUrl || '').trim().slice(0, 512);
+      if (rawPatch.link4mUrl !== undefined) {
+        patch.link4mUrl = validateHttpOrHttpsUrl(String(rawPatch.link4mUrl || '').trim().slice(0, 512), 'link4mUrl');
+      }
       if (rawPatch.link4mRewardHours !== undefined) {
         const hrs = Number(rawPatch.link4mRewardHours);
         if (!Number.isInteger(hrs) || hrs < 1 || hrs > 48) {
@@ -1777,18 +2245,24 @@ function createAdminApi({
       if (rawPatch.link4mApiToken !== undefined) {
         const rawTok = String(rawPatch.link4mApiToken || '').trim();
         if (rawTok !== '********') {
+          if (rawTok && !encKey) {
+            return res.status(500).json({ ok: false, error: 'Chưa cấu hình MANAGER_ENCRYPTION_KEY để mã hóa Link4M API token.' });
+          }
           newApiToken = rawTok;
           patch.link4mApiToken = rawTok ? '********' : '';
-          patch.link4mApiTokenCiphertext = rawTok && encKey ? encryptSecret(rawTok, encKey) : null;
+          patch.link4mApiTokenCiphertext = rawTok ? encryptSecret(rawTok, encKey) : null;
         }
       }
       let newSecretKey = null;
       if (rawPatch.link4mSecretKey !== undefined) {
         const rawSec = String(rawPatch.link4mSecretKey || '').trim();
         if (rawSec !== '********') {
+          if (rawSec && !encKey) {
+            return res.status(500).json({ ok: false, error: 'Chưa cấu hình MANAGER_ENCRYPTION_KEY để mã hóa Link4M secret key.' });
+          }
           newSecretKey = rawSec;
           patch.link4mSecretKey = rawSec ? '********' : '';
-          patch.link4mSecretKeyCiphertext = rawSec && encKey ? encryptSecret(rawSec, encKey) : null;
+          patch.link4mSecretKeyCiphertext = rawSec ? encryptSecret(rawSec, encKey) : null;
         }
       }
 
@@ -1799,7 +2273,9 @@ function createAdminApi({
           currentSettings = persisted;
         }
       } else if (store.client) {
-        const { data } = await store.client.from('manager_settings').select('value').eq('key', 'system_settings').maybeSingle().catch(() => ({}));
+        const { data } = await Promise.resolve(
+          store.client.from('manager_settings').select('value').eq('key', 'system_settings').maybeSingle()
+        ).catch(() => ({}));
         if (data?.value && typeof data.value === 'object') {
           currentSettings = data.value;
         }
@@ -1832,7 +2308,7 @@ function createAdminApi({
         }, { onConflict: 'key' });
       }
 
-      // Synchronize live Link4mService runtime config immediately
+      // Synchronize live Link4mService runtime config immediately without mutating frozen config in place
       if (link4mService) {
         if (typeof link4mService.configure === 'function' && (
           patch.link4mRewardEnabled !== undefined ||
@@ -1845,10 +2321,18 @@ function createAdminApi({
             dailyLimit: mergedSettings.link4mDailyLimit
           }).catch(() => {});
         }
-        if (link4mService.config) {
-          if (patch.publicBaseUrl !== undefined) link4mService.config.publicBaseUrl = mergedSettings.publicBaseUrl;
-          if (newApiToken !== null) link4mService.config.link4mApiToken = newApiToken;
-          if (newSecretKey !== null) link4mService.config.link4mSecretKey = newSecretKey;
+        const hasCredUpdates = patch.publicBaseUrl !== undefined || newApiToken !== null || newSecretKey !== null;
+        if (hasCredUpdates) {
+          const credUpdate = {
+            ...(patch.publicBaseUrl !== undefined ? { publicBaseUrl: mergedSettings.publicBaseUrl } : {}),
+            ...(newApiToken !== null ? { link4mApiToken: newApiToken } : {}),
+            ...(newSecretKey !== null ? { link4mSecretKey: newSecretKey } : {})
+          };
+          if (typeof link4mService.setRuntimeCredentials === 'function') {
+            link4mService.setRuntimeCredentials(credUpdate);
+          } else if (link4mService.config) {
+            link4mService.config = { ...link4mService.config, ...credUpdate };
+          }
         }
       }
 
@@ -1862,7 +2346,8 @@ function createAdminApi({
         settings: publicResponse
       });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      const status = error.status === 400 ? 400 : 500;
+      return res.status(status).json({ ok: false, error: error.message });
     }
   });
 
@@ -1914,7 +2399,7 @@ function createAdminApi({
         action: 'ADMIN_VIEW_BOT_CREDENTIALS',
         actorId: req.managerAuthSession?.username || 'admin',
         actorRole: 'admin',
-        actorIp: req.ip || '127.0.0.1',
+        actorIp: resolveClientIp(req) || '127.0.0.1',
         details: { method: 'GET', botCount: bots.length }
       }).catch(() => null);
       return res.json({ ok: true, bots });
@@ -1925,13 +2410,22 @@ function createAdminApi({
 
   router.post('/admin/credentials', async (req, res) => {
     try {
-      const body = req.body || {};
-      const newPassword = body.password || body.newPassword;
-      if (newPassword) {
+      const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+      const bodyKeys = Object.keys(body);
+      const hasPasswordField = Object.prototype.hasOwnProperty.call(body, 'password')
+        || Object.prototype.hasOwnProperty.call(body, 'newPassword');
+      const actorIp = resolveClientIp(req) || '127.0.0.1';
+
+      if (hasPasswordField) {
+        const invalidExtra = bodyKeys.some((k) => k !== 'password' && k !== 'newPassword');
+        if (invalidExtra) {
+          return res.status(400).json({ ok: false, error: 'Tham số không hợp lệ.' });
+        }
+        const newPassword = Object.prototype.hasOwnProperty.call(body, 'password') ? body.password : body.newPassword;
         if (typeof newPassword !== 'string' || newPassword.length < 6 || newPassword.length > 256) {
           return res.status(400).json({ ok: false, error: 'Mật khẩu phải dài từ 6 đến 256 ký tự.' });
         }
-        const hashed = hashAdminPassword(newPassword);
+        const hashed = await hashAdminPasswordAsync(newPassword);
         if (store && typeof store.setSetting === 'function') {
           await store.setSetting('admin_credentials', { passwordHash: hashed, updatedAt: new Date().toISOString() });
         }
@@ -1946,16 +2440,27 @@ function createAdminApi({
         if (typeof store?.adapter?.revokeAdminSessions === 'function') {
           await store.adapter.revokeAdminSessions(currentTokenHash).catch(() => null);
         }
+        await store.addAudit?.({
+          action: 'ADMIN_CHANGE_PASSWORD',
+          targetId: 'admin',
+          actorId: req.managerAuthSession?.username || 'admin',
+          actorRole: 'admin',
+          actorIp
+        }).catch(() => null);
         return res.json({ ok: true, message: 'Đã cập nhật mật khẩu quản trị viên.' });
       }
 
-      // If no password change requested, return bots list (for UI modal and backward compatibility)
+      if (bodyKeys.length > 0) {
+        return res.status(400).json({ ok: false, error: 'Tham số không hợp lệ.' });
+      }
+
+      // Empty body preserves Dashboard UI modal & backward compatibility (API-06)
       const bots = await listAllBotCredentials();
       await store.addAudit?.({
         action: 'ADMIN_VIEW_BOT_CREDENTIALS',
         actorId: req.managerAuthSession?.username || 'admin',
         actorRole: 'admin',
-        actorIp: req.ip || '127.0.0.1',
+        actorIp,
         details: { method: 'POST', botCount: bots.length }
       }).catch(() => null);
       return res.json({ ok: true, bots });
@@ -1966,11 +2471,11 @@ function createAdminApi({
 
   // 11. PENDING RESETS
   router.get('/pending-resets', async (_req, res) => {
-    return res.json({ ok: true, resets: [] });
+    return res.status(501).json({ ok: false, error: 'Endpoint pending-resets không còn được hỗ trợ.' });
   });
 
   router.post('/pending-resets/all/resolve', async (_req, res) => {
-    return res.json({ ok: true, message: 'Đã xử lý tất cả yêu cầu reset.' });
+    return res.status(501).json({ ok: false, error: 'Endpoint pending-resets không còn được hỗ trợ.' });
   });
 
   // 12. DIAGNOSTICS & SYSTEM METRICS

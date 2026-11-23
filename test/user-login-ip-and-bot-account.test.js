@@ -48,8 +48,8 @@ test('IP-RESOLUTION-01: resolveClientIp prioritizes headers correctly', () => {
   };
   assert.strictEqual(resolveClientIp(reqDirect), '171.244.10.20');
 
-  // 5. Fallback to 127.0.0.1 on invalid/empty request
-  assert.strictEqual(resolveClientIp({}), '127.0.0.1');
+  // 5. Fallback to 0.0.0.0 fail-closed sentinel on invalid/empty request (AUTH-01)
+  assert.strictEqual(resolveClientIp({}), '0.0.0.0');
 });
 
 test('ADMIN-API-02: GET /users includes lastLoginIp and botMinecraftUser', async () => {
@@ -71,7 +71,7 @@ test('ADMIN-API-02: GET /users includes lastLoginIp and botMinecraftUser', async
       role: 'user',
       status: 'active',
       registrationIp: '42.112.33.44',
-      // lastLoginIp not set -> should fallback to registrationIp
+      // lastLoginIp not set -> must NOT fabricate fallback from registrationIp (API-10)
       workerIds: []
     }
   ];
@@ -120,7 +120,8 @@ test('ADMIN-API-02: GET /users includes lastLoginIp and botMinecraftUser', async
     assert.strictEqual(data.users.length, 2);
     assert.strictEqual(data.users[0].lastLoginIp, '14.232.100.200');
     assert.strictEqual(data.users[0].registrationIp, '127.0.0.1');
-    assert.strictEqual(data.users[1].lastLoginIp, '42.112.33.44');
+    assert.strictEqual(data.users[1].lastLoginIp, '');
+    assert.strictEqual(data.users[1].registrationIp, '42.112.33.44');
 
     // Verify availableBots includes Minecraft account name
     assert.strictEqual(data.availableBots.length, 1);
