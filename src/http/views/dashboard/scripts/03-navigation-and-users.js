@@ -944,7 +944,7 @@ function renderUserTable() {
 
     // Cột 6: Thao tác
     const actionsCol = '<div style="text-align:right;white-space:nowrap;">' +
-      '<button type="button" class="small" data-user-action="edit" data-user-id="' + uidAttr + '">✏ Sửa</button> ' +
+      '<button type="button" class="small" data-user-action="edit" data-user-id="' + uidAttr + '">✏️ Sửa</button> ' +
       (isAdmin ? '' : '<button type="button" class="small danger" data-user-action="delete" data-user-id="' + uidAttr + '" data-username="' + unameAttr + '">🗑 Xóa</button>') +
     '</div>';
 

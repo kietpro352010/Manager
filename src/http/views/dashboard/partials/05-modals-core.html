@@ -99,13 +99,13 @@
         Người dùng vẫn có thể đăng nhập Web để xem trạng thái hoặc gia hạn key, nhưng toàn bộ thẻ Worker sẽ hiển thị làm mờ và khóa thao tác điều khiển (Web &amp; Discord) cho tới khi bạn tắt bảo trì. Quản trị viên vẫn thao tác bình thường.
       </div>
 
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:rgba(15,23,42,0.6);border:1px solid var(--border);border-radius:8px;">
-        <label for="maintenanceModalEnabled" style="margin:0;cursor:pointer;">
-          <strong style="color:var(--text);display:block;">Bật chế độ bảo trì hệ thống:</strong>
-          <span style="font-size:11.5px;color:var(--muted);">Khóa tạm thời toàn bộ thao tác Worker đối với tài khoản khách</span>
-        </label>
-        <input type="checkbox" id="maintenanceModalEnabled" style="width:20px;height:20px;cursor:pointer;">
-      </div>
+      <label class="check-row" for="maintenanceModalEnabled" style="justify-content:space-between;padding:12px 14px;margin:0;">
+        <span style="min-width:0;flex:1;">
+          <strong style="color:var(--text);display:block;font-size:13px;">Bật chế độ bảo trì hệ thống</strong>
+          <span style="font-size:11.5px;color:var(--muted);display:block;margin-top:2px;">Khóa tạm thời toàn bộ thao tác Worker đối với tài khoản khách</span>
+        </span>
+        <input type="checkbox" id="maintenanceModalEnabled">
+      </label>
 
       <div>
         <label for="maintenanceModalMessage" style="font-weight:700;display:block;margin-bottom:6px;color:var(--text);">Thông báo bảo trì hiển thị cho người dùng:</label>
@@ -487,7 +487,10 @@
 </div>
 <div id="userEditModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="userEditModalTitle">
   <div class="modal-card" style="width:min(580px, 98vw);">
-    <h3 id="userEditModalTitle">Thêm Người Dùng Mới</h3>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:14px;">
+      <h3 id="userEditModalTitle" style="margin:0;">Thêm Người Dùng Mới</h3>
+      <button type="button" class="small" onclick="closeUserEditModal()" aria-label="Đóng">✕</button>
+    </div>
     <input id="userFormId" type="hidden">
     <div class="form-row">
       <label for="userFormUsername">Tên đăng nhập (Username)</label>
@@ -496,14 +499,14 @@
     <div class="form-row">
       <label for="userFormPassword">Mật khẩu (Password)</label>
       <div class="password-input-wrap" style="display:flex;gap:6px;align-items:center;">
-        <input id="userFormPassword" type="password" autocomplete="new-password" placeholder="Nhập mật khẩu (tối thiểu 6 ký tự)..." style="flex:1;padding-right:66px;">
-        <button type="button" class="password-toggle-btn" style="right:36px;" aria-label="Hiện mật khẩu" aria-pressed="false" onclick="togglePasswordVisibility('userFormPassword', this)">👁</button>
+        <input id="userFormPassword" type="password" autocomplete="new-password" placeholder="Nhập mật khẩu (tối thiểu 6 ký tự)..." style="flex:1;padding-right:86px;">
+        <button type="button" class="password-toggle-btn" style="right:42px;" aria-label="Hiện mật khẩu" aria-pressed="false" onclick="togglePasswordVisibility('userFormPassword', this)">👁</button>
         <button type="button" class="password-toggle-btn" onclick="generateRandomUserPassword()" title="Tạo mật khẩu ngẫu nhiên" aria-label="Tạo mật khẩu ngẫu nhiên">🎲</button>
       </div>
     </div>
     <div class="form-row">
       <label for="userFormStatus">Trạng thái tài khoản</label>
-      <select id="userFormStatus" class="search-box" style="width:100%;">
+      <select id="userFormStatus" style="width:100%;">
         <option value="active">🟢 Đang hoạt động (Cho phép đăng nhập)</option>
         <option value="expired">⚠️ Hết hạn thuê</option>
         <option value="disabled">🔴 Tạm khóa (Không thể đăng nhập)</option>

@@ -9,42 +9,47 @@
         </div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-        <div class="admin-only" style="display:inline-flex;align-items:center;gap:6px;background:var(--card2);border:1px solid var(--border-strong);border-radius:8px;padding:3px 8px;">
-          <button type="button" id="trialGiftToggleBtn" class="small" onclick="toggleTrialGiftSetting()" title="Bật/Tắt chế độ tặng dùng thử kèm bot trống cho người mới" style="background:transparent !important;border:none !important;color:var(--accent-text) !important;font-weight:700;padding:2px 4px;cursor:pointer;">
-            <span id="trialGiftBtnLabel">🎁 Tặng Dùng Thử:</span> <span id="trialGiftStatusBadge">BẬT</span>
-          </button>
-          <span style="color:var(--border);">|</span>
-          <label for="trialDaysInput" style="font-size:12px;color:var(--muted);display:inline-flex;align-items:center;gap:4px;margin:0;">
-            <span>Số ngày:</span>
-            <input type="number" id="trialDaysInput" min="1" max="365" value="1" title="Số ngày dùng thử tặng khi đăng ký tài khoản mới" style="width:52px;padding:3px 6px;font-size:12px;border-radius:4px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);text-align:center;" onchange="saveTrialDaysSetting()">
-            <span style="font-size:11px;">ngày</span>
-          </label>
-        </div>
-
-        <!-- CỤM CẤU HÌNH VƯỢT LINK +12H (ADMIN) -->
-        <div class="admin-only" style="display:inline-flex;align-items:center;gap:6px;background:var(--card2);border:1px solid rgba(234,179,8,0.38);border-radius:8px;padding:3px 8px;">
-          <button type="button" id="link4mToggleBtn" class="small" onclick="toggleLink4mSetting()" title="Bật/Tắt tính năng vượt link Link4M nhận +12h" style="background:transparent !important;border:none !important;color:var(--yellow) !important;font-weight:700;padding:2px 4px;cursor:pointer;">
-            <span id="link4mBtnLabel">⚡ Vượt Link +12h:</span> <span id="link4mStatusBadge">TẮT</span>
-          </button>
-          <span style="color:var(--border);">|</span>
-          <button type="button" class="small" onclick="openLink4mConfigModal()" title="Cấu hình Link rút gọn hoặc API Token Link4M" style="background:rgba(234,179,8,0.14);border:1px solid rgba(234,179,8,0.35);color:var(--yellow);padding:2px 8px;border-radius:5px;cursor:pointer;font-weight:600;">
-            ⚙ Cấu hình Link
-          </button>
-        </div>
-
-        <!-- CỤM BẢO TRÌ HỆ THỐNG (KHÓA / MỞ WORKER CHO USER - ADMIN) -->
-        <div id="maintenanceControlGroup" class="admin-only" style="display:inline-flex;align-items:center;gap:6px;background:var(--card2);border:1px solid rgba(245,158,11,0.38);border-radius:8px;padding:3px 8px;">
-          <button type="button" id="maintenanceToggleBtn" class="small" onclick="toggleMaintenanceSetting()" title="Bật/Tắt chế độ bảo trì — tạm khóa toàn bộ thao tác worker của người dùng" style="background:transparent !important;border:none !important;color:#fbbf24 !important;font-weight:700;padding:2px 4px;cursor:pointer;">
-            <span id="maintenanceBtnLabel">🛠️ Bảo Trì Worker:</span> <span id="maintenanceStatusBadge" style="color:#94a3b8;">TẮT</span>
-          </button>
-          <span style="color:var(--border);">|</span>
-          <button type="button" id="maintenanceConfigBtn" class="small" onclick="openMaintenanceConfigModal()" title="Soạn thông báo bảo trì và bật/tắt khóa worker" style="background:rgba(245,158,11,0.14);border:1px solid rgba(245,158,11,0.35);color:#fbbf24;padding:2px 8px;border-radius:5px;cursor:pointer;font-weight:600;">
-            ⚙ Thông báo
-          </button>
-        </div>
         <button type="button" class="primary" onclick="openCreateUserModal()">＋ Thêm Người Dùng Mới</button>
         <button type="button" class="secondary" onclick="switchUserMgmtSubTab('keys')">🎟️ Quản Lý Key</button>
         <button type="button" class="small" onclick="refreshUserManagementPage()">↻ Làm mới</button>
+      </div>
+    </div>
+
+    <!-- CỤM ĐIỀU KHIỂN DỊCH VỤ ADMIN (CĂN THẲNG HÀNG 3 CỘT PC / 1 CỘT MOBILE) -->
+    <div class="admin-controls-strip admin-only">
+      <div class="admin-control-card">
+        <button type="button" id="trialGiftToggleBtn" class="small" onclick="toggleTrialGiftSetting()" title="Bật/Tắt chế độ tặng dùng thử kèm bot trống cho người mới" style="background:transparent !important;border:none !important;color:var(--accent-text) !important;font-weight:700;padding:2px 4px;cursor:pointer;">
+          <span id="trialGiftBtnLabel">🎁 Tặng Dùng Thử:</span> <span id="trialGiftStatusBadge">BẬT</span>
+        </button>
+        <label for="trialDaysInput" class="admin-control-card-right" style="font-size:12px;color:var(--muted);margin:0;">
+          <span>Số ngày:</span>
+          <input type="number" id="trialDaysInput" min="1" max="365" value="1" title="Số ngày dùng thử tặng khi đăng ký tài khoản mới" style="width:54px;padding:4px 6px;font-size:12px;border-radius:6px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);text-align:center;" onchange="saveTrialDaysSetting()">
+          <span style="font-size:11px;">ngày</span>
+        </label>
+      </div>
+
+      <!-- CỤM CẤU HÌNH VƯỢT LINK +12H (ADMIN) -->
+      <div class="admin-control-card yellow">
+        <button type="button" id="link4mToggleBtn" class="small" onclick="toggleLink4mSetting()" title="Bật/Tắt tính năng vượt link Link4M nhận +12h" style="background:transparent !important;border:none !important;color:var(--yellow) !important;font-weight:700;padding:2px 4px;cursor:pointer;">
+          <span id="link4mBtnLabel">⚡ Vượt Link +12h:</span> <span id="link4mStatusBadge">TẮT</span>
+        </button>
+        <div class="admin-control-card-right">
+          <button type="button" class="small warning-btn" onclick="openLink4mConfigModal()" title="Cấu hình Link rút gọn hoặc API Token Link4M" style="padding:4px 10px;border-radius:6px;cursor:pointer;font-weight:600;">
+            ⚙ Cấu hình Link
+          </button>
+        </div>
+      </div>
+
+      <!-- CỤM BẢO TRÌ HỆ THỐNG (KHÓA / MỞ WORKER CHO USER - ADMIN) -->
+      <div id="maintenanceControlGroup" class="admin-control-card amber">
+        <button type="button" id="maintenanceToggleBtn" class="small" onclick="toggleMaintenanceSetting()" title="Bật/Tắt chế độ bảo trì — tạm khóa toàn bộ thao tác worker của người dùng" style="background:transparent !important;border:none !important;color:#fbbf24 !important;font-weight:700;padding:2px 4px;cursor:pointer;">
+          <span id="maintenanceBtnLabel">🛠️ Bảo Trì Worker:</span> <span id="maintenanceStatusBadge" style="color:#94a3b8;">TẮT</span>
+        </button>
+        <div class="admin-control-card-right">
+          <button type="button" id="maintenanceConfigBtn" class="small warning-btn" onclick="openMaintenanceConfigModal()" title="Soạn thông báo bảo trì và bật/tắt khóa worker" style="padding:4px 10px;border-radius:6px;cursor:pointer;font-weight:600;">
+            ⚙ Thông báo
+          </button>
+        </div>
       </div>
     </div>
 
@@ -78,7 +83,7 @@
       </div>
 
       <!-- USER TABLE -->
-      <div class="user-table-wrap">
+      <div class="user-table-wrap" tabindex="0" role="region" aria-label="Bảng danh sách người dùng">
         <table class="user-table">
           <thead>
             <tr>
@@ -279,7 +284,7 @@
     </div>
 
     <!-- TABLE WRAP -->
-    <div class="user-table-wrap" style="overflow-y:auto;max-height:65vh;">
+    <div class="user-table-wrap" tabindex="0" role="region" aria-label="Bảng nhật ký hoạt động Audit" style="overflow-y:auto;max-height:65vh;">
       <table class="user-table" style="font-size:12px;">
         <thead>
           <tr>

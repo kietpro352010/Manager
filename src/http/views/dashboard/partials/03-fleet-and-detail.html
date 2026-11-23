@@ -32,18 +32,18 @@
       </div>
       <div id="systemMaintenanceAdminActions" class="admin-only" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
         <button type="button" class="small primary" onclick="toggleMaintenanceSetting()">🔓 Mở lại Worker</button>
-        <button type="button" class="small secondary" onclick="openMaintenanceConfigModal()">✏ Sửa thông báo</button>
+        <button type="button" class="small secondary" onclick="openMaintenanceConfigModal()">✏️ Sửa thông báo</button>
       </div>
     </div>
 
     <!-- User Rental Banner (Prominently displaying expiration date, hours, minutes and live countdown) -->
     <div id="userRentalDashboardBanner" class="user-rental-dashboard-banner" style="display:none;margin-bottom:16px;padding:14px 18px;border-radius:12px;background:rgba(30,41,59,0.7);border:1px solid rgba(59,130,246,0.35);backdrop-filter:blur(8px);align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
-      <div style="display:flex;align-items:center;gap:12px;">
-        <div style="font-size:26px;" id="userRentalBannerIcon">⏳</div>
-        <div>
-          <div style="font-size:14px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:8px;">
+      <div style="display:flex;align-items:center;gap:12px;min-width:0;flex:1 1 auto;">
+        <div style="font-size:26px;flex-shrink:0;" id="userRentalBannerIcon">⏳</div>
+        <div style="min-width:0;">
+          <div style="font-size:14px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <span id="userRentalBannerTitle">Thông Tin Thuê Dịch Vụ Của Bạn:</span>
-            <span id="userRentalBannerPlan" style="font-size:12px;padding:2px 8px;border-radius:6px;background:rgba(59,130,246,0.2);color:#60a5fa;border:1px solid rgba(59,130,246,0.3);">Gói thường</span>
+            <span id="userRentalBannerPlan" style="font-size:12px;padding:2px 8px;border-radius:6px;background:rgba(59,130,246,0.2);color:#60a5fa;border:1px solid rgba(59,130,246,0.3);white-space:nowrap;flex-shrink:0;">Gói thường</span>
           </div>
           <div style="font-size:13px;color:var(--muted);margin-top:3px;">
             Hạn sử dụng: <b id="userRentalBannerExactTime" style="color:var(--text);font-family:monospace;">--:-- - --/--/----</b>
@@ -175,7 +175,7 @@
         <button type="button" class="tab-btn" id="tabUnreachable" onclick="setStatusFilter('unreachable')">⚠️ Lỗi/Unreachable (<span id="countUnreachable">0</span>)</button>
       </div>
       <div class="fleet-search-sort-wrap">
-        <input id="searchInput" type="search" aria-label="Tìm kiếm bot theo tên, tài khoản ingame hoặc IP" class="search-box" placeholder="🔍 Tìm bot (tên, user ingame, IP...)" oninput="filterBots()">
+        <input id="searchInput" type="search" aria-label="Tìm kiếm bot theo tên, tài khoản ingame hoặc IP" class="search-box" placeholder="🔍 Tìm bot, username, IP..." oninput="filterBots()">
         <select id="sortBotsSelect" aria-label="Sắp xếp danh sách bot" class="sort-select" onchange="changeBotSort(this.value)">
           <option value="default">Sắp xếp: Mặc định</option>
           <option value="status">Sắp xếp: Ưu tiên Online</option>
@@ -209,9 +209,9 @@
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
         <button type="button" class="small back-btn" onclick="goHome()">← Quay về Dashboard</button>
         <div class="title-wrap">
-          <div style="display:flex;align-items:center;gap:10px;">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <div id="detailTitle" class="detail-title">Bot</div>
-            <button type="button" class="small" onclick="renameDetailBotAlias()" title="Đổi tên hiển thị / Ghi chú cho bot này" style="padding:3px 10px;font-size:11px;font-weight:600;border-radius:6px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:var(--text);cursor:pointer;">✏ Đổi tên / Ghi chú</button>
+            <button type="button" class="small" onclick="renameDetailBotAlias()" title="Đổi tên hiển thị / Ghi chú cho bot này" style="padding:4px 10px;font-size:11.5px;font-weight:600;border-radius:6px;white-space:nowrap;flex-shrink:0;">✏️ Đổi tên / Ghi chú</button>
           </div>
           <div class="detail-subtitle">Quản lý, theo dõi và đồng bộ cấu hình bot</div>
         </div>

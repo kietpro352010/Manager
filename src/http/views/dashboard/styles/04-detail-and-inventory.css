@@ -106,6 +106,7 @@
 }
 .detail-grid {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: stretch;
   grid-template-areas:
     "status gui"
     "chat events"
@@ -118,7 +119,23 @@
   min-width: 0;
 }
 #detailStatusPanel { grid-area: status; }
-#detailRemoteGuiCard { grid-area: gui; }
+#detailStatusPanel .info-item:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+body.user-mode #detailStatusPanel .info-item:last-child {
+  grid-column: auto;
+}
+#detailRemoteGuiCard {
+  grid-area: gui;
+  display: flex;
+  flex-direction: column;
+}
+#detailRemoteGuiPlaceholder {
+  margin-block: auto;
+}
+#detailRemoteGuiContent {
+  margin-top: 4px;
+}
 #detailChatPanel { grid-area: chat; }
 #detailEventPanel { grid-area: events; }
 #detailInventoryPanel { grid-area: inventory; }
@@ -188,10 +205,23 @@
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+  align-items: stretch;
   margin-top: 14px;
 }
 .controls button {
-  flex: 1 1 110px;
+  flex: 1 1 95px;
+  min-block-size: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+#detailResetCustomerBtn {
+  flex: 1 1 100%;
+  margin-left: 0 !important;
+  white-space: normal;
+  text-align: center;
 }
 
 .chat-panel {
@@ -208,6 +238,17 @@
 .chat-row {
   display: flex;
   gap: 8px;
+  align-items: stretch;
+}
+.chat-row input {
+  flex: 1 1 0%;
+  width: auto;
+  min-width: 0;
+}
+.chat-row button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  min-width: 72px;
 }
 .chat-form {
   margin-top: 10px;

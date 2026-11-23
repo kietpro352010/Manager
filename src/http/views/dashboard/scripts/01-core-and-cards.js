@@ -586,7 +586,7 @@ function botCardHtml(bot) {
         '<div class="bot-error-text">❌ <strong>URL không tồn tại (404):</strong> URL worker bị sai hoặc app đã bị xoá khỏi Render.</div>' +
         '<div style="display:flex;gap:4px;">' +
           (isAdmin ? '<button type="button" class="bot-action-chip danger" onclick="event.stopPropagation(); deleteBot(event,' + escapeHtml(idArg) + ')" title="Xoá bot này khỏi registry">🗑 Xoá</button>' : '') +
-          (isAdmin ? '<button type="button" class="bot-action-chip" onclick="event.stopPropagation(); editBot(event,' + escapeHtml(idArg) + ')" title="Sửa lại URL">✏ Sửa URL</button>' : '') +
+          (isAdmin ? '<button type="button" class="bot-action-chip" onclick="event.stopPropagation(); editBot(event,' + escapeHtml(idArg) + ')" title="Sửa lại URL">✏️ Sửa URL</button>' : '') +
         '</div>' +
       '</div>';
     } else if (errorType === 'probing') {
@@ -671,7 +671,7 @@ function botCardHtml(bot) {
       '<div class="bot-card-title-group">' +
         '<span class="bot-id-chip">#' + escapeHtml(idStr) + '</span>' +
         '<h2 class="bot-card-name" title="' + escapeHtml(bot.label) + '">' + escapeHtml(bot.label) + '</h2>' +
-        '<button type="button" class="bot-mini-btn btn-rename-alias" data-bot-id="' + escapeHtml(id) + '" data-bot-label="' + escapeHtml(bot.label) + '" ' + cardDisabledAttr + (isCardLocked ? cardDisabledStyle + cardDisabledTitle : 'title="Đổi tên / Ghi chú hiển thị"') + ' onclick="event.stopPropagation(); handleRenameClick(this)">✏</button>' +
+        '<button type="button" class="bot-mini-btn btn-rename-alias" data-bot-id="' + escapeHtml(id) + '" data-bot-label="' + escapeHtml(bot.label) + '" ' + cardDisabledAttr + (isCardLocked ? cardDisabledStyle + cardDisabledTitle : 'title="Đổi tên / Ghi chú hiển thị"') + ' onclick="event.stopPropagation(); handleRenameClick(this)">✏️</button>' +
       '</div>' +
       (isAdmin ?
         '<div class="bot-card-admin-actions" onclick="event.stopPropagation()">' +
@@ -726,7 +726,7 @@ function botCardHtml(bot) {
 
       '<div class="vital-card ping-card">' +
         '<div class="vital-label-row">' +
-          '<span class="vital-label">📶 PING / TPS ⚡</span>' +
+          '<span class="vital-label">📶 PING / TPS</span>' +
           '<span class="vital-val" style="color:#38bdf8;">' + escapeHtml(ping) + ' <small style="color:' + tpsColor + ';font-weight:700;">(' + escapeHtml(tpsText) + ')</small></span>' +
         '</div>' +
         '<div class="sparkline-container">' + pingSpark + '</div>' +

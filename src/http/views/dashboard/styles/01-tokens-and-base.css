@@ -12,7 +12,7 @@
   --bg-base: #06080e;
   --bg-surface: rgba(12, 13, 20, 0.94);
   --surface-soft: rgba(148, 163, 184, 0.08);
-  --bg-elevated: rgba(18, 19, 28, 0.96);
+  --bg-elevated: #12131c;
   --bg-input: rgba(8, 9, 14, 0.94);
   --bg-gradient:
     radial-gradient(ellipse at 14% 12%, rgba(79, 70, 229, 0.09) 0%, transparent 48%),
@@ -90,7 +90,7 @@
   --bg: #040d1a;
   --bg-base: #040d1a;
   --bg-surface: rgba(8, 23, 44, 0.92);
-  --bg-elevated: rgba(12, 32, 60, 0.96);
+  --bg-elevated: #0c203c;
   --bg-input: #061426;
   --bg-gradient:
     radial-gradient(ellipse at 18% 10%, rgba(14, 165, 233, 0.18) 0%, transparent 55%),
@@ -320,6 +320,10 @@
   box-sizing: border-box;
 }
 
+html {
+  scroll-padding-top: calc(68px + env(safe-area-inset-top, 0px));
+}
+
 body {
   margin: 0;
   min-height: 100vh;
@@ -331,6 +335,10 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overflow-x: clip;
+  overflow-wrap: break-word;
+}
+
+:where(a, code) {
   overflow-wrap: anywhere;
 }
 
@@ -373,7 +381,7 @@ button, .btn {
   cursor: pointer;
   font-weight: 600;
   font-family: inherit;
-  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease, transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s cubic-bezier(0.16, 1, 0.3, 1);
   box-shadow: var(--shadow-sm);
   user-select: none;
   letter-spacing: 0.01em;
@@ -447,7 +455,7 @@ input, select, textarea {
   font-size: 13.5px;
   min-block-size: var(--target-size);
   outline: none;
-  transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
+  transition: border-color 0.16s, box-shadow 0.16s;
   box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.42);
 }
 
