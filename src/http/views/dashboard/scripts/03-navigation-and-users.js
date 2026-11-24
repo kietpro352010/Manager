@@ -668,6 +668,8 @@ async function refreshUserManagementPage() {
     const disabledCount = userManagementList.filter(u => u.status === 'disabled').length;
     const expiredCount = userManagementList.filter(u => u.isPermanent !== true && (u.status === 'expired' || (u.expiresAt && Date.parse(u.expiresAt) <= now))).length;
     const lifetimeCount = userManagementList.filter(u => u.isPermanent === true).length;
+    const discordLinkedCount = userManagementList.filter(u => Boolean(String(u.discordUserId || u.discord_user_id || '').trim())).length;
+    const discordUnlinkedCount = total - discordLinkedCount;
 
     const elTotal = document.getElementById('userMgmtTotalCount'); if (elTotal) elTotal.textContent = total;
     const elStatAll = document.getElementById('statUserAll'); if (elStatAll) elStatAll.textContent = total;
@@ -675,6 +677,8 @@ async function refreshUserManagementPage() {
     const elStatDis = document.getElementById('statUserDisabled'); if (elStatDis) elStatDis.textContent = disabledCount;
     const elStatExp = document.getElementById('statUserExpired'); if (elStatExp) elStatExp.textContent = expiredCount;
     const elStatLife = document.getElementById('statUserLifetime'); if (elStatLife) elStatLife.textContent = lifetimeCount;
+    const elStatDiscLinked = document.getElementById('statUserDiscordLinked'); if (elStatDiscLinked) elStatDiscLinked.textContent = discordLinkedCount;
+    const elStatDiscUnlinked = document.getElementById('statUserDiscordUnlinked'); if (elStatDiscUnlinked) elStatDiscUnlinked.textContent = discordUnlinkedCount;
 
     renderUserTable();
   } catch (err) {
@@ -693,7 +697,9 @@ function setUserStatusFilter(status) {
     active: document.getElementById('userFilterActive'),
     disabled: document.getElementById('userFilterDisabled'),
     expired: document.getElementById('userFilterExpired'),
-    lifetime: document.getElementById('userFilterLifetime')
+    lifetime: document.getElementById('userFilterLifetime'),
+    discord_linked: document.getElementById('userFilterDiscordLinked'),
+    discord_unlinked: document.getElementById('userFilterDiscordUnlinked')
   };
   Object.keys(chipMap).forEach(k => {
     if (chipMap[k]) {
@@ -792,25 +798,35 @@ function renderUserTable() {
   const filtered = userManagementList
     .filter(u => u.role !== 'admin' && String(u.username || '').toLowerCase() !== 'admin')
     .filter(u => {
+    const discordIdRaw = String(u.discordUserId || u.discord_user_id || '').trim();
+    const discordDisplay = String(u.discordDisplayName || '').trim();
+    const discordHandle = String(u.discordUsername || '').trim();
+
     // Lọc theo từ khóa tìm kiếm
     if (searchQuery) {
       const matchUser = String(u.username || '').toLowerCase().includes(searchQuery);
       const matchNote = String(u.note || '').toLowerCase().includes(searchQuery);
       const matchPlan = String(u.planName || '').toLowerCase().includes(searchQuery);
-      const matchDiscord = String(u.discordUserId || u.discord_user_id || '').toLowerCase().includes(searchQuery);
+      const matchDiscord =
+        discordIdRaw.toLowerCase().includes(searchQuery) ||
+        discordDisplay.toLowerCase().includes(searchQuery) ||
+        discordHandle.toLowerCase().includes(searchQuery);
       if (!matchUser && !matchNote && !matchPlan && !matchDiscord) return false;
     }
 
-    // Lọc theo trạng thái (UX-01: chỉ coi là Vĩnh Viễn khi isPermanent === true)
+    // Lọc theo trạng thái và trạng thái liên kết Discord (UX-01: chỉ coi là Vĩnh Viễn khi isPermanent === true)
     const isLife = u.isPermanent === true;
     const isAct = u.status === 'active' && (isLife || (u.expiresAt && Date.parse(u.expiresAt) > now));
     const isDis = u.status === 'disabled';
     const isExp = !isLife && (u.status === 'expired' || (u.expiresAt && Date.parse(u.expiresAt) <= now));
+    const hasDiscord = Boolean(discordIdRaw);
 
     if (currentUserStatusFilter === 'active') return isAct;
     if (currentUserStatusFilter === 'disabled') return isDis;
     if (currentUserStatusFilter === 'expired') return isExp;
     if (currentUserStatusFilter === 'lifetime') return isLife;
+    if (currentUserStatusFilter === 'discord_linked') return hasDiscord;
+    if (currentUserStatusFilter === 'discord_unlinked') return !hasDiscord;
     return true;
   });
 
@@ -832,12 +848,17 @@ function renderUserTable() {
     // Cột 1: Người dùng
     const isAdmin = u.role === 'admin';
     const discordId = String(u.discordUserId || u.discord_user_id || '').trim();
+    const dDisplay = String(u.discordDisplayName || '').trim();
+    const dUsername = String(u.discordUsername || '').trim();
+    const discordLabelText = (dDisplay && dUsername && dDisplay.toLowerCase() !== dUsername.toLowerCase())
+      ? (dDisplay + ' (@' + dUsername + ')')
+      : (dDisplay || (dUsername ? ('@' + dUsername) : ('ID: ' + discordId)));
     const discordBadge = discordId
-      ? '<div style="font-size:10.5px;color:var(--muted);margin-top:2.5px;display:flex;align-items:center;gap:4px;">' +
+      ? '<div class="discord-link-row">' +
           '<span>💬 Discord:</span> ' +
-          '<span style="font-family:var(--font-mono);color:#818cf8;background:rgba(99,102,241,0.18);padding:1px 6px;border-radius:4px;border:1px solid rgba(99,102,241,0.3);font-weight:600;" title="Discord Snowflake ID: ' + escapeHtml(discordId) + '">' + escapeHtml(discordId) + '</span>' +
+          '<span class="discord-linked-pill" title="Discord ID: ' + escapeHtml(discordId) + '">' + escapeHtml(discordLabelText) + '</span>' +
         '</div>'
-      : '<div style="font-size:10px;color:#64748b;margin-top:2px;">💬 Discord: <span style="font-style:italic;">Chưa liên kết</span></div>';
+      : '<div class="discord-link-row unlinked">💬 Discord: <span class="discord-unlinked-text">Chưa liên kết</span></div>';
 
     const activeLoginIp = String(u.lastLoginIp || u.last_login_ip || u.registrationIp || u.registration_ip || '').trim();
     const regIp = String(u.registrationIp || u.registration_ip || '').trim();

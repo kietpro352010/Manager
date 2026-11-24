@@ -1413,6 +1413,170 @@ function navigateAuditPage(delta) {
   }
 }
 
+const AUDIT_CATEGORY_META = {
+  AUTH: { label: 'Bảo mật', cls: 'audit-cat-auth' },
+  BOT_CONTROL: { label: 'Điều khiển', cls: 'audit-cat-bot' },
+  BOT_ACCOUNT: { label: 'Tài khoản MC', cls: 'audit-cat-bot' },
+  BOT_SETTINGS: { label: 'Cài đặt bot', cls: 'audit-cat-settings' },
+  BOT_INVENTORY: { label: 'Kho đồ', cls: 'audit-cat-bot' },
+  FLEET: { label: 'Hạ tầng bot', cls: 'audit-cat-settings' },
+  USER_MGMT: { label: 'Người dùng', cls: 'audit-cat-user' },
+  LICENSE_KEY: { label: 'License Key', cls: 'audit-cat-key' },
+  SYSTEM: { label: 'Hệ thống', cls: 'audit-cat-sys' }
+};
+
+const AUDIT_ACTION_LABELS = {
+  LOGIN_SUCCESS: 'Đăng nhập Web thành công',
+  LOGIN_FAILED: 'Đăng nhập Web thất bại',
+  LOGIN_LOCKED: 'Khóa tạm thời do sai mật khẩu',
+  LOGOUT: 'Đăng xuất Web Manager',
+  REGISTER_SUCCESS: 'Đăng ký tài khoản mới',
+  CHANGE_PASSWORD: 'Đổi mật khẩu tài khoản',
+  DISCORD_LOGIN_SUCCESS: 'Liên kết & đăng nhập Discord',
+  DISCORD_LOGIN_FAILED: 'Đăng nhập Discord thất bại',
+  DISCORD_LOGIN_BLOCKED_DISABLED: 'Chặn đăng nhập Discord (tài khoản khóa)',
+  DISCORD_LOGIN_RATE_LIMITED: 'Giới hạn đăng nhập Discord',
+  DISCORD_LOGOUT: 'Hủy liên kết Discord',
+  DISCORD_POINTS_ADMIN_ADJUST: 'Admin chỉnh điểm Discord',
+  DISCORD_POINTS_ADMIN_RESET: 'Admin reset điểm Discord',
+  BOT_START: 'Khởi chạy Bot',
+  BOT_STOP: 'Dừng Bot',
+  BOT_RESTART: 'Khởi động lại Bot',
+  BOT_RESPAWN: 'Hồi sinh Bot',
+  BOT_RESET: 'Đặt lại dữ liệu Bot',
+  BOT_RESET_CUSTOMER: 'Thu hồi & bàn giao Bot mới',
+  BOT_ACCOUNT_UPDATE: 'Cập nhật tài khoản Minecraft',
+  BOT_SETTINGS_UPDATE: 'Cập nhật cài đặt Bot',
+  BOT_PROXY_UPDATE: 'Cập nhật Proxy Bot',
+  BOT_CHAT_SEND: 'Gửi lệnh / chat trong game',
+  USER_CREATED: 'Tạo tài khoản khách mới',
+  USER_UPDATED: 'Cập nhật tài khoản khách',
+  USER_DELETED: 'Xóa tài khoản khách',
+  USER_RENEWED: 'Gia hạn gói sử dụng',
+  USER_LOCKED: 'Tạm khóa tài khoản khách',
+  USER_UNLOCKED: 'Mở khóa tài khoản khách',
+  KEY_GENERATED: 'Phát hành Key / Giftcode',
+  KEY_REDEEMED: 'Kích hoạt Key gia hạn',
+  KEY_DELETED: 'Xóa mã Key',
+  BACKUP_CREATED: 'Tạo bản sao lưu dữ liệu',
+  BACKUP_RESTORED: 'Khôi phục dữ liệu từ sao lưu',
+  MAINTENANCE_TOGGLED: 'Thay đổi trạng thái bảo trì',
+  AUDIT_LOGS_CLEARED: 'Xóa lịch sử nhật ký Audit'
+};
+
+const AUDIT_DETAIL_KEY_LABELS = {
+  reason: 'Lý do',
+  result: 'Kết quả',
+  username: 'Tài khoản',
+  actor: 'Thực hiện',
+  botId: 'Bot',
+  botName: 'Tên bot',
+  workerId: 'Worker',
+  provider: 'Nền tảng',
+  days: 'Số ngày',
+  planName: 'Gói',
+  role: 'Vai trò',
+  scope: 'Phạm vi',
+  mode: 'Kiểu',
+  amount: 'Số lượng',
+  beforePoints: 'Điểm cũ',
+  afterPoints: 'Điểm mới',
+  ip: 'IP',
+  clientIp: 'IP',
+  guildId: 'Server Discord',
+  error: 'Lỗi',
+  message: 'Thông điệp',
+  count: 'Số lượng',
+  key: 'Mã Key',
+  code: 'Mã'
+};
+
+function humanizeAuditAction(item) {
+  const rawAction = String(item?.action || '').trim();
+  const upperAction = rawAction.toUpperCase();
+  if (AUDIT_ACTION_LABELS[upperAction]) {
+    return AUDIT_ACTION_LABELS[upperAction];
+  }
+  const explicitLabel = String(item?.actionLabel || '').trim();
+  if (explicitLabel && !/^[A-Z0-9_]{4,}$/.test(explicitLabel)) {
+    return explicitLabel;
+  }
+  if (!rawAction) return 'Thao tác hệ thống';
+  if (upperAction.startsWith('SYSTEM_ALERT_')) {
+    return 'Cảnh báo ' + upperAction.slice('SYSTEM_ALERT_'.length).replace(/_/g, ' ').toLowerCase();
+  }
+  return rawAction.replace(/_/g, ' ').toLowerCase().replace(/^./, c => c.toUpperCase());
+}
+
+function formatAuditDetailsHtml(rawDetails, rawMessage) {
+  const msgText = String(rawMessage || '').trim();
+  let parsedObj = null;
+
+  if (rawDetails && typeof rawDetails === 'object' && !Array.isArray(rawDetails)) {
+    parsedObj = rawDetails;
+  } else if (typeof rawDetails === 'string') {
+    const trimmed = rawDetails.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const candidate = JSON.parse(trimmed);
+        if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+          parsedObj = candidate;
+        }
+      } catch (_) {}
+    } else if (trimmed && trimmed !== '-' && trimmed !== msgText) {
+      return '<div class="audit-detail-msg">' + escapeHtml(trimmed) + '</div>';
+    }
+  }
+
+  const parts = [];
+  const objMsg = parsedObj && typeof parsedObj.message === 'string' ? parsedObj.message.trim() : '';
+  const leadMsg = msgText || objMsg;
+  if (leadMsg) {
+    parts.push('<div class="audit-detail-msg">' + escapeHtml(leadMsg) + '</div>');
+  }
+
+  if (parsedObj) {
+    const ignoredKeys = new Set(['source', 'event', 'level', 'password', 'token', 'secret']);
+    const entries = Object.entries(parsedObj).filter(([k, v]) => {
+      if (ignoredKeys.has(k)) return false;
+      if (k === 'message' && leadMsg) return false;
+      if (v === null || v === undefined || v === '') return false;
+      return true;
+    });
+
+    const visibleEntries = entries.slice(0, 4);
+    const hiddenEntries = entries.slice(4);
+
+    if (visibleEntries.length > 0) {
+      parts.push(
+        '<div class="audit-kv-list">' +
+          visibleEntries.map(([k, v]) => {
+            const label = AUDIT_DETAIL_KEY_LABELS[k] || k.replace(/([A-Z])/g, ' $1').replace(/_/g, ' ').trim();
+            const valStr = typeof v === 'object' ? JSON.stringify(v) : String(v);
+            return '<span class="audit-kv-pill"><span class="audit-kv-key">' + escapeHtml(label) + ':</span> <span class="audit-kv-val">' + escapeHtml(valStr.slice(0, 90)) + '</span></span>';
+          }).join('') +
+        '</div>'
+      );
+    }
+
+    if (hiddenEntries.length > 0) {
+      parts.push(
+        '<details class="audit-raw-more"><summary>+' + hiddenEntries.length + ' chi tiết khác</summary>' +
+          '<div class="audit-kv-list" style="margin-top:6px;">' +
+            hiddenEntries.map(([k, v]) => {
+              const label = AUDIT_DETAIL_KEY_LABELS[k] || k;
+              const valStr = typeof v === 'object' ? JSON.stringify(v) : String(v);
+              return '<span class="audit-kv-pill"><span class="audit-kv-key">' + escapeHtml(label) + ':</span> <span class="audit-kv-val">' + escapeHtml(valStr.slice(0, 120)) + '</span></span>';
+            }).join('') +
+          '</div>' +
+        '</details>'
+      );
+    }
+  }
+
+  return parts.length > 0 ? parts.join('') : '<span style="color:var(--muted);">—</span>';
+}
+
 function renderAuditLogs(items, total, page, totalPages, limit) {
   const tbody = document.getElementById('auditLogTableBody');
   if (!tbody) return;
@@ -1424,91 +1588,96 @@ function renderAuditLogs(items, total, page, totalPages, limit) {
 
   const startRecord = total === 0 ? 0 : (page - 1) * limit + 1;
   const endRecord = Math.min(total, page * limit);
-  if (infoEl) infoEl.textContent = 'Hiển thị ' + startRecord + ' - ' + endRecord + ' trong tổng số ' + total + ' bản ghi';
+  if (infoEl) infoEl.textContent = 'Hiển thị ' + startRecord + ' – ' + endRecord + ' / ' + total + ' bản ghi';
   if (indEl) indEl.textContent = 'Trang ' + page + ' / ' + totalPages;
   if (prevBtn) prevBtn.disabled = (page <= 1);
   if (nextBtn) nextBtn.disabled = (page >= totalPages);
 
   if (!items.length) {
-    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:28px;color:var(--muted);">Không tìm thấy bản ghi nhật ký nào phù hợp với bộ lọc.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:32px;color:var(--muted);">Không có bản ghi nhật ký nào phù hợp bộ lọc.</td></tr>';
     return;
   }
 
   tbody.innerHTML = items.map(item => {
     const d = item.timestamp ? new Date(item.timestamp) : null;
-    const timeDisplay = d ? d.toLocaleTimeString('vi-VN', { hour12: false }) + ' ' + d.toLocaleDateString('vi-VN') : '-';
-    const relativeTime = d ? formatRelativeTime(d) : '';
+    const validDate = d && !Number.isNaN(d.getTime());
+    const timeStr = validDate ? d.toLocaleTimeString('vi-VN', { hour12: false }) : '—';
+    const dateStr = validDate ? d.toLocaleDateString('vi-VN') : '';
+    const relativeTime = validDate ? formatRelativeTime(d) : '';
 
+    const rawStatus = String(item.status || 'SUCCESS').toUpperCase();
     const statusMap = {
-      'SUCCESS': { text: '🟢 THÀNH CÔNG', color: 'var(--green)', bg: 'rgba(34,197,94,0.14)' },
-      'FAILED': { text: '🔴 THẤT BẠI', color: 'var(--red)', bg: 'rgba(239,68,68,0.14)' },
-      'BLOCKED': { text: '🟠 BỊ CHẶN', color: 'var(--yellow)', bg: 'rgba(234,179,8,0.14)' },
-      'PARTIAL': { text: '🟡 MỘT PHẦN', color: 'var(--cyan)', bg: 'rgba(56,189,248,0.14)' }
+      SUCCESS: { text: 'Thành công', cls: 'audit-status-success', rowCls: '' },
+      FAILED: { text: 'Thất bại', cls: 'audit-status-failed', rowCls: 'audit-row-failed' },
+      BLOCKED: { text: 'Bị chặn', cls: 'audit-status-blocked', rowCls: 'audit-row-blocked' },
+      PARTIAL: { text: 'Một phần', cls: 'audit-status-partial', rowCls: 'audit-row-warning' },
+      WARNING: { text: 'Cảnh báo', cls: 'audit-status-partial', rowCls: 'audit-row-warning' }
     };
-    const st = statusMap[item.status] || { text: item.status || 'UNKNOWN', color: 'var(--muted)', bg: 'rgba(255,255,255,0.06)' };
+    const st = statusMap[rawStatus] || { text: rawStatus, cls: 'audit-status-neutral', rowCls: '' };
 
-    const roleMap = {
-      'admin': '<span style="color:var(--cyan);font-weight:700;">👑 Quản trị viên</span>',
-      'user': '<span style="color:var(--green);font-weight:700;">👤 Khách thuê</span>',
-      'system': '<span style="color:#a78bfa;font-weight:700;">🤖 Hệ thống tự động</span>'
+    const roleMeta = {
+      admin: { label: 'Admin', cls: 'audit-role-admin' },
+      user: { label: 'Khách thuê', cls: 'audit-role-user' },
+      system: { label: 'Hệ thống', cls: 'audit-role-sys' }
     };
-    const actorRole = roleMap[item.actor?.role] || ('<span style="color:var(--muted);">' + escapeHtml(item.actor?.role || 'Guest') + '</span>');
-    const actorUser = item.actor?.username || 'system';
-    const actorIp = item.actor?.ip || '127.0.0.1';
+    const rawRole = String(item.actor?.role || '').toLowerCase();
+    const actorRoleObj = roleMeta[rawRole] || { label: item.actor?.role || 'Khách', cls: 'audit-role-user' };
+    const actorUser = String(item.actor?.username || item.actorId || 'system');
+    const actorIp = String(item.actor?.ip || '').trim();
 
-    let targetText = '-';
+    let targetText = '—';
     if (item.target) {
       if (typeof item.target === 'object') {
         if (item.target.botId !== undefined && item.target.botId !== null && item.target.botId !== '') {
           const bNum = item.target.botId;
           const lbl = item.target.label;
           const hasCustom = lbl && lbl !== ('Bot ' + bNum) && lbl !== ('bot' + bNum) && lbl !== ('Bot #' + bNum);
-          targetText = '🤖 Bot #' + bNum + (hasCustom ? ' (' + lbl + ')' : '');
+          targetText = 'Bot #' + bNum + (hasCustom ? ' (' + lbl + ')' : '');
         } else if (item.target.username) {
-          targetText = '👤 ' + item.target.username;
+          targetText = item.target.username;
         } else if (item.target.key) {
-          targetText = '🔑 ' + item.target.key;
+          targetText = item.target.key;
         } else if (item.target.label) {
-          targetText = '🤖 ' + item.target.label;
+          targetText = item.target.label;
         } else {
-          targetText = JSON.stringify(item.target);
+          targetText = String(item.target.id || '—');
         }
       } else {
         targetText = String(item.target);
       }
     }
 
-    let detailsText = item.details || '-';
-    if (typeof detailsText === 'object') detailsText = JSON.stringify(detailsText);
+    const catKey = String(item.category || 'SYSTEM').toUpperCase();
+    const catMeta = AUDIT_CATEGORY_META[catKey] || { label: catKey, cls: 'audit-cat-sys' };
+    const actionTitle = humanizeAuditAction(item);
+    const detailsHtml = formatAuditDetailsHtml(item.details, item.message);
 
-    const catBadgeStyle = 'display:inline-block;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:800;letter-spacing:0.5px;background:rgba(255,255,255,0.08);margin-right:6px;border:1px solid rgba(255,255,255,0.12);';
-    const cat = item.category || 'SYSTEM';
-    const actionLabel = item.actionLabel || item.action || 'UNKNOWN';
-
-    return '<tr>' +
-      '<td style="white-space:nowrap;font-family:monospace;font-size:11px;" title="' + escapeHtml(relativeTime) + '">' +
-        '<div>' + escapeHtml(timeDisplay) + '</div>' +
-        '<div style="font-size:10px;color:var(--muted);">' + escapeHtml(relativeTime) + '</div>' +
+    return '<tr class="audit-row ' + st.rowCls + '">' +
+      '<td class="audit-time-cell" title="' + escapeHtml(dateStr + ' ' + timeStr) + '">' +
+        '<div class="audit-time-main">' + escapeHtml(timeStr) + '</div>' +
+        '<div class="audit-time-sub">' + escapeHtml(dateStr + (relativeTime ? ' · ' + relativeTime : '')) + '</div>' +
       '</td>' +
       '<td>' +
-        '<div>' + actorRole + '</div>' +
-        '<div style="font-size:10.5px;color:#cbd5e1;font-weight:600;">' + escapeHtml(actorUser) + '</div>' +
-        '<div style="font-size:10px;color:var(--muted);font-family:monospace;">' + escapeHtml(actorIp) + '</div>' +
+        '<div class="audit-actor-top">' +
+          '<span class="audit-actor-name">' + escapeHtml(actorUser) + '</span>' +
+          '<span class="audit-role-tag ' + actorRoleObj.cls + '">' + escapeHtml(actorRoleObj.label) + '</span>' +
+        '</div>' +
+        (actorIp && actorIp !== '127.0.0.1'
+          ? '<div class="audit-actor-ip">' + escapeHtml(actorIp) + '</div>'
+          : '') +
       '</td>' +
       '<td>' +
-        '<div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;">' +
-          '<span style="' + catBadgeStyle + '">' + escapeHtml(cat) + '</span>' +
-          '<span style="font-weight:600;font-size:11.5px;color:#f8fafc;">' + escapeHtml(actionLabel) + '</span>' +
+        '<div class="audit-action-cell" title="' + escapeHtml(item.action || '') + '">' +
+          '<span class="audit-cat-tag ' + catMeta.cls + '">' + escapeHtml(catMeta.label) + '</span>' +
+          '<span class="audit-action-title">' + escapeHtml(actionTitle) + '</span>' +
         '</div>' +
       '</td>' +
-      '<td style="font-size:11px;color:#e2e8f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:135px;" title="' + escapeHtml(targetText) + '">' +
-        escapeHtml(targetText) +
+      '<td class="audit-target-cell" title="' + escapeHtml(targetText) + '">' +
+        '<span class="audit-target-pill">' + escapeHtml(targetText) + '</span>' +
       '</td>' +
-      '<td style="font-size:11.5px;color:#e2e8f0;line-height:1.45;word-break:break-word;">' +
-        escapeHtml(detailsText) +
-      '</td>' +
+      '<td class="audit-details-cell">' + detailsHtml + '</td>' +
       '<td style="text-align:right;white-space:nowrap;">' +
-        '<span style="display:inline-block;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:700;color:' + st.color + ';background:' + st.bg + ';border:1px solid ' + st.color + '40;">' + escapeHtml(st.text) + '</span>' +
+        '<span class="audit-status-pill ' + st.cls + '"><span class="audit-status-dot"></span>' + escapeHtml(st.text) + '</span>' +
       '</td>' +
     '</tr>';
   }).join('');

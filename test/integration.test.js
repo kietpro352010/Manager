@@ -223,15 +223,15 @@ async function runTests() {
   const registeredNames = commands.map(c => c.data.name).sort();
   assert.deepStrictEqual(
     registeredNames,
-    ['admin', 'bots', 'check', 'help', 'kbot', 'login', 'logout', 'logs', 'wispbyte'],
-    'Discord commands must strictly contain: admin, bots, check, help, kbot, login, logout, logs, wispbyte'
+    ['admin', 'bots', 'bxh', 'check', 'diem', 'diemadmin', 'diemdanh', 'help', 'kbot', 'login', 'logout', 'logs', 'tinnhan', 'wispbyte'],
+    'Discord commands must strictly contain: admin, bots, bxh, check, diem, diemadmin, diemdanh, help, kbot, login, logout, logs, tinnhan, wispbyte'
   );
 
   const bannedCommands = ['status', 'info', 'start', 'stop', 'restart', 'ping', 'uptime', 'reconnect', 'panel', 'bot', 'render', 'user', 'setup', 'system'];
   for (const banned of bannedCommands) {
     assert.strictEqual(registeredNames.includes(banned), false, `Banned standalone command /${banned} must NOT be registered`);
   }
-  console.log('✅ 7. Discord Commands: Strictly 9 allowed commands (including /check, /kbot, /wispbyte), all legacy individual commands removed.');
+  console.log('✅ 7. Discord Commands: Strictly 14 allowed commands (including /diemdanh, /diem, /tinnhan, /bxh, /diemadmin), all legacy individual commands removed.');
 
   // 8. Discord Full Bot ID & Panel Rendering Verification
   console.log('8. Checking Discord Panel Rendering & Full Bot ID...');

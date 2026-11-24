@@ -798,6 +798,7 @@ function createApp({
     broker,
     fleetOperations,
     adminNotifier,
+    discordClient,
     config,
     logger,
     invalidateUserSessions,

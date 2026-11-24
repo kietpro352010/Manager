@@ -156,11 +156,81 @@ function createAdminApi({
   broker,
   fleetOperations,
   adminNotifier,
+  discordClient = null,
   config,
   logger,
   invalidateUserSessions,
   invalidateAdminSessions
 }) {
+  const discordProfileCache = new Map();
+  const DISCORD_PROFILE_HIT_TTL_MS = 10 * 60 * 1000;
+  const DISCORD_PROFILE_MISS_TTL_MS = 2 * 60 * 1000;
+  const DISCORD_PROFILE_CACHE_MAX = 1000;
+
+  async function resolveDiscordProfile(discordId) {
+    const id = String(discordId || '').trim();
+    if (!id || !/^\d{17,20}$/.test(id)) {
+      return { discordUsername: '', discordDisplayName: '' };
+    }
+    const now = Date.now();
+    const cached = discordProfileCache.get(id);
+    if (cached && now < cached.expiresAt) {
+      return cached.profile;
+    }
+
+    const client = discordClient || adminNotifier?.client || null;
+    if (!client) {
+      return { discordUsername: '', discordDisplayName: '' };
+    }
+
+    let resolvedUser = client.users?.cache?.get?.(id) || null;
+    if (!resolvedUser && typeof client.users?.fetch === 'function') {
+      let timer = null;
+      try {
+        resolvedUser = await Promise.race([
+          Promise.resolve(client.users.fetch(id)).catch(() => null),
+          new Promise((resolve) => {
+            timer = setTimeout(() => resolve(null), 1500);
+            timer.unref?.();
+          })
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+
+    const discordUsername = String(resolvedUser?.username || '').trim();
+    const discordDisplayName = String(
+      resolvedUser?.globalName || resolvedUser?.displayName || resolvedUser?.username || ''
+    ).trim();
+    const profile = { discordUsername, discordDisplayName };
+    const ttl = (discordUsername || discordDisplayName) ? DISCORD_PROFILE_HIT_TTL_MS : DISCORD_PROFILE_MISS_TTL_MS;
+
+    if (!discordProfileCache.has(id) && discordProfileCache.size >= DISCORD_PROFILE_CACHE_MAX) {
+      for (const [k, entry] of discordProfileCache.entries()) {
+        if (now >= entry.expiresAt) discordProfileCache.delete(k);
+      }
+      while (discordProfileCache.size >= DISCORD_PROFILE_CACHE_MAX) {
+        const oldest = discordProfileCache.keys().next().value;
+        if (oldest === undefined) break;
+        discordProfileCache.delete(oldest);
+      }
+    }
+    discordProfileCache.set(id, { profile, expiresAt: now + ttl });
+    return profile;
+  }
+
+  async function resolveDiscordProfilesMap(discordIds) {
+    const uniqueIds = [...new Set(discordIds.map((x) => String(x || '').trim()).filter((x) => /^\d{17,20}$/.test(x)))];
+    const map = new Map();
+    const CONCURRENCY = 6;
+    for (let i = 0; i < uniqueIds.length; i += CONCURRENCY) {
+      const batch = uniqueIds.slice(i, i + CONCURRENCY);
+      const profiles = await Promise.all(batch.map((id) => resolveDiscordProfile(id)));
+      batch.forEach((id, idx) => map.set(id, profiles[idx]));
+    }
+    return map;
+  }
   const router = express.Router();
   for (const method of ['get', 'post', 'put', 'patch', 'delete', 'all']) {
     const orig = router[method].bind(router);
@@ -221,10 +291,15 @@ function createAdminApi({
   router.get('/users', async (_req, res) => {
     try {
       const [storedUsers, workers] = await Promise.all([store.listAccess(), registry.list()]);
+      const discordMap = await resolveDiscordProfilesMap(
+        storedUsers.map((user) => user.discordUserId || user.discord_user_id || '')
+      );
       const users = storedUsers.map((user) => {
         const assignedBotIds = Array.isArray(user.workerIds)
           ? [...new Set(user.workerIds.map((workerId) => String(workerId).trim().toLowerCase()).filter(Boolean))]
           : [];
+        const dId = String(user.discordUserId || user.discord_user_id || '').trim();
+        const dProfile = dId ? (discordMap.get(dId) || { discordUsername: '', discordDisplayName: '' }) : { discordUsername: '', discordDisplayName: '' };
         return {
           id: String(user.userId || user.id || ''),
           userId: String(user.userId || user.id || ''),
@@ -241,7 +316,9 @@ function createAdminApi({
           botAliases: (user.botAliases && typeof user.botAliases === 'object' && !Array.isArray(user.botAliases))
             ? user.botAliases
             : (user.bot_aliases && typeof user.bot_aliases === 'object' ? user.bot_aliases : {}),
-          discordUserId: String(user.discordUserId || user.discord_user_id || ''),
+          discordUserId: dId,
+          discordUsername: dProfile.discordUsername,
+          discordDisplayName: dProfile.discordDisplayName,
           lastLoginIp: String(user.lastLoginIp || user.last_login_ip || ''),
           lastLoginAt: user.lastLoginAt || user.last_login_at || null,
           registrationIp: String(user.registrationIp || user.registration_ip || ''),

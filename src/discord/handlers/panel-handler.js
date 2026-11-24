@@ -483,6 +483,7 @@ async function handlePanelInteraction(interaction, services) {
         resetLoginRateLimit(discordUserId);
         resetUsernameRateLimit(cleanUsername);
         await services.accessStore.linkDiscord(discordUserId, 'admin', 'admin');
+        try { require('./points-message-handler').clearMessagePointsLoginCache(discordUserId); } catch (_) {}
         await services.accessStore?.addAudit?.({
           action: 'DISCORD_LOGIN_SUCCESS',
           actorId: discordUserId,
@@ -583,6 +584,7 @@ async function handlePanelInteraction(interaction, services) {
     resetUsernameRateLimit(cleanUsername);
     const canonicalUserId = user.id || user.userId || user.username;
     await services.accessStore.linkDiscord(discordUserId, user.username, canonicalUserId);
+    try { require('./points-message-handler').clearMessagePointsLoginCache(discordUserId); } catch (_) {}
     await services.accessStore?.recordUserLogin?.(canonicalUserId, null).catch(() => null);
     await services.accessStore?.addAudit?.({
       action: 'DISCORD_LOGIN_SUCCESS',
@@ -765,6 +767,135 @@ async function handlePanelInteraction(interaction, services) {
     const client = services?.discordClient || services?.client || interaction.client;
     const view = await renderKbotServerList(client);
     return safeUpdate(interaction, view);
+  }
+
+  // 0C. Discord Points Leaderboard Tabs (Accessible to logged-in users in configured guild)
+  if (customId.startsWith('points:lb:')) {
+    const { resolveLoggedInPointsUser } = require('../../services/discord-points-service');
+    const {
+      renderLoginRequiredNotice,
+      renderPointsLeaderboard,
+      renderCombinedPointsLeaderboard
+    } = require('../panels/points-renderer');
+
+    const loggedInUser = await resolveLoggedInPointsUser(discordUserId, services);
+    if (!loggedInUser) {
+      return safeReply(interaction, {
+        ...renderLoginRequiredNotice(),
+        flags: MessageFlags.Ephemeral
+      });
+    }
+    if (!services?.discordPoints) {
+      return safeReply(interaction, {
+        content: '❌ Hệ thống điểm tích lũy chưa được khởi tạo.',
+        flags: MessageFlags.Ephemeral
+      });
+    }
+    if (!checkCooldown(discordUserId, 800)) {
+      return safeDeferUpdate(interaction);
+    }
+    await safeDeferUpdate(interaction);
+    const rawType = customId.split(':')[2] || 'tatca';
+    if (rawType === 'tatca') {
+      const combined = await services.discordPoints.getCombinedLeaderboards({
+        guildId: interaction.guildId,
+        limit: 10,
+        viewerUserId: discordUserId
+      });
+      return safeUpdate(interaction, renderCombinedPointsLeaderboard({
+        guildName: interaction.guild?.name || 'Server',
+        combined
+      }));
+    }
+    const leaderboard = await services.discordPoints.getLeaderboard({
+      guildId: interaction.guildId,
+      type: rawType,
+      limit: 10,
+      viewerUserId: discordUserId
+    });
+    return safeUpdate(interaction, renderPointsLeaderboard({
+      guildName: interaction.guild?.name || 'Server',
+      leaderboard
+    }));
+  }
+
+  // 0D. Discord Points 1-Day Missed Streak Restore Prompt (points:restore:yes:<userId> | points:restore:no:<userId>)
+  if (customId.startsWith('points:restore:')) {
+    const [, , choice, ownerUserId] = customId.split(':');
+    if (ownerUserId && String(discordUserId) !== String(ownerUserId)) {
+      return safeReply(interaction, {
+        content: '⛔ Chỉ chủ nhân của lệnh `/diemdanh` này mới có thể bấm nút lựa chọn.',
+        flags: MessageFlags.Ephemeral
+      });
+    }
+
+    const { resolveLoggedInPointsUser } = require('../../services/discord-points-service');
+    const { renderLoginRequiredNotice, renderCheckinResult } = require('../panels/points-renderer');
+    const loggedInUser = await resolveLoggedInPointsUser(discordUserId, services);
+    if (!loggedInUser) {
+      return safeReply(interaction, {
+        ...renderLoginRequiredNotice(),
+        flags: MessageFlags.Ephemeral
+      });
+    }
+    if (!services?.discordPoints) {
+      return safeReply(interaction, {
+        content: '❌ Hệ thống điểm tích lũy chưa được khởi tạo.',
+        flags: MessageFlags.Ephemeral
+      });
+    }
+    if (!checkCooldown(discordUserId, 800)) {
+      return safeDeferUpdate(interaction);
+    }
+    await safeDeferUpdate(interaction);
+
+    const displayName =
+      interaction.member?.displayName ||
+      interaction.user?.globalName ||
+      interaction.user?.username ||
+      loggedInUser.username ||
+      '';
+
+    if (choice === 'yes') {
+      const res = await services.discordPoints.restoreCheckin({
+        guildId: interaction.guildId,
+        userId: discordUserId,
+        username: displayName
+      });
+      if (res.ok || res.alreadyCheckedIn) {
+        return safeUpdate(interaction, renderCheckinResult({ user: interaction.user, result: res }));
+      }
+      if (res.reason === 'insufficient_points') {
+        return safeUpdate(interaction, {
+          embeds: [
+            embed(
+              '❌ KHÔNG ĐỦ ĐIỂM KHÔI PHỤC',
+              `Bạn hiện có **${res.currentPoints} đ**, cần tối thiểu **${res.restoreCost} đ** để khôi phục chuỗi.\nBạn có thể nhắn tin tích thêm điểm hoặc gõ lại \`/diemdanh\` rồi chọn **Không** để điểm danh mới (+10đ).`,
+              0xef4444
+            )
+          ],
+          components: []
+        });
+      }
+      return safeUpdate(interaction, {
+        embeds: [
+          embed(
+            '⏳ HẾT HẠN KHÔI PHỤC CHUỖI',
+            'Đã qua **00:00** sang ngày mới hoặc trạng thái chuỗi đã thay đổi. Vui lòng gõ lại `/diemdanh` nhé!',
+            0xf59e0b
+          )
+        ],
+        components: []
+      });
+    }
+
+    const res = await services.discordPoints.checkin({
+      guildId: interaction.guildId,
+      userId: discordUserId,
+      username: displayName,
+      declineRestore: true
+    });
+    return safeUpdate(interaction, renderCheckinResult({ user: interaction.user, result: res }));
   }
 
   // Verify Discord role / authorization before interacting with panel controls (DISCORD-03)

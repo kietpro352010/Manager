@@ -25,8 +25,19 @@ async function execute() {
         inline: false
       },
       {
+        name: '🎁 Tích Điểm & Điểm Danh (Chỉ thành viên đã /login)',
+        value:
+          '• `/diemdanh` — Điểm danh hằng ngày từ 00:00 (+10đ/ngày, mốc mỗi 7 ngày +30đ, xem hành trình 10 ngày tới; lỡ 1 ngày có thể dùng 50đ khôi phục chuỗi)\n' +
+          '• `/diem [nguoidung]` — Xem điểm, chuỗi điểm danh và tổng tin nhắn\n' +
+          '• `/tinnhan [nguoidung]` — Xem tổng số tin nhắn từ trước tới nay\n' +
+          '• `/bxh` — Bảng xếp hạng Top 10 Điểm, Chuỗi điểm danh & Tin nhắn\n' +
+          '• Nhắn tin ở bất kỳ kênh nào trong server để nhận âm thầm **+1đ/tin nhắn** (điểm tối thiểu 0đ)',
+        inline: false
+      },
+      {
         name: '🛡️ Lệnh Quản Trị (Admin)',
         value:
+          '• `/diemadmin` — Cộng, trừ, đặt điểm hoặc reset điểm thành viên\n' +
           '• `/check` — Gửi bảng theo dõi hệ thống (tự động cập nhật mỗi 15 phút)\n' +
           '• `/kbot` — Danh sách máy chủ Discord đang chạy KBot\n' +
           '• `/admin` — Phân quyền Role server & đổi mật khẩu Admin\n' +

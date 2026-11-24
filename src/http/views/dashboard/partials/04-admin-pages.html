@@ -69,16 +69,18 @@
     <!-- SUB-PANEL 1: DANH SÁCH USER -->
     <div id="subPanelUsers" class="sub-panel" role="tabpanel" aria-labelledby="subTabUsers">
       <!-- FILTERS & STATS -->
-      <div class="mgmt-filter-bar">
-        <div style="flex:1;min-width:220px;">
-          <input type="search" id="userFilterSearch" aria-label="Tìm theo username, ghi chú, gói" placeholder="🔍 Tìm theo username, ghi chú, gói..." class="search-box" style="margin:0;width:100%;box-sizing:border-box;" oninput="debounceUserFilter()">
+      <div class="mgmt-filter-bar mgmt-filter-bar-inline">
+        <div class="mgmt-search-wrap">
+          <input type="search" id="userFilterSearch" aria-label="Tìm theo username, tên Discord, ghi chú, gói" placeholder="🔍 Tìm user, tên Discord, gói..." class="search-box mgmt-search-input" oninput="debounceUserFilter()">
         </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;" role="group" aria-label="Lọc trạng thái người dùng">
+        <div class="mgmt-filter-chips" role="group" aria-label="Lọc trạng thái và liên kết Discord">
           <button type="button" class="filter-chip active" id="userFilterAll" aria-pressed="true" onclick="setUserStatusFilter('all')">Tất cả (<span id="statUserAll">0</span>)</button>
           <button type="button" class="filter-chip" id="userFilterActive" aria-pressed="false" onclick="setUserStatusFilter('active')">🟢 Hoạt động (<span id="statUserActive">0</span>)</button>
           <button type="button" class="filter-chip" id="userFilterDisabled" aria-pressed="false" onclick="setUserStatusFilter('disabled')">🔒 Tạm khóa (<span id="statUserDisabled">0</span>)</button>
           <button type="button" class="filter-chip" id="userFilterExpired" aria-pressed="false" onclick="setUserStatusFilter('expired')">⏳ Hết hạn (<span id="statUserExpired">0</span>)</button>
           <button type="button" class="filter-chip" id="userFilterLifetime" aria-pressed="false" onclick="setUserStatusFilter('lifetime')">👑 Vĩnh viễn (<span id="statUserLifetime">0</span>)</button>
+          <button type="button" class="filter-chip filter-chip-discord" id="userFilterDiscordLinked" aria-pressed="false" onclick="setUserStatusFilter('discord_linked')">💬 Đã LK Discord (<span id="statUserDiscordLinked">0</span>)</button>
+          <button type="button" class="filter-chip filter-chip-discord" id="userFilterDiscordUnlinked" aria-pressed="false" onclick="setUserStatusFilter('discord_unlinked')">Chưa LK Discord (<span id="statUserDiscordUnlinked">0</span>)</button>
         </div>
       </div>
 
@@ -220,61 +222,61 @@
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
         <button type="button" class="small" onclick="navigateTo('dashboard')">← Về Dashboard</button>
         <div>
-          <h2 class="full-page-title">📋 Nhật Ký Hoạt Động (Audit Trail Enterprise)</h2>
-          <div class="full-page-subtitle">Theo dõi thời gian thực 100% mọi hành vi vận hành bot, can thiệp cấu hình, tài khoản và cấp phát license key.</div>
+          <h2 class="full-page-title">📋 Nhật Ký Hoạt Động</h2>
+          <div class="full-page-subtitle">Theo dõi thao tác người dùng, thay đổi cấu hình hệ thống, tài khoản và vận hành bot theo thời gian thực.</div>
         </div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
         <button type="button" class="small" onclick="exportAuditLogs('csv')">📥 Xuất CSV</button>
         <button type="button" class="small" onclick="exportAuditLogs('jsonl')">📥 Xuất JSONL</button>
-        <button type="button" class="small danger" onclick="clearAllAuditLogs()">🗑 Xóa Nhật Ký</button>
+        <button type="button" class="small danger" onclick="clearAllAuditLogs()">🗑 Xóa nhật ký</button>
         <button type="button" class="small" onclick="refreshAuditLogs(1)">↻ Làm mới</button>
       </div>
     </div>
 
-    <!-- TABS PHÂN LOẠI NHẬT KÝ (HỆ THỐNG / USER vs BOT VẬN HÀNH / COORDS) -->
-    <div class="audit-type-tabs" role="tablist" aria-label="Phân loại nhật ký hoạt động" style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+    <!-- TABS PHÂN LOẠI NHẬT KÝ -->
+    <div class="audit-type-tabs" role="tablist" aria-label="Phân loại nhật ký hoạt động">
       <button type="button" role="tab" aria-selected="true" id="auditTabSystem" class="audit-tab-btn active" onclick="switchAuditLogType('SYSTEM')">
-        🌐 Nhật Ký Hệ Thống &amp; Thao Tác Người Dùng
+        Hệ thống &amp; Tài khoản
       </button>
       <button type="button" role="tab" aria-selected="false" id="auditTabBot" class="audit-tab-btn" onclick="switchAuditLogType('BOT')">
-        🤖 Nhật Ký Vận Hành Bot &amp; Tài Khoản (Coords, Acc, Proxy)
+        Vận hành Bot &amp; Game
       </button>
       <button type="button" role="tab" aria-selected="false" id="auditTabAll" class="audit-tab-btn" onclick="switchAuditLogType('')">
-        📋 Tất Cả Nhật Ký
+        Tất cả nhật ký
       </button>
     </div>
 
     <!-- FILTER TOOLBAR -->
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);padding:8px 12px;border-radius:8px;">
-      <div style="flex:1;min-width:180px;">
-        <input type="search" id="auditLogSearchInput" aria-label="Tìm nhật ký theo từ khóa, chi tiết, IP, user" placeholder="🔍 Tìm theo từ khóa, chi tiết, IP, user..." class="search-box" style="margin:0;padding:6px 12px;font-size:12px;width:100%;box-sizing:border-box;" oninput="debounceAuditFilter()">
+    <div class="audit-toolbar">
+      <div class="audit-search-wrap">
+        <input type="search" id="auditLogSearchInput" aria-label="Tìm nhật ký theo từ khóa, chi tiết, IP, user" placeholder="Tìm theo hành động, user, IP hoặc chi tiết..." class="search-box audit-search-input" oninput="debounceAuditFilter()">
       </div>
-      <div style="min-width:160px;">
-        <select id="auditLogCategoryFilter" aria-label="Lọc theo danh mục nhật ký" style="margin:0;padding:6px 10px;font-size:12px;background:var(--card);border:1px solid var(--border);color:#fff;border-radius:6px;width:100%;" onchange="refreshAuditLogs(1)">
-          <option value="">📂 Tất cả danh mục</option>
-          <option value="AUTH">🔐 Xác thực &amp; Bảo mật (AUTH)</option>
-          <option value="BOT_CONTROL">🎮 Điều khiển Bot (BOT)</option>
-          <option value="BOT_ACCOUNT">👤 Tài khoản Minecraft</option>
-          <option value="BOT_SETTINGS">⚙️ Cài đặt Bot</option>
-          <option value="BOT_INVENTORY">🎒 Kho đồ &amp; Trang bị</option>
-          <option value="FLEET">🤖 Quản lý Bot</option>
-          <option value="USER_MGMT">👥 Quản lý Khách thuê</option>
-          <option value="LICENSE_KEY">🔑 Mã Bản quyền/Gói</option>
-          <option value="SYSTEM">🤖 Hệ thống Tự động</option>
+      <div class="audit-select-wrap">
+        <select id="auditLogCategoryFilter" aria-label="Lọc theo danh mục nhật ký" class="audit-select" onchange="refreshAuditLogs(1)">
+          <option value="">Tất cả danh mục</option>
+          <option value="AUTH">Xác thực &amp; Bảo mật</option>
+          <option value="BOT_CONTROL">Điều khiển Bot</option>
+          <option value="BOT_ACCOUNT">Tài khoản Minecraft</option>
+          <option value="BOT_SETTINGS">Cài đặt Bot</option>
+          <option value="BOT_INVENTORY">Kho đồ &amp; Trang bị</option>
+          <option value="FLEET">Quản lý Bot</option>
+          <option value="USER_MGMT">Quản lý Khách thuê</option>
+          <option value="LICENSE_KEY">Key gia hạn</option>
+          <option value="SYSTEM">Hệ thống tự động</option>
         </select>
       </div>
-      <div style="min-width:140px;">
-        <select id="auditLogStatusFilter" aria-label="Lọc theo trạng thái nhật ký" style="margin:0;padding:6px 10px;font-size:12px;background:var(--card);border:1px solid var(--border);color:#fff;border-radius:6px;width:100%;" onchange="refreshAuditLogs(1)">
-          <option value="">⚡ Tất cả trạng thái</option>
-          <option value="SUCCESS">🟢 Thành công (SUCCESS)</option>
-          <option value="FAILED">🔴 Thất bại (FAILED)</option>
-          <option value="BLOCKED">🟠 Bị chặn (BLOCKED)</option>
-          <option value="PARTIAL">🟡 Một phần (PARTIAL)</option>
+      <div class="audit-select-wrap status">
+        <select id="auditLogStatusFilter" aria-label="Lọc theo trạng thái nhật ký" class="audit-select" onchange="refreshAuditLogs(1)">
+          <option value="">Tất cả trạng thái</option>
+          <option value="SUCCESS">Thành công</option>
+          <option value="FAILED">Thất bại</option>
+          <option value="BLOCKED">Bị chặn</option>
+          <option value="PARTIAL">Một phần</option>
         </select>
       </div>
-      <div style="min-width:110px;">
-        <select id="auditLogLimitSelect" aria-label="Số dòng nhật ký mỗi trang" style="margin:0;padding:6px 10px;font-size:12px;background:var(--card);border:1px solid var(--border);color:#fff;border-radius:6px;width:100%;" onchange="refreshAuditLogs(1)">
+      <div class="audit-select-wrap limit">
+        <select id="auditLogLimitSelect" aria-label="Số dòng nhật ký mỗi trang" class="audit-select" onchange="refreshAuditLogs(1)">
           <option value="25">25 dòng/trang</option>
           <option value="50" selected>50 dòng/trang</option>
           <option value="100">100 dòng/trang</option>
@@ -284,16 +286,16 @@
     </div>
 
     <!-- TABLE WRAP -->
-    <div class="user-table-wrap" tabindex="0" role="region" aria-label="Bảng nhật ký hoạt động Audit" style="overflow-y:auto;max-height:65vh;">
-      <table class="user-table" style="font-size:12px;">
+    <div class="user-table-wrap audit-table-wrap" tabindex="0" role="region" aria-label="Bảng nhật ký hoạt động Audit">
+      <table class="user-table audit-table">
         <thead>
           <tr>
-            <th style="width:135px;">THỜI GIAN</th>
-            <th style="width:145px;">NGƯỜI THỰC HIỆN</th>
-            <th style="width:170px;">HÀNH ĐỘNG</th>
-            <th style="width:135px;">MỤC TIÊU</th>
-            <th>CHI TIẾT THAO TÁC</th>
-            <th style="width:95px;text-align:right;">TRẠNG THÁI</th>
+            <th style="width:142px;">Thời gian</th>
+            <th style="width:155px;">Người thực hiện</th>
+            <th style="width:195px;">Hành động</th>
+            <th style="width:145px;">Mục tiêu</th>
+            <th>Chi tiết</th>
+            <th style="width:110px;text-align:right;">Trạng thái</th>
           </tr>
         </thead>
         <tbody id="auditLogTableBody">
@@ -303,11 +305,11 @@
     </div>
 
     <!-- PAGINATION FOOTER -->
-    <div class="modal-actions" style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.06);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-      <div id="auditLogPaginationInfo" style="color:var(--muted);font-size:11.5px;">Tổng cộng: 0 bản ghi</div>
+    <div class="modal-actions audit-pagination">
+      <div id="auditLogPaginationInfo" class="audit-pagination-info">Tổng cộng: 0 bản ghi</div>
       <div style="display:flex;align-items:center;gap:6px;">
         <button type="button" id="auditLogPrevBtn" class="small" onclick="navigateAuditPage(-1)">‹ Trước</button>
-        <span id="auditLogPageIndicator" style="font-size:11.5px;padding:0 6px;color:#fff;">Trang 1 / 1</span>
+        <span id="auditLogPageIndicator" class="audit-page-indicator">Trang 1 / 1</span>
         <button type="button" id="auditLogNextBtn" class="small" onclick="navigateAuditPage(1)">Sau ›</button>
       </div>
     </div>

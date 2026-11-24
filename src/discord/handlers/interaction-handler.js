@@ -247,8 +247,9 @@ function attachInteractionHandler(client, { config, services, logger }) {
         const acked = await safeDeferReply(interaction, { ephemeral: isEphemeral });
         if (!acked) return;
 
-        // RBAC Role Gate: /login and /logout are accessible without an authorized role (DISCORD-12).
-        if (interaction.commandName !== 'login' && interaction.commandName !== 'logout') {
+        // RBAC Role Gate: /login, /logout and community points commands do not require Web role linkage (DISCORD-12).
+        const PUBLIC_SERVER_COMMANDS = new Set(['login', 'logout', 'diemdanh', 'diem', 'bxh', 'tinnhan']);
+        if (!PUBLIC_SERVER_COMMANDS.has(interaction.commandName)) {
           const hasRole = await hasAuthorizedRole(interaction, services);
           if (!hasRole) {
             const { embed } = require('../panels/renderer');
@@ -267,7 +268,7 @@ function attachInteractionHandler(client, { config, services, logger }) {
         }
 
         // Admin command authorization check
-        if (interaction.commandName === 'admin' || interaction.commandName === 'wispbyte' || interaction.commandName === 'check' || interaction.commandName === 'kbot') {
+        if (['admin', 'wispbyte', 'check', 'kbot', 'diemadmin'].includes(interaction.commandName)) {
           const allowedGuildId = await getEffectiveAllowedGuildId(config, services);
           const user = (services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function')
             ? await resolveLinkedUser(interaction, services)

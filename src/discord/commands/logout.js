@@ -10,6 +10,7 @@ const definition = new SlashCommandBuilder()
 async function execute(interaction, services) {
   const discordUserId = interaction.user?.id;
   await services.accessStore.unlinkDiscord(discordUserId);
+  try { require('../handlers/points-message-handler').clearMessagePointsLoginCache(discordUserId); } catch (_) {}
   await services.accessStore?.addAudit?.({
     action: 'DISCORD_LOGOUT',
     actorId: discordUserId,

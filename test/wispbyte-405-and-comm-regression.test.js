@@ -29,6 +29,7 @@ function createCaptureLogger() {
 async function startRegressionHarness({
   seedWorkers = [],
   fetchImpl = null,
+  discordClient = null,
   commandResultTimeoutMs = 4000,
   workerPollWaitMs = 2000
 } = {}) {
@@ -97,6 +98,7 @@ async function startRegressionHarness({
     broker,
     entitlementService: { redeem: async () => ({ ok: true }) },
     accessControl: new AccessControl({ store }),
+    discordClient,
     config,
     logger
   });
@@ -1678,6 +1680,177 @@ test('16. Routine Minecraft connection errors do NOT alert Admin, crash events s
     assert.ok(!userCardHtml.includes('ECONNREFUSED'), 'Regular user card must not display raw ECONNREFUSED');
     assert.ok(!userCardHtml.includes('Sửa URL'), 'Regular user card must not show admin diagnostics');
     assert.ok(userCardHtml.includes('Tạm ngắt kết nối máy chủ'));
+  } finally {
+    await env.close();
+  }
+});
+
+test('17. GET /api/manager/users resolves Discord displayName/username, Manage Users inline Discord filters & name badges work, and Audit Logs render formatted pills', async () => {
+  const vm = require('node:vm');
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { encryptUserPassword } = require('../src/utils/secrets');
+
+  const fakeDiscordClient = {
+    users: {
+      cache: new Map(),
+      fetch: async (id) => {
+        if (id === '123456789012345678') {
+          return { id: '123456789012345678', username: 'kietpro', globalName: 'Kiệt Pro' };
+        }
+        return null;
+      }
+    }
+  };
+
+  const env = await startRegressionHarness({ discordClient: fakeDiscordClient });
+  try {
+    await env.store.setAccess('usr_linked', {
+      id: 'usr_linked',
+      username: 'linked_acc',
+      password: encryptUserPassword('Pass!123'),
+      role: 'user',
+      status: 'active',
+      isPermanent: true
+    }, 'test-seed');
+    await env.store.linkDiscord('123456789012345678', 'linked_acc', 'usr_linked');
+    await env.store.setAccess('usr_unlinked', {
+      id: 'usr_unlinked',
+      username: 'plain_acc',
+      password: encryptUserPassword('Pass!123'),
+      role: 'user',
+      status: 'active',
+      isPermanent: false
+    }, 'test-seed');
+
+    const res = await fetch(`${env.baseUrl}/api/manager/users`, { headers: env.adminHeaders });
+    assert.equal(res.status, 200);
+    const json = await res.json();
+    const linked = json.users.find((u) => u.username === 'linked_acc');
+    const unlinked = json.users.find((u) => u.username === 'plain_acc');
+    assert.equal(linked.discordUserId, '123456789012345678');
+    assert.equal(linked.discordUsername, 'kietpro');
+    assert.equal(linked.discordDisplayName, 'Kiệt Pro');
+    assert.equal(unlinked.discordUserId, '');
+    assert.equal(unlinked.discordUsername, '');
+
+    // Verify inline filter HTML partial
+    const adminHtml = fs.readFileSync(path.join(__dirname, '../src/http/views/dashboard/partials/04-admin-pages.html'), 'utf8');
+    assert.ok(adminHtml.includes('id="userFilterDiscordLinked"'));
+    assert.ok(adminHtml.includes('id="userFilterDiscordUnlinked"'));
+    assert.ok(adminHtml.includes('class="mgmt-search-wrap"'));
+    assert.ok(adminHtml.includes('class="audit-toolbar"'));
+    assert.ok(adminHtml.includes('class="user-table audit-table"'));
+
+    // VM check for Manage Users Discord name rendering, Discord filters, and Audit Logs formatting
+    const elements = new Map();
+    const makeEl = (id) => {
+      if (!elements.has(id)) {
+        const classes = new Set();
+        const attrs = new Map();
+        elements.set(id, {
+          id,
+          value: '',
+          textContent: '',
+          innerHTML: '',
+          disabled: false,
+          style: { setProperty: () => {} },
+          dataset: {},
+          classList: {
+            add: (...c) => c.forEach((x) => classes.add(x)),
+            remove: (...c) => c.forEach((x) => classes.delete(x)),
+            toggle: (x, f) => { if (f === undefined) { if (classes.has(x)) classes.delete(x); else classes.add(x); } else if (f) classes.add(x); else classes.delete(x); },
+            contains: (x) => classes.has(x)
+          },
+          setAttribute: (k, v) => attrs.set(k, String(v)),
+          getAttribute: (k) => attrs.get(k) ?? null,
+          hasAttribute: (k) => attrs.has(k),
+          querySelector: () => null,
+          querySelectorAll: () => [],
+          addEventListener: () => {},
+          closest: () => null,
+          focus: () => {}
+        });
+      }
+      return elements.get(id);
+    };
+    const doc = {
+      readyState: 'complete',
+      body: { classList: { add: () => {}, remove: () => {}, toggle: () => {} }, dataset: {}, style: {} },
+      documentElement: { setAttribute: () => {}, removeAttribute: () => {}, style: { setProperty: () => {} } },
+      getElementById: (id) => (id === 'appStarfieldCanvas' ? null : makeEl(id)),
+      querySelectorAll: () => [],
+      addEventListener: () => {},
+      createElement: (tag) => makeEl(`__dyn_${tag}_${Math.random()}`),
+      hidden: false
+    };
+    const win = {
+      __INITIAL_USER__: null,
+      location: { protocol: 'https:', host: 'mgr.example.com', href: 'https://mgr.example.com/' },
+      addEventListener: () => {},
+      matchMedia: () => ({ matches: false, addEventListener: () => {} }),
+      requestAnimationFrame: () => 0,
+      cancelAnimationFrame: () => {}
+    };
+    const ctx = {
+      window: win,
+      document: doc,
+      URL,
+      localStorage: { getItem: () => null, setItem: () => {} },
+      sessionStorage: { getItem: () => null, setItem: () => {} },
+      navigator: { onLine: true, clipboard: { writeText: async () => {} } },
+      setTimeout,
+      clearTimeout,
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+      console
+    };
+    ctx.globalThis = ctx;
+    vm.createContext(ctx);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/http/views/dashboard/scripts/01-core-and-cards.js'), 'utf8'), ctx);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/http/views/dashboard/scripts/02-auth-theme-canvas.js'), 'utf8'), ctx);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/http/views/dashboard/scripts/03-navigation-and-users.js'), 'utf8'), ctx);
+
+    vm.runInContext(`
+      currentUser = { role: 'admin', username: 'admin' };
+      userManagementList = [
+        { id: 'u1', username: 'linked_acc', role: 'user', status: 'active', isPermanent: true, discordUserId: '123456789012345678', discordUsername: 'kietpro', discordDisplayName: 'Kiệt Pro', workerIds: [] },
+        { id: 'u2', username: 'plain_acc', role: 'user', status: 'active', isPermanent: false, discordUserId: '', discordUsername: '', discordDisplayName: '', workerIds: [] }
+      ];
+      userManagementBotOwnership = {};
+      userManagementAvailableBots = [];
+    `, ctx);
+
+    ctx.setUserStatusFilter('discord_linked');
+    const linkedHtml = doc.getElementById('userFullTableBody').innerHTML;
+    assert.ok(linkedHtml.includes('linked_acc'));
+    assert.ok(!linkedHtml.includes('plain_acc'));
+    assert.ok(linkedHtml.includes('Kiệt Pro (@kietpro)'), 'User table must render Discord name instead of raw ID');
+    assert.ok(linkedHtml.includes('title="Discord ID: 123456789012345678"'));
+
+    ctx.setUserStatusFilter('discord_unlinked');
+    const unlinkedHtml = doc.getElementById('userFullTableBody').innerHTML;
+    assert.ok(unlinkedHtml.includes('plain_acc'));
+    assert.ok(!unlinkedHtml.includes('linked_acc'));
+
+    // Verify polished Audit Logs formatting (structured pills instead of raw JSON dump)
+    ctx.renderAuditLogs([
+      {
+        timestamp: new Date().toISOString(),
+        status: 'SUCCESS',
+        category: 'USER_MGMT',
+        action: 'DISCORD_POINTS_ADMIN_ADJUST',
+        actor: { role: 'admin', username: 'admin', ip: '1.2.3.4' },
+        target: { username: 'linked_acc' },
+        details: { mode: 'add', beforePoints: 10, afterPoints: 60, reason: 'Thưởng event' }
+      }
+    ], 1, 1, 1, 50);
+    const auditHtml = doc.getElementById('auditLogTableBody').innerHTML;
+    assert.ok(auditHtml.includes('Admin chỉnh điểm Discord'));
+    assert.ok(auditHtml.includes('audit-kv-pill'));
+    assert.ok(auditHtml.includes('Thưởng event'));
+    assert.ok(auditHtml.includes('Điểm mới:'));
+    assert.ok(!auditHtml.includes('{"mode"'), 'Audit Logs must NOT render raw JSON strings for structured details');
   } finally {
     await env.close();
   }

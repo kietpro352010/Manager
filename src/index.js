@@ -45,9 +45,11 @@ const { ManagerRuntimeSettings } = require('./services/manager-runtime-settings'
 const WispbyteKeepAliveManager = require('./services/wispbyte-keepalive');
 const { AdminNotifier } = require('./services/admin-notifier');
 const { StatusMonitorService } = require('./discord/status-monitor');
+const { DiscordPointsService } = require('./services/discord-points-service');
 
 const { createApp } = require('./http/app');
 const { attachInteractionHandler } = require('./discord/handlers/interaction-handler');
+const { attachMessagePointsHandler } = require('./discord/handlers/points-message-handler');
 const { registerCommands } = require('./discord/register-commands');
 
 async function main() {
@@ -119,7 +121,7 @@ async function main() {
   }
 
   // 4. Discord Client & Admin Notifier
-  const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+  const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
   const adminNotifier = new AdminNotifier({
     client,
     store: accessStore,
@@ -183,6 +185,10 @@ async function main() {
     });
   });
   const wispbyteKeepAlive = new WispbyteKeepAliveManager({ store: accessStore, config: runtimeConfig, logger, adminNotifier });
+  const discordPointsService = new DiscordPointsService({ store: accessStore, logger });
+  await discordPointsService.initialize().catch((err) => {
+    logger?.warn?.('discord_points_init_failed', { error: err?.message || String(err) });
+  });
 
   // Start background workers (optimized intervals to reduce idle Supabase/Render usage)
   broker.startOutboxProcessor({ intervalMs: Number(process.env.OUTBOX_POLL_INTERVAL_MS) || 30000 });
@@ -248,6 +254,7 @@ async function main() {
     managerRuntimeSettings,
     wispbyteKeepAlive,
     adminNotifier,
+    discordPoints: discordPointsService,
     discordClient: client
   };
   const statusMonitor = new StatusMonitorService({ services, intervalMs: 15 * 60 * 1000 });
@@ -286,6 +293,7 @@ async function main() {
   // 7. Discord Gateway & Slash Commands
   if (config.discordToken) {
     attachInteractionHandler(client, { config: runtimeConfig, services, logger });
+    attachMessagePointsHandler(client, { config: runtimeConfig, services, logger });
 
     const targetGuildId = config.discordGuildId || roleSettings?.guildId || '';
     const registerSlash = async (gId = targetGuildId) => {
@@ -357,6 +365,8 @@ async function main() {
       broker.stopOutboxProcessor();
       wispbyteKeepAlive.stop();
       statusMonitor.stop();
+      discordPointsService.stop();
+      await discordPointsService.flush().catch(() => {});
       try { client?.destroy?.(); } catch (_) {}
 
       server.closeIdleConnections?.();
