@@ -173,7 +173,7 @@ function exportBotList() {
     label: b.label,
     url: b.url || '',
     ...(b.provider ? { provider: b.provider } : {}),
-    ...(b.serviceId ? { serviceId: b.serviceId } : {})
+    ...(b.renderServiceId ? { renderServiceId: b.renderServiceId } : (b.serviceId ? { serviceId: b.serviceId } : {}))
   }));
   const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
   const objectUrl = URL.createObjectURL(blob);
@@ -204,7 +204,7 @@ async function handleImportFile(event) {
     const botsToImport = data.map(item => {
       const rawUrl = String(item.url || item.endpoint || item.sourceUrl || '').trim();
       const provider = String(item.provider || '').trim() || undefined;
-      const serviceId = String(item.serviceId || '').trim() || undefined;
+      const serviceId = String(item.renderServiceId || item.serviceId || '').trim() || undefined;
       return {
         ...(item.id !== undefined ? { id: item.id } : {}),
         url: rawUrl ? normalizeClientBotUrl(rawUrl) : '',

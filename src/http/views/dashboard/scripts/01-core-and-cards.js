@@ -1014,14 +1014,24 @@ function editBot(event,id){
   const urlEl = document.getElementById('editBotUrl');
   if (urlEl && urlEl.dataset) delete urlEl.dataset.prevRenderUrl;
   const looksWispPanel = isClientWispbyteControlPanelUrl(bot.url || '');
-  if (provEl) {
+  const initialProvider = (() => {
     const pLower = String(bot.provider || '').trim().toLowerCase();
-    provEl.value = (pLower === 'wispbyte' || looksWispPanel || (!pLower && !bot.url)) ? 'wispbyte' : 'render';
+    return (pLower === 'wispbyte' || looksWispPanel || (!pLower && !bot.url)) ? 'wispbyte' : 'render';
+  })();
+  if (provEl) {
+    provEl.value = initialProvider;
   }
   if (urlEl) {
-    urlEl.value = looksWispPanel ? '' : (bot.url || '');
+    if (initialProvider === 'wispbyte') {
+      if (!looksWispPanel && String(bot.url || '').trim()) {
+        urlEl.dataset.prevRenderUrl = String(bot.url).trim();
+      }
+      urlEl.value = '';
+    } else {
+      urlEl.value = looksWispPanel ? '' : (bot.url || '');
+    }
   }
-  handleEditBotProviderChange({ preserveUrl: true });
+  handleEditBotProviderChange({ preserveUrl: initialProvider === 'render' });
   document.getElementById('editBotLabel').value=bot.label||'';
   const secInput = document.getElementById('editBotSecretKey');
   if (secInput) {

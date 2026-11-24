@@ -1019,21 +1019,23 @@ function createAdminApi({
       for (const item of botsToImport) {
         try {
           const rawUrl = String(item.url || item.serviceUrl || '').trim();
+          const serviceId = String(item.renderServiceId || item.serviceId || '').trim();
           const isHttpUrl = /^https?:\/\//i.test(rawUrl);
           const isWispPanel = isHttpUrl && isWispbyteControlPanelUrl(rawUrl);
           const explicitProvider = String(item.provider || '').trim().toLowerCase();
           const provider = isWispPanel
             ? 'wispbyte'
             : ((explicitProvider === 'render' || explicitProvider === 'wispbyte') ? explicitProvider : (isHttpUrl ? 'render' : 'wispbyte'));
-          if (provider === 'render' && !rawUrl && !item.serviceId) {
+          if (provider === 'render' && !rawUrl && !serviceId) {
             throw new Error('Render worker cần có URL HTTPS hoặc Render service ID.');
           }
-          const safeUrl = isWispPanel ? '' : (rawUrl ? await validateWorkerBotUrl(rawUrl) : '');
+          const validatedUrl = (!isWispPanel && rawUrl) ? await validateWorkerBotUrl(rawUrl) : '';
+          const safeUrl = (isWispPanel || provider === 'wispbyte') ? '' : validatedUrl;
           const result = await registry.add({
             name: item.label || item.name,
             provider,
             serviceUrl: safeUrl,
-            serviceId: item.serviceId || ''
+            serviceId
           });
           added.push(result.worker);
         } catch (err) {
@@ -1161,6 +1163,9 @@ function createAdminApi({
       if (secret) await registry.setSecret(worker.workerId, secret);
       const rawUpdated = await registry.find(worker.workerId, { bypassCache: true });
       const updated = registry.publicView(rawUpdated) || rawUpdated;
+      if (updated?.provider === 'render' && broker && typeof broker.wakePoller === 'function') {
+        broker.wakePoller(worker.workerId);
+      }
       await store.addAudit({
         action: 'ADMIN_UPDATE_BOT',
         targetId: worker.workerId,

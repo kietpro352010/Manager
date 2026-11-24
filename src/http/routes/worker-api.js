@@ -4,6 +4,7 @@ const express = require('express');
 const { createWorkerAuth, extractWorkerSecret } = require('../middleware/worker-auth');
 const { resolveClientIp } = require('../../services/captcha');
 const { timingSafeStringEquals } = require('../../utils/secrets');
+const { isWispbyteControlPanelUrl } = require('../../utils/http');
 
 const POLL_TELEMETRY_KEYS = [
   'state', 'online', 'connected', 'username', 'health', 'food', 'tps', 'pingMs',
@@ -110,6 +111,20 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
     };
     res.on('close', onClose);
     try {
+      if (typeof registry.find === 'function') {
+        const currentWorker = await registry.find(req.workerId);
+        if (!currentWorker || currentWorker.enabled === false) {
+          return res.status(404).json({ ok: false, error: 'worker_not_found' });
+        }
+        const currentUrl = String(currentWorker.serviceUrl || '').trim();
+        const isConfiguredRenderHttp = currentWorker.provider === 'render'
+          && Boolean(currentUrl)
+          && !isWispbyteControlPanelUrl(currentUrl)
+          && (currentWorker.status?.source === 'admin-config' || currentWorker.status?.transport === 'render-http');
+        if (isConfiguredRenderHttp) {
+          return res.status(409).json({ ok: false, error: 'worker_configured_for_render_http' });
+        }
+      }
       const clientIp = resolveClientIp(req);
       const rawStatus = req.body?.status;
       const hasStatusObj = Boolean(rawStatus && typeof rawStatus === 'object' && !Array.isArray(rawStatus));

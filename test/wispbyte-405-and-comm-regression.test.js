@@ -972,7 +972,8 @@ test('11. Dashboard editBot/saveEditBot VM tests: Wispbyte panel URL detection, 
     bots = [
       { workerId: 'b-no-id', id: 'b-no-id', label: 'NoId', provider: 'wispbyte', url: '', renderServiceId: '' },
       { workerId: 'b-has-id', id: 'b-has-id', label: 'HasId', provider: 'render', url: '', renderServiceId: 'srv-123' },
-      { workerId: 'b-render', id: 'b-render', label: 'Ren', provider: 'render', url: 'https://bot-1.onrender.com', renderServiceId: '' }
+      { workerId: 'b-render', id: 'b-render', label: 'Ren', provider: 'render', url: 'https://bot-1.onrender.com', renderServiceId: '' },
+      { workerId: 'b-wisp-stale', id: 'b-wisp-stale', label: 'WispStale', provider: 'wispbyte', url: 'https://stale-bot.onrender.com', renderServiceId: '' }
     ];
   `, ctx);
 
@@ -1010,4 +1011,168 @@ test('11. Dashboard editBot/saveEditBot VM tests: Wispbyte panel URL detection, 
   assert.equal(patchRequests.length, 1);
   assert.equal(patchRequests[0].body.provider, 'wispbyte');
   assert.equal(patchRequests[0].body.url, '');
+
+  // 11e. Opening editBot on wispbyte bot with stale Render URL displays '' and stashes URL for render toggle
+  patchRequests.length = 0;
+  ctx.editBot(null, 'b-wisp-stale');
+  assert.equal(doc.getElementById('editBotProvider').value, 'wispbyte');
+  assert.equal(doc.getElementById('editBotUrl').value, '', 'Wispbyte edit modal must not display stale Render URL');
+  doc.getElementById('editBotProvider').value = 'render';
+  ctx.handleEditBotProviderChange();
+  assert.equal(doc.getElementById('editBotUrl').value, 'https://stale-bot.onrender.com');
+});
+
+test('12. Live migration resists straggler /poll, future lastStateAt clock skew, and allows clean Render -> Wispbyte rollback', async () => {
+  const sec = 'm'.repeat(32);
+  let renderHttpCount = 0;
+  const renderSrv = http.createServer((req, res) => {
+    renderHttpCount += 1;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, result: { ok: true, state: 'online', transport: 'render-http' } }));
+  });
+  await new Promise((resolve) => renderSrv.listen(0, '127.0.0.1', resolve));
+  const renderUrl = `http://127.0.0.1:${renderSrv.address().port}`;
+
+  const env = await startRegressionHarness({
+    seedWorkers: [{
+      worker_id: 'mig-live',
+      bot_number: 1,
+      name: 'Live Mig Bot',
+      enabled: true,
+      provider: 'wispbyte',
+      service_url: '',
+      render_service_id: '',
+      secret: sec,
+      settings: { ecoMode: true, rentable: true },
+      status: {
+        state: 'online',
+        online: true,
+        transport: 'wispbyte-poll',
+        source: 'wispbyte-poll',
+        lastStateAt: new Date(Date.now() + 600000).toISOString()
+      },
+      events: [],
+      created_at: new Date().toISOString()
+    }],
+    fetchImpl: global.fetch,
+    workerPollWaitMs: 3000
+  });
+
+  try {
+    // Active Wispbyte poller holds /poll open
+    const activePollPromise = fetch(`${env.baseUrl}/api/v1/workers/mig-live/poll`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-worker-secret': sec },
+      body: JSON.stringify({ status: { state: 'online', transport: 'wispbyte-poll' }, waitMs: 3000 })
+    });
+    for (let i = 0; i < 40 && !env.broker.hasActivePoller('mig-live'); i++) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    assert.equal(env.broker.hasActivePoller('mig-live'), true);
+
+    // Admin migrates to Render via PATCH -> must immediately wake active poller
+    const patchRes = await fetch(`${env.baseUrl}/api/manager/bot/mig-live`, {
+      method: 'PATCH',
+      headers: env.adminHeaders,
+      body: JSON.stringify({ provider: 'render', url: renderUrl })
+    });
+    assert.equal(patchRes.status, 200);
+    assert.equal(env.broker.hasActivePoller('mig-live'), false, 'PATCH to render must immediately wake existing poller waiter');
+    const firstPollRes = await activePollPromise;
+    assert.equal(firstPollRes.status, 200);
+
+    // Straggler /poll from retiring Wispbyte must be rejected with 409 and NOT corrupt DB
+    const stragglerPoll = await fetch(`${env.baseUrl}/api/v1/workers/mig-live/poll`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-worker-secret': sec },
+      body: JSON.stringify({ status: { state: 'online', transport: 'wispbyte-poll' }, waitMs: 100 })
+    });
+    assert.equal(stragglerPoll.status, 409);
+    assert.equal(env.broker.hasActivePoller('mig-live'), false);
+
+    // Direct updateStatus/touchHeartbeat poll calls must NOT flip provider back to wispbyte when Render URL is valid
+    await env.registry.updateStatus('mig-live', { state: 'online', transport: 'wispbyte-poll' }, 'wispbyte-poll');
+    await env.registry.touchHeartbeat('mig-live', { fromPoll: true });
+    const afterStragglers = await env.registry.find('mig-live', { bypassCache: true });
+    assert.equal(afterStragglers.provider, 'render');
+    assert.equal(afterStragglers.serviceUrl, renderUrl);
+    assert.equal(afterStragglers.status?.transport, 'render-http');
+
+    // Render heartbeat with current timestamp succeeds despite old Wispbyte +10m future lastStateAt
+    const hbRes = await fetch(`${env.baseUrl}/api/v1/workers/mig-live/heartbeat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-worker-secret': sec },
+      body: JSON.stringify({
+        status: {
+          state: 'online',
+          online: true,
+          transport: 'render-http',
+          username: 'RenderUser',
+          lastStateAt: new Date().toISOString()
+        }
+      })
+    });
+    assert.equal(hbRes.status, 200);
+    const afterHb = await env.registry.find('mig-live', { bypassCache: true });
+    assert.equal(afterHb.status?.username, 'RenderUser', 'New Render heartbeat must not be dropped by old Wispbyte clock skew');
+
+    // Command dispatches via Render HTTP immediately
+    const disp = await env.broker.dispatch('mig-live', 'status', {});
+    assert.equal(disp.delivered, true);
+    assert.equal(renderHttpCount, 1);
+
+    // Rollback Render -> Wispbyte resets transport and allows /poll again
+    const rollbackRes = await fetch(`${env.baseUrl}/api/manager/bot/mig-live`, {
+      method: 'PATCH',
+      headers: env.adminHeaders,
+      body: JSON.stringify({ provider: 'wispbyte' })
+    });
+    assert.equal(rollbackRes.status, 200);
+    const afterRollback = await env.registry.find('mig-live', { bypassCache: true });
+    assert.equal(afterRollback.provider, 'wispbyte');
+    assert.equal(afterRollback.serviceUrl, '');
+    assert.equal(afterRollback.status?.transport, 'wispbyte-poll');
+
+    const wispPollAfterRollback = await fetch(`${env.baseUrl}/api/v1/workers/mig-live/poll`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-worker-secret': sec },
+      body: JSON.stringify({ status: { state: 'online', transport: 'wispbyte-poll' }, waitMs: 50 })
+    });
+    assert.equal(wispPollAfterRollback.status, 200);
+  } finally {
+    await env.close();
+    await new Promise((resolve) => {
+      renderSrv.close(resolve);
+      renderSrv.closeAllConnections?.();
+    });
+  }
+});
+
+test('13. batch-import handles renderServiceId and clears stale URL when provider is wispbyte', async () => {
+  const env = await startRegressionHarness();
+  try {
+    const res = await fetch(`${env.baseUrl}/api/manager/bots/batch-import`, {
+      method: 'POST',
+      headers: env.adminHeaders,
+      body: JSON.stringify({
+        bots: [
+          { label: 'WispWithUrl', provider: 'wispbyte', url: 'http://127.0.0.1:45101' },
+          { label: 'RenderById', provider: 'render', url: 'http://127.0.0.1:45102', renderServiceId: 'srv-xyz999' },
+          { label: 'WispSsrf', provider: 'wispbyte', url: 'http://169.254.169.254/latest/meta-data' }
+        ]
+      })
+    });
+    assert.equal(res.status, 200);
+    const json = await res.json();
+    assert.equal(json.addedCount, 2);
+    assert.equal(json.skippedCount, 1);
+    const wisp = json.bots.find((b) => b.name === 'WispWithUrl');
+    const ren = json.bots.find((b) => b.name === 'RenderById');
+    assert.equal(wisp.provider, 'wispbyte');
+    assert.equal(wisp.serviceUrl, '');
+    assert.equal(ren.provider, 'render');
+    assert.equal(ren.renderServiceId, 'srv-xyz999');
+  } finally {
+    await env.close();
+  }
 });
