@@ -1,6 +1,7 @@
 'use strict';
 
 const MAINTENANCE_SETTING_KEY = 'system_maintenance';
+const MAINTENANCE_CACHE_TTL_MS = 30000;
 const DEFAULT_MAINTENANCE_MESSAGE =
   'Hệ thống đang bảo trì nâng cấp máy chủ. Tạm khóa thao tác điều khiển worker, vui lòng quay lại sau.';
 
@@ -16,7 +17,10 @@ function normalizeMaintenanceState(raw) {
 }
 
 async function getMaintenanceState(store) {
-  if (store && store.cachedMaintenance !== undefined) {
+  const cacheFresh = store && store.cachedMaintenance !== undefined && (
+    !store.cachedMaintenanceAt || (Date.now() - Number(store.cachedMaintenanceAt) < MAINTENANCE_CACHE_TTL_MS)
+  );
+  if (cacheFresh) {
     return normalizeMaintenanceState(store.cachedMaintenance);
   }
   if (typeof store?.getSetting === 'function') {
@@ -24,6 +28,7 @@ async function getMaintenanceState(store) {
     const normalized = normalizeMaintenanceState(raw);
     if (store && typeof store === 'object') {
       store.cachedMaintenance = normalized;
+      store.cachedMaintenanceAt = Date.now();
     }
     return normalized;
   }
@@ -48,6 +53,7 @@ async function setMaintenanceState(store, patch = {}, actor = 'admin') {
   }
   if (store && typeof store === 'object') {
     store.cachedMaintenance = next;
+    store.cachedMaintenanceAt = Date.now();
   }
   return next;
 }

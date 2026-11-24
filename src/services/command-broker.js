@@ -1,7 +1,7 @@
 'use strict';
 
 const { randomUUID } = require('node:crypto');
-const { readJson } = require('../utils/http');
+const { readJson, isWispbyteControlPanelUrl } = require('../utils/http');
 const { resolveAndValidateHost, validateProxyUrl } = require('./proxy-validation');
 const { ACTIONS } = require('./worker-registry');
 
@@ -128,7 +128,7 @@ class CommandBroker {
             continue;
           }
 
-          if (worker.provider === 'render' && worker.serviceUrl) {
+          if (!this._shouldUsePollTransport(worker) && worker.serviceUrl) {
             await this.dispatchRender(worker, { commandId: item.id, action, payload });
             await store.completeOutboxItem(item.id, this.instanceId);
           } else {
@@ -194,6 +194,20 @@ class CommandBroker {
     return safePayload;
   }
 
+  _shouldUsePollTransport(worker) {
+    if (!worker || typeof worker !== 'object') return true;
+    if (worker.provider !== 'render') return true;
+    if (this.hasActivePoller(worker.workerId)) return true;
+    const transport = String(worker.transport || worker.status?.transport || '').trim().toLowerCase();
+    if (transport === 'wispbyte-poll') return true;
+    const source = String(worker.status?.source || '').trim().toLowerCase();
+    if (source === 'wispbyte-poll') return true;
+    const serviceUrl = String(worker.serviceUrl || '').trim();
+    if (isWispbyteControlPanelUrl(serviceUrl)) return true;
+    if (!serviceUrl && !String(worker.renderServiceId || '').trim()) return true;
+    return false;
+  }
+
   async dispatch(workerId, action, payload = {}) {
     if (!ACTIONS.has(action)) {
       const err = new Error(`Unsupported worker action: ${action}`);
@@ -232,7 +246,13 @@ class CommandBroker {
     }
 
     this.idleOutboxTicks = 0;
-    this.logger.info('worker_command_dispatch', { workerId, provider: worker.provider, action });
+    const usePoll = this._shouldUsePollTransport(worker);
+    this.logger.info('worker_command_dispatch', {
+      workerId,
+      provider: worker.provider,
+      transport: usePoll ? 'wispbyte-poll' : 'render-http',
+      action
+    });
     const resolvedAction = action === 'reconnect' ? 'restart' : action;
     const command = {
       commandId: randomUUID(),
@@ -241,11 +261,12 @@ class CommandBroker {
       createdAt: new Date().toISOString()
     };
 
-    if (worker.provider === 'render') {
+    if (!usePoll) {
       return this.dispatchRender(worker, command);
     }
 
-    if (!worker.lastHeartbeat || Date.now() - new Date(worker.lastHeartbeat).getTime() > 120000) {
+    const hasRecentHeartbeat = Boolean(worker.lastHeartbeat && Date.now() - new Date(worker.lastHeartbeat).getTime() <= 120000);
+    if (!this.hasActivePoller(worker.workerId) && !hasRecentHeartbeat) {
       const err = new Error(`Wispbyte worker ${workerId} has not checked in recently.`);
       err.code = 'WORKER_UNAVAILABLE';
       err.status = 503;
@@ -275,6 +296,12 @@ class CommandBroker {
       const err = new Error('Render worker URL must use http:// or https://.');
       err.code = 'INVALID_WORKER_URL';
       err.status = 400;
+      throw err;
+    }
+    if (isWispbyteControlPanelUrl(baseUrl)) {
+      const err = new Error('URL cấu hình của Bot là trang quản trị Wispbyte (không nhận lệnh HTTP Push). Hãy xóa Web URL bot để dùng chế độ Wispbyte Pull.');
+      err.code = 'INVALID_WORKER_URL';
+      err.status = 422;
       throw err;
     }
     if (parsedUrl.username || parsedUrl.password || parsedUrl.hostname.includes('%')) {
@@ -330,7 +357,41 @@ class CommandBroker {
         redirErr.status = 502;
         throw redirErr;
       }
-      body = await readJson(response);
+      try {
+        body = await readJson(response);
+      } catch (parseErr) {
+        if (parseErr?.isInvalidJson) {
+          if (response.status === 405) {
+            const err = new Error(`URL Worker (${parsedUrl.host}) trả về HTTP 405 (Method Not Allowed) — URL này là trang web/panel tĩnh, không phải API BotWorker. Nếu chạy trên Wispbyte, hãy xóa Web URL của bot.`);
+            err.code = 'INVALID_WORKER_URL';
+            err.status = 422;
+            throw err;
+          }
+          if (response.status === 404) {
+            const err = new Error(`URL Worker (${parsedUrl.host}) không tìm thấy endpoint điều khiển BotWorker (HTTP 404).`);
+            err.code = 'WORKER_NOT_FOUND';
+            err.status = 502;
+            throw err;
+          }
+          if ([502, 503, 504, 521, 522, 524].includes(response.status)) {
+            const err = new Error(`Máy chủ Worker (${parsedUrl.host}) đang khởi động lại hoặc tạm ngưng phản hồi (HTTP ${response.status}).`);
+            err.code = 'WORKER_UNAVAILABLE';
+            err.status = 503;
+            throw err;
+          }
+          if (!response.ok) {
+            const err = new Error(`Máy chủ Worker (${parsedUrl.host}) trả về mã lỗi HTTP ${response.status} (phản hồi không phải JSON).`);
+            err.code = 'WORKER_UPSTREAM_ERROR';
+            err.status = 502;
+            throw err;
+          }
+          const err = new Error(`URL Worker (${parsedUrl.host}) trả về nội dung HTML/văn bản thay vì JSON hợp lệ (HTTP ${response.status}). Hãy kiểm tra lại Web URL bot.`);
+          err.code = 'INVALID_WORKER_URL';
+          err.status = 502;
+          throw err;
+        }
+        throw parseErr;
+      }
     } catch (fetchErr) {
       if (fetchErr.name === 'TimeoutError' || fetchErr.code === 'ETIMEDOUT' || /timed out/i.test(fetchErr.message)) {
         const timeoutErr = new Error('Command execution timed out waiting for worker response.');
@@ -343,9 +404,17 @@ class CommandBroker {
 
     if (!response.ok || !body.ok) {
       const err = new Error(body.error || `Worker returned HTTP ${response.status}.`);
-      if (body.code || body.error === 'execution_timeout') err.code = body.code || body.error;
       const upstreamStatus = Number(response.status);
-      err.status = [400, 409, 422, 429, 503, 504].includes(upstreamStatus) ? upstreamStatus : 502;
+      if (body.code || body.error === 'execution_timeout') {
+        err.code = body.code || body.error;
+      } else if (upstreamStatus === 405) {
+        err.code = 'INVALID_WORKER_URL';
+      } else if (upstreamStatus === 401 || upstreamStatus === 403) {
+        err.code = 'WORKER_AUTH_FAILED';
+      }
+      err.status = upstreamStatus === 405
+        ? 422
+        : ([400, 409, 422, 429, 503, 504].includes(upstreamStatus) ? upstreamStatus : 502);
       throw err;
     }
 

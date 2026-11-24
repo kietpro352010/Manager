@@ -305,6 +305,9 @@ function createUserApi({
       WORKER_DISABLED: 409,
       WORKER_RESTRICTED: 409,
       RATE_LIMIT: 429,
+      INVALID_WORKER_URL: 422,
+      WORKER_AUTH_FAILED: 502,
+      WORKER_UPSTREAM_ERROR: 502,
       QUEUE_BUSY: 503,
       WORKER_UNAVAILABLE: 503,
       ETIMEDOUT: 504,
@@ -419,8 +422,15 @@ function createUserApi({
     if (session.role === 'admin') return { allowed: true, user: session, worker };
 
     const assigned = Array.isArray(session.assignedBotIds) ? session.assignedBotIds.map(String) : [];
-    const allWorkers = await registry.list();
-    if (!isWorkerAssignedToSession(worker, assigned, allWorkers)) {
+    let conflictOwner = null;
+    const botNum = Number(worker.botNumber);
+    const workerIdLower = String(worker.workerId || '').trim().toLowerCase();
+    const matchedLiteralId = workerIdLower && assigned.some((id) => String(id || '').trim().toLowerCase() === workerIdLower);
+    if (!matchedLiteralId && Number.isInteger(botNum) && botNum > 0) {
+      const literalOwner = await registry.find(String(botNum));
+      if (literalOwner) conflictOwner = [literalOwner];
+    }
+    if (!isWorkerAssignedToSession(worker, assigned, conflictOwner)) {
       return { allowed: false, status: 403, error: 'Bạn không có quyền quản lý bot này.' };
     }
 
@@ -763,11 +773,15 @@ function createUserApi({
 
   // 3. GET SYSTEM ANNOUNCEMENT
   router.get('/announcement', requireSession, async (_req, res) => {
-    let rawAnnouncement = store?.cachedAnnouncement;
+    const cacheFresh = store?.cachedAnnouncement !== undefined && (
+      !store?.cachedAnnouncementAt || (Date.now() - Number(store.cachedAnnouncementAt) < 30000)
+    );
+    let rawAnnouncement = cacheFresh ? store.cachedAnnouncement : undefined;
     if (rawAnnouncement === undefined && typeof store?.getSetting === 'function') {
       try {
         rawAnnouncement = await store.getSetting('system_announcement');
         store.cachedAnnouncement = rawAnnouncement || null;
+        store.cachedAnnouncementAt = Date.now();
       } catch (_) {
         rawAnnouncement = null;
       }
@@ -1531,13 +1545,20 @@ function createUserApi({
       if (result?.result && typeof result.result === 'object' && result.result.ok === false) {
         const code = result.result.code || result.result.error || null;
         const reason = result.result.detail || result.result.message || result.result.error || 'UNKNOWN_ERROR';
-        logger?.error?.('Bot action state sync or execution failed', {
+        const status = commandErrorStatus({ code, status: result.result.status });
+        const logPayload = {
           botId: worker.workerId,
           action,
           error: code,
-          detail: result.result.detail || null
-        });
-        return res.status(commandErrorStatus({ code, status: result.result.status })).json({
+          detail: result.result.detail || null,
+          status
+        };
+        if ([400, 404, 409, 422, 429, 503, 504].includes(status)) {
+          logger?.warn?.('Bot action rejected or unavailable', logPayload);
+        } else {
+          logger?.error?.('Bot action state sync or execution failed', logPayload);
+        }
+        return res.status(status).json({
           ok: false,
           error: `Thực thi lệnh ${action} không hoàn tất: ${reason}`,
           code,
@@ -1569,8 +1590,13 @@ function createUserApi({
         result: result?.result || null
       });
     } catch (error) {
-      logger.error('Bot action failed', { botId: id, action, error: error.message, code: error.code || null });
-      return res.status(commandErrorStatus(error)).json({
+      const status = commandErrorStatus(error);
+      if ([400, 404, 409, 422, 429, 503, 504].includes(status)) {
+        logger?.warn?.('Bot action rejected or unavailable', { botId: id, action, error: error.message, code: error.code || null, status });
+      } else {
+        logger.error('Bot action failed', { botId: id, action, error: error.message, code: error.code || null, status });
+      }
+      return res.status(status).json({
         ok: false,
         error: 'Không thể thực thi lệnh: ' + error.message,
         code: error.code || null

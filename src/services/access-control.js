@@ -121,7 +121,7 @@ class AccessControl {
     const role = String(options.role || 'user').toLowerCase();
     if (role !== 'user') throw new Error('Admin and user roles are managed by Discord server roles.');
     const workerIds = [...new Set((options.workerIds || []).map((id) => String(id).trim().toLowerCase()).filter(Boolean))];
-    if (workerIds.some((id) => !/^[a-z0-9][a-z0-9_-]{1,39}$/.test(id))) throw new Error('One or more worker IDs are invalid.');
+    if (workerIds.some((id) => !/^(?:[1-9]\d{0,8}|[a-z0-9][a-z0-9_-]{1,39})$/.test(id))) throw new Error('One or more worker IDs are invalid.');
 
     const registry = options.registry || this.registry || this.store?.registry;
     if (registry && workerIds.length > 0) {

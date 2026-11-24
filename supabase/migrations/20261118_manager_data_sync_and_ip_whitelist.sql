@@ -10,6 +10,11 @@ ALTER TABLE public.manager_ip_whitelist ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.manager_ip_whitelist FROM PUBLIC, anon, authenticated;
 GRANT ALL ON TABLE public.manager_ip_whitelist TO service_role;
 
+ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS registration_ip text;
+ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS device_fingerprint text;
+ALTER TABLE public.manager_users ADD COLUMN IF NOT EXISTS registration_user_agent text;
+
+CREATE INDEX IF NOT EXISTS idx_users_reg_ip ON public.manager_users(registration_ip);
 CREATE INDEX IF NOT EXISTS idx_users_fingerprint ON public.manager_users(device_fingerprint);
 
 -- Recover trial worker IDs from the durable registration field.

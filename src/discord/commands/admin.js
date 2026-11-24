@@ -43,6 +43,26 @@ function shouldSkipDefer(interaction) {
 
 async function execute(interaction, services) {
   const allowedGuildId = await getAllowedGuildId(services);
+  const subcommand = interaction.options.getSubcommand();
+
+  if (subcommand === 'password') {
+    const newPassword = interaction.options.getString('new_password');
+    if (!newPassword) {
+      if (!checkSuperAdmin(interaction, services, allowedGuildId)) {
+        return {
+          embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Chỉ Chủ sở hữu server hoặc SuperAdmin mới có quyền đổi mật khẩu quản trị viên.', 0xef4444)]
+        };
+      }
+      if (typeof interaction.showModal === 'function' && !interaction.deferred && !interaction.replied) {
+        await interaction.showModal(buildAdminPasswordModal());
+        return null;
+      }
+      return {
+        embeds: [embed('❌ LỖI', 'Mật khẩu quản trị viên phải dài từ 6 đến 256 ký tự.', 0xef4444)]
+      };
+    }
+  }
+
   const user = (services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function')
     ? await resolveLinkedUser(interaction, services)
     : null;
@@ -53,8 +73,6 @@ async function execute(interaction, services) {
       embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Lệnh này chỉ dành cho Quản trị viên hệ thống (Admin).', 0xef4444)]
     };
   }
-
-  const subcommand = interaction.options.getSubcommand();
 
   // 1. SETUP
   if (subcommand === 'setup') {

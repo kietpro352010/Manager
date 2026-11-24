@@ -193,21 +193,21 @@
     <div id="addBotFormView">
       <div class="form-row">
         <label for="addBotUrl" style="display:flex;justify-content:space-between;align-items:center;">
-          <span>Web URL của bot con (1 hoặc nhiều link Render / Wispbyte)</span>
-          <span id="addBotUrlCountBadge" style="font-size:11.5px;color:#38bdf8;font-weight:700;">0 link</span>
+          <span>Web URL của bot con (Để trống để tạo cụm Wispbyte 2-in-1)</span>
+          <span id="addBotUrlCountBadge" style="font-size:11.5px;color:#38bdf8;font-weight:700;">Wispbyte 2-in-1 (Không cần URL)</span>
         </label>
-        <textarea id="addBotUrl" rows="4" autocomplete="off" oninput="updateAddBotUrlCounter()" placeholder="Dán 1 hoặc nhiều link bot tại đây, phân biệt bằng dấu cách hoặc xuống dòng:&#10;https://kbot-worker.onrender.com" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:12.5px;padding:10px;resize:vertical;line-height:1.45;"></textarea>
+        <textarea id="addBotUrl" rows="4" autocomplete="off" oninput="updateAddBotUrlCounter()" placeholder="Bỏ trống để tự tạo 2 Slot Wispbyte (Pull Mode), hoặc dán 1 hoặc nhiều URL Render:&#10;https://kbot-worker.onrender.com" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:12.5px;padding:10px;resize:vertical;line-height:1.45;"></textarea>
       </div>
       <div class="form-row">
         <label for="addBotLabel">Tên hiển thị / Tiền tố đặt tên (Không bắt buộc)</label>
         <input id="addBotLabel" autocomplete="off" placeholder="Ví dụ: Bot (Để trống sẽ tự động đặt theo Bot #ID)">
       </div>
       <div class="note" style="line-height:1.5;">
-        💡 <strong>Tự động nhận diện Dual-Slot (2-in-1):</strong> Mỗi link Worker Render/Wispbyte sẽ tự động bung <strong>2 Bot độc lập</strong> (Slot 1 & Slot 2). Hệ thống tự sinh ID và Secret bí mật.
+        💡 <strong>Tự động nhận diện Dual-Slot (2-in-1):</strong> Để trống URL để tạo nhanh cụm <strong>Wispbyte (2 Bot)</strong> chế độ Pull, hoặc dán URL Render để bung <strong>2 Bot độc lập</strong> kèm ID và Secret riêng.
       </div>
       <div class="modal-actions" style="margin-top:16px;">
         <button type="button" onclick="closeAddBotModal()">Hủy</button>
-        <button type="button" id="confirmAddBotButton" class="primary" onclick="addBotFromWeb()">➕ Thêm Bot</button>
+        <button type="button" id="confirmAddBotButton" class="primary" onclick="addBotFromWeb()">➕ Thêm Cụm Wispbyte (2 Bot)</button>
       </div>
     </div>
 
@@ -242,8 +242,15 @@
       <input id="editBotLabel" placeholder="Ví dụ: Bot Farm Lúa, Bot VIP..." autocomplete="off" style="width:100%;box-sizing:border-box;">
     </div>
     <div class="form-row admin-only" style="margin-bottom:10px;">
-      <label for="editBotUrl" style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">Web URL bot con</label>
-      <input id="editBotUrl" placeholder="https://kbot-instance.onrender.com" autocomplete="off" style="width:100%;box-sizing:border-box;">
+      <label for="editBotProvider" style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">Loại hạ tầng Worker (Provider)</label>
+      <select id="editBotProvider" class="form-input" style="width:100%;box-sizing:border-box;">
+        <option value="wispbyte">Wispbyte (Pull Mode — Không cần URL)</option>
+        <option value="render">Render (Web Service — Cần HTTPS URL)</option>
+      </select>
+    </div>
+    <div class="form-row admin-only" style="margin-bottom:10px;">
+      <label for="editBotUrl" style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">Web URL bot con (Để trống nếu dùng Wispbyte)</label>
+      <input id="editBotUrl" placeholder="https://kbot-instance.onrender.com (bỏ trống cho Wispbyte)" autocomplete="off" style="width:100%;box-sizing:border-box;">
     </div>
     <div class="form-row admin-only" style="margin-bottom:10px;display:none;">
       <label for="editBotSecretKey" style="display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">

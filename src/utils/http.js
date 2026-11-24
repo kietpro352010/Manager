@@ -2,13 +2,31 @@
 
 const zlib = require('node:zlib');
 
+function isWispbyteControlPanelUrl(rawUrl) {
+  const raw = String(rawUrl || '').trim();
+  if (!raw) return false;
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (host === 'wispbyte.com' || host.endsWith('.wispbyte.com')) return true;
+  return /^\/client\/servers\/[a-z0-9_-]+/i.test(parsed.pathname || '');
+}
+
 async function readJson(response) {
   const text = await response.text();
   if (!text) return {};
   try {
     return JSON.parse(text);
   } catch {
-    throw new Error(`Remote server returned invalid JSON (${response.status}).`);
+    const err = new Error(`Remote server returned invalid JSON (${response.status}).`);
+    err.status = response.status;
+    err.isInvalidJson = true;
+    throw err;
   }
 }
 
@@ -234,6 +252,7 @@ function createGzipMiddleware({ minLength = 512, level = 5 } = {}) {
 }
 
 module.exports = {
+  isWispbyteControlPanelUrl,
   readJson,
   fetchWithRetry,
   createGzipMiddleware

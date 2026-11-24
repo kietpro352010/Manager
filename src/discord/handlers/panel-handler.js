@@ -5,6 +5,7 @@ const AsyncKeyLock = require('../../services/async-key-lock');
 const {
   renderBotsList,
   renderBotDetail,
+  renderBotLogs,
   renderAdminStatus,
   renderAdminBots,
   renderWispbyteList,
@@ -27,6 +28,11 @@ const resolvedUserCache = new WeakMap();
 async function resolveAllowedGuildId(services) {
   if (services?.config?.discordGuildId && String(services.config.discordGuildId).trim()) {
     return String(services.config.discordGuildId).trim();
+  }
+  const snap = services?.managerRuntimeSettings?.snapshot?.();
+  if (snap && (snap.guildId || snap.discordGuildId)) {
+    const id = String(snap.guildId || snap.discordGuildId).trim();
+    if (id) return id;
   }
   try {
     const roleSettings = await services?.managerRuntimeSettings?.getRoleSettings?.();
@@ -198,6 +204,17 @@ setInterval(() => {
 async function getEffectiveRoleIds(services) {
   let adminRoleId = services?.accessControl?.adminRoleId || services?.config?.adminRoleId || '';
   let userRoleId = services?.accessControl?.userRoleId || services?.config?.userRoleId || '';
+  if (!adminRoleId || !userRoleId) {
+    const snap = services?.managerRuntimeSettings?.snapshot?.();
+    if (snap) {
+      if (!adminRoleId && (snap.adminRoleId || snap.discordAdminRoleId)) {
+        adminRoleId = String(snap.adminRoleId || snap.discordAdminRoleId).trim();
+      }
+      if (!userRoleId && (snap.userRoleId || snap.discordUserRoleId)) {
+        userRoleId = String(snap.userRoleId || snap.discordUserRoleId).trim();
+      }
+    }
+  }
   if (!adminRoleId || !userRoleId) {
     try {
       const stored = await services?.accessStore?.getSetting?.('discord_access');
@@ -684,10 +701,11 @@ async function handlePanelInteraction(interaction, services) {
   // 0. Status Monitor Refresh (Admin Only, Public View)
   if (customId === 'status_monitor:refresh') {
     const { isUserAdmin } = require('./interaction-handler');
-    const user = (services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function')
-      ? await resolveLinkedUser(interaction, services).catch(() => null)
-      : null;
-    const isAdmin = isUserAdmin(interaction, services, user, effectiveGuildId);
+    let isAdmin = isUserAdmin(interaction, services, null, effectiveGuildId);
+    if (!isAdmin && services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function') {
+      const user = await resolveLinkedUser(interaction, services).catch(() => null);
+      isAdmin = isUserAdmin(interaction, services, user, effectiveGuildId);
+    }
 
     if (!isAdmin) {
       if (interaction.deferred || interaction.replied) return;
@@ -724,10 +742,11 @@ async function handlePanelInteraction(interaction, services) {
   // 0B. KBot Server List Refresh (Admin Only, Ephemeral/Private View)
   if (customId === 'kbot:refresh_servers') {
     const { isUserAdmin } = require('./interaction-handler');
-    const user = (services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function')
-      ? await resolveLinkedUser(interaction, services).catch(() => null)
-      : null;
-    const isAdmin = isUserAdmin(interaction, services, user, effectiveGuildId);
+    let isAdmin = isUserAdmin(interaction, services, null, effectiveGuildId);
+    if (!isAdmin && services?.accessStore?.getUserByDiscordId && typeof resolveLinkedUser === 'function') {
+      const user = await resolveLinkedUser(interaction, services).catch(() => null);
+      isAdmin = isUserAdmin(interaction, services, user, effectiveGuildId);
+    }
 
     if (!isAdmin) {
       if (interaction.deferred || interaction.replied) return;
@@ -896,7 +915,6 @@ async function handlePanelInteraction(interaction, services) {
     return safeUpdate(interaction, view);
   }
 
-  // Old log buttons in existing Discord messages now open the concise detail panel.
   if (customId.startsWith('logs:')) {
     const workerId = customId === 'logs:select'
       ? interaction.values?.[0]
@@ -911,10 +929,32 @@ async function handlePanelInteraction(interaction, services) {
       });
     }
 
-    return safeUpdate(interaction, renderBotDetail({
+    const fullBotId = worker.workerId || worker.id;
+    const storeRef = services?.store || services?.registry?.store;
+    let logs = [];
+    try {
+      if (services?.workerClient?.getBotLogs) {
+        logs = await services.workerClient.getBotLogs(fullBotId, 25);
+      } else if (services?.registry?.getLogs) {
+        logs = await services.registry.getLogs(fullBotId, 25);
+      }
+      if ((!Array.isArray(logs) || logs.length === 0) && storeRef?.get) {
+        const fullRecord = await storeRef.get(fullBotId, { includeEvents: true }).catch(() => null);
+        if (Array.isArray(fullRecord?.events) && fullRecord.events.length > 0) {
+          logs = fullRecord.events;
+        }
+      }
+      if ((!Array.isArray(logs) || logs.length === 0) && storeRef?.getAuditLogs) {
+        logs = await storeRef.getAuditLogs({ botId: fullBotId, limit: 25 });
+      }
+    } catch (err) {
+      logs = [{ time: new Date().toISOString(), type: 'error', message: 'Không thể tải logs: ' + err.message }];
+    }
+
+    return safeUpdate(interaction, renderBotLogs({
       user,
       worker,
-      notice: 'Nhật ký bot không hiển thị trên Discord. Hãy dùng Web Manager nếu cần xem log.'
+      logs: Array.isArray(logs) ? logs.slice(-25) : []
     }));
   }
 

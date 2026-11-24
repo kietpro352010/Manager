@@ -462,7 +462,7 @@ function renderBotLogs({ user, worker, logs = [] }) {
   if (rawWorkerId) {
     components.push(
       new ActionRowBuilder().addComponents(
-        button('Làm mới', `bot:refresh:${rawWorkerId}`, ButtonStyle.Secondary, false, '🔄'),
+        button('Làm mới', `logs:refresh:${rawWorkerId}`, ButtonStyle.Secondary, false, '🔄'),
         button('Chi tiết bot', `bot:view:${rawWorkerId}`, ButtonStyle.Primary, false, 'ℹ️'),
         button('Quay lại danh sách', 'bots:list', ButtonStyle.Secondary, false, '◀')
       )

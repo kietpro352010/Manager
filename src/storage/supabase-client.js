@@ -544,7 +544,9 @@ class SupabaseAdapter {
                 allow_account_change: u.allowAccountChange !== false,
                 lock_reason: String(u.lockReason || ''),
                 note: String(u.note || ''),
-                bot_count: Math.max(1, Number(u.botCount || (Array.isArray(u.assignedBotIds) && u.assignedBotIds.length ? u.assignedBotIds.length : 1))),
+                bot_count: (u.botCount !== undefined && u.botCount !== null && Number.isFinite(Number(u.botCount)))
+                  ? Math.max(Array.isArray(u.assignedBotIds) ? u.assignedBotIds.length : 0, Math.trunc(Number(u.botCount)))
+                  : Math.max(1, Number((Array.isArray(u.assignedBotIds) && u.assignedBotIds.length ? u.assignedBotIds.length : 1))),
                 ...(u.discordUserId || u.discord_user_id ? { discord_user_id: String(u.discordUserId || u.discord_user_id) } : {}),
                 ...(u.isTrial !== undefined || u.is_trial !== undefined ? { is_trial: Boolean(u.isTrial ?? u.is_trial) } : {}),
                 ...(u.trialBotId || u.trial_bot_id ? { trial_bot_id: String(u.trialBotId || u.trial_bot_id) } : {}),
@@ -576,6 +578,8 @@ class SupabaseAdapter {
             console.warn('[SUPABASE] Lỗi giải mã mật khẩu user:', u.username || u.id, err?.message || err);
         }
         const assignedArr = Array.isArray(u.assigned_bot_ids) ? u.assigned_bot_ids : [];
+        const rawBotCount = u.bot_count ?? u.botCount;
+        const parsedBotCount = Number(rawBotCount);
         const mapped = {
             id: u.id,
             username: u.username,
@@ -584,7 +588,9 @@ class SupabaseAdapter {
             role: u.role || 'user',
             status: u.status || 'active',
             assignedBotIds: assignedArr,
-            botCount: Math.max(1, parseInt(u.bot_count ?? u.botCount, 10) || assignedArr.length || 1),
+            botCount: (rawBotCount !== undefined && rawBotCount !== null && Number.isFinite(parsedBotCount))
+              ? Math.max(assignedArr.length, Math.trunc(parsedBotCount))
+              : Math.max(1, assignedArr.length),
             expiresAt: u.expires_at || null,
             isPermanent: Boolean(u.is_permanent === true),
             planName: u.plan_name || 'Gói mặc định',
@@ -678,7 +684,9 @@ class SupabaseAdapter {
                     expiresAt: userRow.expires_at || null, planName: String(userRow.plan_name || 'Gói thường'),
                     isPermanent: Boolean(userRow.is_permanent === true),
                     allowAccountChange: userRow.allow_account_change !== false, lockReason: String(userRow.lock_reason || ''),
-                    botCount: Math.max(1, parseInt(userRow.bot_count ?? userRow.botCount, 10) || (Array.isArray(userRow.assigned_bot_ids) ? userRow.assigned_bot_ids.length : 1))
+                    botCount: (userRow.bot_count !== undefined && userRow.bot_count !== null && Number.isFinite(Number(userRow.bot_count)))
+                      ? Math.max(Array.isArray(userRow.assigned_bot_ids) ? userRow.assigned_bot_ids.length : 0, Math.trunc(Number(userRow.bot_count)))
+                      : Math.max(1, Array.isArray(userRow.assigned_bot_ids) ? userRow.assigned_bot_ids.length : 0)
                 } : null
             };
         } catch (err) {
@@ -715,7 +723,9 @@ class SupabaseAdapter {
                 expiresAt: row.expires_at || null, planName: String(row.plan_name || 'Gói thường'),
                 isPermanent: Boolean(row.is_permanent === true),
                 allowAccountChange: row.allow_account_change !== false, lockReason: String(row.lock_reason || ''),
-                botCount: Math.max(1, parseInt(row.bot_count ?? row.botCount, 10) || (Array.isArray(row.assigned_bot_ids) ? row.assigned_bot_ids.length : 1))
+                botCount: (row.bot_count !== undefined && row.bot_count !== null && Number.isFinite(Number(row.bot_count)))
+                  ? Math.max(Array.isArray(row.assigned_bot_ids) ? row.assigned_bot_ids.length : 0, Math.trunc(Number(row.bot_count)))
+                  : Math.max(1, Array.isArray(row.assigned_bot_ids) ? row.assigned_bot_ids.length : 0)
             } : null };
         } catch (err) {
             return { ok: false, error: err.message || 'Không thể xác minh entitlement user trên Supabase.' };

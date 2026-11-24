@@ -972,6 +972,12 @@ function editBot(event,id){
   if(!bot)return;
   const workerId=String(bot.workerId||bot.id||id);
   document.getElementById('editBotId').value=workerId;
+  const provEl = document.getElementById('editBotProvider');
+  if (provEl) {
+    const pLower = String(bot.provider || '').trim().toLowerCase();
+    const looksWispPanel = /wispbyte\.com\/client\/servers/i.test(String(bot.url || ''));
+    provEl.value = (pLower === 'wispbyte' || looksWispPanel || (!pLower && !bot.url)) ? 'wispbyte' : 'render';
+  }
   document.getElementById('editBotUrl').value=bot.url||'';
   document.getElementById('editBotLabel').value=bot.label||'';
   const secInput = document.getElementById('editBotSecretKey');
@@ -1008,10 +1014,11 @@ async function saveEditBot(){
   const rawTags=document.getElementById('editBotTags')?.value || '';
   const tags = rawTags.split(/[,;\s]+/).map(t => t.trim().toLowerCase().replace(/^#/, '')).filter(Boolean);
   const rentable = document.getElementById('editBotRentable') ? document.getElementById('editBotRentable').checked : true;
+  const selectedProvider = String(document.getElementById('editBotProvider')?.value || '').trim().toLowerCase();
   const targetBotObj = bots.find(b => String(b.workerId || b.id) === id);
-  const targetProvider = String(targetBotObj?.provider || targetBotObj?.source || '').toLowerCase();
+  const targetProvider = String(selectedProvider || targetBotObj?.provider || targetBotObj?.source || '').toLowerCase();
   const isRenderProvider = targetProvider === 'render';
-  if(currentUser?.role !== 'user' && isRenderProvider && !url){showToast('URL không được trống đối với bot Render.');return;}
+  if(currentUser?.role !== 'user' && isRenderProvider && Boolean(targetBotObj?.serviceId) && !url){showToast('URL không được trống đối với bot Render gắn Service ID.');return;}
   try{
     let data;
     if (currentUser?.role === 'user') {
@@ -1031,6 +1038,9 @@ async function saveEditBot(){
       }
     } else {
       const payload = { url, label, tags, rentable };
+      if (selectedProvider === 'render' || selectedProvider === 'wispbyte') {
+        payload.provider = selectedProvider;
+      }
       if (secretKey) payload.secretKey = secretKey;
       const result=await requestJson('/api/manager/bot/'+encodeURIComponent(id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
       data=result.data||{};
@@ -1040,6 +1050,7 @@ async function saveEditBot(){
         if (data.bot.label) found.label = data.bot.label;
         if (data.bot.tags) found.tags = data.bot.tags;
         found.rentable = data.bot.rentable !== false;
+        if (data.bot.provider) found.provider = data.bot.provider;
         if (data.bot.url !== undefined) found.url = data.bot.url;
       }
       if (detailBot && String(detailBot.workerId||detailBot.id) === id && data.bot?.label) {

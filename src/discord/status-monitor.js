@@ -117,7 +117,7 @@ async function collectSystemStatus(services, { intervalMs = 15 * 60 * 1000 } = {
   const intervalMinutes = Math.max(1, Math.round(intervalSec / 60));
 
   // 7. Public Web Dashboard URL
-  const publicBaseUrl = services?.config?.publicBaseUrl || '';
+  const publicBaseUrl = services?.managerRuntimeSettings?.snapshot?.()?.publicBaseUrl || services?.config?.publicBaseUrl || '';
 
   return {
     managerOk: true,

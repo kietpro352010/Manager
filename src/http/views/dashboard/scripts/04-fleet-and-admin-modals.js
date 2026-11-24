@@ -1246,10 +1246,12 @@ function updateAddBotUrlCounter() {
   const badge = document.getElementById('addBotUrlCountBadge');
   const btn = document.getElementById('confirmAddBotButton');
   if (badge) {
-    badge.textContent = tokens.length ? (tokens.length + ' link nhận diện') : '0 link';
+    badge.textContent = tokens.length ? (tokens.length + ' link nhận diện') : 'Wispbyte 2-in-1 (Không cần URL)';
   }
   if (btn) {
-    btn.textContent = tokens.length > 1 ? ('➕ Thêm ' + tokens.length + ' Bot') : '➕ Thêm Bot';
+    btn.textContent = tokens.length > 1
+      ? ('➕ Thêm ' + tokens.length + ' Bot')
+      : (tokens.length === 1 ? '➕ Thêm Bot' : '➕ Thêm Cụm Wispbyte (2 Bot)');
   }
 }
 window.updateAddBotUrlCounter = updateAddBotUrlCounter;
@@ -1286,23 +1288,20 @@ async function addBotFromWeb() {
   const rawInput = String(document.getElementById('addBotUrl')?.value || '').trim();
   const label = String(document.getElementById('addBotLabel')?.value || '').trim();
   const tokens = rawInput.split(/[\r\n\s,]+/).map(s => s.trim()).filter(Boolean);
-  if (!tokens.length) {
-    showToast('Vui lòng nhập hoặc dán ít nhất 1 URL bot con.');
-    return;
-  }
   if (button) {
     button.disabled = true;
-    button.textContent = tokens.length > 1 ? '⏳ Đang thêm các bot...' : '⏳ Đang thêm bot...';
+    button.textContent = tokens.length > 1
+      ? '⏳ Đang thêm các bot...'
+      : (tokens.length === 1 ? '⏳ Đang thêm bot...' : '⏳ Đang tạo cụm Wispbyte...');
   }
   try {
+    const bodyPayload = tokens.length
+      ? { urls: tokens, url: tokens[0], label }
+      : { provider: 'wispbyte', slots: 2, label };
     const result = await requestJson('/api/manager/bots', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        urls: tokens,
-        url: tokens[0],
-        label
-      })
+      body: JSON.stringify(bodyPayload)
     });
     const data = result.data || {};
     if (!result.ok) throw new Error(data.error || 'Không thể thêm bot.');

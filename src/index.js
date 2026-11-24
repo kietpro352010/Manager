@@ -158,6 +158,7 @@ async function main() {
     accessStore.cachedAnnouncement = (typeof savedAnnouncement === 'object')
       ? savedAnnouncement
       : { enabled: Boolean(savedAnnouncement), content: String(savedAnnouncement), title: '', mode: 'banner' };
+    accessStore.cachedAnnouncementAt = Date.now();
   }
   const savedWebhook = await accessStore.getSetting('webhook_settings').catch(() => null);
   if (savedWebhook && typeof savedWebhook === 'object' && typeof adminNotifier.configureWebhook === 'function') {

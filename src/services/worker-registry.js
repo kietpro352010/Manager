@@ -5,10 +5,14 @@ const AsyncKeyLock = require('./async-key-lock');
 const { isLocalOrPrivateHost, resolveAndValidateHost, validateProxyUrl } = require('./proxy-validation');
 const { encryptSecret, decryptSecret, generateWorkerSecret } = require('../utils/secrets');
 const { extractChatMessage } = require('../utils/text-format');
+const { isWispbyteControlPanelUrl } = require('../utils/http');
 
 async function validateWorkerServiceUrl(rawUrl) {
   const urlStr = String(rawUrl || '').trim().replace(/\/+$/, '');
   if (!urlStr) return '';
+  if (isWispbyteControlPanelUrl(urlStr)) {
+    throw new Error('Không dùng link trang quản trị Wispbyte làm Worker URL. Với Wispbyte, hãy để trống URL để dùng chế độ Pull.');
+  }
   let parsed;
   try {
     parsed = new URL(urlStr);
@@ -489,16 +493,6 @@ class WorkerRegistry {
     });
   }
 
-  async reindexAfterRemoval(removedBotNumber) {
-    try {
-      const allWorkers = await this.store.list();
-      const toShift = allWorkers.filter((w) => w.botNumber > removedBotNumber).sort((a, b) => a.botNumber - b.botNumber);
-      for (const worker of toShift) {
-        await this.store.update(worker.workerId, { botNumber: worker.botNumber - 1 });
-      }
-    } catch (_) {}
-  }
-
   computeReachable(record) {
     if (!record) return null;
     record.reachable = Boolean(record.lastHeartbeat && Date.now() - new Date(record.lastHeartbeat).getTime() <= 120000);
@@ -800,9 +794,15 @@ class WorkerRegistry {
             safeStatus[numKey] = ex[numKey];
           }
         }
+        if (!safeStatus.transport && ex.transport) {
+          safeStatus.transport = ex.transport;
+        }
         if (!Object.hasOwn(rawStatus, 'connectedAt') && ex.connectedAt) {
           safeStatus.connectedAt = ex.connectedAt;
         }
+      }
+      if (source === 'wispbyte-poll' && !safeStatus.transport) {
+        safeStatus.transport = 'wispbyte-poll';
       }
 
       // Preserve manuallyStopped flag across status reports if not explicitly provided
@@ -856,6 +856,7 @@ class WorkerRegistry {
       const fingerprint = [
         safeStatus.state,
         Boolean(safeStatus.online),
+        safeStatus.transport || '',
         safeStatus.username || '',
         safeStatus.lastError || '',
         safeStatus.lastKickReason || '',
@@ -873,23 +874,40 @@ class WorkerRegistry {
           : (safeStatus.currentWindow === null ? 'closed' : '')
       ].join('|');
 
+      const isPollWorker = source === 'wispbyte-poll' || safeStatus.transport === 'wispbyte-poll';
+      const hasPanelUrl = isWispbyteControlPanelUrl(existing.serviceUrl);
+      const needsProviderHealToWispbyte = isPollWorker && (existing.provider === 'render' || hasPanelUrl);
+      const needsProviderHealToRender = source === 'worker-heartbeat' &&
+        safeStatus.transport === 'render-http' &&
+        existing.provider === 'wispbyte' &&
+        Boolean(existing.serviceUrl) &&
+        !hasPanelUrl;
+      const needsProviderHeal = needsProviderHealToWispbyte || needsProviderHealToRender;
+
       const prevFingerprint = this.lastDbStatusFingerprint.get(id);
-      if (prevFingerprint !== fingerprint) {
+      if (prevFingerprint !== fingerprint || needsProviderHeal) {
         this.bumpRevision(id);
       }
 
       const isHeartbeatSource = source === 'worker-heartbeat' || source === 'wispbyte-poll';
       const isLightweight = Boolean(status?.isLightweight === true || status?.digestUnchanged === true);
       const lastPersistAt = this.lastDbStatusPersistAt.get(id) || 0;
-      const canCoalesceDbWrite = isHeartbeatSource && isLightweight && prevFingerprint === fingerprint && (Date.now() - lastPersistAt < 90000);
+      const canCoalesceDbWrite = !needsProviderHeal && isHeartbeatSource && isLightweight && prevFingerprint === fingerprint && (Date.now() - lastPersistAt < 90000);
 
       if (canCoalesceDbWrite) {
         return { ...existing, status: safeStatus, lastHeartbeat: managerNow };
       }
 
+      const updatePatch = {
+        status: safeStatus,
+        lastHeartbeat: managerNow,
+        ...(needsProviderHealToWispbyte ? { provider: 'wispbyte', ...(hasPanelUrl ? { serviceUrl: '' } : {}) } : {}),
+        ...(needsProviderHealToRender ? { provider: 'render' } : {})
+      };
+
       // Bảo tồn cờ enabled của admin, KHÔNG tự ý set enabled: true
-      const rawUpdated = await this.store.update(id, { status: safeStatus, lastHeartbeat: managerNow }, { returning: false });
-      const updated = rawUpdated || { ...existing, status: safeStatus, lastHeartbeat: managerNow, updatedAt: managerNow };
+      const rawUpdated = await this.store.update(id, updatePatch, { returning: false });
+      const updated = rawUpdated || { ...existing, ...updatePatch, updatedAt: managerNow };
       this.lastDbStatusFingerprint.set(id, fingerprint);
       this.lastDbStatusPersistAt.set(id, Date.now());
 
@@ -918,13 +936,31 @@ class WorkerRegistry {
     });
   }
 
-  async touchHeartbeat(workerId) {
+  async touchHeartbeat(workerId, { fromPoll = false } = {}) {
     const id = String(workerId || '').trim().toLowerCase();
-    const existing = await this.find(id);
-    if (!existing || existing.enabled === false) return null;
-    const now = new Date();
-    const updated = await this.store.update(id, { lastHeartbeat: now });
-    return this.publicView(updated || { ...existing, lastHeartbeat: now });
+    return this.statusLock.run(id, async () => {
+      const existing = await this.find(id);
+      if (!existing || existing.enabled === false) return null;
+      const now = new Date();
+      this.liveHeartbeats.set(id, now);
+      const hasPanelUrl = isWispbyteControlPanelUrl(existing.serviceUrl);
+      const needsHeal = fromPoll && (existing.provider === 'render' || hasPanelUrl);
+      const lastPersistAt = this.lastDbStatusPersistAt.get(id) || 0;
+      const canCoalesce = Boolean(fromPoll) && !needsHeal && lastPersistAt > 0 && (Date.now() - lastPersistAt < 90000);
+      const patch = {
+        lastHeartbeat: now,
+        ...(needsHeal ? { provider: 'wispbyte', ...(hasPanelUrl ? { serviceUrl: '' } : {}) } : {})
+      };
+      if (canCoalesce) {
+        return this.publicView({ ...existing, ...patch });
+      }
+      const rawUpdated = await this.store.update(id, patch, { returning: false });
+      this.lastDbStatusPersistAt.set(id, Date.now());
+      if (needsHeal) {
+        this.bumpRevision(id);
+      }
+      return this.publicView(rawUpdated || { ...existing, ...patch });
+    });
   }
 
   async addEvent(workerId, event) {
@@ -1111,10 +1147,23 @@ class WorkerRegistry {
         next.tags = tags;
       }
       if (Object.hasOwn(patch, 'rentable')) next.rentable = patch.rentable !== false;
+      if (Object.hasOwn(patch, 'provider') && patch.provider !== undefined && patch.provider !== null) {
+        const nextProvider = String(patch.provider).trim().toLowerCase();
+        if (!['render', 'wispbyte'].includes(nextProvider)) {
+          throw new Error('Provider must be render or wispbyte.');
+        }
+        recordPatch.provider = nextProvider;
+      }
       if (Object.hasOwn(patch, 'serviceUrl')) {
         const serviceUrl = await validateWorkerServiceUrl(patch.serviceUrl || '');
-        if (!serviceUrl && worker.provider === 'render' && !worker.renderServiceId) {
-          throw new Error('Render workers need a service URL or Render service ID.');
+        const targetProvider = recordPatch.provider || worker.provider;
+        if (!serviceUrl && targetProvider === 'render' && !worker.renderServiceId) {
+          if (Object.hasOwn(patch, 'provider') && recordPatch.provider === 'render') {
+            throw new Error('Render workers need a service URL or Render service ID.');
+          }
+          recordPatch.provider = 'wispbyte';
+        } else if (serviceUrl && !Object.hasOwn(patch, 'provider') && worker.provider === 'wispbyte') {
+          recordPatch.provider = 'render';
         }
         recordPatch.serviceUrl = serviceUrl;
       }
@@ -1280,6 +1329,7 @@ class WorkerRegistry {
       alias: next.alias ?? worker.alias ?? worker.name,
       tags: next.tags ?? worker.tags ?? [],
       rentable: next.rentable ?? worker.rentable !== false,
+      provider: recordPatch.provider ?? worker.provider,
       serviceUrl: recordPatch.serviceUrl ?? worker.serviceUrl,
       ecoMode: (next.ecoMode ?? worker.settings?.ecoMode) !== false,
       autoTotem: (next.autoTotem ?? worker.settings?.autoTotem) !== false,
@@ -1407,7 +1457,30 @@ class WorkerRegistry {
     if (typeof this.store?.invalidateCache === 'function') {
       this.store.invalidateCache();
     }
-    return this.list();
+    const workers = await this.list();
+    let healed = false;
+    if (Array.isArray(workers) && typeof this.store?.update === 'function') {
+      for (const w of workers) {
+        if (!w || !w.workerId) continue;
+        const hasPanelUrl = isWispbyteControlPanelUrl(w.serviceUrl);
+        const emptyRender = w.provider === 'render'
+          && !String(w.serviceUrl || '').trim()
+          && !String(w.renderServiceId || '').trim();
+        const pollTelemetryOnRender = w.provider === 'render'
+          && (w.status?.transport === 'wispbyte-poll' || w.status?.source === 'wispbyte-poll');
+        if (hasPanelUrl || emptyRender || pollTelemetryOnRender) {
+          try {
+            await this.store.update(w.workerId, {
+              provider: 'wispbyte',
+              ...(hasPanelUrl ? { serviceUrl: '' } : {})
+            }, { returning: false });
+            this.bumpRevision(w.workerId);
+            healed = true;
+          } catch (_) {}
+        }
+      }
+    }
+    return healed ? this.list() : workers;
   }
 
   async save() {

@@ -10,6 +10,7 @@ const {
   isStoredCredentialCiphertext
 } = require('../../utils/secrets');
 const { validateSafeBotUrl } = require('../../services/proxy-validation');
+const { isWispbyteControlPanelUrl } = require('../../utils/http');
 const { resolveClientIp } = require('../../services/captcha');
 const { getMaintenanceState, setMaintenanceState } = require('../../utils/maintenance');
 const rawSchema = require('../../storage/schema-sql');
@@ -26,6 +27,9 @@ function isLoopbackBotUrl(rawUrl) {
 async function validateWorkerBotUrl(rawUrl) {
   const clean = String(rawUrl || '').trim().replace(/\/+$/, '');
   if (!clean) return '';
+  if (isWispbyteControlPanelUrl(clean)) {
+    throw new Error('Không dùng link trang quản trị Wispbyte làm URL bot. Hãy để trống URL để dùng chế độ Wispbyte Pull.');
+  }
   let parsed;
   try {
     parsed = new URL(clean);
@@ -768,34 +772,74 @@ function createAdminApi({
       const managerBaseUrl = String(config.publicBaseUrl || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
       const actorIp = resolveClientIp(req) || '127.0.0.1';
 
-      // Case 1: No URLs provided (manual / wispbyte worker -> 1 slot)
+      // Case 1: No URLs provided (manual / wispbyte worker -> 1 or 2 slots)
       if (!rawUrls.length) {
-        const result = await registry.add({
-          workerId: explicitWorkerId,
-          name: baseLabel || undefined,
-          provider: explicitProvider || 'wispbyte',
-          serviceUrl: body.serviceUrl ? await validateWorkerBotUrl(body.serviceUrl) : '',
-          serviceId: body.serviceId || '',
-          secret: explicitSecret
-        });
+        const provider = explicitProvider || 'wispbyte';
+        const rawSlots = body.slots !== undefined ? Number(body.slots) : (body.botCount !== undefined ? Number(body.botCount) : 1);
+        const slots = Number.isInteger(rawSlots) && rawSlots >= 1 && rawSlots <= 2 ? rawSlots : 1;
+        const rawCount = body.count !== undefined ? Number(body.count) : 1;
+        const serverCount = Number.isInteger(rawCount) && rawCount >= 1 && rawCount <= 25 ? rawCount : 1;
+        const serviceUrlVal = body.serviceUrl ? await validateWorkerBotUrl(body.serviceUrl) : '';
+
+        const added = [];
+        const envConfigs = [];
+        let firstSecret = undefined;
+
+        for (let srvIdx = 0; srvIdx < serverCount; srvIdx++) {
+          const clusterBots = [];
+          for (let slot = 1; slot <= slots; slot++) {
+            let botLabel = undefined;
+            if (baseLabel) {
+              if (serverCount > 1 && slots > 1) botLabel = `${baseLabel} ${srvIdx + 1} (Slot ${slot})`;
+              else if (serverCount > 1) botLabel = `${baseLabel} ${srvIdx + 1}`;
+              else if (slots > 1) botLabel = `${baseLabel} (Slot ${slot})`;
+              else botLabel = baseLabel;
+            }
+            const totalTarget = serverCount * slots;
+            const slotWorkerId = (explicitWorkerId && totalTarget === 1) ? explicitWorkerId : undefined;
+            const slotSecret = (explicitSecret && totalTarget === 1) ? explicitSecret : undefined;
+
+            const result = await registry.add({
+              workerId: slotWorkerId,
+              name: botLabel,
+              provider,
+              serviceUrl: serviceUrlVal,
+              serviceId: body.serviceId || '',
+              secret: slotSecret
+            });
+            if (firstSecret === undefined) firstSecret = result.secret;
+            clusterBots.push({ worker: result.worker, secret: result.secret, slot });
+            added.push(result.worker);
+          }
+          if (clusterBots.length > 0) {
+            const header = serverCount > 1 ? `# Server Wispbyte #${srvIdx + 1}\n` : '';
+            const transportLine = `WORKER_TRANSPORT=${provider === 'render' ? 'render-http' : 'wispbyte-poll'}\n`;
+            const countLine = slots > 1 ? `WORKER_BOT_COUNT=${slots}\n` : '';
+            let chunk = `${header}MANAGER_URL=${managerBaseUrl}\n${transportLine}${countLine}`;
+            clusterBots.forEach((cb) => {
+              chunk += `WORKER_ID_${cb.slot}=${cb.worker.workerId}\nWORKER_SECRET_${cb.slot}=${cb.secret}\n`;
+            });
+            envConfigs.push(chunk.trim());
+          }
+        }
 
         await store.addAudit?.({
           action: 'ADMIN_CREATE_BOT',
-          targetId: result.worker.workerId,
+          targetId: added.map((b) => b.workerId).join(','),
           actorId: req.managerAuthSession.username,
           actorRole: 'admin',
           actorIp,
-          details: { provider: result.worker.provider, name: result.worker.name }
+          details: { provider, count: serverCount, slots, addedCount: added.length }
         }).catch(() => null);
 
-        const envConfig = `MANAGER_URL=${managerBaseUrl}\nWORKER_ID_1=${result.worker.workerId}\nWORKER_SECRET_1=${result.secret}`;
+        const envConfig = envConfigs.join('\n\n');
 
         return res.status(201).json({
           ok: true,
-          message: 'Đã thêm Bot mới thành công.',
-          bot: result.worker,
-          bots: [result.worker],
-          secret: result.secret,
+          message: added.length > 1 ? `Đã thêm thành công ${added.length} Bot!` : 'Đã thêm Bot mới thành công.',
+          bot: added[0],
+          bots: added,
+          secret: firstSecret,
           envConfig
         });
       }
@@ -814,10 +858,17 @@ function createAdminApi({
         }
 
         const isHttpUrl = /^https?:\/\//i.test(rawUrl);
-        const provider = explicitProvider || (isHttpUrl ? 'render' : 'wispbyte');
-        let slots = isHttpUrl ? 2 : 1; // Render / HTTP hosts default to dual-slot; manual wispbyte identifier creates 1 slot
+        const isWispPanel = isHttpUrl && isWispbyteControlPanelUrl(rawUrl);
+        const provider = isWispPanel ? 'wispbyte' : (explicitProvider || (isHttpUrl ? 'render' : 'wispbyte'));
+        const requestedSlots = body.slots !== undefined ? Number(body.slots) : null;
+        let slots = (Number.isInteger(requestedSlots) && requestedSlots >= 1 && requestedSlots <= 2)
+          ? requestedSlots
+          : (isHttpUrl ? 2 : 1); // Render / Wispbyte panel entries default to dual-slot; manual identifier creates 1 slot
+        let effectiveServiceUrl = (isHttpUrl && !isWispPanel) ? rawUrl : '';
 
-        if (provider === 'render') {
+        if (isWispPanel) {
+          effectiveServiceUrl = '';
+        } else if (provider === 'render') {
           if (!isHttpUrl) {
             skipped.push({ url: rawUrl, slot: 0, reason: 'Render worker bắt buộc phải sử dụng URL HTTPS hợp lệ.' });
             continue;
@@ -840,11 +891,11 @@ function createAdminApi({
             skipped.push({ url: rawUrl, slot: 0, reason: 'Identifier worker không hợp lệ.' });
             continue;
           }
-          slots = 1;
+          if (requestedSlots === null) slots = 1;
         }
 
-        // Probe worker /health endpoint if accessible
-        if (provider === 'render' && isHttpUrl) {
+        // Probe worker /health endpoint if accessible (skip for Wispbyte panel URLs)
+        if (!isWispPanel && provider === 'render' && isHttpUrl) {
           try {
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), 2500);
@@ -869,11 +920,11 @@ function createAdminApi({
             }
           } catch (probeErr) {
             // Worker might be booting or cold-starting; keep default dual-slot
-            logger?.info?.('Worker probe cold-start or timeout, defaulting to dual-slot', {
+            logger?.info?.('Worker probe cold-start or timeout, keeping fallback slot count', {
               url: rawUrl,
               error: probeErr?.message
             });
-            slots = 2;
+            if (requestedSlots === null) slots = 2;
           }
         }
 
@@ -890,7 +941,7 @@ function createAdminApi({
               workerId: slotWorkerId,
               name: botLabel,
               provider,
-              serviceUrl: isHttpUrl ? rawUrl : '',
+              serviceUrl: effectiveServiceUrl,
               serviceId: body.serviceId || '',
               secret: slotSecret
             });
@@ -908,7 +959,12 @@ function createAdminApi({
         }
 
         if (clusterBots.length > 0) {
-          let envChunk = `# Cấu hình Worker: ${rawUrl}\nMANAGER_URL=${managerBaseUrl}\n`;
+          const header = isWispPanel
+            ? `# Cấu hình Wispbyte Pull (từ link panel): ${rawUrl}`
+            : `# Cấu hình Worker: ${rawUrl}`;
+          const transportLine = `WORKER_TRANSPORT=${provider === 'render' ? 'render-http' : 'wispbyte-poll'}\n`;
+          const countLine = slots > 1 ? `WORKER_BOT_COUNT=${slots}\n` : '';
+          let envChunk = `${header}\nMANAGER_URL=${managerBaseUrl}\n${transportLine}${countLine}`;
           clusterBots.forEach((cb) => {
             envChunk += `WORKER_ID_${cb.slot}=${cb.worker.workerId}\nWORKER_SECRET_${cb.slot}=${cb.secret}\n`;
           });
@@ -963,11 +1019,16 @@ function createAdminApi({
       for (const item of botsToImport) {
         try {
           const rawUrl = String(item.url || item.serviceUrl || '').trim();
-          const provider = String(item.provider || 'wispbyte').trim().toLowerCase();
+          const isHttpUrl = /^https?:\/\//i.test(rawUrl);
+          const isWispPanel = isHttpUrl && isWispbyteControlPanelUrl(rawUrl);
+          const explicitProvider = String(item.provider || '').trim().toLowerCase();
+          const provider = isWispPanel
+            ? 'wispbyte'
+            : ((explicitProvider === 'render' || explicitProvider === 'wispbyte') ? explicitProvider : (isHttpUrl ? 'render' : 'wispbyte'));
           if (provider === 'render' && !rawUrl && !item.serviceId) {
             throw new Error('Render worker cần có URL HTTPS hoặc Render service ID.');
           }
-          const safeUrl = rawUrl ? await validateWorkerBotUrl(rawUrl) : '';
+          const safeUrl = isWispPanel ? '' : (rawUrl ? await validateWorkerBotUrl(rawUrl) : '');
           const result = await registry.add({
             name: item.label || item.name,
             provider,
@@ -1040,23 +1101,40 @@ function createAdminApi({
         if (typeof body.rentable !== 'boolean') return res.status(400).json({ ok: false, error: 'Trạng thái cho thuê không hợp lệ.' });
         patch.rentable = body.rentable;
       }
+      if (has('provider')) {
+        const nextProvider = String(body.provider || '').trim().toLowerCase();
+        if (!['render', 'wispbyte'].includes(nextProvider)) {
+          return res.status(400).json({ ok: false, error: 'Provider phải là render hoặc wispbyte.' });
+        }
+        patch.provider = nextProvider;
+      }
       if (has('url') || has('serviceUrl')) {
         const rawServiceUrl = body.url ?? body.serviceUrl;
         if (typeof rawServiceUrl !== 'string') {
           return res.status(400).json({ ok: false, error: 'URL bot không hợp lệ.' });
         }
         const serviceUrl = rawServiceUrl.trim().replace(/\/+$/, '');
-        if (serviceUrl) {
-          try {
-            await validateWorkerBotUrl(serviceUrl);
-          } catch (ssrfErr) {
-            return res.status(400).json({ ok: false, error: ssrfErr.message || 'Worker URL bị chặn do chính sách bảo mật (SSRF).' });
+        if (serviceUrl && isWispbyteControlPanelUrl(serviceUrl)) {
+          patch.serviceUrl = '';
+          if (!patch.provider) patch.provider = 'wispbyte';
+        } else {
+          if (serviceUrl) {
+            try {
+              await validateWorkerBotUrl(serviceUrl);
+            } catch (ssrfErr) {
+              return res.status(400).json({ ok: false, error: ssrfErr.message || 'Worker URL bị chặn do chính sách bảo mật (SSRF).' });
+            }
           }
+          if (!serviceUrl && !worker.renderServiceId) {
+            if (patch.provider === 'render') {
+              return res.status(400).json({ ok: false, error: 'Render worker cần URL hoặc Render service ID.' });
+            }
+            if (!patch.provider && worker.provider === 'render') {
+              patch.provider = 'wispbyte';
+            }
+          }
+          patch.serviceUrl = serviceUrl;
         }
-        if (!serviceUrl && worker.provider === 'render' && !worker.renderServiceId) {
-          return res.status(400).json({ ok: false, error: 'Render worker cần URL hoặc Render service ID.' });
-        }
-        patch.serviceUrl = serviceUrl;
       }
 
       const rawSecret = body.secretKey ?? body.secret;
@@ -1070,7 +1148,8 @@ function createAdminApi({
 
       if (Object.keys(patch).length) await registry.updateSettings(worker.workerId, patch);
       if (secret) await registry.setSecret(worker.workerId, secret);
-      const updated = await registry.find(worker.workerId);
+      const rawUpdated = await registry.find(worker.workerId, { bypassCache: true });
+      const updated = registry.publicView(rawUpdated) || rawUpdated;
       await store.addAudit({
         action: 'ADMIN_UPDATE_BOT',
         targetId: worker.workerId,
@@ -1081,6 +1160,7 @@ function createAdminApi({
           label: updated.alias || updated.name,
           tags: updated.tags || [],
           rentable: updated.rentable !== false,
+          provider: updated.provider,
           serviceUrlChanged: has('url') || has('serviceUrl'),
           secretChanged: Boolean(secret)
         }
@@ -1095,6 +1175,7 @@ function createAdminApi({
           label: updated.alias || updated.name,
           tags: updated.tags || [],
           rentable: updated.rentable !== false,
+          provider: updated.provider,
           url: updated.serviceUrl || ''
         }
       });
@@ -1575,12 +1656,20 @@ function createAdminApi({
     let rawPasswordMap = new Map();
     if (store?.client && typeof store.client.from === 'function') {
       try {
-        const { data } = await store.client.from('manager_users').select('id,username,password');
-        if (Array.isArray(data)) {
+        const PAGE_SIZE = 1000;
+        let offset = 0;
+        while (true) {
+          const query = store.client.from('manager_users').select('id,username,password');
+          const { data, error } = typeof query?.range === 'function'
+            ? await query.range(offset, offset + PAGE_SIZE - 1)
+            : await query;
+          if (error || !Array.isArray(data) || data.length === 0) break;
           for (const row of data) {
             if (row?.id && row.password) rawPasswordMap.set(String(row.id), row.password);
             if (row?.username && row.password) rawPasswordMap.set(String(row.username).toLowerCase(), row.password);
           }
+          if (typeof query?.range !== 'function' || data.length < PAGE_SIZE) break;
+          offset += PAGE_SIZE;
         }
       } catch (_) {}
     }
@@ -1921,6 +2010,7 @@ function createAdminApi({
         await store.setSetting('system_announcement', record);
       }
       store.cachedAnnouncement = record;
+      store.cachedAnnouncementAt = Date.now();
       return res.json({ ok: true, message: 'Đã cập nhật thông báo hệ thống.', announcement: record });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });

@@ -432,15 +432,6 @@ window.drawSparkleStar = drawSparkleStar;
   var rafId = null;
   var isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (window.innerWidth <= 768);
 
-  var bgVideo = document.getElementById('appGalaxyVideo');
-  if (bgVideo) {
-    var hideAppVideo = function() {
-      bgVideo.style.display = 'none';
-      bgVideo.pause();
-    };
-    bgVideo.addEventListener('error', hideAppVideo);
-  }
-
   function resize() {
     var prevW = w;
     var prevH = h;

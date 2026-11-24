@@ -1003,7 +1003,7 @@ test('DA-P1-04: Discord renderer customIds/dedup, DM blocking, manuallyStopped s
   const logsView = renderBotLogs({ user: { role: 'user' }, worker: workerWithUnderscore, logs: ['hi'] });
   const ids = logsView.components[0].components.map((c) => c.data.custom_id);
   assert.ok(ids.includes('bot:view:bot_1_alpha'), 'renderBotLogs must use valid bot:view:<rawId> customId');
-  assert.ok(ids.includes('bot:refresh:bot_1_alpha'));
+  assert.ok(ids.includes('logs:refresh:bot_1_alpha'));
 
   // DM blocked when effectiveGuildId configured
   let dmReply = null;

@@ -233,6 +233,10 @@ class SupabaseDashboardStore {
 
   invalidateCache() {
     this.cache.clear();
+    this.cachedMaintenance = undefined;
+    this.cachedMaintenanceAt = 0;
+    this.cachedAnnouncement = undefined;
+    this.cachedAnnouncementAt = 0;
   }
 
   async runMaintenanceCleanup() {
@@ -372,7 +376,7 @@ class SupabaseDashboardStore {
         note: userData.note || '',
         allowAccountChange: userData.allow_account_change !== false,
         lockReason: userData.lock_reason || '',
-        botCount: userData.bot_count || 1,
+        botCount: (userData.bot_count !== undefined && userData.bot_count !== null) ? Number(userData.bot_count) : 1,
         botAliases: userData.bot_aliases || {},
         workerIds: assigned,
         createdAt: userData.created_at,
@@ -464,7 +468,7 @@ class SupabaseDashboardStore {
           note: u.note || '',
           allowAccountChange: u.allow_account_change !== false,
           lockReason: u.lock_reason || '',
-          botCount: u.bot_count || 1,
+          botCount: (u.bot_count !== undefined && u.bot_count !== null) ? Number(u.bot_count) : 1,
           botAliases: u.bot_aliases || {},
           registrationIp: u.registration_ip || '',
           deviceFingerprint: u.device_fingerprint || '',
@@ -549,6 +553,17 @@ class SupabaseDashboardStore {
         ? workerIds
         : normalizeWorkerIds(existingUser?.assigned_bot_ids);
       assignedForSync = assigned;
+      const explicitBotCount = fields.botCount !== undefined && fields.botCount !== null && Number.isFinite(Number(fields.botCount))
+        ? Math.trunc(Number(fields.botCount))
+        : null;
+      const existingBotCount = existingUser?.bot_count !== undefined && existingUser?.bot_count !== null && Number.isFinite(Number(existingUser.bot_count))
+        ? Math.trunc(Number(existingUser.bot_count))
+        : null;
+      const resolvedBotCount = explicitBotCount !== null
+        ? Math.max(assigned.length, explicitBotCount)
+        : (existingBotCount !== null
+            ? Math.max(assigned.length, existingBotCount)
+            : Math.max(1, assigned.length));
       const userRow = {
         id: existingUser?.id || userId,
         username: cleanUsername,
@@ -558,7 +573,7 @@ class SupabaseDashboardStore {
         expires_at: fields.expiresAt !== undefined ? (fields.expiresAt || null) : (existingUser?.expires_at || null),
         plan_name: String(fields.planName || existingUser?.plan_name || 'Gói mặc định'),
         assigned_bot_ids: assigned,
-        bot_count: Math.max(1, Number(fields.botCount || existingUser?.bot_count || assigned.length || 1)),
+        bot_count: resolvedBotCount,
         bot_aliases: (fields.botAliases && typeof fields.botAliases === 'object')
           ? fields.botAliases
           : ((existingUser?.bot_aliases && typeof existingUser.bot_aliases === 'object') ? existingUser.bot_aliases : {}),
@@ -663,6 +678,10 @@ class SupabaseDashboardStore {
           isPermanent: Boolean(data.is_permanent),
           expiresAt: data.expires_at,
           planName: data.plan_name,
+          allowAccountChange: data.allow_account_change !== undefined ? (data.allow_account_change !== false) : userRow.allow_account_change,
+          lockReason: data.lock_reason !== undefined ? String(data.lock_reason || '') : userRow.lock_reason,
+          botAliases: (data.bot_aliases && typeof data.bot_aliases === 'object') ? data.bot_aliases : userRow.bot_aliases,
+          botCount: (data.bot_count !== undefined && data.bot_count !== null) ? Number(data.bot_count) : userRow.bot_count,
           workerIds: assigned,
           updatedAt: data.updated_at
         };
@@ -1005,19 +1024,33 @@ class SupabaseDashboardStore {
 
       if (usedFallback && typeof this.client.from(USERS).select === 'function') {
         try {
-          const { data: allUsers, error: allErr } = await this.client
-            .from(USERS)
-            .select('id, username, assigned_bot_ids');
-          if (!allErr && Array.isArray(allUsers)) {
-            usersToUpdate = allUsers.filter((u) => {
-              const ids = Array.isArray(u.assigned_bot_ids)
-                ? u.assigned_bot_ids.map((x) => String(x).toLowerCase())
-                : (typeof u.assigned_bot_ids === 'string' ? (() => { try { const a = JSON.parse(u.assigned_bot_ids || '[]'); return Array.isArray(a) ? a : []; } catch (_) { return []; } })().map((x) => String(x).toLowerCase()) : []);
-              return ids.includes(targetId);
-            });
-          } else if (allErr && !isMissingSchemaError(allErr) && String(allErr?.code || '') !== '42501') {
-            throw allErr;
+          const allUsers = [];
+          const PAGE_SIZE = 1000;
+          let offset = 0;
+          while (true) {
+            const query = this.client
+              .from(USERS)
+              .select('id, username, assigned_bot_ids');
+            const { data: page, error: allErr } = typeof query?.range === 'function'
+              ? await query.range(offset, offset + PAGE_SIZE - 1)
+              : await query;
+            if (allErr) {
+              if (!isMissingSchemaError(allErr) && String(allErr?.code || '') !== '42501') {
+                throw allErr;
+              }
+              break;
+            }
+            if (!Array.isArray(page) || page.length === 0) break;
+            allUsers.push(...page);
+            if (typeof query?.range !== 'function' || page.length < PAGE_SIZE) break;
+            offset += PAGE_SIZE;
           }
+          usersToUpdate = allUsers.filter((u) => {
+            const ids = Array.isArray(u.assigned_bot_ids)
+              ? u.assigned_bot_ids.map((x) => String(x).toLowerCase())
+              : (typeof u.assigned_bot_ids === 'string' ? (() => { try { const a = JSON.parse(u.assigned_bot_ids || '[]'); return Array.isArray(a) ? a : []; } catch (_) { return []; } })().map((x) => String(x).toLowerCase()) : []);
+            return ids.includes(targetId);
+          });
         } catch (scanErr) {
           if (!isMissingSchemaError(scanErr) && String(scanErr?.code || '') !== '42501') {
             throw scanErr;
@@ -1666,7 +1699,7 @@ class SupabaseDashboardStore {
           note: data.note || '',
           allowAccountChange: data.allow_account_change !== false,
           lockReason: data.lock_reason || '',
-          botCount: data.bot_count || 1,
+          botCount: (data.bot_count !== undefined && data.bot_count !== null) ? Number(data.bot_count) : 1,
           botAliases: data.bot_aliases || {},
           assignedBotIds: assignedIds,
           workerIds: assignedIds,
@@ -1847,6 +1880,13 @@ class SupabaseDashboardStore {
     const { error } = await this.client.from(SETTINGS).upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' });
     if (error) throw error;
     this.cache.delete(`setting:${key}`);
+    if (key === 'system_maintenance') {
+      this.cachedMaintenance = undefined;
+      this.cachedMaintenanceAt = 0;
+    } else if (key === 'system_announcement') {
+      this.cachedAnnouncement = undefined;
+      this.cachedAnnouncementAt = 0;
+    }
     return this.getSetting(key, { bypassCache: true });
   }
 

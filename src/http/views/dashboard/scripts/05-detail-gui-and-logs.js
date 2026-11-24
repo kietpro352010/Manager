@@ -615,7 +615,15 @@ function handleItemTextureError(imgEl) {
     }
     stage = 'tertiary';
   }
-  if (stage === 'tertiary' || stage === 'exhausted') {
+  if (stage === 'tertiary') {
+    if (imgEl.dataset && imgEl.dataset.cdnSrc && imgEl.src !== imgEl.dataset.cdnSrc) {
+      imgEl.src = imgEl.dataset.cdnSrc;
+      imgEl.dataset.fallbackStage = 'cdn';
+      return;
+    }
+    stage = 'cdn';
+  }
+  if (stage === 'cdn' || stage === 'exhausted') {
     imgEl.style.display = 'none';
     imgEl.onerror = null;
     if (imgEl.dataset) imgEl.dataset.fallbackStage = 'exhausted';
@@ -681,10 +689,12 @@ function renderDetailRemoteGui(win) {
     }
     const tex = resolveItemTexture(item);
     const safeName = escapeHtml(tex.label);
+    const cdnRel = (tex.secondary || '').startsWith('/textures/') ? tex.secondary.slice(10) : ('item/' + String(item.name || 'stone').replace(/^minecraft:/i, '').toLowerCase().replace(/[^a-z0-9_]/g, '') + '.png');
+    const cdnSrc = 'https://cdn.jsdelivr.net/gh/InventivetalentDev/minecraft-assets@1.20.1/assets/minecraft/textures/' + cdnRel;
     const initials = (typeof getItemInitials === 'function') ? getItemInitials(tex.label) : (tex.label ? tex.label.slice(0, 2).toUpperCase() : 'IT');
     const ariaLabel = 'Ô GUI #' + idx + ': ' + safeName + (tex.count > 1 ? ' x' + tex.count : '');
     return '<div role="button" tabindex="0" onclick="clickDetailGuiSlot(' + idx + ')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();clickDetailGuiSlot(' + idx + ');}" aria-label="' + escapeHtml(ariaLabel) + '" style="aspect-ratio:1;min-width:0;overflow:hidden;background:rgba(56,189,248,0.08);border:1px solid rgba(56,189,248,0.3);border-radius:6px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;padding:2px;text-align:center;box-shadow:var(--shadow-sm);transition:transform 0.15s ease,border-color 0.15s ease;" onmouseenter="this.style.transform=\'scale(1.05)\';this.style.borderColor=\'#38bdf8\'" onmouseleave="this.style.transform=\'none\';this.style.borderColor=\'rgba(56,189,248,0.3)\'" title="Ô #' + idx + ': ' + safeName + ' (Click để chọn)">' +
-      '<img src="' + escapeHtml(tex.primary) + '" data-fallback-stage="primary" data-secondary-src="' + escapeHtml(tex.secondary) + '" data-tertiary-src="' + escapeHtml(tex.tertiary || tex.secondary) + '" data-initials="' + escapeHtml(initials) + '" onerror="handleItemTextureError(this)" style="width:28px;height:28px;object-fit:contain;image-rendering:pixelated;" alt="' + safeName + '">' +
+      '<img src="' + escapeHtml(tex.primary) + '" data-fallback-stage="primary" data-secondary-src="' + escapeHtml(tex.secondary) + '" data-tertiary-src="' + escapeHtml(tex.tertiary || tex.secondary) + '" data-cdn-src="' + escapeHtml(cdnSrc) + '" data-initials="' + escapeHtml(initials) + '" onerror="handleItemTextureError(this)" style="width:28px;height:28px;object-fit:contain;image-rendering:pixelated;" alt="' + safeName + '">' +
       '<span class="slot-text-name" style="font-size:9px;font-weight:700;color:var(--text);overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;line-height:1.1;max-width:100%;word-break:break-word;margin-top:1px;">' + safeName + '</span>' +
       (tex.count > 1 ? '<span style="position:absolute;bottom:2px;right:2px;font-size:9.5px;font-weight:800;background:var(--bg-elevated);border:1px solid var(--border-strong);padding:0 4px;border-radius:4px;color:var(--accent-text);">x' + tex.count + '</span>' : '') +
       '</div>';
@@ -1399,7 +1409,10 @@ function createDetailSlot(item,slot,selected) {
     img.className = 'slot-icon-img';
     img.alt = itemLabel(item);
     img.loading = 'lazy';
-    img.src = getMinecraftItemIconUrl(item.name);
+    const cdnUrl = getMinecraftItemIconUrl(item.name);
+    if (img.dataset) img.dataset.cdnSrc = cdnUrl;
+    else img.setAttribute?.('data-cdn-src', cdnUrl);
+    img.src = cdnUrl;
     img.onerror = function() {
       if (typeof handleItemIconError === 'function') handleItemIconError(this, item.name);
     };

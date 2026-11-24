@@ -46,8 +46,11 @@ const JS_HASH = crypto.createHash('sha256').update(SCRIPTS).digest('hex').slice(
 const CSS_PATH = `/assets/dashboard.${CSS_HASH}.css`;
 const JS_PATH = `/assets/dashboard.${JS_HASH}.js`;
 
-// Full inline bundle preserved for backward-compatible static analysis / tests
-const HTML = `${HEAD}
+// Full inline bundle built lazily only when requested (e.g. static analysis / tests)
+let cachedFullHtml = null;
+function getFullHtml() {
+  if (cachedFullHtml === null) {
+    cachedFullHtml = `${HEAD}
 <style>
 ${STYLES}
 </style>
@@ -58,6 +61,9 @@ ${SCRIPTS}
 </script>
 </body>
 </html>`;
+  }
+  return cachedFullHtml;
+}
 
 // Lightweight HTML shell referencing content-hashed immutable static CSS/JS assets (BW-01)
 const SHELL_HTML = `${HEAD}
@@ -68,8 +74,7 @@ ${BODY}
 </body>
 </html>`;
 
-module.exports = {
-  HTML,
+const dashboardExports = {
   SHELL_HTML,
   HEAD,
   STYLES,
@@ -83,3 +88,11 @@ module.exports = {
   PARTIAL_FILES,
   SCRIPT_FILES
 };
+
+Object.defineProperty(dashboardExports, 'HTML', {
+  enumerable: true,
+  configurable: true,
+  get: getFullHtml
+});
+
+module.exports = dashboardExports;

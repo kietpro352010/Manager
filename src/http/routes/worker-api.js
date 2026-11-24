@@ -121,7 +121,7 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
           return res.status(404).json({ ok: false, error: 'worker_not_found' });
         }
       } else if (typeof registry.touchHeartbeat === 'function') {
-        const hb = await registry.touchHeartbeat(req.workerId);
+        const hb = await registry.touchHeartbeat(req.workerId, { fromPoll: true });
         if (hb === null) {
           return res.status(404).json({ ok: false, error: 'worker_not_found' });
         }
