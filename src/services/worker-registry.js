@@ -251,6 +251,11 @@ function validateWorkerStatus(rawStatus, source = 'worker') {
   return normalized;
 }
 
+function isRoutineMinecraftWorkerError(text = '', kickReason = '') {
+  const combined = `${String(text || '')} ${String(kickReason || '')}`;
+  return /kick|banned|ban\b|ip_limited|quitting|lobby|minecraft connection|connection_error|connect_failed|connection timed out|credentials are not configured|credentials_missing|invalid_proxy|socks|auth_failed|max_reconnects_reached|reconnect_exhausted|econnrefused|econnreset|etimedout|ehostunreach|enetunreach|epipe|enotfound|socket hang up/i.test(combined);
+}
+
 class WorkerRegistry {
   constructor({ store, accessStore, encryptionKey, renderApi, adminNotifier }) {
     this.store = store;
@@ -966,11 +971,11 @@ class WorkerRegistry {
       this.lastDbStatusFingerprint.set(id, fingerprint);
       this.lastDbStatusPersistAt.set(id, Date.now());
 
-      // Kiểm tra và gửi cảnh báo admin
+      // Kiểm tra và gửi cảnh báo admin (bỏ qua sự cố kết nối / gameplay Minecraft bình thường)
       if (this.adminNotifier && updated && safeStatus.state === 'error') {
         const errText = safeStatus.lastError || '';
-        const isGameEvent = /kick|banned|ban\b|ip_limited|quitting|lobby/i.test(errText) || /kick|banned|ban\b|ip_limited/i.test(safeStatus.lastKickReason || '');
-        if (!isGameEvent && errText) {
+        const isRoutineMcEvent = isRoutineMinecraftWorkerError(errText, safeStatus.lastKickReason);
+        if (!isRoutineMcEvent && errText) {
           void this.adminNotifier.sendAlert({
             source: 'Worker System',
             event: 'worker_system_error',
@@ -1099,11 +1104,11 @@ class WorkerRegistry {
     this.bumpRevision(id);
 
     const ERROR_EVENT_TYPES = [
-      'crash', 'process_error', 'system_error', 'connection_error', 'error',
-      'kicked', 'afk_kicked', 'ip_limited', 'banned', 'reconnect_exhausted', 'auth_failed'
+      'crash', 'process_error', 'system_error', 'error'
     ];
-    if (this.adminNotifier && ERROR_EVENT_TYPES.includes(safeEvent.type)) {
-      const isWarn = ['kicked', 'afk_kicked'].includes(safeEvent.type);
+    const shouldAlertAdmin = ERROR_EVENT_TYPES.includes(safeEvent.type)
+      && !(safeEvent.type === 'error' && isRoutineMinecraftWorkerError(rawMsg, existing.status?.lastKickReason));
+    if (this.adminNotifier && shouldAlertAdmin) {
       void this.adminNotifier.sendAlert({
         source: 'BotWorker',
         event: `worker_${safeEvent.type}`,
@@ -1118,7 +1123,7 @@ class WorkerRegistry {
           errorReason: rawMsg,
           eventDetails: event?.details || {}
         },
-        level: isWarn ? 'warn' : 'error'
+        level: 'error'
       });
     }
 
@@ -1645,6 +1650,7 @@ WorkerRegistry.ACTIONS = ACTIONS;
 WorkerRegistry.validateWorkerStatus = validateWorkerStatus;
 WorkerRegistry.VALID_WORKER_STATES = VALID_WORKER_STATES;
 WorkerRegistry.REACHABLE_WINDOW_MS = REACHABLE_WINDOW_MS;
+WorkerRegistry.isRoutineMinecraftWorkerError = isRoutineMinecraftWorkerError;
 
 module.exports = WorkerRegistry;
 module.exports.WorkerRegistry = WorkerRegistry;
@@ -1652,3 +1658,4 @@ module.exports.ACTIONS = ACTIONS;
 module.exports.validateWorkerStatus = validateWorkerStatus;
 module.exports.VALID_WORKER_STATES = VALID_WORKER_STATES;
 module.exports.REACHABLE_WINDOW_MS = REACHABLE_WINDOW_MS;
+module.exports.isRoutineMinecraftWorkerError = isRoutineMinecraftWorkerError;

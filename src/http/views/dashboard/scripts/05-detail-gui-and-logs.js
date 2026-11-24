@@ -1164,6 +1164,7 @@ async function loadDetailLogs(force=false, expectedGeneration=detailRefreshGener
         rest = timeMatch[2];
       }
 
+      const isAdminUser = Boolean(currentUser && currentUser.role === 'admin');
       let rawTag = '';
       let bodyText = rest;
       const tagMatch = rest.match(/^\[([^\]]{1,24})\]\s*(.*)$/);
@@ -1172,24 +1173,44 @@ async function loadDetailLogs(force=false, expectedGeneration=detailRefreshGener
         bodyText = tagMatch[2].trim() || rawTag;
       }
 
+      if (!isAdminUser && typeof humanizeBotErrorForUser === 'function') {
+        const humanized = humanizeBotErrorForUser(bodyText);
+        if (humanized) bodyText = humanized;
+      }
+
+      const tagLabelMap = {
+        connection_error: 'KẾT NỐI',
+        credentials_missing: 'TÀI KHOẢN',
+        reconnect_exhausted: 'TẠM DỪNG',
+        afk_kicked: 'VĂNG AFK',
+        afk_recovered: 'VÀO LẠI',
+        maintenance_window: 'BẢO TRÌ',
+        bot_death: 'HẠ GỤC',
+        auth_failed: 'ĐĂNG NHẬP',
+        invalid_proxy: 'PROXY',
+        worker_event: 'HỆ THỐNG'
+      };
+      const lowerTag = rawTag.toLowerCase();
+      const mappedPill = !isAdminUser && tagLabelMap[lowerTag] ? tagLabelMap[lowerTag] : '';
+
       const lower = (rawTag + ' ' + bodyText).toLowerCase();
       let kind = 'info';
-      let pillLabel = rawTag ? rawTag.slice(0, 14).toUpperCase() : 'HỆ THỐNG';
-      if (lower.includes('lỗi') || lower.includes('error') || lower.includes('❌') || lower.includes('disconnect') || lower.includes('kicked')) {
+      let pillLabel = mappedPill || (rawTag ? rawTag.slice(0, 14).toUpperCase() : 'HỆ THỐNG');
+      if (lower.includes('lỗi') || lower.includes('error') || lower.includes('❌') || lower.includes('disconnect') || lower.includes('kicked') || lower.includes('ngắt kết nối')) {
         kind = 'error';
-        if (!rawTag) pillLabel = 'LỖI';
-      } else if (lower.includes('cảnh báo') || lower.includes('warn') || lower.includes('⚠')) {
+        if (!rawTag && !mappedPill) pillLabel = 'LỖI';
+      } else if (lower.includes('cảnh báo') || lower.includes('warn') || lower.includes('⚠') || lower.includes('phản hồi chậm')) {
         kind = 'warn';
-        if (!rawTag) pillLabel = 'CẢNH BÁO';
+        if (!rawTag && !mappedPill) pillLabel = 'CẢNH BÁO';
       } else if (lower.includes('totem') || lower.includes('vào cụm') || lower.includes('flow') || lower.includes('gui') || lower.includes('menu') || lower.includes('🎯')) {
         kind = 'flow';
-        if (!rawTag) pillLabel = 'LUỒNG';
-      } else if (lower.includes('thành công') || lower.includes('connected') || lower.includes('spawn') || lower.includes('✅') || lower.includes('🎉')) {
+        if (!rawTag && !mappedPill) pillLabel = 'LUỒNG';
+      } else if (lower.includes('thành công') || lower.includes('connected') || lower.includes('spawn') || lower.includes('✅') || lower.includes('🎉') || lower.includes('bình thường')) {
         kind = 'success';
-        if (!rawTag) pillLabel = 'HOÀN TẤT';
+        if (!rawTag && !mappedPill) pillLabel = 'HOÀN TẤT';
       } else if (lower.includes('chat') || lower.includes('tin nhắn')) {
         kind = 'chat';
-        if (!rawTag) pillLabel = 'CHAT';
+        if (!rawTag && !mappedPill) pillLabel = 'CHAT';
       }
 
       return '<div class="log-row log-row-' + kind + '">' +

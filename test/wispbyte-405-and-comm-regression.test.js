@@ -1483,3 +1483,202 @@ test('15. Active poller reachability, idle poll single-take, in-place _listCache
     await env.close();
   }
 });
+
+test('16. Routine Minecraft connection errors do NOT alert Admin, crash events still alert Admin, and User notifications are concise', async () => {
+  const vm = require('node:vm');
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { AdminNotifier } = require('../src/services/admin-notifier');
+  const { encryptUserPassword } = require('../src/utils/secrets');
+
+  const dmsByUserId = new Map();
+  const fakeDiscordClient = {
+    users: {
+      fetch: async (uid) => ({
+        send: async (payload) => {
+          const list = dmsByUserId.get(uid) || [];
+          list.push(payload);
+          dmsByUserId.set(uid, list);
+          return payload;
+        }
+      })
+    }
+  };
+
+  const sentAdminAlerts = [];
+  const notifierStore = {
+    addAudit: async (entry) => entry,
+    assignedUser: async (workerId) => (workerId === '12' ? { workerId: '12', userId: 'usr_12' } : null),
+    getAccess: async (userId) => (userId === 'usr_12' ? { userId: 'usr_12', username: 'cust12', discordUserId: '222222222222222222' } : null),
+    getDiscordLink: async (userId) => (userId === 'usr_12' ? { discord_user_id: '222222222222222222', username: 'cust12' } : null)
+  };
+  const adminNotifier = new AdminNotifier({
+    client: fakeDiscordClient,
+    store: notifierStore,
+    adminUserId: '999999999999999999',
+    logger: createCaptureLogger()
+  });
+  adminNotifier.batchWaitMs = 5;
+  adminNotifier.flushBatch = async () => {
+    const batch = adminNotifier.pendingBatch.splice(0, adminNotifier.pendingBatch.length);
+    for (const a of batch) sentAdminAlerts.push(a);
+  };
+
+  const workerRec = {
+    workerId: '12',
+    botNumber: 12,
+    name: 'KingMC Bot 12',
+    enabled: true,
+    provider: 'wispbyte',
+    status: { state: 'offline', online: false, username: 'KingMC_12' },
+    settings: { userNotifyEnabled: true, notifyOnAfkKick: true, notifyOnReconnectExhausted: true }
+  };
+  const fakeWorkerStore = {
+    update: async (_id, patch) => ({ ...workerRec, ...patch }),
+    addEvent: async () => true
+  };
+  const registry = new WorkerRegistry({
+    store: fakeWorkerStore,
+    accessStore: notifierStore,
+    encryptionKey: Buffer.alloc(32, 7),
+    adminNotifier
+  });
+  registry.find = async (id) => (String(id) === '12' ? workerRec : null);
+
+  // 16a. Routine Minecraft socket / timeout / auth events -> ZERO Admin alerts
+  await registry.updateStatus('12', {
+    state: 'error',
+    online: false,
+    lastError: 'Minecraft connection error (ECONNREFUSED)'
+  }, 'wispbyte-poll');
+  await registry.updateStatus('12', {
+    state: 'error',
+    online: false,
+    lastError: 'Minecraft connection timed out (kingmc.vn:25565)'
+  }, 'wispbyte-poll');
+  await registry.addEvent('12', { type: 'connection_error', message: 'Minecraft connection error (ECONNREFUSED)' });
+  await registry.addEvent('12', { type: 'auth_failed', message: 'Sai mật khẩu tài khoản Minecraft' });
+  await adminNotifier.sendAlert({
+    source: 'BotWorker',
+    event: 'worker_connection_error',
+    message: 'Minecraft connection error (ECONNRESET)'
+  });
+
+  await new Promise((r) => setTimeout(r, 35));
+  assert.equal(sentAdminAlerts.length, 0, 'Routine Minecraft connection/auth errors must NOT alert Admin');
+
+  // 16b. Genuine worker crash -> STILL alerts Admin
+  await registry.addEvent('12', { type: 'crash', message: 'Worker fatal OOM crash' });
+  await new Promise((r) => setTimeout(r, 35));
+  assert.equal(sentAdminAlerts.length, 1, 'Genuine worker crash must still alert Admin');
+  assert.equal(sentAdminAlerts[0].event, 'worker_crash');
+
+  // 16c. User Discord DM is concise & humanized (no raw ECONNREFUSED or anti-cheat jargon)
+  const dmRes = await adminNotifier.notifyBotLifecycleEvent({
+    workerId: '12',
+    workerMeta: workerRec,
+    event: { type: 'afk_kicked', reason: 'Minecraft connection error (ECONNREFUSED)' },
+    registry,
+    store: notifierStore
+  });
+  assert.equal(dmRes.userNotified, true);
+  const custDms = dmsByUserId.get('222222222222222222') || [];
+  assert.equal(custDms.length, 1);
+  const embedData = custDms[0].embeds[0].data;
+  assert.ok(embedData.title.includes('bị kick / văng khi đang treo AFK'));
+  assert.ok(embedData.description.includes('máy chủ tạm ngắt kết nối'));
+  assert.ok(!embedData.description.includes('ECONNREFUSED'));
+  assert.ok(!embedData.description.includes('anti-cheat'));
+  assert.ok((embedData.fields || []).length <= 1);
+
+  // 16d. Regular user API response & Web dashboard card hide verbose technical diagnostics
+  const secret25 = 'n'.repeat(32);
+  const env = await startRegressionHarness({
+    seedWorkers: [{
+      worker_id: '25',
+      bot_number: 25,
+      name: 'Wispbyte Bot 25',
+      enabled: true,
+      provider: 'wispbyte',
+      service_url: '',
+      render_service_id: '',
+      secret: secret25,
+      settings: { ecoMode: true, rentable: false },
+      status: { state: 'offline', online: false },
+      events: [],
+      last_heartbeat: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    }]
+  });
+  try {
+    await env.store.setAccess('usr_user25', {
+      id: 'usr_user25',
+      username: 'customer_25',
+      password: encryptUserPassword('CustPass!25'),
+      role: 'user',
+      status: 'active',
+      isPermanent: true,
+      workerIds: ['25']
+    }, 'test-seed');
+    const loginRes = await fetch(`${env.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'customer_25', password: 'CustPass!25' })
+    });
+    const userToken = (await loginRes.json()).token;
+
+    const userStartRes = await fetch(`${env.baseUrl}/api/user/bot/25/start`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${userToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    assert.equal(userStartRes.status, 503);
+    const userStartJson = await userStartRes.json();
+    assert.equal(userStartJson.error, 'Bot đang tạm ngoại tuyến, vui lòng thử lại sau ít phút.');
+    assert.ok(!userStartJson.error.includes('MANAGER_URL'));
+    assert.ok(!userStartJson.error.includes('Wispbyte'));
+
+    const userDoc = {
+      getElementById: () => null,
+      querySelectorAll: () => [],
+      addEventListener: () => {},
+      createElement: () => ({ style: {}, setAttribute: () => {}, appendChild: () => {}, children: [] }),
+      hidden: false
+    };
+    const userCtx = {
+      window: { __INITIAL_USER__: null, location: { protocol: 'https:', host: 'mgr.example.com' }, addEventListener: () => {} },
+      document: userDoc,
+      URL,
+      localStorage: { getItem: () => null, setItem: () => {} },
+      sessionStorage: { getItem: () => null, setItem: () => {} },
+      navigator: { onLine: true, clipboard: { writeText: async () => {} } },
+      setTimeout,
+      clearTimeout,
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+      console
+    };
+    userCtx.globalThis = userCtx;
+    vm.createContext(userCtx);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/http/views/dashboard/scripts/01-core-and-cards.js'), 'utf8'), userCtx);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/http/views/dashboard/scripts/04-fleet-and-admin-modals.js'), 'utf8'), userCtx);
+    vm.runInContext(`currentUser = { role: 'user', username: 'customer_25' };`, userCtx);
+    const userCardHtml = userCtx.botCardHtml({
+      id: '25',
+      workerId: '25',
+      botNumber: 25,
+      label: 'Bot 25',
+      status: 'error',
+      available: false,
+      manuallyStopped: false,
+      lastError: 'Minecraft connection error (ECONNREFUSED)',
+      lastKickReason: 'Minecraft connection error (ECONNREFUSED)'
+    });
+    assert.ok(!userCardHtml.includes('ECONNREFUSED'), 'Regular user card must not display raw ECONNREFUSED');
+    assert.ok(!userCardHtml.includes('Sửa URL'), 'Regular user card must not show admin diagnostics');
+    assert.ok(userCardHtml.includes('Tạm ngắt kết nối máy chủ'));
+  } finally {
+    await env.close();
+  }
+});

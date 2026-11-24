@@ -94,6 +94,31 @@ function redactSensitiveObject(obj, depth = 0, seen = new WeakSet()) {
   }
 }
 
+function humanizeUserBotReason(rawReason = '') {
+  const clean = redactSensitiveText(String(rawReason || '')).replace(/[\r\n\t]+/g, ' ').trim();
+  if (!clean || clean === 'Không rõ chi tiết') return 'máy chủ ngắt kết nối';
+  const lower = clean.toLowerCase();
+  if (/minecraft connection timed out|connection timed out|etimedout|timed out/.test(lower)) {
+    return 'máy chủ phản hồi chậm';
+  }
+  if (/minecraft connection error|connection_error|econnrefused|econnreset|ehostunreach|enetunreach|epipe|enotfound|socket hang up|connection refused/.test(lower)) {
+    return 'máy chủ tạm ngắt kết nối';
+  }
+  if (/credentials_missing|credentials are not configured|chưa cài/.test(lower)) {
+    return 'chưa cài tài khoản Minecraft';
+  }
+  if (/invalid_proxy|socks/.test(lower)) {
+    return 'lỗi kết nối Proxy';
+  }
+  if (/ip_limited/.test(lower)) {
+    return 'giới hạn IP vào server';
+  }
+  if (/auth_failed|sai mật khẩu|wrong password/.test(lower)) {
+    return 'chưa đăng nhập được tài khoản trong game';
+  }
+  return clean.length > 80 ? `${clean.slice(0, 77)}...` : clean;
+}
+
 class AdminNotifier {
   constructor({ client, store = null, adminUserId = '', telegramBotToken = '', telegramChatId = '', encryptionKey = '', logger } = {}) {
     this.client = client;
@@ -244,7 +269,7 @@ class AdminNotifier {
     const isMinecraftWorkerSource = /(?:worker|bot|kingmc|minecraft|afk)/i.test(sourceLower);
     const effectiveBypass = Boolean(bypassInGameFilter && isMinecraftWorkerSource);
     if (isMinecraftWorkerSource && !effectiveBypass) {
-      const filterHaystack = `${event} ${message} ${details?.lastKickReason || ''} ${details?.state || ''}`.toLowerCase();
+      const filterHaystack = `${event} ${message} ${details?.lastKickReason || ''} ${details?.state || ''} ${details?.errorReason || ''} ${details?.error || ''}`.toLowerCase();
       if (
         filterHaystack.includes('kick') ||
         filterHaystack.includes('banned') ||
@@ -252,7 +277,21 @@ class AdminNotifier {
         filterHaystack.includes('bị kick') ||
         filterHaystack.includes('ip_limited') ||
         filterHaystack.includes('server_restriction') ||
-        filterHaystack.includes('disconnect.quitting')
+        filterHaystack.includes('disconnect.quitting') ||
+        filterHaystack.includes('connection_error') ||
+        filterHaystack.includes('minecraft connection') ||
+        filterHaystack.includes('connection timed out') ||
+        filterHaystack.includes('econnrefused') ||
+        filterHaystack.includes('econnreset') ||
+        filterHaystack.includes('etimedout') ||
+        filterHaystack.includes('ehostunreach') ||
+        filterHaystack.includes('enetunreach') ||
+        filterHaystack.includes('epipe') ||
+        filterHaystack.includes('socket hang up') ||
+        filterHaystack.includes('auth_failed') ||
+        filterHaystack.includes('credentials_missing') ||
+        filterHaystack.includes('credentials are not configured') ||
+        filterHaystack.includes('invalid_proxy')
       ) {
         return;
       }
@@ -914,7 +953,7 @@ class AdminNotifier {
         .setTitle(String(title || '🔔 Thông Báo Trạng Thái Bot').slice(0, 256))
         .setDescription(String(description || '').slice(0, 4096))
         .setTimestamp()
-        .setFooter({ text: 'KingMC AFK Bot Cloud • Thông báo riêng tự động cho chủ Bot' });
+        .setFooter({ text: 'KingMC AFK Cloud' });
       if (Array.isArray(fields) && fields.length > 0) {
         embed.addFields(fields.slice(0, 8).map((f) => ({
           name: String(f?.name || '—').slice(0, 256),
@@ -1035,41 +1074,44 @@ class AdminNotifier {
     const adminDiscordNotifyEnabled = await this.isAdminDmEnabled(targetStore);
 
     const reasonText = redactSensitiveText(event?.reason || event?.message || event?.coords || 'Không rõ chi tiết').slice(0, 300);
+    const shortReason = humanizeUserBotReason(reasonText);
     const attempts = Number(event?.attempts) || 0;
-    const timeStr = new Date(now).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
 
     let title = '';
-    let description = '';
+    let userDescription = '';
+    let adminDescription = '';
     let color = 0x3b82f6;
     let level = 'warn';
 
     if (eventType === 'afk_kicked') {
-      title = `⚠️ [BÁO ĐỘNG AFK] ${botLabel} bị kick / văng khi đang treo AFK!`;
-      description = `Bot **${botLabel}** (#${botNumber}) đang ở khu vực treo AFK thì bị kick hoặc văng khỏi máy chủ.\n• **Lý do:** \`${reasonText}\`\n• **Trạng thái:** Hệ thống đang tự động thử kết nối lại (anti-cheat delay)...`;
+      title = `⚠️ ${botLabel} bị kick / văng khi đang treo AFK`;
+      userDescription = `Bot **${botLabel}** vừa bị văng khỏi server (${shortReason}). Đang tự vào lại...`;
+      adminDescription = `Bot **${botLabel}** (#${botNumber}) bị kick/văng khỏi khu AFK.\n• **Lý do:** \`${reasonText}\``;
       color = 0xf59e0b;
       level = 'warn';
     } else if (eventType === 'bot_death') {
-      title = `💀 [BÁO ĐỘNG BOT DIE] ${botLabel} vừa bị chết trong game!`;
-      description = `Bot **${botLabel}** (#${botNumber}) vừa bị tiêu diệt trong máy chủ!\n• **Tọa độ / Chi tiết:** \`${reasonText}\``;
+      title = `💀 ${botLabel} vừa bị chết trong game`;
+      userDescription = `Bot **${botLabel}** vừa bị hạ gục (${reasonText.slice(0, 90)}).`;
+      adminDescription = `Bot **${botLabel}** (#${botNumber}) vừa bị tiêu diệt trong game.\n• **Chi tiết:** \`${reasonText}\``;
       color = 0xef4444;
       level = 'error';
     } else if (eventType === 'afk_recovered') {
-      title = `✅ [KẾT NỐI LẠI THÀNH CÔNG] ${botLabel} đã vào lại khu vực AFK!`;
-      description = `Bot **${botLabel}** (#${botNumber}) đã tự động kết nối lại, vượt sảnh và vào lại cụm AFK thành công${attempts > 0 ? ` sau **${attempts} lần thử**` : ''}.`;
+      title = `✅ ${botLabel} đã vào lại khu AFK`;
+      userDescription = `Bot **${botLabel}** đã kết nối lại và treo AFK bình thường.`;
+      adminDescription = `Bot **${botLabel}** (#${botNumber}) đã tự động vào lại cụm AFK thành công${attempts > 0 ? ` sau **${attempts} lần thử**` : ''}.`;
       color = 0x22c55e;
       level = 'info';
     } else if (eventType === 'reconnect_exhausted') {
-      title = `🛑 [DỪNG RECONNECT] ${botLabel} kết nối lại thất bại quá nhiều lần!`;
-      description = `Bot **${botLabel}** (#${botNumber}) đã thử kết nối lại **${attempts || 'nhiều'} lần** liên tiếp (thời gian chờ tăng dần) nhưng không thành công nên hệ thống đã **tự động dừng kết nối**.\n• **Lý do cuối:** \`${reasonText}\`\n• **Hành động:** Vui lòng mở Web Dashboard kiểm tra và bấm **Chạy** khi máy chủ ổn định.`;
+      title = `🛑 ${botLabel} tạm dừng kết nối lại`;
+      userDescription = `Bot **${botLabel}** thử vào lại chưa được (${shortReason}) nên đã tạm dừng. Bạn vào Web bấm **Chạy** lại sau ít phút nhé.`;
+      adminDescription = `Bot **${botLabel}** (#${botNumber}) đã thử kết nối lại **${attempts || 'nhiều'} lần** không thành công nên đã tự dừng.\n• **Lý do cuối:** \`${reasonText}\``;
       color = 0xef4444;
       level = 'error';
     }
 
-    const dmFields = [
-      { name: '🤖 Bot được gán', value: `\`${botLabel}\` (#${botNumber})`, inline: true },
-      ...(mcUsername ? [{ name: '🎮 Nhân vật MC', value: `\`${mcUsername}\``, inline: true }] : []),
-      { name: '⏰ Thời gian', value: timeStr, inline: true }
-    ];
+    const dmFields = mcUsername
+      ? [{ name: '🎮 Nhân vật', value: `\`${mcUsername}\``, inline: true }]
+      : [];
 
     let userNotified = false;
     const alreadyNotifiedAsAdmin = Boolean(
@@ -1092,7 +1134,7 @@ class AdminNotifier {
       userNotified = await this.dispatchUserDm({
         discordUserId: targetDiscordUserId,
         title,
-        description,
+        description: userDescription,
         color,
         fields: dmFields
       });
@@ -1120,7 +1162,7 @@ class AdminNotifier {
       await this.sendAlert({
         source: 'KingMC AFK Monitor',
         event: eventType,
-        message: `${description}${assignedUsername ? `\n• **Khách thuê:** \`${assignedUsername}\` (${userNotified ? 'Đã nhắn DM Discord' : (!targetDiscordUserId ? 'Chưa liên kết Discord với Web' : 'Đã tắt thông báo Discord')})` : '\n• **Khách thuê:** `Chưa gán`'}`,
+        message: `${adminDescription}${assignedUsername ? `\n• **Khách thuê:** \`${assignedUsername}\` (${userNotified ? 'Đã nhắn DM Discord' : (!targetDiscordUserId ? 'Chưa liên kết Discord với Web' : 'Đã tắt thông báo Discord')})` : '\n• **Khách thuê:** `Chưa gán`'}`,
         details: {
           workerId: id,
           botNumber,
@@ -1218,7 +1260,7 @@ class AdminNotifier {
             const strMsg = String(fields?.message || fields?.error || '').toLowerCase();
             // Forward infrastructure / database / discord / manager system warnings (exclude ordinary Minecraft gameplay events)
             const isInfraWarning = /supabase|postgrest|pgrst|database|db_|rpc_|outbox|state_sync|discord|wispbyte|link4m|worker_registration_lost|worker_system/i.test(`${strEvent} ${strMsg}`);
-            const isMinecraftNoise = /minecraft_|totem|food|lobby|window|chunk|kick|banned|ip_limited/i.test(`${strEvent} ${strMsg}`);
+            const isMinecraftNoise = /minecraft_|minecraft connection|connection_error|totem|food|lobby|window|chunk|kick|banned|ip_limited/i.test(`${strEvent} ${strMsg}`);
             if (!isInfraWarning || isMinecraftNoise) return;
             const source = this._resolveLogSource(strEvent, strMsg, fields?.source);
             const message = fields?.message || fields?.reason || fields?.error || String(event);
@@ -1241,5 +1283,6 @@ module.exports = {
   escapeTelegramHtml,
   redactSensitiveText,
   redactSensitiveObject,
-  validateDiscordWebhookUrl
+  validateDiscordWebhookUrl,
+  humanizeUserBotReason
 };

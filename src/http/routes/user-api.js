@@ -1526,6 +1526,21 @@ function createUserApi({
       return res.status(403).json({ ok: false, error: 'Chỉ Quản trị viên (ADMIN) mới được phép đặt lại (reset) bot.' });
     }
 
+    const isAdminSession = req.managerAuthSession?.role === 'admin';
+    const actionLabels = {
+      start: 'Chạy',
+      stop: 'Dừng',
+      restart: 'Khởi động lại',
+      reconnect: 'Kết nối lại',
+      respawn: 'Hồi sinh',
+      inventory: 'Kiểm tra túi đồ',
+      look: 'Quay góc nhìn',
+      toss: 'Vứt vật phẩm',
+      status: 'Kiểm tra trạng thái',
+      reset: 'Đặt lại'
+    };
+    const actionLabel = actionLabels[action] || action;
+
     try {
       const worker = perm.worker;
       const resolvedAction = action === 'reconnect' ? 'restart' : action;
@@ -1538,7 +1553,9 @@ function createUserApi({
         logger?.warn?.('Bot action timed out or undelivered', { botId: worker.workerId, action });
         return res.status(504).json({
           ok: false,
-          error: `Thực thi lệnh ${action} quá thời gian chờ (Gateway Timeout).`,
+          error: isAdminSession
+            ? `Thực thi lệnh ${action} quá thời gian chờ (Gateway Timeout).`
+            : 'Bot phản hồi chậm, vui lòng thử lại sau ít giây.',
           timedOut: true
         });
       }
@@ -1561,7 +1578,9 @@ function createUserApi({
         }
         return res.status(status).json({
           ok: false,
-          error: `Thực thi lệnh ${action} không hoàn tất: ${reason}`,
+          error: isAdminSession
+            ? `Thực thi lệnh ${action} không hoàn tất: ${reason}`
+            : `Chưa thực hiện được lệnh ${actionLabel.toLowerCase()}, vui lòng thử lại.`,
           code,
           result: result.result
         });
@@ -1587,7 +1606,9 @@ function createUserApi({
 
       return res.json({
         ok: true,
-        message: `Đã gửi lệnh ${action} tới Bot #${worker.botNumber || worker.workerId}.`,
+        message: isAdminSession
+          ? `Đã gửi lệnh ${action} tới Bot #${worker.botNumber || worker.workerId}.`
+          : `Đã gửi lệnh ${actionLabel.toLowerCase()} cho Bot #${worker.botNumber || worker.workerId}.`,
         result: result?.result || null
       });
     } catch (error) {
@@ -1607,7 +1628,9 @@ function createUserApi({
         return res.json({
           ok: true,
           offlineStopped: true,
-          message: `Worker Bot #${offlineWorker.botNumber || offlineWorker.workerId} hiện đang ngoại tuyến nên đã đánh dấu DỪNG trên Manager (khi bật lại container, bot sẽ không tự kết nối cho tới khi bạn bấm Chạy).`,
+          message: isAdminSession
+            ? `Worker Bot #${offlineWorker.botNumber || offlineWorker.workerId} hiện đang ngoại tuyến nên đã đánh dấu DỪNG trên Manager (khi bật lại container, bot sẽ không tự kết nối cho tới khi bạn bấm Chạy).`
+            : `Đã dừng Bot #${offlineWorker.botNumber || offlineWorker.workerId}.`,
           bot: marked || registry.publicView(offlineWorker),
           result: { ok: true, state: 'stopped', manuallyStopped: true, offlineStopped: true }
         });
@@ -1619,8 +1642,12 @@ function createUserApi({
         logger.error('Bot action failed', { botId: id, action, error: error.message, code: error.code || null, status });
       }
       const errorMessage = error?.code === 'WORKER_UNAVAILABLE'
-        ? `Worker Bot #${perm.worker?.botNumber || id} chưa kết nối với Manager trong 2 phút qua (${error.message}). Hãy kiểm tra container trên Wispbyte đang chạy (Running) và đúng biến môi trường (MANAGER_URL, WORKER_TRANSPORT=wispbyte-poll, WORKER_ID_1, WORKER_SECRET_1).`
-        : ('Không thể thực thi lệnh: ' + error.message);
+        ? (isAdminSession
+          ? `Worker Bot #${perm.worker?.botNumber || id} chưa kết nối với Manager trong 2 phút qua (${error.message}). Hãy kiểm tra container trên Wispbyte đang chạy (Running) và đúng biến môi trường (MANAGER_URL, WORKER_TRANSPORT=wispbyte-poll, WORKER_ID_1, WORKER_SECRET_1).`
+          : 'Bot đang tạm ngoại tuyến, vui lòng thử lại sau ít phút.')
+        : (isAdminSession
+          ? ('Không thể thực thi lệnh: ' + error.message)
+          : 'Chưa thể thực hiện lệnh lúc này, vui lòng thử lại sau.');
       return res.status(status).json({
         ok: false,
         error: errorMessage,

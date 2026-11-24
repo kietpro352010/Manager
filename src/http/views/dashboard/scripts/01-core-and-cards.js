@@ -222,6 +222,42 @@ function statusMeta(status, available=true, manuallyStopped=false, bot=null) {
   return map[status] || ['red','OFFLINE','offline'];
 }
 
+function humanizeBotErrorForUser(rawText) {
+  const clean = String(rawText || '').replace(/[\r\n\t]+/g, ' ').trim();
+  if (!clean) return '';
+  const lower = clean.toLowerCase();
+  if (lower.includes('minecraft connection timed out') || lower.includes('etimedout') || lower.includes('timed out')) {
+    return 'Máy chủ phản hồi chậm, đang tự thử lại.';
+  }
+  if (
+    lower.includes('minecraft connection error') ||
+    lower.includes('connection_error') ||
+    lower.includes('econnrefused') ||
+    lower.includes('econnreset') ||
+    lower.includes('ehostunreach') ||
+    lower.includes('enetunreach') ||
+    lower.includes('epipe') ||
+    lower.includes('socket hang up') ||
+    lower.includes('connection refused')
+  ) {
+    return 'Tạm ngắt kết nối máy chủ, đang tự vào lại.';
+  }
+  if (lower.includes('credentials are not configured') || lower.includes('credentials_missing') || lower.includes('set this worker account')) {
+    return 'Chưa cài tài khoản Minecraft.';
+  }
+  if (lower.includes('invalid_proxy') || lower.includes('socks')) {
+    return 'Lỗi kết nối Proxy.';
+  }
+  if (lower.includes('ip_limited')) {
+    return 'Máy chủ đang giới hạn IP vào game.';
+  }
+  if (lower.includes('reconnect is paused until 05:30') || lower.includes('scheduled stop 04:30')) {
+    return 'Đang tạm nghỉ bảo trì định kỳ (04:30 - 05:30).';
+  }
+  return clean.length > 90 ? (clean.slice(0, 87) + '...') : clean;
+}
+window.humanizeBotErrorForUser = humanizeBotErrorForUser;
+
 function showToast(message, type = 'info', duration = 3200) {
   const container = document.getElementById('toast');
   if (!container) return;
@@ -541,7 +577,8 @@ function botCardHtml(bot) {
   const hpPercent = hpVal !== null ? Math.max(0, Math.min(100, Math.round((hpVal / 20) * 100))) : 0;
   const hpColor = hpVal === null ? '#94a3b8' : (hpVal <= 6 ? 'var(--red)' : hpVal <= 14 ? 'var(--yellow)' : 'var(--green)');
 
-  const lastKickReason = bot.lastKickReason || bot.summary?.lastKickReason || '';
+  const rawKickReason = bot.lastKickReason || bot.summary?.lastKickReason || '';
+  const lastKickReason = isAdmin ? rawKickReason : humanizeBotErrorForUser(rawKickReason);
   const kickWarning = lastKickReason ? ('<div class="bot-kick-notice">⚠️ <strong>Bị kick:</strong> ' + escapeHtml(lastKickReason) + '</div>') : '';
   const rawIp = String(bot.ipAddress || '').trim();
   const isLoopback = rawIp === '127.0.0.1' || rawIp === 'localhost' || rawIp === '0.0.0.0' || rawIp === '::1';
@@ -580,6 +617,16 @@ function botCardHtml(bot) {
   if (!bot.available) {
     if (errorType === 'stopped') {
       errorBannerHtml = '';
+    } else if (!isAdmin) {
+      if (errorType === 'render_sleep' || errorType === 'probing') {
+        errorBannerHtml = '<div class="bot-error-action-banner info">' +
+          '<div class="bot-error-text">⏳ Máy chủ bot đang khởi động lại, vui lòng đợi ít giây...</div>' +
+        '</div>';
+      } else {
+        errorBannerHtml = '<div class="bot-error-action-banner warning">' +
+          '<div class="bot-error-text">⚠️ Hệ thống đang kết nối lại máy chủ bot, vui lòng thử lại sau ít phút.</div>' +
+        '</div>';
+      }
     } else if (errorType === 'secret_mismatch') {
       errorBannerHtml = '<div class="bot-error-action-banner warning">' +
         '<div class="bot-error-text">⚠️ <strong>Lệch Secret Key (409):</strong> Worker từ chối lệnh do khóa bí mật không khớp với Manager.</div>' +
