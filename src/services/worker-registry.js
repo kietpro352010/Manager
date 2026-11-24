@@ -80,6 +80,32 @@ const VALID_WORKER_STATES = new Set([
   'ip_limited', 'disconnected', 'unknown'
 ]);
 
+function createEmptyInventorySnapshot(revision = 0) {
+  return {
+    slots: {},
+    armor: { head: null, torso: null, legs: null, feet: null },
+    offhand: null,
+    health: null,
+    food: null,
+    totemCount: 0,
+    goldenAppleCount: 0,
+    foodCount: 0,
+    selectedHotbar: 0,
+    revision: Number.isInteger(revision) && revision >= 0 ? revision : 0,
+    items: []
+  };
+}
+
+const DISCONNECTED_INVENTORY_STATES = new Set([
+  'stopped', 'offline', 'registered', 'disconnected', 'error', 'kicked', 'maintenance', 'ip_limited', 'banned'
+]);
+
+function isDisconnectedBotStatus(statusObj) {
+  if (!statusObj || typeof statusObj !== 'object') return true;
+  const st = String(statusObj.state || '').trim().toLowerCase();
+  return Boolean(statusObj.manuallyStopped && !statusObj.online) || DISCONNECTED_INVENTORY_STATES.has(st);
+}
+
 // Canonical Worker Status Validator (WORKER-08)
 function validateWorkerStatus(rawStatus, source = 'worker') {
   const status = rawStatus && typeof rawStatus === 'object' && !Array.isArray(rawStatus) ? rawStatus : {};
@@ -799,14 +825,22 @@ class WorkerRegistry {
       }
 
       const safeStatus = validateWorkerStatus(rawStatus, source);
-      if (safeStatus.state === 'unknown' && existing.status?.state && !rawStatus.state) {
+      if (source === 'user-stop' || source === 'discord-stop') {
+        safeStatus.state = 'stopped';
+        safeStatus.online = false;
+        safeStatus.manuallyStopped = true;
+        safeStatus.connectedAt = null;
+        safeStatus.uptimeSeconds = 0;
+      } else if (safeStatus.state === 'unknown' && existing.status?.state && !rawStatus.state) {
         safeStatus.state = existing.status.state;
       }
+
+      const disconnectedNow = isDisconnectedBotStatus(safeStatus);
 
       // Preserve omitted partial telemetry fields from existing.status (WORKER-CHAN-03 / WORKER-CHAN-14)
       if (existing.status && typeof existing.status === 'object') {
         const ex = existing.status;
-        if (!Object.hasOwn(rawStatus, 'online') && !Object.hasOwn(rawStatus, 'connected') && ex.online !== undefined) {
+        if (!Object.hasOwn(rawStatus, 'online') && !Object.hasOwn(rawStatus, 'connected') && ex.online !== undefined && !disconnectedNow) {
           safeStatus.online = Boolean(ex.online);
         }
         if (!Object.hasOwn(rawStatus, 'username') && ex.username) {
@@ -826,6 +860,9 @@ class WorkerRegistry {
           safeStatus.locationState = ex.locationState;
         }
         for (const numKey of ['health', 'food', 'tps', 'pingMs', 'totemCount', 'goldenAppleCount', 'foodCount', 'uptimeSeconds', 'reconnectAttempts', 'reconnectCount', 'cpuPercent', 'rssMb', 'heapUsedMb']) {
+          if (disconnectedNow && ['health', 'food', 'tps', 'pingMs', 'totemCount', 'goldenAppleCount', 'foodCount', 'uptimeSeconds'].includes(numKey)) {
+            continue;
+          }
           if (!Object.hasOwn(rawStatus, numKey) && ex[numKey] !== undefined && ex[numKey] !== null) {
             safeStatus[numKey] = ex[numKey];
           }
@@ -841,7 +878,7 @@ class WorkerRegistry {
         if (!safeStatus.transport && ex.transport && !(source === 'worker-heartbeat' && ex.transport === 'wispbyte-poll')) {
           safeStatus.transport = ex.transport;
         }
-        if (!Object.hasOwn(rawStatus, 'connectedAt') && ex.connectedAt) {
+        if (!disconnectedNow && !Object.hasOwn(rawStatus, 'connectedAt') && ex.connectedAt) {
           safeStatus.connectedAt = ex.connectedAt;
         }
         if (!Object.hasOwn(rawStatus, 'lastStateAt') && !safeStatus.lastStateAt && ex.lastStateAt) {
@@ -856,7 +893,9 @@ class WorkerRegistry {
       }
 
       // Preserve manuallyStopped flag across status reports if not explicitly provided
-      if (rawStatus.manuallyStopped !== undefined) {
+      if (source === 'user-stop' || source === 'discord-stop') {
+        safeStatus.manuallyStopped = true;
+      } else if (rawStatus.manuallyStopped !== undefined) {
         safeStatus.manuallyStopped = Boolean(rawStatus.manuallyStopped);
       } else if (existing.status?.manuallyStopped !== undefined) {
         safeStatus.manuallyStopped = Boolean(existing.status.manuallyStopped);
@@ -869,8 +908,25 @@ class WorkerRegistry {
         safeStatus.hostIp = existing.status.hostIp;
       }
 
-      // Preserve rich telemetry if incoming report is lightweight/partial
-      if ((rawStatus.isLightweight === true || rawStatus.isPartial === true || rawStatus.inventory === undefined) && existing.status) {
+      if (disconnectedNow) {
+        const hadOldItems = existing.status?.inventory && Object.keys(existing.status.inventory.slots || {}).length > 0;
+        const nextInvRev = Math.max(
+          Number(safeStatus.inventory?.revision) || 0,
+          (Number(existing.status?.inventory?.revision) || 0) + (hadOldItems ? 1 : 0)
+        );
+        safeStatus.inventory = createEmptyInventorySnapshot(nextInvRev);
+        safeStatus.currentWindow = null;
+        safeStatus.totemCount = 0;
+        safeStatus.goldenAppleCount = 0;
+        safeStatus.foodCount = 0;
+        safeStatus.uptimeSeconds = 0;
+        safeStatus.connectedAt = null;
+        delete safeStatus.health;
+        delete safeStatus.food;
+        delete safeStatus.tps;
+        delete safeStatus.pingMs;
+      } else if ((rawStatus.isLightweight === true || rawStatus.isPartial === true || rawStatus.inventory === undefined) && existing.status) {
+        // Preserve rich telemetry if incoming report is lightweight/partial while online
         if (safeStatus.inventory === undefined && existing.status.inventory !== undefined) {
           safeStatus.inventory = existing.status.inventory;
         }
@@ -1014,16 +1070,34 @@ class WorkerRegistry {
       }
 
       const baseStatus = existing.status && typeof existing.status === 'object' ? existing.status : {};
+      const nextInvRev = (Number(baseStatus.inventory?.revision) || 0) + 1;
       const safeStatus = validateWorkerStatus({
-        ...baseStatus,
         state: 'stopped',
         online: false,
+        username: baseStatus.username || '',
+        serverHost: baseStatus.serverHost || null,
+        server: baseStatus.server || baseStatus.serverHost || null,
+        transport: baseStatus.transport || '',
+        proxyEnabled: Boolean(baseStatus.proxyEnabled),
+        restriction: baseStatus.restriction || null,
+        lastError: baseStatus.lastError || '',
+        lastKickReason: baseStatus.lastKickReason || '',
         connectedAt: null,
         uptimeSeconds: 0,
         reconnectAttempts: 0,
+        reconnectCount: baseStatus.reconnectCount || 0,
         manuallyStopped: true,
+        totemCount: 0,
+        goldenAppleCount: 0,
+        foodCount: 0,
+        inventory: createEmptyInventorySnapshot(nextInvRev),
+        currentWindow: null,
         lastStateAt: baseStatus.lastStateAt || null
       }, source);
+      delete safeStatus.health;
+      delete safeStatus.food;
+      delete safeStatus.tps;
+      delete safeStatus.pingMs;
 
       this.summaryLastAppliedSeq.set(id, requestSeq);
       this.summaryCache.set(id, { timestamp: Date.now(), data: safeStatus });
@@ -1648,6 +1722,8 @@ class WorkerRegistry {
 WorkerRegistry.WorkerRegistry = WorkerRegistry;
 WorkerRegistry.ACTIONS = ACTIONS;
 WorkerRegistry.validateWorkerStatus = validateWorkerStatus;
+WorkerRegistry.createEmptyInventorySnapshot = createEmptyInventorySnapshot;
+WorkerRegistry.isDisconnectedBotStatus = isDisconnectedBotStatus;
 WorkerRegistry.VALID_WORKER_STATES = VALID_WORKER_STATES;
 WorkerRegistry.REACHABLE_WINDOW_MS = REACHABLE_WINDOW_MS;
 WorkerRegistry.isRoutineMinecraftWorkerError = isRoutineMinecraftWorkerError;
@@ -1656,6 +1732,8 @@ module.exports = WorkerRegistry;
 module.exports.WorkerRegistry = WorkerRegistry;
 module.exports.ACTIONS = ACTIONS;
 module.exports.validateWorkerStatus = validateWorkerStatus;
+module.exports.createEmptyInventorySnapshot = createEmptyInventorySnapshot;
+module.exports.isDisconnectedBotStatus = isDisconnectedBotStatus;
 module.exports.VALID_WORKER_STATES = VALID_WORKER_STATES;
 module.exports.REACHABLE_WINDOW_MS = REACHABLE_WINDOW_MS;
 module.exports.isRoutineMinecraftWorkerError = isRoutineMinecraftWorkerError;

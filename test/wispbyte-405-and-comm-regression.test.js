@@ -1855,3 +1855,281 @@ test('17. GET /api/manager/users resolves Discord displayName/username, Manage U
     await env.close();
   }
 });
+
+test('18. Supabase 42703/22P02 guards, stopped bot inventory/GUI clear (API+VM), and humanized Vietnamese Wispbyte errors', async () => {
+  const vm = require('node:vm');
+  const fs = require('node:fs');
+  const path = require('node:path');
+
+  const secret24 = '0123456789abcdef0123456789abcdef_secret_24';
+  const env = await startRegressionHarness({
+    seedWorkers: [{
+      worker_id: '24',
+      bot_number: 24,
+      name: 'Wispbyte Bot 24',
+      provider: 'wispbyte',
+      service_url: '',
+      secret: secret24,
+      enabled: true,
+      last_heartbeat: null,
+      status: { state: 'offline', online: false, manuallyStopped: false }
+    }]
+  });
+
+  try {
+    // 1. Spy on Supabase query calls to ensure audit_logs uses timestamp (never created_at) and jsonb .contains sends JSON array string (never raw array)
+    const recordedOrderCalls = [];
+    const recordedContainsCalls = [];
+    const wrapBuilder = (table, b) => {
+      if (!b || typeof b !== 'object' || b._wrappedForTest) return b;
+      b._wrappedForTest = true;
+      for (const chainMethod of ['select', 'eq', 'neq', 'in', 'or', 'range', 'limit']) {
+        const origChain = b[chainMethod]?.bind(b);
+        if (origChain) {
+          b[chainMethod] = (...args) => wrapBuilder(table, origChain(...args));
+        }
+      }
+      const origOrder = b.order?.bind(b);
+      if (origOrder) {
+        b.order = (col, opts) => {
+          recordedOrderCalls.push({ table, col, opts });
+          return wrapBuilder(table, origOrder(col, opts));
+        };
+      }
+      const origContains = b.contains?.bind(b);
+      if (origContains) {
+        b.contains = (col, val) => {
+          recordedContainsCalls.push({ table, col, val, type: typeof val });
+          return wrapBuilder(table, origContains(col, val));
+        };
+      }
+      return b;
+    };
+    const origFrom = env.store.client.from.bind(env.store.client);
+    env.store.client.from = (table) => wrapBuilder(table, origFrom(table));
+
+    await env.store.addAudit({
+      action: 'AUTH_LOGIN_SUCCESS',
+      logType: 'SYSTEM',
+      category: 'AUTH',
+      actorId: 'admin',
+      details: { ip: '127.0.0.1' }
+    });
+
+    const auditQueryRes = await env.store.queryAudit({ page: 1, limit: 50, logType: 'system' });
+    assert.ok(Array.isArray(auditQueryRes.logs) && auditQueryRes.logs.length >= 1, 'store.queryAudit must return audit logs');
+
+    // Also verify the PostgREST query-builder path (without adapter) orders strictly by 'timestamp', never 'created_at'
+    const savedAdapter = env.store.adapter;
+    env.store.adapter = null;
+    try {
+      const fallbackAuditRes = await env.store.queryAudit({ page: 1, limit: 50, logType: 'system' });
+      assert.ok(Array.isArray(fallbackAuditRes.logs) && fallbackAuditRes.logs.length >= 1);
+    } finally {
+      env.store.adapter = savedAdapter;
+    }
+    assert.ok(recordedOrderCalls.some((c) => c.table === 'audit_logs' && c.col === 'timestamp'), 'audit_logs query must order by timestamp');
+    assert.ok(!recordedOrderCalls.some((c) => c.table === 'audit_logs' && c.col === 'created_at'), 'audit_logs query must NEVER order by non-existent created_at');
+
+    const auditHttpRes = await fetch(`${env.baseUrl}/api/manager/audit-logs?logType=system&page=1&limit=50`, {
+      headers: env.adminHeaders
+    });
+    assert.equal(auditHttpRes.status, 200);
+    const auditHttpJson = await auditHttpRes.json();
+    assert.equal(auditHttpJson.ok, true);
+    assert.ok(auditHttpJson.logs.length >= 1);
+
+    // 22P02 guard on assignedUser + removeWorkerAssignments
+    const unassigned = await env.store.assignedUser('unassigned_bot_xyz');
+    assert.equal(unassigned, null);
+    await env.store.removeWorkerAssignments('unassigned_bot_xyz');
+    const jsonbCalls = recordedContainsCalls.filter((c) => c.table === 'manager_users' && c.col === 'assigned_bot_ids');
+    assert.ok(jsonbCalls.length >= 2, 'Expected assigned_bot_ids .contains queries');
+    for (const c of jsonbCalls) {
+      assert.equal(c.type, 'string', 'assigned_bot_ids .contains must serialize array via JSON.stringify to avoid PostgreSQL 22P02');
+      assert.deepEqual(JSON.parse(c.val), ['unassigned_bot_xyz']);
+    }
+
+    // 2. Humanized Vietnamese error when starting stopped/unreachable Wispbyte worker
+    const startOfflineRes = await fetch(`${env.baseUrl}/api/user/bot/24/start`, {
+      method: 'POST',
+      headers: env.adminHeaders,
+      body: JSON.stringify({})
+    });
+    assert.equal(startOfflineRes.status, 503);
+    const startOfflineJson = await startOfflineRes.json();
+    assert.equal(startOfflineJson.code, 'WORKER_UNAVAILABLE');
+    assert.ok(startOfflineJson.error.includes('Wispbyte'));
+    assert.ok(startOfflineJson.error.includes('CPU/RAM'));
+    assert.ok(!startOfflineJson.error.includes('has not checked in recently'), 'Must not expose raw English internal error text');
+
+    // 3. Clearing inventory, hotbar, equipment & open GUI when bot transitions to stopped/offline
+    await env.registry.updateStatus('24', {
+      state: 'online',
+      online: true,
+      health: 19,
+      food: 18,
+      totemCount: 4,
+      goldenAppleCount: 12,
+      foodCount: 30,
+      inventory: {
+        slots: {
+          '9': { slot: 9, name: 'totem_of_undying', count: 1, displayName: 'Totem of Undying' },
+          '36': { slot: 36, name: 'diamond_sword', count: 1, displayName: 'Diamond Sword' }
+        },
+        armor: { head: { slot: 5, name: 'netherite_helmet', count: 1 }, torso: null, legs: null, feet: null },
+        offhand: 'totem_of_undying',
+        selectedHotbar: 2,
+        revision: 7,
+        items: [{ slot: 9, name: 'totem_of_undying', count: 1 }, { slot: 36, name: 'diamond_sword', count: 1 }]
+      },
+      currentWindow: { id: 5, title: 'Menu', type: 'minecraft:chest', slots: [{ slot: 0, name: 'compass', count: 1 }] }
+    }, 'wispbyte-poll');
+
+    const onlineSnapRes = await fetch(`${env.baseUrl}/api/user/bot/24/snapshot`, { headers: env.adminHeaders });
+    const onlineSnap = await onlineSnapRes.json();
+    assert.equal(onlineSnap.inventory.slots['36'].name, 'diamond_sword');
+    assert.equal(onlineSnap.bot.currentWindow.title, 'Menu');
+
+    // Stop while offline (simulate container killed -> WORKER_UNAVAILABLE -> offline stop)
+    env.registry.liveHeartbeats.delete('24');
+    await env.workerStore.update('24', { lastHeartbeat: null }, { returning: false });
+    const offlineStopRes = await fetch(`${env.baseUrl}/api/user/bot/24/stop`, {
+      method: 'POST',
+      headers: env.adminHeaders,
+      body: JSON.stringify({})
+    });
+    assert.equal(offlineStopRes.status, 200);
+
+    const stoppedSnapRes = await fetch(`${env.baseUrl}/api/user/bot/24/snapshot`, { headers: env.adminHeaders });
+    const stoppedSnap = await stoppedSnapRes.json();
+    assert.deepEqual(stoppedSnap.inventory.slots, {}, 'Stopped bot snapshot inventory slots must be cleared');
+    assert.deepEqual(stoppedSnap.inventory.items, []);
+    assert.equal(stoppedSnap.inventory.offhand, null);
+    assert.equal(stoppedSnap.inventory.armor.head, null);
+    assert.equal(stoppedSnap.bot.totemCount, 0);
+    assert.equal(stoppedSnap.bot.currentWindow, null, 'Stopped bot currentWindow must be null');
+
+    const stoppedInvRes = await fetch(`${env.baseUrl}/api/user/bot/24/inventory`, { headers: env.adminHeaders });
+    const stoppedInvJson = await stoppedInvRes.json();
+    assert.deepEqual(stoppedInvJson.inventory.slots, {}, '/inventory endpoint must return empty slots when stopped');
+
+    // 4. Frontend VM check for clearing detail inventory grid, equipment, hotbar, Remote GUI & Wispbyte unreachable text
+    const elements = new Map();
+    const makeDomNode = (id = '', tagName = 'DIV') => {
+      const classes = new Set();
+      const attrs = new Map();
+      const node = {
+        id,
+        tagName: String(tagName).toUpperCase(),
+        children: [],
+        value: '',
+        textContent: '',
+        innerHTML: '',
+        disabled: false,
+        draggable: false,
+        title: '',
+        style: { setProperty: () => {} },
+        dataset: {},
+        classList: {
+          add: (...c) => c.forEach((x) => classes.add(x)),
+          remove: (...c) => c.forEach((x) => classes.delete(x)),
+          toggle: (x, f) => { if (f === undefined) { if (classes.has(x)) classes.delete(x); else classes.add(x); } else if (f) classes.add(x); else classes.delete(x); },
+          contains: (x) => classes.has(x)
+        },
+        set className(val) {
+          classes.clear();
+          String(val || '').split(/\s+/).filter(Boolean).forEach((x) => classes.add(x));
+        },
+        get className() {
+          return [...classes].join(' ');
+        },
+        setAttribute: (k, v) => attrs.set(k, String(v)),
+        getAttribute: (k) => attrs.get(k) ?? null,
+        appendChild: (child) => { node.children.push(child); return child; },
+        remove: () => {},
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        addEventListener: () => {},
+        closest: () => null,
+        focus: () => {}
+      };
+      return node;
+    };
+    const getOrMakeEl = (id) => {
+      if (!elements.has(id)) elements.set(id, makeDomNode(id));
+      return elements.get(id);
+    };
+    const invDoc = {
+      readyState: 'complete',
+      body: { classList: { add: () => {}, remove: () => {}, toggle: () => {} }, dataset: {}, style: {} },
+      documentElement: { setAttribute: () => {}, removeAttribute: () => {}, style: { setProperty: () => {} } },
+      getElementById: (id) => (id === 'appStarfieldCanvas' ? null : (id === 'detailTouchHint' ? null : getOrMakeEl(id))),
+      querySelectorAll: () => [],
+      addEventListener: () => {},
+      createElement: (tag) => makeDomNode('', tag),
+      hidden: false
+    };
+    const invCtx = {
+      window: { __INITIAL_USER__: null, location: { protocol: 'https:', host: 'mgr.example.com', href: 'https://mgr.example.com/' }, addEventListener: () => {}, matchMedia: () => ({ matches: false, addEventListener: () => {} }) },
+      document: invDoc,
+      URL,
+      localStorage: { getItem: () => null, setItem: () => {} },
+      sessionStorage: { getItem: () => null, setItem: () => {} },
+      navigator: { onLine: true, clipboard: { writeText: async () => {} } },
+      setTimeout,
+      clearTimeout,
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+      console
+    };
+    invCtx.globalThis = invCtx;
+    vm.createContext(invCtx);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/http/views/dashboard/scripts/01-core-and-cards.js'), 'utf8'), invCtx);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/http/views/dashboard/scripts/04-fleet-and-admin-modals.js'), 'utf8'), invCtx);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/http/views/dashboard/scripts/05-detail-gui-and-logs.js'), 'utf8'), invCtx);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/http/views/dashboard/scripts/06-detail-inventory-sched.js'), 'utf8'), invCtx);
+
+    vm.runInContext(`
+      currentUser = { role: 'admin', username: 'admin' };
+      detailBot = {
+        id: '24', workerId: '24', botNumber: 24, status: 'stopped', available: false, manuallyStopped: true,
+        provider: 'wispbyte',
+        currentWindow: { id: 5, title: 'Menu', slots: [{ slot: 0, name: 'compass', count: 1 }] }
+      };
+      // Simulate stale detailInventory still sitting in client memory when bot stops
+      detailInventory = {
+        slots: { '9': { slot: 9, name: 'totem_of_undying', count: 1 }, '36': { slot: 36, name: 'diamond_sword', count: 1 } },
+        armor: { head: { name: 'netherite_helmet', count: 1 } },
+        offhand: 'totem_of_undying',
+        health: 20, food: 20, totemCount: 4, goldenAppleCount: 8, foodCount: 16, selectedHotbar: 2, revision: 7
+      };
+      detailStatusHtml();
+      renderDetailInventory();
+    `, invCtx);
+
+    assert.equal(getOrMakeEl('detailInventoryCapacity').textContent, '0/36 ô (0%)');
+    assert.equal(getOrMakeEl('detailHealth').textContent, '-- / 20');
+    assert.equal(getOrMakeEl('detailFood').textContent, '-- / 20');
+    assert.equal(getOrMakeEl('detailTotem').textContent, '0');
+    assert.ok(getOrMakeEl('equipHead').innerHTML.includes('>-<'));
+    assert.equal(getOrMakeEl('detailRemoteGuiContent').style.display, 'none', 'Remote GUI must hide when bot is stopped');
+    const invChildren = getOrMakeEl('detailInventory').children;
+    const hotChildren = getOrMakeEl('detailHotbar').children;
+    assert.equal(invChildren.length, 27);
+    assert.equal(hotChildren.length, 9);
+    assert.ok(invChildren.every((el) => el.classList.contains('empty') && !el.children.some((c) => c.tagName === 'IMG')), 'All 27 inventory slots must be empty when stopped');
+    assert.ok(hotChildren.every((el) => el.classList.contains('empty') && !el.classList.contains('selected') && !el.children.some((c) => c.tagName === 'IMG')), 'All 9 hotbar slots must be empty and unselected when stopped');
+
+    assert.equal(invCtx.humanizeBotErrorForUser('Set this worker account on the Web Dashboard or Discord before starting.'), 'Chưa cài tài khoản Minecraft.');
+    const cardHtml = invCtx.botCardHtml({
+      id: '24', workerId: '24', botNumber: 24, label: 'Bot 24',
+      status: 'offline', available: false, manuallyStopped: false, provider: 'wispbyte',
+      lastError: 'Wispbyte worker 24 has not checked in recently.'
+    });
+    assert.ok(cardHtml.includes('Container Wispbyte đang tắt'));
+    assert.ok(!cardHtml.includes('has not checked in recently'));
+  } finally {
+    await env.close();
+  }
+});

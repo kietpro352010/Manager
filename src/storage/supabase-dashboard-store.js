@@ -964,9 +964,9 @@ class SupabaseDashboardStore {
       return { workerId: data.worker_id, userId: data.user_id, assignedBy: data.assigned_by, assignedAt: data.assigned_at };
     }
 
-    // Fallback: tìm trong manager_users
+    // Fallback: tìm trong manager_users (chú ý truyền JSON array string cho cột jsonb để PostgREST không sinh cs.{id} lỗi 22P02)
     try {
-      const { data: users, error: uErr } = await this.client.from(USERS).select('id,username,assigned_bot_ids').contains('assigned_bot_ids', [cleanId]).limit(1);
+      const { data: users, error: uErr } = await this.client.from(USERS).select('id,username,assigned_bot_ids').contains('assigned_bot_ids', JSON.stringify([cleanId])).limit(1);
       if (!uErr && users?.[0]) {
         return { workerId: cleanId, userId: users[0].id || users[0].username, assignedBy: 'system', assignedAt: new Date().toISOString() };
       }
@@ -1008,7 +1008,7 @@ class SupabaseDashboardStore {
         const { data: users, error: findErr } = await this.client
           .from(USERS)
           .select('id, username, assigned_bot_ids')
-          .contains('assigned_bot_ids', [targetId]);
+          .contains('assigned_bot_ids', JSON.stringify([targetId]));
         if (!findErr && Array.isArray(users)) {
           usersToUpdate = users;
         } else if (findErr) {
@@ -2012,38 +2012,39 @@ class SupabaseDashboardStore {
     if (error && error.code !== '42P01') throw error;
   }
 
-  async listAudit(limitOrOpts = 100) {
-    const opts = (limitOrOpts && typeof limitOrOpts === 'object') ? limitOrOpts : { limit: limitOrOpts };
-    const limit = Math.max(1, Math.min(2000, Number(opts.limit) || 100));
+  _normalizeAuditRow(e) {
     const parseAuditDetails = (val) => {
       if (!val) return null;
       if (typeof val === 'object') return val;
       try { return JSON.parse(val); } catch (_) { return val; }
     };
-    const normalizeAuditRow = (e) => {
-      const ts = e.timestamp || e.created_at || e.createdAt || null;
-      const username = e.actor?.username || e.actor_username || e.actor_id || 'system';
-      const role = e.actor?.role || e.actor_role || (String(username).toLowerCase() === 'admin' ? 'admin' : 'system');
-      const detailsParsed = parseAuditDetails(e.details);
-      const ip = e.actor?.ip || e.actor_ip || e.ip || (detailsParsed && typeof detailsParsed === 'object' ? detailsParsed.ip : null) || '127.0.0.1';
-      const action = String(e.action || 'UNKNOWN');
-      const category = String(e.category || (action.startsWith('AUTH_') ? 'AUTH' : (action.includes('BOT') || action.includes('WORKER') ? 'BOT' : 'SYSTEM'))).toUpperCase();
-      const logType = String(e.logType || e.log_type || (category === 'BOT' ? 'BOT' : 'SYSTEM')).toUpperCase();
-      return {
-        id: e.id || null,
-        logType,
-        category,
-        actorId: username,
-        actor: { username, role, ip },
-        action,
-        actionLabel: e.actionLabel || e.action_label || action,
-        target: e.target ?? '',
-        details: detailsParsed,
-        status: String(e.status || 'SUCCESS').toUpperCase(),
-        timestamp: ts,
-        createdAt: ts
-      };
+    const ts = e.timestamp || e.created_at || e.createdAt || null;
+    const username = e.actor?.username || e.actor_username || e.actor_id || 'system';
+    const role = e.actor?.role || e.actor_role || (String(username).toLowerCase() === 'admin' ? 'admin' : 'system');
+    const detailsParsed = parseAuditDetails(e.details);
+    const ip = e.actor?.ip || e.actor_ip || e.ip || (detailsParsed && typeof detailsParsed === 'object' ? detailsParsed.ip : null) || '127.0.0.1';
+    const action = String(e.action || 'UNKNOWN');
+    const category = String(e.category || (action.startsWith('AUTH_') ? 'AUTH' : (action.includes('BOT') || action.includes('WORKER') ? 'BOT' : 'SYSTEM'))).toUpperCase();
+    const rawLogType = String(e.logType || e.log_type || (category === 'BOT' ? 'BOT' : 'SYSTEM')).toUpperCase();
+    return {
+      id: e.id || null,
+      logType: rawLogType === 'MANAGER' ? 'SYSTEM' : rawLogType,
+      category,
+      actorId: username,
+      actor: { username, role, ip },
+      action,
+      actionLabel: e.actionLabel || e.action_label || action,
+      target: e.target ?? '',
+      details: detailsParsed,
+      status: String(e.status || 'SUCCESS').toUpperCase(),
+      timestamp: ts,
+      createdAt: ts
     };
+  }
+
+  async listAudit(limitOrOpts = 100) {
+    const opts = (limitOrOpts && typeof limitOrOpts === 'object') ? limitOrOpts : { limit: limitOrOpts };
+    const limit = Math.max(1, Math.min(2000, Number(opts.limit) || 100));
 
     if (this.adapter && typeof this.adapter.fetchAuditLogs === 'function') {
       const res = await this.adapter.fetchAuditLogs({
@@ -2056,7 +2057,7 @@ class SupabaseDashboardStore {
       });
       const rows = Array.isArray(res?.logs) ? res.logs : (Array.isArray(res?.entries) ? res.entries : null);
       if (rows) {
-        return rows.map(normalizeAuditRow);
+        return rows.map((row) => this._normalizeAuditRow(row));
       }
     }
     let query = this.client.from(AUDIT_LOGS)
@@ -2071,7 +2072,99 @@ class SupabaseDashboardStore {
         .limit(limit);
     }
     if (res?.error && res.error.code !== '42P01') throw res.error;
-    return (res?.data || []).map(normalizeAuditRow);
+    return (res?.data || []).map((row) => this._normalizeAuditRow(row));
+  }
+
+  async queryAudit({ page = 1, limit = 50, q = '', category = '', status = '', logType = '' } = {}) {
+    const safePage = Math.max(1, Number(page) || 1);
+    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 50));
+    const startIndex = (safePage - 1) * safeLimit;
+    const upperCategory = category ? String(category).trim().toUpperCase() : '';
+    const upperStatus = status ? String(status).trim().toUpperCase() : '';
+    const upperLogType = logType && String(logType).trim().toLowerCase() !== 'all'
+      ? String(logType).trim().toUpperCase()
+      : '';
+    const cleanQ = String(q || '').trim().toLowerCase();
+
+    if (this.adapter && typeof this.adapter.fetchAuditLogs === 'function') {
+      const res = await this.adapter.fetchAuditLogs({
+        page: safePage,
+        limit: safeLimit,
+        q: cleanQ,
+        category: upperCategory,
+        status: upperStatus,
+        logType: upperLogType
+      });
+      if (res && Array.isArray(res.logs)) {
+        const total = Number.isFinite(Number(res.total)) ? Number(res.total) : res.logs.length;
+        return { logs: res.logs.map((row) => this._normalizeAuditRow(row)), total };
+      }
+    }
+
+    if (this.client && typeof this.client.from === 'function' && !cleanQ) {
+      let query = this.client.from(AUDIT_LOGS).select('*', { count: 'exact' });
+      if (upperCategory && typeof query?.eq === 'function') query = query.eq('category', upperCategory);
+      if (upperStatus && typeof query?.eq === 'function') query = query.eq('status', upperStatus);
+      if (upperLogType) {
+        if (upperLogType === 'SYSTEM' && typeof query?.in === 'function') {
+          query = query.in('log_type', ['SYSTEM', 'MANAGER']);
+        } else if (typeof query?.eq === 'function') {
+          query = query.eq('log_type', upperLogType);
+        }
+      }
+      if (typeof query?.order === 'function') {
+        query = query.order('timestamp', { ascending: false });
+      }
+      if (typeof query?.range === 'function') {
+        const res = await query.range(startIndex, startIndex + safeLimit - 1);
+        if (!res?.error && Array.isArray(res?.data)) {
+          const total = Number.isFinite(Number(res.count)) ? Number(res.count) : res.data.length;
+          return { logs: res.data.map((row) => this._normalizeAuditRow(row)), total };
+        }
+        if (res?.error && res.error.code === '42P01') {
+          return { logs: [], total: 0 };
+        }
+      }
+    }
+
+    const all = await this.listAudit({
+      limit: 2000,
+      logType: upperLogType,
+      category: upperCategory,
+      search: cleanQ
+    });
+    const filtered = all.filter((log) => {
+      if (upperCategory && String(log.category || '').toUpperCase() !== upperCategory) return false;
+      if (upperStatus && String(log.status || '').toUpperCase() !== upperStatus) return false;
+      if (upperLogType) {
+        const lt = String(log.logType || '').toUpperCase();
+        const normalizedLt = lt === 'MANAGER' ? 'SYSTEM' : lt;
+        if (normalizedLt !== upperLogType) return false;
+      }
+      if (cleanQ) {
+        const actionStr = String(log.action || '').toLowerCase();
+        const labelStr = String(log.actionLabel || '').toLowerCase();
+        const actorStr = String(log.actor?.username || log.actorId || '').toLowerCase();
+        const targetStr = (typeof log.target === 'object' ? JSON.stringify(log.target) : String(log.target || '')).toLowerCase();
+        const detailsStr = log.details
+          ? (typeof log.details === 'object' ? JSON.stringify(log.details) : String(log.details)).toLowerCase()
+          : '';
+        if (
+          !actionStr.includes(cleanQ) &&
+          !labelStr.includes(cleanQ) &&
+          !actorStr.includes(cleanQ) &&
+          !targetStr.includes(cleanQ) &&
+          !detailsStr.includes(cleanQ)
+        ) {
+          return false;
+        }
+      }
+      return true;
+    });
+    return {
+      logs: filtered.slice(startIndex, startIndex + safeLimit),
+      total: filtered.length
+    };
   }
 
   async clearAuditLogs() {

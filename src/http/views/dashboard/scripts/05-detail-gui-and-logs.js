@@ -21,6 +21,15 @@ function detailStatusHtml() {
         (isAdmin ? '<button type="button" class="small danger" onclick="deleteBot(event,' + escapeHtml(workerIdArg) + ')" style="padding:2px 8px;font-size:11px;">🗑 Xoá Bot</button>' +
         '<button type="button" class="small" onclick="editBot(event,' + escapeHtml(workerIdArg) + ')" style="padding:2px 8px;font-size:11px;">✏️ Sửa URL</button>' : '') +
       '</div>';
+    } else if (errorType === 'unreachable') {
+      const isWispbyte = String(detailBot.provider || detailBot.platform || 'wispbyte').toLowerCase() === 'wispbyte' || !detailBot.url;
+      const humanizedErr = (typeof humanizeBotErrorForUser === 'function'
+        ? humanizeBotErrorForUser(detailBot.lastError || detailBot.error || '')
+        : '') || 'Bot hiện chưa phản hồi.';
+      const reasonText = isWispbyte
+        ? '⚠️ Container trên Wispbyte đang tắt (Stopped) hoặc vừa tự dừng do chạm giới hạn CPU/RAM. Hãy bật lại container trên Wispbyte.'
+        : ('⚠️ ' + humanizedErr);
+      statusDetailHtml += '<div style="font-size:12px;color:#fb923c;margin-top:8px;font-weight:600;">' + escapeHtml(reasonText) + '</div>';
     }
   }
   document.getElementById('detailStatus').innerHTML=statusDetailHtml;
@@ -201,8 +210,9 @@ function detailStatusHtml() {
     void loadFullSettingsForAdmin();
   }
 
-  // 7. Render Remote GUI Inspector
-  renderDetailRemoteGui(detailBot.currentWindow);
+  // 7. Render Remote GUI Inspector (tự ẩn menu GUI khi bot đã dừng/ngoại tuyến)
+  const offlineOrStopped = typeof isDetailBotOfflineOrStopped === 'function' ? isDetailBotOfflineOrStopped(detailBot) : false;
+  renderDetailRemoteGui(offlineOrStopped ? null : detailBot.currentWindow);
 
   const lockInfo = (typeof getWorkerLockInfo === 'function')
     ? getWorkerLockInfo()
@@ -1173,17 +1183,28 @@ async function loadDetailLogs(force=false, expectedGeneration=detailRefreshGener
         bodyText = tagMatch[2].trim() || rawTag;
       }
 
-      if (!isAdminUser && typeof humanizeBotErrorForUser === 'function') {
+      if (typeof humanizeBotErrorForUser === 'function') {
         const humanized = humanizeBotErrorForUser(bodyText);
         if (humanized) bodyText = humanized;
       }
 
       const tagLabelMap = {
-        connection_error: 'KẾT NỐI',
-        credentials_missing: 'TÀI KHOẢN',
-        reconnect_exhausted: 'TẠM DỪNG',
+        connecting: 'KẾT NỐI',
+        spawn: 'VÀO SẢNH',
+        online: 'VÀO GAME',
+        kicked: 'NGẮT KẾT NỐI',
+        stopped: 'ĐÃ DỪNG',
+        host_switch: 'ĐỔI MÁY CHỦ',
+        window_open: 'MỞ MENU',
+        window_close: 'ĐÓNG MENU',
+        window_click: 'CLICK MENU',
+        respawn: 'HỒI SINH',
+        totem_popped: 'DÙNG TOTEM',
+        connection_error: 'LỖI KẾT NỐI',
+        credentials_missing: 'THIẾU TÀI KHOẢN',
+        reconnect_exhausted: 'DỪNG THỬ LẠI',
         afk_kicked: 'VĂNG AFK',
-        afk_recovered: 'VÀO LẠI',
+        afk_recovered: 'VÀO LẠI AFK',
         maintenance_window: 'BẢO TRÌ',
         bot_death: 'HẠ GỤC',
         auth_failed: 'ĐĂNG NHẬP',
@@ -1191,7 +1212,7 @@ async function loadDetailLogs(force=false, expectedGeneration=detailRefreshGener
         worker_event: 'HỆ THỐNG'
       };
       const lowerTag = rawTag.toLowerCase();
-      const mappedPill = !isAdminUser && tagLabelMap[lowerTag] ? tagLabelMap[lowerTag] : '';
+      const mappedPill = tagLabelMap[lowerTag] || '';
 
       const lower = (rawTag + ' ' + bodyText).toLowerCase();
       let kind = 'info';

@@ -36,10 +36,25 @@ async function quickBotAction(event, id, action) {
       } else if (action === 'stop') {
         targetBot.status = 'offline';
         targetBot.manuallyStopped = true;
+        targetBot.currentWindow = null;
+        targetBot.totemCount = 0;
+        targetBot.goldenAppleCount = 0;
+        if (String(selectedBotId) === String(id)) {
+          detailInventory = { slots: {}, armor: {}, offhand: null, totemCount: 0, goldenAppleCount: 0, foodCount: 0, items: [], revision: 0 };
+          if (detailBot) {
+            detailBot.status = 'offline';
+            detailBot.manuallyStopped = true;
+            detailBot.currentWindow = null;
+          }
+          if (typeof renderDetailInventory === 'function') renderDetailInventory();
+          if (typeof detailStatusHtml === 'function') detailStatusHtml();
+        }
       }
       renderHome();
     }
-    showToast('Đang gửi lệnh ' + action + ' tới Bot ' + id + '...');
+    const actionLabelsVi = { start: 'chạy', stop: 'dừng', restart: 'khởi động lại', reconnect: 'kết nối lại' };
+    const actionVi = actionLabelsVi[action] || action;
+    showToast('Đang gửi lệnh ' + actionVi + ' tới Bot #' + (targetBot?.botNumber || id) + '...');
     try {
       const res = await requestJson('/api/manager/bot/' + id + '/' + action, {
         method: 'POST',
@@ -47,7 +62,7 @@ async function quickBotAction(event, id, action) {
         body: JSON.stringify({})
       });
       if (res.ok) {
-        showToast('Đã thực hiện ' + action + ' Bot ' + id + ' thành công!', 'success');
+        showToast(res.data?.message || ('Đã ' + actionVi + ' Bot #' + (targetBot?.botNumber || id) + ' thành công!'), 'success');
         lastHomeSig = '';
         void refreshHome();
         setTimeout(() => { if (typeof document === 'undefined' || !document.hidden) void refreshHome(); }, 1200);

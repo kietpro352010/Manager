@@ -203,8 +203,11 @@ async function main() {
   }, 120000);
   expiredCheckInterval.unref();
 
-  // 5. Adaptive Memory Sweeper (Trụ cột 1.1)
+  // 5. Adaptive Memory Sweeper (Trụ cột 1.1: so sánh theo V8 heap_size_limit, tránh GC liên tục khi heap idle nhỏ)
   const ramThresholdMb = config.ramWarningMb || config.rssWarningThresholdMb || 280;
+  const managerHeapLimitMb = Math.max(256, Math.round((v8.getHeapStatistics()?.heap_size_limit || 0) / (1024 * 1024)) || 512);
+  const managerHeapThresholdMb = Math.max(128, Math.round(managerHeapLimitMb * 0.7));
+  const managerEmergencyHeapMb = Math.round(managerHeapLimitMb * 0.85);
   let lastManagerGcAt = 0;
   const memorySweepInterval = setInterval(() => {
     const memory = process.memoryUsage();
@@ -212,13 +215,22 @@ async function main() {
     const heapUsedMb = Math.round(memory.heapUsed / (1024 * 1024));
     const heapTotalMb = Math.round(memory.heapTotal / (1024 * 1024));
 
-    if (rssMb > ramThresholdMb || heapUsedMb > 0.75 * heapTotalMb) {
+    if (rssMb > ramThresholdMb || heapUsedMb > managerHeapThresholdMb) {
       registry.pruneStaleMemory();
       const now = Date.now();
-      const collected = (now - lastManagerGcAt >= 120000 || heapUsedMb > 0.85 * heapTotalMb)
+      const shouldGc = now - lastManagerGcAt >= 180000 || heapUsedMb > managerEmergencyHeapMb || rssMb >= 380;
+      const collected = shouldGc
         ? (() => { lastManagerGcAt = now; return runGarbageCollection(); })()
         : false;
-      logger.info('adaptive_memory_sweep', { rssMb, heapUsedMb, heapTotalMb, collected });
+      if (collected || rssMb > ramThresholdMb) {
+        logger.info('adaptive_memory_sweep', {
+          rssMb,
+          heapUsedMb,
+          heapTotalMb,
+          heapLimitMb: managerHeapLimitMb,
+          collected
+        });
+      }
     }
   }, config.gcIntervalMs || 30000);
   memorySweepInterval.unref();

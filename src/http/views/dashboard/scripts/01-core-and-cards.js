@@ -177,6 +177,14 @@ function isBotUnreachable(bot) {
 }
 window.isBotUnreachable = isBotUnreachable;
 
+function isDetailBotOfflineOrStopped(bot) {
+  if (!bot) return true;
+  if (typeof isBotIntentionallyStopped === 'function' && isBotIntentionallyStopped(bot)) return true;
+  const st = String(bot.status || bot.state || '').trim().toLowerCase();
+  return !bot.available || ['stopped', 'offline', 'registered', 'disconnected', 'error', 'kicked', 'maintenance', 'ip_limited', 'banned'].includes(st);
+}
+window.isDetailBotOfflineOrStopped = isDetailBotOfflineOrStopped;
+
 function statusMeta(status, available=true, manuallyStopped=false, bot=null) {
   const isStopped = Boolean(manuallyStopped || bot?.manuallyStopped);
   if (isStopped && (status === 'offline' || status === 'kicked' || status === 'stopped' || !available)) {
@@ -202,7 +210,7 @@ function statusMeta(status, available=true, manuallyStopped=false, bot=null) {
     if (isProbing) {
       return ['yellow', 'ĐANG KIỂM TRA...', 'probing'];
     }
-    return ['red', 'Mất kết nối / Unreachable', 'unreachable'];
+    return ['red', 'Container tắt / Mất kết nối', 'unreachable'];
   }
   const map={
     online:['green','ONLINE','online'],
@@ -226,6 +234,21 @@ function humanizeBotErrorForUser(rawText) {
   const clean = String(rawText || '').replace(/[\r\n\t]+/g, ' ').trim();
   if (!clean) return '';
   const lower = clean.toLowerCase();
+  if (lower.includes('has not checked in recently') || lower.includes('worker_unavailable')) {
+    return 'Container bot đang tắt hoặc tạm mất kết nối.';
+  }
+  if (lower.includes('max_reconnects_reached') || lower.includes('reconnect_exhausted')) {
+    return 'Đã dừng tự kết nối lại sau nhiều lần thử thất bại.';
+  }
+  if (lower.includes('server requires /login') || lower.includes('server requires /register')) {
+    return 'Máy chủ yêu cầu mật khẩu (/login) nhưng bot chưa được cấu hình mật khẩu.';
+  }
+  if (lower.includes('authentication failed') || lower.includes('auth_failed')) {
+    return 'Sai mật khẩu đăng nhập trong máy chủ Minecraft.';
+  }
+  if (lower.includes('lifecycle_conflict') || lower.includes('already in progress')) {
+    return 'Bot đang xử lý một thao tác bật/tắt khác.';
+  }
   if (lower.includes('minecraft connection timed out') || lower.includes('etimedout') || lower.includes('timed out')) {
     return 'Máy chủ phản hồi chậm, đang tự thử lại.';
   }
@@ -654,8 +677,13 @@ function botCardHtml(bot) {
         '<div class="bot-error-text">⏳ <strong>Đang kết nối:</strong> Đang kiểm tra trạng thái máy chủ bot...</div>' +
       '</div>';
     } else {
+      const isWispbyte = String(bot.provider || bot.platform || 'wispbyte').toLowerCase() === 'wispbyte' || !bot.url;
+      const humanizedErr = humanizeBotErrorForUser(bot.lastError || bot.error || '');
+      const unreachableHtml = isWispbyte
+        ? '⚠️ <strong>Container Wispbyte đang tắt:</strong> Container đang ở trạng thái Stopped hoặc vừa tự dừng do chạm giới hạn CPU/RAM.'
+        : ('⚠️ <strong>Mất kết nối:</strong> ' + escapeHtml(humanizedErr || 'Worker không phản hồi.'));
       errorBannerHtml = '<div class="bot-error-action-banner danger">' +
-        '<div class="bot-error-text">⚠️ <strong>Mất kết nối:</strong> ' + escapeHtml(bot.lastError || bot.error || 'Worker không phản hồi.') + '</div>' +
+        '<div class="bot-error-text">' + unreachableHtml + '</div>' +
         (isAdmin ? '<button type="button" class="bot-action-chip danger" onclick="event.stopPropagation(); deleteBot(event,' + escapeHtml(idArg) + ')" title="Xoá bot này khỏi registry">🗑 Xoá bot</button>' : '') +
       '</div>';
     }

@@ -392,8 +392,19 @@ function createTableBuilder(rowsFn, handlers = {}) {
     in: (col, vals) => { inFilter = { col, values: vals }; return builder; },
     or: (expr) => { orFilter = expr; return builder; },
     contains: (col, arr) => {
+      const normalized = Array.isArray(arr)
+        ? arr
+        : (() => {
+            if (typeof arr === 'string') {
+              try {
+                const parsed = JSON.parse(arr);
+                if (Array.isArray(parsed)) return parsed;
+              } catch (_) {}
+            }
+            return [arr];
+          })();
       const prevMatches = builder._extraFilter;
-      builder._extraFilter = (r) => (prevMatches ? prevMatches(r) : true) && Array.isArray(r[col]) && arr.every((x) => r[col].includes(x));
+      builder._extraFilter = (r) => (prevMatches ? prevMatches(r) : true) && Array.isArray(r[col]) && normalized.every((x) => r[col].includes(x));
       return builder;
     },
     order: (col) => { orderCol = col; return builder; },

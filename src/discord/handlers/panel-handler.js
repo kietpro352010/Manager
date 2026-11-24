@@ -1039,11 +1039,11 @@ async function handlePanelInteraction(interaction, services) {
       } catch (err) {
         if (action === 'stop' && err?.code === 'WORKER_UNAVAILABLE' && typeof services.registry?.markOfflineStopped === 'function') {
           await services.registry.markOfflineStopped(workerId, { source: 'discord-offline-stop' }).catch(() => {});
-          notice = `⏹️ Bot \`${workerId}\` hiện đang ngoại tuyến nên đã đánh dấu **DỪNG** trên Manager (sẽ không tự chạy lại khi Worker bật lên).`;
+          notice = `⏹️ Bot \`${workerId}\` hiện đang ngoại tuyến nên đã chuyển sang **DỪNG** (sẽ giữ trạng thái nghỉ khi container bật lại).`;
         } else if (err?.code === 'WORKER_UNAVAILABLE') {
-          notice = `⚠️ Worker \`${workerId}\` chưa check-in với Manager trong 2 phút qua (${err.message}). Hãy kiểm tra container Wispbyte đang chạy và đúng biến môi trường.`;
+          notice = `⚠️ Container của bot \`${workerId}\` hiện đang tắt (Stopped hoặc vừa tự dừng do chạm giới hạn CPU/RAM trên Wispbyte). Hãy bật lại container rồi thử lại.`;
         } else {
-          notice = `❌ Lỗi khi gửi lệnh ${action}: ${err.message}`;
+          notice = `❌ Không thể gửi lệnh ${action}: ${err.message}`;
         }
       }
     });

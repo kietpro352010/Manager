@@ -16,11 +16,15 @@ function updateEquipSlot(elId, item) {
 }
 
 function renderDetailInventory(){
-  if(!detailInventory) return;
-  const dSlots = detailInventory.slots || [];
+  const isOfflineBot = typeof isDetailBotOfflineOrStopped === 'function' ? isDetailBotOfflineOrStopped(detailBot) : false;
+  if(!detailInventory && !isOfflineBot) return;
+  const activeInv = isOfflineBot
+    ? { slots: {}, armor: {}, offhand: null, totemCount: 0, goldenAppleCount: 0, foodCount: 0, selectedHotbar: -1, revision: detailInventory?.revision || 0 }
+    : detailInventory;
+  const dSlots = activeInv.slots || {};
   let usedCount = 0;
   for (let i = 9; i <= 44; i++) {
-    if (dSlots[i]) usedCount++;
+    if (dSlots[i] || dSlots[String(i)]) usedCount++;
   }
   const capPercent = Math.round((usedCount / 36) * 100);
   const capEl = document.getElementById('detailInventoryCapacity');
@@ -28,30 +32,30 @@ function renderDetailInventory(){
     capEl.textContent = usedCount + '/36 ô (' + capPercent + '%)';
     capEl.className = 'capacity-badge' + (capPercent >= 90 ? ' danger' : capPercent >= 75 ? ' warning' : '');
   }
-  const health=Math.max(0,Math.min(20,Number(detailInventory.health||0)));
-  const food=Math.max(0,Math.min(20,Number(detailInventory.food||0)));
-  document.getElementById('detailHealth').textContent=health.toFixed(1)+' / 20';
-  document.getElementById('detailFood').textContent=String(food)+' / 20';
-  document.getElementById('detailHealthBar').style.width=(health/20*100)+'%';
-  document.getElementById('detailFoodBar').style.width=(food/20*100)+'%';
-  document.getElementById('detailGolden').textContent=String(detailInventory.goldenAppleCount||0);
-  document.getElementById('detailTotem').textContent=String(detailInventory.totemCount||0);
-  document.getElementById('detailOffhand').textContent=String(detailInventory.offhand||'-').replace(/_/g,' ');
-  document.getElementById('detailFoodCount').textContent=String(detailInventory.foodCount||0);
-  document.getElementById('detailInventoryRevision').textContent='revision '+String(detailInventory.revision||0);
-  const armor=detailInventory.armor||{};
+  const health=isOfflineBot ? 0 : Math.max(0,Math.min(20,Number(activeInv.health||0)));
+  const food=isOfflineBot ? 0 : Math.max(0,Math.min(20,Number(activeInv.food||0)));
+  document.getElementById('detailHealth').textContent=isOfflineBot ? '-- / 20' : (health.toFixed(1)+' / 20');
+  document.getElementById('detailFood').textContent=isOfflineBot ? '-- / 20' : (String(food)+' / 20');
+  document.getElementById('detailHealthBar').style.width=(isOfflineBot ? 0 : (health/20*100))+'%';
+  document.getElementById('detailFoodBar').style.width=(isOfflineBot ? 0 : (food/20*100))+'%';
+  document.getElementById('detailGolden').textContent=String(activeInv.goldenAppleCount||0);
+  document.getElementById('detailTotem').textContent=String(activeInv.totemCount||0);
+  document.getElementById('detailOffhand').textContent=String(activeInv.offhand||'-').replace(/_/g,' ');
+  document.getElementById('detailFoodCount').textContent=String(activeInv.foodCount||0);
+  document.getElementById('detailInventoryRevision').textContent='revision '+String(activeInv.revision||0);
+  const armor=activeInv.armor||{};
   updateEquipSlot('equipHead', armor.head);
   updateEquipSlot('equipTorso', armor.torso);
   updateEquipSlot('equipLegs', armor.legs);
   updateEquipSlot('equipFeet', armor.feet);
-  const off=detailInventory.slots?detailInventory.slots['45']:null;
+  const off=activeInv.slots?activeInv.slots['45']:null;
   updateEquipSlot('equipOffhand', off);
 
-  const slots=detailInventory.slots||{};
+  const slots=activeInv.slots||{};
   const invBox=document.getElementById('detailInventory');invBox.innerHTML='';
   for(let slot=9;slot<=35;slot++) invBox.appendChild(createDetailSlot(slots[String(slot)]||null,slot,false));
   const hotBox=document.getElementById('detailHotbar');hotBox.innerHTML='';
-  const selected=Number(detailInventory.selectedHotbar??detailInventory.selectedSlot??0);
+  const selected=isOfflineBot ? -1 : Number(activeInv.selectedHotbar??activeInv.selectedSlot??0);
   for(let slot=36;slot<=44;slot++) hotBox.appendChild(createDetailSlot(slots[String(slot)]||null,slot,slot-36===selected));
   const hintEl = document.getElementById('detailTouchHint');
   if (hintEl) hintEl.remove();
@@ -504,6 +508,9 @@ async function detailAction(action){
       } else if (action === 'stop') {
         detailBot.manuallyStopped = true;
         detailBot.status = 'offline';
+        detailBot.currentWindow = null;
+        detailInventory = { slots: {}, armor: {}, offhand: null, totemCount: 0, goldenAppleCount: 0, foodCount: 0, items: [], revision: 0 };
+        renderDetailInventory();
       } else if (action === 'restart') {
         detailBot.manuallyStopped = false;
         detailBot.status = 'waking';
@@ -703,6 +710,19 @@ async function quickCardAction(btn, botId, action) {
     } else if (action === 'stop') {
       targetBot.manuallyStopped = true;
       targetBot.status = 'offline';
+      targetBot.currentWindow = null;
+      targetBot.totemCount = 0;
+      targetBot.goldenAppleCount = 0;
+      if (String(selectedBotId) === String(botId)) {
+        detailInventory = { slots: {}, armor: {}, offhand: null, totemCount: 0, goldenAppleCount: 0, foodCount: 0, items: [], revision: 0 };
+        if (detailBot) {
+          detailBot.status = 'offline';
+          detailBot.manuallyStopped = true;
+          detailBot.currentWindow = null;
+        }
+        renderDetailInventory();
+        if (typeof detailStatusHtml === 'function') detailStatusHtml();
+      }
     } else if (action === 'restart') {
       targetBot.manuallyStopped = false;
       targetBot.status = 'waking';

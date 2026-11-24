@@ -321,23 +321,94 @@ function createUserApi({
     return [400, 404, 409, 422, 429, 502, 503, 504].includes(upstreamStatus) ? upstreamStatus : 500;
   }
 
-  function commandErrorResponse(res, error) {
+  const DISCONNECTED_BOT_STATES = new Set([
+    'stopped', 'offline', 'registered', 'disconnected', 'error', 'kicked', 'maintenance', 'ip_limited', 'banned'
+  ]);
+
+  function buildEmptyInventoryPayload(revision = 0) {
+    return {
+      slots: {},
+      armor: { head: null, torso: null, legs: null, feet: null },
+      offhand: null,
+      health: null,
+      food: null,
+      totemCount: 0,
+      goldenAppleCount: 0,
+      foodCount: 0,
+      selectedHotbar: 0,
+      revision: Number.isInteger(revision) && revision >= 0 ? revision : 0,
+      items: []
+    };
+  }
+
+  function isWorkerDisconnectedForInventory(worker) {
+    if (!worker || typeof worker !== 'object') return true;
+    const status = worker.status || {};
+    const state = String(status.state || worker.state || 'offline').trim().toLowerCase();
+    return Boolean(status.manuallyStopped && !status.online) || DISCONNECTED_BOT_STATES.has(state);
+  }
+
+  function humanizeWorkerErrorVi(failure, { isAdmin = false, worker = null, actionLabel = 'thao tác' } = {}) {
+    const code = String(failure?.code || failure?.error || '').trim().toUpperCase();
+    const rawMsg = String(failure?.detail || failure?.message || failure?.error || '').trim();
+    const lower = rawMsg.toLowerCase();
+    const botNum = worker?.botNumber || worker?.workerId || '';
+    const botLabel = botNum ? `Bot #${botNum}` : 'Bot';
+    const provider = String(worker?.provider || 'wispbyte').toLowerCase();
+
+    if (code === 'WORKER_UNAVAILABLE' || lower.includes('has not checked in recently')) {
+      if (!isAdmin) {
+        return 'Bot đang tạm ngoại tuyến, vui lòng thử lại sau ít phút.';
+      }
+      if (provider === 'render' && String(worker?.serviceUrl || '').trim()) {
+        return `Máy chủ Cloud (Render) của ${botLabel} đang ngủ đông hoặc khởi động lại. Vui lòng đợi khoảng 30 giây rồi thử lại.`;
+      }
+      return `${botLabel} hiện chưa kết nối với Manager — container trên Wispbyte đang tắt (Stopped) hoặc vừa tự dừng do chạm giới hạn CPU/RAM. Hãy bật lại container trên Wispbyte rồi thử lại.`;
+    }
+    if (code === 'CREDENTIALS_MISSING' || lower.includes('credentials are not configured') || lower.includes('credentials_missing')) {
+      return 'Bot chưa được cài đặt tài khoản Minecraft. Vui lòng nhập Tên nhân vật trong phần Chi tiết Bot trước khi chạy.';
+    }
+    if (code === 'LIFECYCLE_CONFLICT' || lower.includes('already in progress')) {
+      return 'Bot đang xử lý một lệnh bật/tắt khác, vui lòng đợi vài giây rồi thử lại.';
+    }
+    if (code === 'WORKER_RESTRICTED' || lower.includes('worker_restricted')) {
+      return 'Bot đang tạm khóa kết nối do máy chủ Minecraft giới hạn IP hoặc khóa tài khoản.';
+    }
+    if (code === 'INVALID_PROXY' || lower.includes('invalid_proxy')) {
+      return 'Cấu hình Proxy SOCKS5 của bot không hợp lệ, vui lòng kiểm tra lại.';
+    }
+    if (code === 'QUEUE_BUSY' || lower.includes('queue is busy')) {
+      return 'Bot đang bận xử lý nhiều lệnh liên tiếp, vui lòng thử lại sau ít giây.';
+    }
+    if (code === 'BOT_NOT_ONLINE' || lower.includes('not connected to minecraft')) {
+      return 'Bot hiện chưa vào trong máy chủ Minecraft nên chưa thể thực hiện thao tác này.';
+    }
+    if (['ETIMEDOUT', 'EXECUTION_TIMEOUT', 'RESULT_TIMEOUT', 'COMMAND_EXPIRED'].includes(code) || lower.includes('timed out')) {
+      return 'Bot phản hồi quá thời gian chờ. Hãy kiểm tra container có đang quá tải hoặc khởi động lại không.';
+    }
+    if (!isAdmin) {
+      return `Chưa thể ${String(actionLabel || 'thực hiện lệnh').toLowerCase()} lúc này, vui lòng thử lại sau.`;
+    }
+    return rawMsg || 'Không thể thực thi lệnh.';
+  }
+
+  function commandErrorResponse(res, error, opts = {}) {
     return res.status(commandErrorStatus(error)).json({
       ok: false,
-      error: error?.message || 'Không thể thực thi lệnh.',
+      error: humanizeWorkerErrorVi(error, opts),
       code: error?.code || null
     });
   }
 
   // Helper: Evaluate command broker dispatch result for consistent HTTP status mapping
-  function evaluateCommandDispatch(dispatchResult, defaultErrorMessage = 'Thao tác không hoàn tất') {
+  function evaluateCommandDispatch(dispatchResult, defaultErrorMessage = 'Thao tác không hoàn tất', opts = {}) {
     if (!dispatchResult || dispatchResult.timedOut || dispatchResult.delivered === false) {
       return {
         success: false,
         status: 504,
         payload: {
           ok: false,
-          error: 'Lệnh tới Bot quá thời gian chờ phản hồi (Gateway Timeout).',
+          error: 'Bot phản hồi quá thời gian chờ. Hãy kiểm tra container có đang quá tải hoặc khởi động lại không.',
           timedOut: true
         }
       };
@@ -346,13 +417,13 @@ function createUserApi({
     const innerResult = dispatchResult.result;
     if (innerResult && typeof innerResult === 'object' && innerResult.ok === false) {
       const code = innerResult.code || innerResult.error || null;
-      const reason = innerResult.detail || innerResult.message || innerResult.error || defaultErrorMessage;
+      const humanized = humanizeWorkerErrorVi(innerResult, { ...opts, isAdmin: opts.isAdmin ?? true });
       return {
         success: false,
         status: commandErrorStatus({ code, status: innerResult.status }),
         payload: {
           ok: false,
-          error: `${defaultErrorMessage}: ${reason}`,
+          error: humanized || defaultErrorMessage,
           code,
           result: innerResult
         }
@@ -477,11 +548,18 @@ function createUserApi({
     const isOnline = worker.status?.state === 'online';
     const isReachable = Boolean(worker.reachable || isOnline);
     const botNum = Number(worker.botNumber || worker.workerId || 1);
+    const isDisconnectedInv = isWorkerDisconnectedForInventory(worker);
     let summaryData = summary?.data || null;
-    if (compact && summaryData && typeof summaryData === 'object') {
-      summaryData = { ...summaryData };
-      delete summaryData.inventory;
-      delete summaryData.currentWindow;
+    if (summaryData && typeof summaryData === 'object') {
+      if (compact || isDisconnectedInv) {
+        summaryData = { ...summaryData };
+        delete summaryData.inventory;
+        delete summaryData.currentWindow;
+        if (isDisconnectedInv) {
+          summaryData.totemCount = 0;
+          summaryData.goldenAppleCount = 0;
+        }
+      }
     }
 
     const safeBot = sanitizeBotForSession({
@@ -507,21 +585,23 @@ function createUserApi({
       server: worker.status?.server || worker.status?.serverHost || worker.settings?.serverHost || worker.serverHost || worker.server || 'kingmc.vn',
       dimension: worker.status?.dimension || 'unknown',
       locationState: worker.status?.locationState || 'unknown',
-      health: worker.status?.health ?? 20,
-      food: worker.status?.food ?? 20,
-      totemCount: worker.status?.totemCount ?? 0,
-      goldenAppleCount: worker.status?.goldenAppleCount ?? 0,
-      inventory: compact ? [] : (worker.status?.inventory || []),
+      health: isDisconnectedInv ? null : (worker.status?.health ?? 20),
+      food: isDisconnectedInv ? null : (worker.status?.food ?? 20),
+      totemCount: isDisconnectedInv ? 0 : (worker.status?.totemCount ?? 0),
+      goldenAppleCount: isDisconnectedInv ? 0 : (worker.status?.goldenAppleCount ?? 0),
+      inventory: compact ? [] : (isDisconnectedInv ? buildEmptyInventoryPayload(worker.status?.inventory?.revision || 0) : (worker.status?.inventory || [])),
       pos: worker.status?.position || { x: 0, y: 0, z: 0 },
       position: worker.status?.position || { x: 0, y: 0, z: 0 },
-      ping: worker.status?.pingMs ?? worker.status?.ping ?? 0,
-      tps: typeof worker.status?.tps === 'number' ? worker.status.tps : null,
-      serverTps: typeof worker.status?.tps === 'number' ? worker.status.tps : null,
-      uptime: worker.status?.uptimeSeconds ?? worker.status?.uptime ?? 0,
-      uptimeSeconds: worker.status?.uptimeSeconds ?? worker.status?.uptime ?? 0,
-      connectedAt: worker.status?.connectedAt || (isOnline && Number(worker.status?.uptimeSeconds) > 0
-        ? new Date(Date.now() - Number(worker.status.uptimeSeconds) * 1000).toISOString()
-        : null),
+      ping: isDisconnectedInv ? null : (worker.status?.pingMs ?? worker.status?.ping ?? 0),
+      tps: isDisconnectedInv ? null : (typeof worker.status?.tps === 'number' ? worker.status.tps : null),
+      serverTps: isDisconnectedInv ? null : (typeof worker.status?.tps === 'number' ? worker.status.tps : null),
+      uptime: isDisconnectedInv ? 0 : (worker.status?.uptimeSeconds ?? worker.status?.uptime ?? 0),
+      uptimeSeconds: isDisconnectedInv ? 0 : (worker.status?.uptimeSeconds ?? worker.status?.uptime ?? 0),
+      connectedAt: isDisconnectedInv
+        ? null
+        : (worker.status?.connectedAt || (isOnline && Number(worker.status?.uptimeSeconds) > 0
+          ? new Date(Date.now() - Number(worker.status.uptimeSeconds) * 1000).toISOString()
+          : null)),
       reconnectAttempts: worker.status?.reconnectAttempts ?? 0,
       reconnectCount: worker.status?.reconnectCount ?? 0,
       lastSeen: worker.lastHeartbeat || null,
@@ -534,7 +614,7 @@ function createUserApi({
       url: worker.serviceUrl || '',
       renderServiceId: worker.renderServiceId || '',
       proxy: worker.proxy || null,
-      currentWindow: compact ? null : (worker.status?.currentWindow || null),
+      currentWindow: (compact || isDisconnectedInv) ? null : (worker.status?.currentWindow || null),
       history: {
         ping: worker.status?.pingHistory || [],
         ram: worker.status?.ramHistory || []
@@ -812,7 +892,9 @@ function createUserApi({
     const worker = perm.worker;
     const session = req.managerAuthSession;
     const summary = registry.summary(worker.workerId);
-    const inventory = worker.status?.inventory || { items: [], slots: {}, revision: 0 };
+    const inventory = isWorkerDisconnectedForInventory(worker)
+      ? buildEmptyInventoryPayload(worker.status?.inventory?.revision || 0)
+      : (worker.status?.inventory || buildEmptyInventoryPayload(0));
     const logs = typeof registry.getLogs === 'function' ? registry.getLogs(worker.workerId) : [];
 
     const rev = typeof registry.getSnapshotRevision === 'function'
@@ -905,9 +987,13 @@ function createUserApi({
   router.get('/bot/:id/inventory', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
+    const worker = perm.worker;
+    const inventory = isWorkerDisconnectedForInventory(worker)
+      ? buildEmptyInventoryPayload(worker.status?.inventory?.revision || 0)
+      : (worker.status?.inventory || buildEmptyInventoryPayload(0));
     return res.json({
       ok: true,
-      inventory: perm.worker.status?.inventory || { items: [], slots: {}, revision: 0 }
+      inventory
     });
   });
 
@@ -1091,7 +1177,11 @@ function createUserApi({
         result: evaluated.result
       });
     } catch (error) {
-      return commandErrorResponse(res, error);
+      return commandErrorResponse(res, error, {
+        isAdmin: req.managerAuthSession?.role === 'admin',
+        worker,
+        actionLabel: 'gửi tin nhắn'
+      });
     }
   });
 
@@ -1181,7 +1271,11 @@ function createUserApi({
 
     try {
       const dispatchResult = await broker.dispatch(perm.worker.workerId, 'window_click', req.body || {});
-      const evaluated = evaluateCommandDispatch(dispatchResult, 'Thao tác click giao diện không thành công');
+      const evaluated = evaluateCommandDispatch(dispatchResult, 'Thao tác click giao diện không thành công', {
+        isAdmin: req.managerAuthSession?.role === 'admin',
+        worker: perm.worker,
+        actionLabel: 'click giao diện'
+      });
       if (!evaluated.success) {
         const errPayload = { ...evaluated.payload };
         if (evaluated.payload?.result?.inventory) errPayload.inventory = evaluated.payload.result.inventory;
@@ -1199,7 +1293,11 @@ function createUserApi({
         result: evaluated.result
       });
     } catch (error) {
-      return commandErrorResponse(res, error);
+      return commandErrorResponse(res, error, {
+        isAdmin: req.managerAuthSession?.role === 'admin',
+        worker: perm.worker,
+        actionLabel: 'click giao diện'
+      });
     }
   });
 
@@ -1209,7 +1307,11 @@ function createUserApi({
 
     try {
       const dispatchResult = await broker.dispatch(perm.worker.workerId, 'window_close', req.body || {});
-      const evaluated = evaluateCommandDispatch(dispatchResult, 'Thao tác đóng giao diện không thành công');
+      const evaluated = evaluateCommandDispatch(dispatchResult, 'Thao tác đóng giao diện không thành công', {
+        isAdmin: req.managerAuthSession?.role === 'admin',
+        worker: perm.worker,
+        actionLabel: 'đóng giao diện'
+      });
       if (!evaluated.success) {
         return res.status(evaluated.status).json(evaluated.payload);
       }
@@ -1220,7 +1322,11 @@ function createUserApi({
         result: evaluated.result
       });
     } catch (error) {
-      return commandErrorResponse(res, error);
+      return commandErrorResponse(res, error, {
+        isAdmin: req.managerAuthSession?.role === 'admin',
+        worker: perm.worker,
+        actionLabel: 'đóng giao diện'
+      });
     }
   });
 
@@ -1235,7 +1341,11 @@ function createUserApi({
         ? { ...req.body, action: invAction }
         : { action: invAction };
       const dispatchResult = await broker.dispatch(perm.worker.workerId, 'inventory', invPayload);
-      const evaluated = evaluateCommandDispatch(dispatchResult, `Thao tác ${invAction} kho đồ không thành công`);
+      const evaluated = evaluateCommandDispatch(dispatchResult, `Thao tác ${invAction} kho đồ không thành công`, {
+        isAdmin: req.managerAuthSession?.role === 'admin',
+        worker: perm.worker,
+        actionLabel: `thao tác ${invAction} kho đồ`
+      });
       if (!evaluated.success) {
         const errPayload = { ...evaluated.payload };
         if (evaluated.payload?.result?.inventory) {
@@ -1252,7 +1362,11 @@ function createUserApi({
         result: evaluated.result
       });
     } catch (error) {
-      return commandErrorResponse(res, error);
+      return commandErrorResponse(res, error, {
+        isAdmin: req.managerAuthSession?.role === 'admin',
+        worker: perm.worker,
+        actionLabel: `thao tác ${invAction} kho đồ`
+      });
     }
   });
 
@@ -1554,7 +1668,7 @@ function createUserApi({
         return res.status(504).json({
           ok: false,
           error: isAdminSession
-            ? `Thực thi lệnh ${action} quá thời gian chờ (Gateway Timeout).`
+            ? `Bot #${worker.botNumber || id} phản hồi lệnh "${actionLabel}" quá thời gian chờ. Hãy kiểm tra container có đang quá tải hoặc khởi động lại không.`
             : 'Bot phản hồi chậm, vui lòng thử lại sau ít giây.',
           timedOut: true
         });
@@ -1562,7 +1676,6 @@ function createUserApi({
 
       if (result?.result && typeof result.result === 'object' && result.result.ok === false) {
         const code = result.result.code || result.result.error || null;
-        const reason = result.result.detail || result.result.message || result.result.error || 'UNKNOWN_ERROR';
         const status = commandErrorStatus({ code, status: result.result.status });
         const logPayload = {
           botId: worker.workerId,
@@ -1578,9 +1691,7 @@ function createUserApi({
         }
         return res.status(status).json({
           ok: false,
-          error: isAdminSession
-            ? `Thực thi lệnh ${action} không hoàn tất: ${reason}`
-            : `Chưa thực hiện được lệnh ${actionLabel.toLowerCase()}, vui lòng thử lại.`,
+          error: humanizeWorkerErrorVi(result.result, { isAdmin: isAdminSession, worker, actionLabel }),
           code,
           result: result.result
         });
@@ -1588,13 +1699,13 @@ function createUserApi({
 
       // API-07: Worker confirmed execution -> now safely update manuallyStopped flag
       if (action === 'stop') {
-        const currentWorker = await registry.find(worker.workerId);
-        const currentStatus = currentWorker?.status || worker.status || {};
-        await registry.updateStatus(worker.workerId, { ...currentStatus, manuallyStopped: true }, 'user-stop');
+        await registry.updateStatus(
+          worker.workerId,
+          { state: 'stopped', online: false, manuallyStopped: true, currentWindow: null },
+          'user-stop'
+        );
       } else if (action === 'start' || action === 'restart' || action === 'reconnect') {
-        const currentWorker = await registry.find(worker.workerId);
-        const currentStatus = currentWorker?.status || worker.status || {};
-        await registry.updateStatus(worker.workerId, { ...currentStatus, manuallyStopped: false }, 'user-start');
+        await registry.updateStatus(worker.workerId, { manuallyStopped: false }, 'user-start');
       }
 
       await store.addAudit({
@@ -1607,7 +1718,7 @@ function createUserApi({
       return res.json({
         ok: true,
         message: isAdminSession
-          ? `Đã gửi lệnh ${action} tới Bot #${worker.botNumber || worker.workerId}.`
+          ? `Đã gửi lệnh ${actionLabel.toLowerCase()} tới Bot #${worker.botNumber || worker.workerId}.`
           : `Đã gửi lệnh ${actionLabel.toLowerCase()} cho Bot #${worker.botNumber || worker.workerId}.`,
         result: result?.result || null
       });
@@ -1629,7 +1740,7 @@ function createUserApi({
           ok: true,
           offlineStopped: true,
           message: isAdminSession
-            ? `Worker Bot #${offlineWorker.botNumber || offlineWorker.workerId} hiện đang ngoại tuyến nên đã đánh dấu DỪNG trên Manager (khi bật lại container, bot sẽ không tự kết nối cho tới khi bạn bấm Chạy).`
+            ? `Đã chuyển Bot #${offlineWorker.botNumber || offlineWorker.workerId} sang trạng thái Dừng (container hiện đang tắt nên bot sẽ giữ trạng thái nghỉ khi bật lại).`
             : `Đã dừng Bot #${offlineWorker.botNumber || offlineWorker.workerId}.`,
           bot: marked || registry.publicView(offlineWorker),
           result: { ok: true, state: 'stopped', manuallyStopped: true, offlineStopped: true }
@@ -1641,13 +1752,11 @@ function createUserApi({
       } else {
         logger.error('Bot action failed', { botId: id, action, error: error.message, code: error.code || null, status });
       }
-      const errorMessage = error?.code === 'WORKER_UNAVAILABLE'
-        ? (isAdminSession
-          ? `Worker Bot #${perm.worker?.botNumber || id} chưa kết nối với Manager trong 2 phút qua (${error.message}). Hãy kiểm tra container trên Wispbyte đang chạy (Running) và đúng biến môi trường (MANAGER_URL, WORKER_TRANSPORT=wispbyte-poll, WORKER_ID_1, WORKER_SECRET_1).`
-          : 'Bot đang tạm ngoại tuyến, vui lòng thử lại sau ít phút.')
-        : (isAdminSession
-          ? ('Không thể thực thi lệnh: ' + error.message)
-          : 'Chưa thể thực hiện lệnh lúc này, vui lòng thử lại sau.');
+      const errorMessage = humanizeWorkerErrorVi(error, {
+        isAdmin: isAdminSession,
+        worker: perm.worker,
+        actionLabel
+      });
       return res.status(status).json({
         ok: false,
         error: errorMessage,

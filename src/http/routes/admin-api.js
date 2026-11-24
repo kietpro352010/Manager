@@ -1391,7 +1391,11 @@ function createAdminApi({
       filtered = filtered.filter((log) => String(log.status || log.details?.status || '').toLowerCase() === status);
     }
     if (logType && logType !== 'all') {
-      filtered = filtered.filter((log) => String(log.logType || log.details?.logType || '').toLowerCase() === logType);
+      filtered = filtered.filter((log) => {
+        const raw = String(log.logType || log.details?.logType || '').toLowerCase();
+        const normalized = raw === 'manager' ? 'system' : raw;
+        return normalized === logType;
+      });
     }
     return filtered;
   }
@@ -1408,11 +1412,20 @@ function createAdminApi({
 
     if (store?.client && typeof store.client.from === 'function') {
       try {
+        const upperCategory = category ? String(category).toUpperCase() : '';
+        const upperStatus = status ? String(status).toUpperCase() : '';
+        const upperLogType = logType && logType !== 'all' ? String(logType).toUpperCase() : '';
         let query = store.client.from('audit_logs').select('*', { count: 'exact' });
-        if (category && typeof query?.eq === 'function') query = query.eq('category', category);
-        if (status && typeof query?.eq === 'function') query = query.eq('status', status);
-        if (logType && logType !== 'all' && typeof query?.eq === 'function') query = query.eq('log_type', logType);
-        if (typeof query?.order === 'function') query = query.order('created_at', { ascending: false });
+        if (upperCategory && typeof query?.eq === 'function') query = query.eq('category', upperCategory);
+        if (upperStatus && typeof query?.eq === 'function') query = query.eq('status', upperStatus);
+        if (upperLogType) {
+          if (upperLogType === 'SYSTEM' && typeof query?.in === 'function') {
+            query = query.in('log_type', ['SYSTEM', 'MANAGER']);
+          } else if (typeof query?.eq === 'function') {
+            query = query.eq('log_type', upperLogType);
+          }
+        }
+        if (typeof query?.order === 'function') query = query.order('timestamp', { ascending: false });
         if (!q && typeof query?.range === 'function') {
           const { data, error, count } = await query.range(startIndex, startIndex + limit - 1);
           if (!error && Array.isArray(data)) {
