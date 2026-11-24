@@ -1176,3 +1176,101 @@ test('13. batch-import handles renderServiceId and clears stale URL when provide
     await env.close();
   }
 });
+
+test('14. Offline Wispbyte worker can be marked stopped (with manuallyStopped bootstrap flag) and exports exact Wispbyte ENV', async () => {
+  const secret23 = 'z'.repeat(32);
+  const env = await startRegressionHarness({
+    seedWorkers: [{
+      worker_id: '23',
+      bot_number: 23,
+      name: 'Wispbyte Bot 23',
+      enabled: true,
+      provider: 'wispbyte',
+      service_url: '',
+      render_service_id: '',
+      secret: secret23,
+      settings: { ecoMode: true, rentable: true },
+      status: { state: 'online', online: true, username: 'Bot23Offline' },
+      events: [],
+      last_heartbeat: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    }]
+  });
+
+  try {
+    // 1. Non-stop actions still return 503 WORKER_UNAVAILABLE with helpful diagnostic message
+    const startRes = await fetch(`${env.baseUrl}/api/user/bot/23/start`, {
+      method: 'POST',
+      headers: env.adminHeaders,
+      body: JSON.stringify({})
+    });
+    assert.equal(startRes.status, 503);
+    const startJson = await startRes.json();
+    assert.equal(startJson.ok, false);
+    assert.equal(startJson.code, 'WORKER_UNAVAILABLE');
+    assert.match(startJson.error, /MANAGER_URL|Wispbyte/i);
+
+    // 2. Stop action on unavailable Wispbyte worker marks stopped + manuallyStopped=true without faking reachable=true
+    const stopRes = await fetch(`${env.baseUrl}/api/user/bot/23/stop`, {
+      method: 'POST',
+      headers: env.adminHeaders,
+      body: JSON.stringify({})
+    });
+    assert.equal(stopRes.status, 200);
+    const stopJson = await stopRes.json();
+    assert.equal(stopJson.ok, true);
+    assert.equal(stopJson.offlineStopped, true);
+    assert.equal(stopJson.bot.status.state, 'stopped');
+    assert.equal(stopJson.bot.status.online, false);
+    assert.equal(stopJson.bot.status.manuallyStopped, true);
+    assert.equal(stopJson.bot.reachable, false);
+    assert.equal(stopJson.bot.lastHeartbeat, null);
+
+    // Dashboard bots list reflects stopped state & manuallyStopped=true while staying reachable=false
+    const botsRes = await fetch(`${env.baseUrl}/api/user/bots`, { headers: env.adminHeaders });
+    assert.equal(botsRes.status, 200);
+    const botsJson = await botsRes.json();
+    const bot23 = botsJson.bots.find((b) => String(b.workerId || b.id) === '23');
+    assert.ok(bot23);
+    assert.equal(bot23.state, 'stopped');
+    assert.equal(bot23.online, false);
+    assert.equal(bot23.available, false);
+    assert.equal(bot23.manuallyStopped, true);
+    assert.equal(bot23.lastSeen, null);
+
+    // 3. Bootstrap endpoint exposes manuallyStopped=true so container won't auto-connect when restarted
+    const bootRes = await fetch(`${env.baseUrl}/api/v1/workers/23/bootstrap`, {
+      headers: { 'x-worker-secret': secret23 }
+    });
+    assert.equal(bootRes.status, 200);
+    const bootJson = await bootRes.json();
+    assert.equal(bootJson.manuallyStopped, true);
+    assert.equal(bootJson.state, 'stopped');
+
+    // 4. Unauthenticated ENV fetch is blocked; Admin ENV fetch returns ready-to-paste Wispbyte variables
+    const unauthEnv = await fetch(`${env.baseUrl}/api/manager/bot/23/env`);
+    assert.equal(unauthEnv.status, 401);
+
+    const envRes = await fetch(`${env.baseUrl}/api/manager/bot/23/env`, {
+      headers: env.adminHeaders
+    });
+    assert.equal(envRes.status, 200);
+    const envJson = await envRes.json();
+    assert.equal(envJson.ok, true);
+    assert.equal(envJson.provider, 'wispbyte');
+    assert.equal(envJson.transport, 'wispbyte-poll');
+    assert.equal(envJson.secretAvailable, true);
+    assert.deepEqual(envJson.vars, {
+      MANAGER_URL: 'https://manager.example.com',
+      WORKER_TRANSPORT: 'wispbyte-poll',
+      WORKER_ID_1: '23',
+      WORKER_SECRET_1: secret23,
+      NODE_OPTIONS: '--max-old-space-size=384'
+    });
+    assert.ok(envJson.envText.includes(`WORKER_SECRET_1=${secret23}`));
+    assert.ok(envJson.envText.includes('WORKER_TRANSPORT=wispbyte-poll'));
+  } finally {
+    await env.close();
+  }
+});

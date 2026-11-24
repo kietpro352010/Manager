@@ -1591,15 +1591,39 @@ function createUserApi({
         result: result?.result || null
       });
     } catch (error) {
+      if (action === 'stop' && error?.code === 'WORKER_UNAVAILABLE') {
+        const offlineWorker = perm.worker;
+        const marked = await registry.markOfflineStopped(offlineWorker.workerId, { source: 'user-offline-stop' });
+        await store.addAudit({
+          action: 'BOT_STOP',
+          targetId: offlineWorker.workerId,
+          actorId: req.managerAuthSession.username,
+          details: { result: 'offline_marked_stopped', reason: error.message }
+        });
+        logger?.info?.('Bot marked stopped locally while Wispbyte worker unavailable', {
+          botId: offlineWorker.workerId,
+          workerNumber: offlineWorker.botNumber || null
+        });
+        return res.json({
+          ok: true,
+          offlineStopped: true,
+          message: `Worker Bot #${offlineWorker.botNumber || offlineWorker.workerId} hiện đang ngoại tuyến nên đã đánh dấu DỪNG trên Manager (khi bật lại container, bot sẽ không tự kết nối cho tới khi bạn bấm Chạy).`,
+          bot: marked || registry.publicView(offlineWorker),
+          result: { ok: true, state: 'stopped', manuallyStopped: true, offlineStopped: true }
+        });
+      }
       const status = commandErrorStatus(error);
       if ([400, 404, 409, 422, 429, 503, 504].includes(status)) {
         logger?.warn?.('Bot action rejected or unavailable', { botId: id, action, error: error.message, code: error.code || null, status });
       } else {
         logger.error('Bot action failed', { botId: id, action, error: error.message, code: error.code || null, status });
       }
+      const errorMessage = error?.code === 'WORKER_UNAVAILABLE'
+        ? `Worker Bot #${perm.worker?.botNumber || id} chưa kết nối với Manager trong 2 phút qua (${error.message}). Hãy kiểm tra container trên Wispbyte đang chạy (Running) và đúng biến môi trường (MANAGER_URL, WORKER_TRANSPORT=wispbyte-poll, WORKER_ID_1, WORKER_SECRET_1).`
+        : ('Không thể thực thi lệnh: ' + error.message);
       return res.status(status).json({
         ok: false,
-        error: 'Không thể thực thi lệnh: ' + error.message,
+        error: errorMessage,
         code: error.code || null
       });
     }

@@ -906,7 +906,14 @@ async function handlePanelInteraction(interaction, services) {
           notice = `⚠️ Chưa xác nhận hoàn tất lệnh ${action}: ${reason}`;
         }
       } catch (err) {
-        notice = `❌ Lỗi khi gửi lệnh ${action}: ${err.message}`;
+        if (action === 'stop' && err?.code === 'WORKER_UNAVAILABLE' && typeof services.registry?.markOfflineStopped === 'function') {
+          await services.registry.markOfflineStopped(workerId, { source: 'discord-offline-stop' }).catch(() => {});
+          notice = `⏹️ Bot \`${workerId}\` hiện đang ngoại tuyến nên đã đánh dấu **DỪNG** trên Manager (sẽ không tự chạy lại khi Worker bật lên).`;
+        } else if (err?.code === 'WORKER_UNAVAILABLE') {
+          notice = `⚠️ Worker \`${workerId}\` chưa check-in với Manager trong 2 phút qua (${err.message}). Hãy kiểm tra container Wispbyte đang chạy và đúng biến môi trường.`;
+        } else {
+          notice = `❌ Lỗi khi gửi lệnh ${action}: ${err.message}`;
+        }
       }
     });
 

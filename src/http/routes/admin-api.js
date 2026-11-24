@@ -1205,6 +1205,52 @@ function createAdminApi({
     }
   });
 
+  router.get('/bot/:id/env', async (req, res) => {
+    try {
+      const worker = await resolveWorker(req.params.id);
+      if (!worker) return res.status(404).json({ ok: false, error: 'Không tìm thấy bot.' });
+
+      const provider = String(worker.provider || 'wispbyte').trim().toLowerCase() === 'render' ? 'render' : 'wispbyte';
+      const transport = provider === 'render' ? 'render-http' : 'wispbyte-poll';
+      const managerBaseUrl = String(config.publicBaseUrl || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+      const secret = typeof registry.credential === 'function'
+        ? await registry.credential(worker.workerId, { bypassCache: true }).catch(() => null)
+        : null;
+      const secretAvailable = typeof secret === 'string' && secret.trim().length > 0;
+      const vars = {
+        MANAGER_URL: managerBaseUrl,
+        WORKER_TRANSPORT: transport,
+        WORKER_ID_1: String(worker.workerId),
+        WORKER_SECRET_1: secretAvailable ? secret.trim() : '<CAN_DAT_SECRET_MOI_MIN_32_KY_TU>',
+        ...(provider === 'wispbyte' ? { NODE_OPTIONS: '--max-old-space-size=384' } : {})
+      };
+      const envText = Object.entries(vars).map(([k, v]) => `${k}=${v}`).join('\n');
+
+      await store.addAudit?.({
+        action: 'ADMIN_EXPORT_BOT_ENV',
+        targetId: worker.workerId,
+        actorId: req.managerAuthSession.username,
+        actorRole: 'admin',
+        actorIp: resolveClientIp(req) || '127.0.0.1',
+        details: { provider, transport, secretAvailable }
+      }).catch(() => {});
+
+      return res.json({
+        ok: true,
+        workerId: String(worker.workerId),
+        botNumber: worker.botNumber ?? null,
+        provider,
+        transport,
+        managerUrl: managerBaseUrl,
+        secretAvailable,
+        vars,
+        envText
+      });
+    } catch (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+  });
+
   router.post('/bot/:id/reset-customer', async (req, res) => {
     try {
       const worker = await resolveWorker(req.params.id);

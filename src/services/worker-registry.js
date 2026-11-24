@@ -944,6 +944,47 @@ class WorkerRegistry {
     });
   }
 
+  async markOfflineStopped(workerId, { source = 'offline-stop' } = {}) {
+    const id = String(workerId || '').trim().toLowerCase();
+    const requestSeq = (this.summaryRequestSeq.get(id) || 0) + 1;
+    this.summaryRequestSeq.set(id, requestSeq);
+
+    return this.statusLock.run(id, async () => {
+      const existing = await this.find(id, { bypassCache: true });
+      if (!existing || existing.enabled === false) {
+        this.secretCache.delete(id);
+        return null;
+      }
+
+      const lastApplied = this.summaryLastAppliedSeq.get(id) || 0;
+      if (requestSeq <= lastApplied) {
+        return this.publicView(existing);
+      }
+
+      const baseStatus = existing.status && typeof existing.status === 'object' ? existing.status : {};
+      const safeStatus = validateWorkerStatus({
+        ...baseStatus,
+        state: 'stopped',
+        online: false,
+        connectedAt: null,
+        uptimeSeconds: 0,
+        reconnectAttempts: 0,
+        manuallyStopped: true,
+        lastStateAt: new Date().toISOString()
+      }, source);
+
+      this.summaryLastAppliedSeq.set(id, requestSeq);
+      this.summaryCache.set(id, { timestamp: Date.now(), data: safeStatus });
+      // Preserve lastHeartbeat / liveHeartbeats untouched so computeReachable() stays false while offline.
+      const rawUpdated = await this.store.update(id, { status: safeStatus }, { returning: false });
+      this.lastDbStatusPersistAt.set(id, Date.now());
+      this.lastDbStatusFingerprint.delete(id);
+      this.bumpRevision(id);
+      this.bumpSettingsRevision(id);
+      return this.publicView(rawUpdated || { ...existing, status: safeStatus });
+    });
+  }
+
   async touchHeartbeat(workerId, { fromPoll = false } = {}) {
     const id = String(workerId || '').trim().toLowerCase();
     return this.statusLock.run(id, async () => {
@@ -1081,6 +1122,7 @@ class WorkerRegistry {
       state,
       restriction,
       restricted: Boolean(restriction),
+      manuallyStopped: Boolean(worker.status?.manuallyStopped),
       settingsRevision: this.getSettingsRevision(worker.workerId),
       settings: {
         afkMode: 'still',

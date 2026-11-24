@@ -983,8 +983,12 @@ window.isClientWispbyteControlPanelUrl = isClientWispbyteControlPanelUrl;
 function handleEditBotProviderChange({ preserveUrl = false } = {}) {
   const provEl = document.getElementById('editBotProvider');
   const urlEl = document.getElementById('editBotUrl');
+  const wispEnvRow = document.getElementById('editBotWispbyteEnvRow');
   if (!provEl || !urlEl) return;
   const provider = String(provEl.value || '').trim().toLowerCase();
+  if (wispEnvRow) {
+    wispEnvRow.style.display = provider === 'wispbyte' ? '' : 'none';
+  }
   if (provider === 'wispbyte') {
     const currentVal = String(urlEl.value || '').trim();
     if (currentVal && !isClientWispbyteControlPanelUrl(currentVal)) {
@@ -1002,6 +1006,45 @@ function handleEditBotProviderChange({ preserveUrl = false } = {}) {
   }
 }
 window.handleEditBotProviderChange = handleEditBotProviderChange;
+
+function resetEditBotWispbyteEnvPreview() {
+  const previewEl = document.getElementById('editBotWispbyteEnvPreview');
+  if (previewEl) {
+    previewEl.value = '';
+    previewEl.style.display = 'none';
+  }
+}
+
+async function copyEditBotWispbyteEnv() {
+  const id = String(document.getElementById('editBotId')?.value || '').trim();
+  const btn = document.getElementById('copyEditBotWispbyteEnvBtn');
+  const previewEl = document.getElementById('editBotWispbyteEnvPreview');
+  if (!id) {
+    showToast('Không xác định được bot cần lấy ENV.');
+    return;
+  }
+  if (btn) btn.disabled = true;
+  try {
+    const result = await requestJson('/api/manager/bot/' + encodeURIComponent(id) + '/env');
+    const data = result.data || {};
+    if (!result.ok || !data.envText) {
+      throw new Error(data.error || 'Không thể lấy cấu hình ENV của bot.');
+    }
+    if (previewEl) {
+      previewEl.value = data.envText;
+      previewEl.style.display = 'block';
+    }
+    await copyText(data.envText);
+    if (data.secretAvailable === false) {
+      showToast('Bot chưa có Secret hợp lệ — hãy đặt Secret mới rồi Lưu trước khi dán ENV.', 'warning');
+    }
+  } catch (err) {
+    showToast(err.message || 'Không thể lấy cấu hình ENV Wispbyte.', 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+window.copyEditBotWispbyteEnv = copyEditBotWispbyteEnv;
 
 function editBot(event,id){
   if(event)event.stopPropagation();
@@ -1031,6 +1074,7 @@ function editBot(event,id){
       urlEl.value = looksWispPanel ? '' : (bot.url || '');
     }
   }
+  resetEditBotWispbyteEnvPreview();
   handleEditBotProviderChange({ preserveUrl: initialProvider === 'render' });
   document.getElementById('editBotLabel').value=bot.label||'';
   const secInput = document.getElementById('editBotSecretKey');
@@ -1056,7 +1100,10 @@ function editBot(event,id){
   }
   document.getElementById('editBotModal').classList.remove('hidden');
 }
-function closeEditBotModal(){document.getElementById('editBotModal').classList.add('hidden');}
+function closeEditBotModal(){
+  resetEditBotWispbyteEnvPreview();
+  document.getElementById('editBotModal').classList.add('hidden');
+}
 async function saveEditBot(){
   const id=String(document.getElementById('editBotId').value||'').trim();
   if(!id){showToast('Không xác định được bot cần sửa.');return;}
