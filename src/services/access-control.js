@@ -48,37 +48,17 @@ class AccessControl {
       ''
     );
 
-    // 1. Designated admin user ID (configured via env or /setup)
+    // 1. Designated admin user ID (configured via env or /admin setup)
     if (this.adminUserId && memberId && memberId === this.adminUserId) return 'admin';
-
-    // 2. Server Owner is always admin
-    const guildOwnerId = String(member?.guild?.ownerId || interaction?.guild?.ownerId || '');
-    if (guildOwnerId && memberId && memberId === guildOwnerId) return 'admin';
-
-    // 3. User with Discord Administrator permission is always admin
-    try {
-      if (interaction?.memberPermissions) {
-        if (interaction.memberPermissions.has('Administrator') || interaction.memberPermissions.has(8n)) {
-          return 'admin';
-        }
-      }
-    } catch (_) {}
-    try {
-      if (typeof member?.permissions?.has === 'function') {
-        if (member.permissions.has('Administrator') || member.permissions.has(8n)) {
-          return 'admin';
-        }
-      } else if (member?.permissions) {
-        if (BigInt(member.permissions) & 8n) return 'admin';
-      }
-    } catch (_) {}
 
     if (!this.isConfigured()) return null;
 
-    // 4. Role-based check
+    // 2. Role-based check (strictly via configured admin/user Discord roles; never guild ownership or raw permissions)
     const roles = Array.isArray(member?.roles)
       ? member.roles.map(String)
-      : member?.roles?.cache ? [...member.roles.cache.keys()].map(String) : [];
+      : member?.roles?.cache
+        ? [...member.roles.cache.keys()].map(String)
+        : (Array.isArray(member?._roles) ? member._roles.map(String) : []);
 
     if (this.adminRoleId && roles.includes(this.adminRoleId)) return 'admin';
     if (this.userRoleId && roles.includes(this.userRoleId)) return 'user';

@@ -497,6 +497,68 @@ function editBotTags(id) {
 }
 window.editBotTags = editBotTags;
 
+function matchesSingleBotTerm(b, rawTerm, isAdmin) {
+  const term = String(rawTerm || '').toLowerCase().trim();
+  if (!term) return true;
+
+  const rawId = String(b?.id ?? b?.workerId ?? '').toLowerCase().trim();
+  const botNumStr = (b?.botNumber !== undefined && b?.botNumber !== null && String(b.botNumber).trim() !== '')
+    ? String(b.botNumber).toLowerCase().trim()
+    : '';
+  const dispNumStr = (b?.displayIndex !== undefined && b?.displayIndex !== null && String(b.displayIndex).trim() !== '')
+    ? String(b.displayIndex).toLowerCase().trim()
+    : (botNumStr || rawId);
+
+  const idCandidates = [rawId, botNumStr, dispNumStr].filter(Boolean);
+  const idToken = term.replace(/^(?:bot\s*#?|id\s*:?\s*#?|#)\s*/i, '').trim();
+  const hadExplicitIdPrefix = idToken !== term && idToken.length > 0;
+  const isNumericToken = /^\d+$/.test(idToken);
+
+  let idMatched = false;
+  if (isNumericToken) {
+    const queryNum = Number(idToken);
+    const paddedToken = idToken.padStart(2, '0');
+    idMatched = idCandidates.some((cand) => {
+      const paddedCand = /^\d+$/.test(cand) ? cand.padStart(2, '0') : cand;
+      return cand === idToken ||
+        paddedCand === paddedToken ||
+        (/^\d+$/.test(cand) && Number(cand) === queryNum);
+    });
+    if (hadExplicitIdPrefix) {
+      return idMatched ||
+        Boolean(b?.label && String(b.label).toLowerCase().includes(term)) ||
+        (Array.isArray(b?.tags) && b.tags.some(t => String(t).toLowerCase().includes(idToken)));
+    }
+  } else if (idToken) {
+    idMatched = idCandidates.some((cand) => cand.includes(idToken));
+  }
+
+  if (idMatched) return true;
+
+  const allowNetworkSubstring = !isNumericToken || idToken.length >= 4;
+  return Boolean(
+    (b?.label && String(b.label).toLowerCase().includes(term)) ||
+    (b?.username && String(b.username).toLowerCase().includes(term)) ||
+    (allowNetworkSubstring && isAdmin && b?.ipAddress && String(b.ipAddress).toLowerCase().includes(term)) ||
+    (allowNetworkSubstring && isAdmin && b?.host && String(b.host).toLowerCase().includes(term)) ||
+    (isAdmin && b?.assignedUsername && String(b.assignedUsername).toLowerCase().includes(term)) ||
+    (Array.isArray(b?.tags) && b.tags.some(t => String(t).toLowerCase().includes(term))) ||
+    (b?.status && String(b.status).toLowerCase().includes(term))
+  );
+}
+
+function matchesBotSearchQuery(b, query, isAdmin) {
+  const cleanQuery = String(query || '').toLowerCase().trim();
+  if (!cleanQuery) return true;
+  if (cleanQuery.includes(',')) {
+    const terms = cleanQuery.split(',').map(s => s.trim()).filter(Boolean);
+    if (!terms.length) return true;
+    return terms.some(term => matchesSingleBotTerm(b, term, isAdmin));
+  }
+  return matchesSingleBotTerm(b, cleanQuery, isAdmin);
+}
+window.matchesBotSearchQuery = matchesBotSearchQuery;
+
 function filterBots() {
   const query = String(document.getElementById('searchInput')?.value || '').toLowerCase().trim();
   const grid = document.getElementById('botGrid');
@@ -524,12 +586,9 @@ function filterBots() {
       }
     }
 
-    // 3. Lọc theo Từ khóa tìm kiếm
+    // 3. Lọc theo Từ khóa tìm kiếm (hỗ trợ ID như 01, 22, #01, 01,22, tên bot, username, IP...)
     if(!query) return true;
-    return (b.label && b.label.toLowerCase().includes(query)) ||
-      (b.username && b.username.toLowerCase().includes(query)) ||
-      (isAdmin && b.ipAddress && b.ipAddress.toLowerCase().includes(query)) ||
-      (b.status && b.status.toLowerCase().includes(query));
+    return matchesBotSearchQuery(b, query, isAdmin);
   });
 
   // 3. Sắp xếp theo chế độ được chọn

@@ -80,6 +80,7 @@ async function main() {
   const managerRuntimeSettings = new ManagerRuntimeSettings({
     store: accessStore,
     encryptionKey: config.encryptionKey,
+    previousEncryptionKey: config.previousEncryptionKey,
     initial: {
       publicBaseUrl: config.publicBaseUrl,
       renderApiKey: config.renderApiKey,
@@ -97,7 +98,7 @@ async function main() {
 
   let adminRoleId = roleSettings?.adminRoleId || config.adminRoleId;
   let userRoleId = roleSettings?.userRoleId || config.userRoleId;
-  let adminUserId = roleSettings?.adminUserId || config.adminUserId;
+  let adminUserId = config.adminUserId || roleSettings?.adminUserId || '';
 
   const accessControl = new AccessControl({ store: accessStore, adminUserId });
   if (adminRoleId && userRoleId) {
@@ -143,7 +144,9 @@ async function main() {
     publicBaseUrl: integrationSettings.publicBaseUrl,
     renderApiKey: integrationSettings.renderApiKey,
     link4mApiToken: integrationSettings.link4mApiToken || config.link4mApiToken || '',
-    link4mSecretKey: integrationSettings.link4mSecretKey || config.link4mSecretKey || ''
+    link4mSecretKey: integrationSettings.link4mSecretKey || config.link4mSecretKey || '',
+    link4mMode: integrationSettings.link4mMode || 'api',
+    link4mUrl: integrationSettings.link4mUrl || ''
   };
 
   const userLock = new AsyncKeyLock();
@@ -277,6 +280,7 @@ async function main() {
     store: accessStore,
     entitlementService,
     link4mService,
+    managerRuntimeSettings,
     registry,
     broker,
     commandStore,

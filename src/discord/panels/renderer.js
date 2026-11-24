@@ -134,19 +134,28 @@ function renderBotsList({ user, workers = [], page = 0, pageSize = 5, notice = '
     components.push(botButtonsRow);
   }
 
-  // Row 2: Navigation & Refresh
+  // Row 2 (+ Row 3 when paginated): Navigation & Refresh
   const navRow = new ActionRowBuilder();
   if (totalPages > 1) {
     navRow.addComponents(
+      button('⏮ Trang đầu', 'bots:first', ButtonStyle.Secondary, currentPage <= 0),
       button('◀ Trang trước', `bots:page:${currentPage - 1}`, ButtonStyle.Secondary, currentPage <= 0),
       button(`${currentPage + 1}/${totalPages}`, 'bots:noop', ButtonStyle.Secondary, true),
-      button('Trang sau ▶', `bots:page:${currentPage + 1}`, ButtonStyle.Secondary, currentPage >= totalPages - 1)
+      button('Trang sau ▶', `bots:page:${currentPage + 1}`, ButtonStyle.Secondary, currentPage >= totalPages - 1),
+      button('Trang cuối ⏭', 'bots:last', ButtonStyle.Secondary, currentPage >= totalPages - 1)
     );
+    components.push(navRow);
+
+    const refreshRow = new ActionRowBuilder().addComponents(
+      button('Làm mới', 'bots:refresh', ButtonStyle.Success, false, '🔄')
+    );
+    components.push(refreshRow);
+  } else {
+    navRow.addComponents(
+      button('Làm mới', 'bots:refresh', ButtonStyle.Success, false, '🔄')
+    );
+    components.push(navRow);
   }
-  navRow.addComponents(
-    button('Làm mới', 'bots:refresh', ButtonStyle.Success, false, '🔄')
-  );
-  components.push(navRow);
 
   return { embeds: [mainEmbed], components };
 }

@@ -210,17 +210,18 @@ test('Reversible AES Web User Passwords preserved while Admin uses async scrypt$
   assert.equal(await verifyAdminPasswordAsync('WrongSecret!987', adminHash), false);
 });
 
-test('DISCORD-01, DISCORD-02, DISCORD-12, DISCORD-13: Strict SuperAdmin guild scoping, fail-closed panel-handler & renderer sanitization', () => {
-  const svcWithOwner = {
-    config: { adminUserId: '111111111111111111', discordGuildId: '999999999999999999' },
-    accessControl: { adminUserId: '111111111111111111' }
+test('DISCORD-01, DISCORD-02, DISCORD-12, DISCORD-13: Strict Admin recognition via configured role/ID only, fail-closed panel-handler & renderer sanitization', () => {
+  const svcWithRoleAndId = {
+    config: { adminUserId: '111111111111111111', discordGuildId: '999999999999999999', adminRoleId: '333333333333333333' },
+    accessControl: { adminUserId: '111111111111111111', adminRoleId: '333333333333333333' }
   };
 
-  assert.equal(isSuperAdmin({ guildId: '888888888888888888', user: { id: '111111111111111111' } }, svcWithOwner), true);
-  assert.equal(isSuperAdmin({ guildId: '999999999999999999', user: { id: '222222222222222222' }, guild: { ownerId: '222222222222222222' } }, svcWithOwner), true);
-  assert.equal(isSuperAdmin({ guildId: '777777777777777777', user: { id: '222222222222222222' }, guild: { ownerId: '222222222222222222' } }, svcWithOwner), false);
+  assert.equal(isSuperAdmin({ guildId: '888888888888888888', user: { id: '111111111111111111' } }, svcWithRoleAndId), true);
+  assert.equal(isSuperAdmin({ guildId: '999999999999999999', user: { id: '444444444444444444' }, member: { roles: ['333333333333333333'] }, guild: { ownerId: '222222222222222222' } }, svcWithRoleAndId), true);
+  assert.equal(isSuperAdmin({ guildId: '777777777777777777', user: { id: '444444444444444444' }, member: { roles: ['333333333333333333'] }, guild: { ownerId: '222222222222222222' } }, svcWithRoleAndId), false);
+  assert.equal(isSuperAdmin({ guildId: '999999999999999999', user: { id: '222222222222222222' }, guild: { ownerId: '222222222222222222' }, memberPermissions: { has: () => true } }, svcWithRoleAndId), false);
   assert.equal(isSuperAdmin({ guildId: '777777777777777777', user: { id: '222222222222222222' }, guild: { ownerId: '222222222222222222' } }, { config: {}, accessControl: {} }, ''), false);
-  assert.equal(isSuperAdmin({ guildId: null, user: { id: '111111111111111111' } }, svcWithOwner), false);
+  assert.equal(isSuperAdmin({ guildId: null, user: { id: '111111111111111111' } }, svcWithRoleAndId), false);
 
   const panelHandlerSrc = fs.readFileSync(path.join(ROOT, 'src/discord/handlers/panel-handler.js'), 'utf8');
   assert.equal(panelHandlerSrc.includes('!normalizedUser.expiresAt'), false, 'panel-handler.js must not auto-entitle users with null expiresAt');

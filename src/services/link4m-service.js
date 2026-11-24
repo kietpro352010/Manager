@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const { safeEqual } = require('../utils/secrets');
+const { safeEqual, decryptSecret } = require('../utils/secrets');
 
 const API_ENDPOINTS = ['https://link4m.co/api-shorten/v2', 'https://link4m.co/api'];
 const COOLDOWN_MS = 2 * 60 * 60 * 1000;
@@ -44,22 +44,44 @@ function validPublicUrl(raw) {
   return `${url.protocol}//${url.host}`;
 }
 
+function validHttpsCustomUrl(raw) {
+  const value = String(raw || '').trim();
+  if (!value) return '';
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return '';
+  }
+  const requireHttps = process.env.NODE_ENV === 'production' && !process.env.NODE_TEST_CONTEXT;
+  const allowedProto = requireHttps ? url.protocol === 'https:' : (url.protocol === 'https:' || url.protocol === 'http:');
+  if (!allowedProto || !url.hostname || url.username || url.password) {
+    return '';
+  }
+  return url.toString();
+}
+
 class Link4mService {
   constructor({ store, accessControl, userLock, config, logger, fetchImpl = global.fetch }) {
     this.store = store;
     this.accessControl = accessControl;
     this.userLock = userLock;
     const rawConfig = config || {};
+    this.encryptionKey = rawConfig.encryptionKey || null;
+    this.previousEncryptionKey = rawConfig.previousEncryptionKey || null;
     const resolvedEnabled = rawConfig.enabled !== undefined
       ? Boolean(rawConfig.enabled)
       : rawConfig.link4mRewardEnabled !== undefined
         ? Boolean(rawConfig.link4mRewardEnabled)
         : false;
+    const rawMode = String(rawConfig.link4mMode || rawConfig.mode || 'api').trim().toLowerCase();
     this.config = {
       ...rawConfig,
       enabled: resolvedEnabled,
       rewardHours: Number(rawConfig.rewardHours || rawConfig.link4mRewardHours || 12),
-      dailyLimit: Number(rawConfig.dailyLimit || rawConfig.link4mDailyLimit || 2)
+      dailyLimit: Number(rawConfig.dailyLimit || rawConfig.link4mDailyLimit || 2),
+      link4mMode: ['api', 'custom_url'].includes(rawMode) ? rawMode : 'api',
+      link4mUrl: String(rawConfig.link4mUrl || rawConfig.customUrl || '').trim()
     };
     this.logger = logger;
     this.fetch = fetchImpl;
@@ -68,25 +90,117 @@ class Link4mService {
     this.lastInitAttemptAt = null;
   }
 
+  _tryDecryptValue(ciphertext) {
+    if (!ciphertext || !this.encryptionKey) return { ok: false, value: null };
+    try {
+      const decrypted = decryptSecret(ciphertext, this.encryptionKey, this.previousEncryptionKey);
+      return { ok: true, value: decrypted };
+    } catch (_) {
+      return { ok: false, value: null };
+    }
+  }
+
+  setRuntimeCredentials(credUpdate = {}) {
+    if (!credUpdate || typeof credUpdate !== 'object') return this.publicConfig();
+    const next = { ...this.config };
+    if (Object.hasOwn(credUpdate, 'publicBaseUrl')) {
+      next.publicBaseUrl = String(credUpdate.publicBaseUrl || '').trim();
+    }
+    if (Object.hasOwn(credUpdate, 'link4mApiToken')) {
+      const tok = String(credUpdate.link4mApiToken || '').trim();
+      next.link4mApiToken = tok;
+      if (Object.hasOwn(next, 'apiToken') && !tok) delete next.apiToken;
+    } else if (Object.hasOwn(credUpdate, 'apiToken')) {
+      next.link4mApiToken = String(credUpdate.apiToken || '').trim();
+    }
+    if (Object.hasOwn(credUpdate, 'link4mSecretKey')) {
+      const sec = String(credUpdate.link4mSecretKey || '').trim();
+      next.link4mSecretKey = sec;
+      if (Object.hasOwn(next, 'secretKey') && !sec) delete next.secretKey;
+    } else if (Object.hasOwn(credUpdate, 'secretKey')) {
+      next.link4mSecretKey = String(credUpdate.secretKey || '').trim();
+    }
+    if (Object.hasOwn(credUpdate, 'link4mMode') || Object.hasOwn(credUpdate, 'mode')) {
+      const modeRaw = String(credUpdate.link4mMode ?? credUpdate.mode ?? 'api').trim().toLowerCase();
+      next.link4mMode = ['api', 'custom_url'].includes(modeRaw) ? modeRaw : 'api';
+    }
+    if (Object.hasOwn(credUpdate, 'link4mUrl') || Object.hasOwn(credUpdate, 'customUrl')) {
+      next.link4mUrl = String(credUpdate.link4mUrl ?? credUpdate.customUrl ?? '').trim();
+    }
+    this.config = next;
+    return this.publicConfig();
+  }
+
   async initialize() {
     this.lastInitAttemptAt = new Date().toISOString();
     try {
-      const stored = await this.store.getSetting('link4m_runtime');
+      const stored = await this.store.getSetting('link4m_runtime', { bypassCache: true });
+      const systemStored = await Promise.resolve(this.store.getSetting('system_settings', { bypassCache: true })).catch(() => null);
+      const mgrStored = await Promise.resolve(this.store.getSetting('manager_runtime', { bypassCache: true })).catch(() => null);
+
+      const sysModeRaw = String(systemStored?.link4mMode ?? stored?.mode ?? this.config.link4mMode ?? 'api').trim().toLowerCase();
+      const resolvedMode = ['api', 'custom_url'].includes(sysModeRaw) ? sysModeRaw : 'api';
+      const resolvedCustomUrl = String(systemStored?.link4mUrl ?? stored?.customUrl ?? this.config.link4mUrl ?? '').trim();
+
       if (stored) {
         this.config.enabled = stored.enabled === true;
         this.config.rewardHours = Number(stored.rewardHours) || this.config.rewardHours || 12;
         this.config.dailyLimit = Number(stored.dailyLimit) || this.config.dailyLimit || 2;
+        this.config.link4mMode = resolvedMode;
+        this.config.link4mUrl = resolvedCustomUrl;
       } else {
         const defaults = {
-          enabled: this.config.enabled === true,
-          rewardHours: Number(this.config.rewardHours || 12),
-          dailyLimit: Number(this.config.dailyLimit || 2)
+          enabled: systemStored?.link4mRewardEnabled !== undefined ? Boolean(systemStored.link4mRewardEnabled) : (this.config.enabled === true),
+          rewardHours: Number(systemStored?.link4mRewardHours || this.config.rewardHours || 12),
+          dailyLimit: Number(systemStored?.link4mDailyLimit || this.config.dailyLimit || 2),
+          mode: resolvedMode,
+          customUrl: resolvedCustomUrl
         };
         this.config.enabled = defaults.enabled;
         this.config.rewardHours = defaults.rewardHours;
         this.config.dailyLimit = defaults.dailyLimit;
+        this.config.link4mMode = defaults.mode;
+        this.config.link4mUrl = defaults.customUrl;
         await this.store.setSetting('link4m_runtime', defaults);
       }
+
+      // Hydrate encrypted credentials durably from system_settings / manager_runtime across restarts
+      let mgrSecrets = null;
+      if (mgrStored?.secretsCiphertext) {
+        const mgrRes = this._tryDecryptValue(mgrStored.secretsCiphertext);
+        if (mgrRes.ok && mgrRes.value) {
+          try { mgrSecrets = JSON.parse(mgrRes.value); } catch (_) { mgrSecrets = null; }
+        }
+      }
+
+      const sysApiRes = systemStored?.link4mApiTokenCiphertext ? this._tryDecryptValue(systemStored.link4mApiTokenCiphertext) : { ok: false, value: null };
+      const sysSecRes = systemStored?.link4mSecretKeyCiphertext ? this._tryDecryptValue(systemStored.link4mSecretKeyCiphertext) : { ok: false, value: null };
+      const sysClearedApi = systemStored && typeof systemStored === 'object' && systemStored.hasLink4mApiToken === false && !systemStored.link4mApiTokenCiphertext;
+      const sysClearedSec = systemStored && typeof systemStored === 'object' && systemStored.hasLink4mSecretKey === false && !systemStored.link4mSecretKeyCiphertext;
+
+      if (sysApiRes.ok && String(sysApiRes.value || '').trim()) {
+        this.config.link4mApiToken = String(sysApiRes.value).trim();
+      } else if (mgrSecrets?.link4mApiToken && String(mgrSecrets.link4mApiToken).trim()) {
+        this.config.link4mApiToken = String(mgrSecrets.link4mApiToken).trim();
+      } else if (sysClearedApi) {
+        this.config.link4mApiToken = '';
+        delete this.config.apiToken;
+      }
+
+      if (sysSecRes.ok && String(sysSecRes.value || '').trim()) {
+        this.config.link4mSecretKey = String(sysSecRes.value).trim();
+      } else if (mgrSecrets?.link4mSecretKey && String(mgrSecrets.link4mSecretKey).trim()) {
+        this.config.link4mSecretKey = String(mgrSecrets.link4mSecretKey).trim();
+      } else if (sysClearedSec) {
+        this.config.link4mSecretKey = '';
+        delete this.config.secretKey;
+      }
+
+      const persistedPublicUrl = String(systemStored?.publicBaseUrl || mgrStored?.publicBaseUrl || '').trim();
+      if (persistedPublicUrl) {
+        this.config.publicBaseUrl = persistedPublicUrl;
+      }
+
       this.initialized = true;
       this.lastInitError = null;
     } catch (error) {
@@ -111,25 +225,39 @@ class Link4mService {
 
   publicConfig() {
     const degraded = Boolean(this.lastInitError);
+    const mode = this.config.link4mMode === 'custom_url' ? 'custom_url' : 'api';
+    const hasApiToken = Boolean(this.config.link4mApiToken || this.config.apiToken);
+    const hasSecretKey = Boolean(this.config.link4mSecretKey || this.config.secretKey);
+    const customUrl = String(this.config.link4mUrl || '').trim();
+    const customUrlConfigured = Boolean(validHttpsCustomUrl(customUrl));
     return {
       enabled: this.config.enabled === true && !degraded,
       configuredEnabled: this.config.enabled === true,
       rewardHours: Number(this.config.rewardHours || 12),
       dailyLimit: Number(this.config.dailyLimit || 2),
-      providerConfigured: Boolean(this.config.link4mApiToken || this.config.apiToken),
-      webhookConfigured: Boolean(this.config.link4mSecretKey || this.config.secretKey),
-      callbackConfigured: Boolean(validPublicUrl(this.config.publicBaseUrl)),
+      mode,
+      customUrl,
+      hasApiToken,
+      hasSecretKey,
+      providerConfigured: mode === 'custom_url' ? customUrlConfigured : hasApiToken,
+      webhookConfigured: hasSecretKey,
+      callbackConfigured: mode === 'custom_url' ? true : Boolean(validPublicUrl(this.config.publicBaseUrl)),
       initialized: this.initialized,
       degraded,
       initError: this.lastInitError
     };
   }
 
-  async configure({ enabled, rewardHours, dailyLimit }) {
+  async configure({ enabled, rewardHours, dailyLimit, mode, customUrl }) {
+    const nextModeRaw = mode !== undefined ? mode : (this.config.link4mMode || 'api');
+    const nextMode = String(nextModeRaw || 'api').trim().toLowerCase() === 'custom_url' ? 'custom_url' : 'api';
+    const nextCustomUrl = customUrl !== undefined ? String(customUrl || '').trim() : String(this.config.link4mUrl || '').trim();
     const next = {
       enabled: Boolean(enabled),
       rewardHours: Number(rewardHours),
-      dailyLimit: Number(dailyLimit)
+      dailyLimit: Number(dailyLimit),
+      mode: nextMode,
+      customUrl: nextCustomUrl
     };
     if (!Number.isInteger(next.rewardHours) || next.rewardHours < 1 || next.rewardHours > 48) {
       throw new Error('Reward hours must be 1–48.');
@@ -138,7 +266,14 @@ class Link4mService {
       throw new Error('Daily limit must be 1–10.');
     }
     await this.store.setSetting('link4m_runtime', next);
-    this.config = { ...this.config, ...next };
+    this.config = {
+      ...this.config,
+      enabled: next.enabled,
+      rewardHours: next.rewardHours,
+      dailyLimit: next.dailyLimit,
+      link4mMode: next.mode,
+      link4mUrl: next.customUrl
+    };
     this.initialized = true;
     this.lastInitError = null;
     return this.publicConfig();
@@ -212,13 +347,21 @@ class Link4mService {
     if (this.config.enabled === false) {
       throw new Error('Tính năng nhận thưởng Link4M hiện đang bảo trì.');
     }
+    const mode = this.config.link4mMode === 'custom_url' ? 'custom_url' : 'api';
+    const fixedUrl = mode === 'custom_url' ? validHttpsCustomUrl(this.config.link4mUrl) : '';
     const apiToken = this.config.link4mApiToken || this.config.apiToken;
-    if (!apiToken) {
-      throw new Error('Chưa cấu hình API Key Link4M trên hệ thống.');
-    }
     const baseUrl = validPublicUrl(this.config.publicBaseUrl);
-    if (!baseUrl) {
-      throw new Error('Chưa cấu hình Public URL của Manager.');
+    if (mode === 'custom_url') {
+      if (!fixedUrl) {
+        throw new Error('Chưa cấu hình đường dẫn Link4M cố định hợp lệ (HTTPS).');
+      }
+    } else {
+      if (!apiToken) {
+        throw new Error('Chưa cấu hình API Key Link4M trên hệ thống.');
+      }
+      if (!baseUrl) {
+        throw new Error('Chưa cấu hình Public URL của Manager.');
+      }
     }
 
     const now = new Date();
@@ -236,7 +379,7 @@ class Link4mService {
     }
 
     const active = await this.store.findActiveLinkAttempt(userId, now);
-    if (active?.providerUrl) {
+    if (active?.providerUrl && (mode !== 'custom_url' || active.providerUrl === fixedUrl)) {
       return {
         attemptId: active.attemptId,
         providerUrl: active.providerUrl,
@@ -254,9 +397,6 @@ class Link4mService {
     const nonce = crypto.randomBytes(24).toString('base64url');
     const createdAt = new Date();
     const expiresAt = new Date(createdAt.getTime() + ATTEMPT_TTL_MS);
-    const returnUrl = new URL('/api/rewards/link4m/return', baseUrl);
-    returnUrl.searchParams.set('attempt', attemptId);
-    returnUrl.searchParams.set('token', nonce);
 
     const rewardHours = Number(this.config.rewardHours || 12);
     const vnDate = vietnamDateString(now);
@@ -277,7 +417,14 @@ class Link4mService {
 
     let providerUrl;
     try {
-      providerUrl = await this.createShortLink(returnUrl.toString(), apiToken);
+      if (mode === 'custom_url') {
+        providerUrl = fixedUrl;
+      } else {
+        const returnUrl = new URL('/api/rewards/link4m/return', baseUrl);
+        returnUrl.searchParams.set('attempt', attemptId);
+        returnUrl.searchParams.set('token', nonce);
+        providerUrl = await this.createShortLink(returnUrl.toString(), apiToken);
+      }
       const saved = await this.store.setLinkAttemptProviderUrl(attemptId, providerUrl);
       if (!saved) throw new Error('Phiên vượt link đã hết hạn trước khi lưu link rút gọn.');
     } catch (error) {

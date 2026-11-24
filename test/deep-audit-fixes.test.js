@@ -1525,7 +1525,7 @@ test('AUDIT-R2-04: Discord /login works for legacy scrypt$ user, passes real use
   let adminDbRevoked = false;
 
   const mockServices = {
-    config: { discordGuildId: 'guild_r2_04', adminUsername: 'admin', adminPassword: 'AdminPass123!', encryptionKey: encKey },
+    config: { discordGuildId: 'guild_r2_04', adminUsername: 'admin', adminPassword: 'AdminPass123!', encryptionKey: encKey, adminUserId: '888888888888888888' },
     registry: {
       getAdminPassword: () => null,
       setAdminPassword: () => {}
@@ -2240,12 +2240,18 @@ test('AUDIT-R3-10/11/12: Auth reserved usernames & IP limit, Admin /settings/sys
     await srvAdmin.close();
   }
 
-  // 11. Discord resolveLinkedUser elevates Discord Admin + checkBotOwnership blocks numeric mismatch + getWorkerState handles afk
-  const elevated = await resolveLinkedUser(
+  // 11. Discord resolveLinkedUser elevates ONLY configured adminRoleId/adminUserId (never guild owner), checkBotOwnership blocks numeric mismatch & getWorkerState handles afk
+  const ownerNotElevated = await resolveLinkedUser(
     { guildId: 'guild_r3_11', user: { id: '999999999999999999' }, guild: { id: 'guild_r3_11', ownerId: '999999999999999999' } },
-    { accessStore: { getUserByDiscordId: async () => ({ userId: 'usr_owner', username: 'owner', role: 'user' }) }, config: { discordGuildId: 'guild_r3_11' } }
+    { accessStore: { getUserByDiscordId: async () => ({ userId: 'usr_owner', username: 'owner', role: 'user' }) }, config: { discordGuildId: 'guild_r3_11', adminRoleId: '111111111111111111' } }
   );
-  assert.strictEqual(elevated.role, 'admin', 'Guild owner linked to regular web account must still have admin role in Discord');
+  assert.strictEqual(ownerNotElevated.role, 'user', 'Guild owner without configured adminRoleId or adminUserId must NOT be elevated to admin');
+
+  const roleElevated = await resolveLinkedUser(
+    { guildId: 'guild_r3_11', user: { id: '555555555555555555' }, member: { roles: ['111111111111111111'] }, guild: { id: 'guild_r3_11', ownerId: '999999999999999999' } },
+    { accessStore: { getUserByDiscordId: async () => ({ userId: 'usr_mod', username: 'moduser', role: 'user' }) }, config: { discordGuildId: 'guild_r3_11', adminRoleId: '111111111111111111' } }
+  );
+  assert.strictEqual(roleElevated.role, 'admin', 'Configured adminRoleId inside allowed guild must elevate user in Discord');
   assert.strictEqual(checkBotOwnership({ role: 'user', assignedBotIds: ['10'] }, '11', { workerId: '11', botNumber: 10 }), false);
   assert.strictEqual(getWorkerState({ status: { state: 'afk' } }).isOnline, true, 'AFK state must be treated as online in Discord');
 
@@ -2605,7 +2611,7 @@ test('AUDIT-R4-05/06/07/08: Restricted user blocked on /auto-chat, /bot-schedule
       accessStore: { getUserByDiscordId: async () => null },
       registry: { list: async () => [{ workerId: 'b1', botNumber: 1, name: 'B1' }], getLogs: () => [] },
       store: { get: async () => ({ workerId: 'b1', events: [{ type: 'info', message: 'db-fallback-event' }] }) },
-      config: { discordGuildId: 'guild_logs_1' }
+      config: { discordGuildId: 'guild_logs_1', adminUserId: '111111111111111111' }
     }
   );
   assert.ok(cmdOut.embeds[0].data.description.includes('db-fallback-event'), '/logs must fall back to persisted store.get(includeEvents:true) when RAM cache is empty');

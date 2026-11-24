@@ -152,6 +152,7 @@ function createAdminApi({
   store,
   entitlementService,
   link4mService,
+  managerRuntimeSettings = null,
   registry,
   broker,
   fleetOperations,
@@ -1793,7 +1794,7 @@ function createAdminApi({
     }
     if (typeof store?.getSetting === 'function') {
       const settingsObj = {};
-      for (const k of ['system_settings', 'system_announcement', 'system_maintenance', 'webhook_settings', 'discord_access', 'link4m_runtime']) {
+      for (const k of ['system_settings', 'system_announcement', 'system_maintenance', 'webhook_settings', 'discord_access', 'link4m_runtime', 'manager_runtime']) {
         const val = await store.getSetting(k).catch(() => null);
         if (val !== null && val !== undefined) settingsObj[k] = val;
       }
@@ -2390,6 +2391,42 @@ function createAdminApi({
   });
 
   // 10. SYSTEM RUNTIME SETTINGS & ADMIN CREDENTIALS (M-09: never mutate frozen config!)
+  let systemSettingsChain = Promise.resolve();
+
+  function tryDecryptSystemSecret(ciphertext) {
+    if (!ciphertext) return { present: false, ok: false, failed: false, value: '' };
+    const encKey = registry?.encryptionKey || config?.encryptionKey;
+    const prevKey = config?.previousEncryptionKey || null;
+    if (!encKey) return { present: true, ok: false, failed: false, value: '' };
+    try {
+      const val = String(decryptSecret(ciphertext, encKey, prevKey) || '').trim();
+      return val ? { present: true, ok: true, failed: false, value: val } : { present: true, ok: false, failed: true, value: '' };
+    } catch (_) {
+      return { present: true, ok: false, failed: true, value: '' };
+    }
+  }
+
+  async function readPersistedSystemSettingsStrict() {
+    if (typeof store?.getSetting === 'function') {
+      const raw = await store.getSetting('system_settings', { bypassCache: true });
+      if (!raw || typeof raw !== 'object') return null;
+      const clean = { ...raw };
+      delete clean.updatedAt;
+      return clean;
+    }
+    if (store?.client) {
+      const { data, error } = await Promise.resolve(
+        store.client.from('manager_settings').select('value').eq('key', 'system_settings').maybeSingle()
+      );
+      if (error && error.code !== 'PGRST116') throw error;
+      if (!data?.value || typeof data.value !== 'object') return null;
+      const clean = { ...data.value };
+      delete clean.updatedAt;
+      return clean;
+    }
+    return null;
+  }
+
   router.get('/settings/system', async (_req, res) => {
     try {
       const l4mCfg = link4mService?.publicConfig?.() || {};
@@ -2397,43 +2434,67 @@ function createAdminApi({
         publicBaseUrl: config.publicBaseUrl || '',
         renderApiKey: config.renderApiKey ? '********' : '',
         link4mRewardEnabled: l4mCfg.configuredEnabled ?? Boolean(config.link4mRewardEnabled),
-        link4mMode: 'api',
-        link4mUrl: '',
-        link4mApiToken: (config.link4mApiToken || l4mCfg.providerConfigured) ? '********' : '',
+        link4mMode: l4mCfg.mode || 'api',
+        link4mUrl: l4mCfg.customUrl || '',
+        link4mApiToken: (config.link4mApiToken || l4mCfg.hasApiToken || l4mCfg.providerConfigured) ? '********' : '',
         link4mRewardHours: Number(l4mCfg.rewardHours || config.link4mRewardHours || 12),
         link4mDailyLimit: Number(l4mCfg.dailyLimit || config.link4mDailyLimit || 2),
-        link4mSecretKey: (config.link4mSecretKey || l4mCfg.webhookConfigured) ? '********' : '',
+        link4mSecretKey: (config.link4mSecretKey || l4mCfg.hasSecretKey || l4mCfg.webhookConfigured) ? '********' : '',
         wispbyteEnabled: true,
         trialGiftEnabled: Boolean(config.trialGiftEnabled ?? false),
         trialDays: Number(config.trialDays || 3)
       };
 
-      let persisted = null;
-      if (typeof store.getSetting === 'function') {
-        persisted = await store.getSetting('system_settings').catch(() => null);
-      } else if (store.client) {
-        const { data } = await Promise.resolve(
-          store.client.from('manager_settings').select('value').eq('key', 'system_settings').maybeSingle()
-        ).catch(() => ({}));
-        persisted = data?.value;
+      const persisted = await readPersistedSystemSettingsStrict();
+      const persistedObj = persisted && typeof persisted === 'object' ? { ...persisted } : {};
+      if (!persistedObj.publicBaseUrl && config.publicBaseUrl) {
+        persistedObj.publicBaseUrl = config.publicBaseUrl;
       }
+
+      const apiTokCheck = tryDecryptSystemSecret(persistedObj.link4mApiTokenCiphertext);
+      const secKeyCheck = tryDecryptSystemSecret(persistedObj.link4mSecretKeyCiphertext);
 
       const mergedSettings = {
         ...defaultSettings,
-        ...(persisted && typeof persisted === 'object' ? persisted : {})
+        ...persistedObj
       };
+      if (persistedObj.link4mRewardEnabled === undefined && l4mCfg.configuredEnabled !== undefined) {
+        mergedSettings.link4mRewardEnabled = Boolean(l4mCfg.configuredEnabled);
+      }
+      if (persistedObj.link4mRewardHours === undefined && l4mCfg.rewardHours !== undefined) {
+        mergedSettings.link4mRewardHours = Number(l4mCfg.rewardHours);
+      }
+      if (persistedObj.link4mDailyLimit === undefined && l4mCfg.dailyLimit !== undefined) {
+        mergedSettings.link4mDailyLimit = Number(l4mCfg.dailyLimit);
+      }
       mergedSettings.trialGiftEnabled = Boolean(mergedSettings.trialGiftEnabled);
       mergedSettings.trialDays = Number.isFinite(Number(mergedSettings.trialDays)) ? Number(mergedSettings.trialDays) : 3;
       mergedSettings.link4mRewardEnabled = Boolean(mergedSettings.link4mRewardEnabled);
       mergedSettings.link4mRewardHours = Number.isFinite(Number(mergedSettings.link4mRewardHours)) ? Number(mergedSettings.link4mRewardHours) : 12;
       mergedSettings.link4mDailyLimit = Number.isFinite(Number(mergedSettings.link4mDailyLimit)) ? Number(mergedSettings.link4mDailyLimit) : 2;
-      // Never return raw secret ciphertexts or plaintext secrets from system_settings
-      if (mergedSettings.link4mApiTokenCiphertext || mergedSettings.link4mApiToken) {
-        mergedSettings.link4mApiToken = '********';
-      }
-      if (mergedSettings.link4mSecretKeyCiphertext || mergedSettings.link4mSecretKey) {
-        mergedSettings.link4mSecretKey = '********';
-      }
+      mergedSettings.link4mMode = ['api', 'custom_url'].includes(String(mergedSettings.link4mMode || '').trim().toLowerCase())
+        ? String(mergedSettings.link4mMode).trim().toLowerCase()
+        : 'api';
+
+      // Verify actual usable/decryptable secrets rather than trusting stale masked placeholders
+      const hasValidApiToken = apiTokCheck.present
+        ? !apiTokCheck.failed
+        : Boolean(
+            (l4mCfg.hasApiToken !== undefined ? l4mCfg.hasApiToken : (mergedSettings.link4mMode === 'api' && l4mCfg.providerConfigured)) ||
+            (persistedObj.hasLink4mApiToken !== false && config.link4mApiToken)
+          );
+      const hasValidSecretKey = secKeyCheck.present
+        ? !secKeyCheck.failed
+        : Boolean(
+            (l4mCfg.hasSecretKey !== undefined ? l4mCfg.hasSecretKey : l4mCfg.webhookConfigured) ||
+            (persistedObj.hasLink4mSecretKey !== false && config.link4mSecretKey)
+          );
+
+      mergedSettings.link4mApiToken = hasValidApiToken ? '********' : '';
+      mergedSettings.link4mSecretKey = hasValidSecretKey ? '********' : '';
+      if (apiTokCheck.failed) mergedSettings.link4mTokenDecryptionFailed = true;
+      if (secKeyCheck.failed) mergedSettings.link4mSecretDecryptionFailed = true;
+
       delete mergedSettings.link4mApiTokenCiphertext;
       delete mergedSettings.link4mSecretKeyCiphertext;
 
@@ -2447,155 +2508,194 @@ function createAdminApi({
     }
   });
 
-  router.post('/settings/system', async (req, res) => {
-    try {
-      const rawPatch = req.body || {};
-      const patch = {};
-      if (rawPatch.publicBaseUrl !== undefined) {
-        patch.publicBaseUrl = validateHttpOrHttpsUrl(String(rawPatch.publicBaseUrl || '').trim().slice(0, 512), 'publicBaseUrl');
-      }
-      if (rawPatch.trialGiftEnabled !== undefined) patch.trialGiftEnabled = Boolean(rawPatch.trialGiftEnabled);
-      if (rawPatch.trialDays !== undefined) {
-        const daysNum = Number(rawPatch.trialDays);
-        if (!Number.isInteger(daysNum) || daysNum < 1 || daysNum > 365) {
-          return res.status(400).json({ ok: false, error: 'Số ngày dùng thử phải từ 1 đến 365.' });
+  router.post('/settings/system', (req, res) => {
+    const run = async () => {
+      try {
+        const rawPatch = req.body || {};
+        const patch = {};
+        if (rawPatch.publicBaseUrl !== undefined) {
+          patch.publicBaseUrl = validateHttpOrHttpsUrl(String(rawPatch.publicBaseUrl || '').trim().slice(0, 512), 'publicBaseUrl');
         }
-        patch.trialDays = daysNum;
-      }
-      if (rawPatch.wispbyteEnabled !== undefined) patch.wispbyteEnabled = Boolean(rawPatch.wispbyteEnabled);
-
-      // Link4M settings fields
-      if (rawPatch.link4mRewardEnabled !== undefined) patch.link4mRewardEnabled = Boolean(rawPatch.link4mRewardEnabled);
-      if (rawPatch.link4mMode !== undefined) {
-        const modeVal = String(rawPatch.link4mMode || 'api').trim().toLowerCase();
-        patch.link4mMode = ['api', 'custom_url'].includes(modeVal) ? modeVal : 'api';
-      }
-      if (rawPatch.link4mUrl !== undefined) {
-        patch.link4mUrl = validateHttpOrHttpsUrl(String(rawPatch.link4mUrl || '').trim().slice(0, 512), 'link4mUrl');
-      }
-      if (rawPatch.link4mRewardHours !== undefined) {
-        const hrs = Number(rawPatch.link4mRewardHours);
-        if (!Number.isInteger(hrs) || hrs < 1 || hrs > 48) {
-          return res.status(400).json({ ok: false, error: 'Số giờ thưởng Link4M phải từ 1 đến 48.' });
-        }
-        patch.link4mRewardHours = hrs;
-      }
-      if (rawPatch.link4mDailyLimit !== undefined) {
-        const lim = Number(rawPatch.link4mDailyLimit);
-        if (!Number.isInteger(lim) || lim < 1 || lim > 10) {
-          return res.status(400).json({ ok: false, error: 'Giới hạn lượt Link4M/ngày phải từ 1 đến 10.' });
-        }
-        patch.link4mDailyLimit = lim;
-      }
-      const encKey = registry?.encryptionKey || config?.encryptionKey;
-      let newApiToken = null;
-      if (rawPatch.link4mApiToken !== undefined) {
-        const rawTok = String(rawPatch.link4mApiToken || '').trim();
-        if (rawTok !== '********') {
-          if (rawTok && !encKey) {
-            return res.status(500).json({ ok: false, error: 'Chưa cấu hình MANAGER_ENCRYPTION_KEY để mã hóa Link4M API token.' });
+        if (rawPatch.trialGiftEnabled !== undefined) patch.trialGiftEnabled = Boolean(rawPatch.trialGiftEnabled);
+        if (rawPatch.trialDays !== undefined) {
+          const daysNum = Number(rawPatch.trialDays);
+          if (!Number.isInteger(daysNum) || daysNum < 1 || daysNum > 365) {
+            return res.status(400).json({ ok: false, error: 'Số ngày dùng thử phải từ 1 đến 365.' });
           }
-          newApiToken = rawTok;
-          patch.link4mApiToken = rawTok ? '********' : '';
-          patch.link4mApiTokenCiphertext = rawTok ? encryptSecret(rawTok, encKey) : null;
+          patch.trialDays = daysNum;
         }
-      }
-      let newSecretKey = null;
-      if (rawPatch.link4mSecretKey !== undefined) {
-        const rawSec = String(rawPatch.link4mSecretKey || '').trim();
-        if (rawSec !== '********') {
-          if (rawSec && !encKey) {
-            return res.status(500).json({ ok: false, error: 'Chưa cấu hình MANAGER_ENCRYPTION_KEY để mã hóa Link4M secret key.' });
+        if (rawPatch.wispbyteEnabled !== undefined) patch.wispbyteEnabled = Boolean(rawPatch.wispbyteEnabled);
+
+        // Link4M settings fields
+        if (rawPatch.link4mRewardEnabled !== undefined) patch.link4mRewardEnabled = Boolean(rawPatch.link4mRewardEnabled);
+        if (rawPatch.link4mMode !== undefined) {
+          const modeVal = String(rawPatch.link4mMode || 'api').trim().toLowerCase();
+          patch.link4mMode = ['api', 'custom_url'].includes(modeVal) ? modeVal : 'api';
+        }
+        if (rawPatch.link4mUrl !== undefined) {
+          patch.link4mUrl = validateHttpOrHttpsUrl(String(rawPatch.link4mUrl || '').trim().slice(0, 512), 'link4mUrl');
+        }
+        if (rawPatch.link4mRewardHours !== undefined) {
+          const hrs = Number(rawPatch.link4mRewardHours);
+          if (!Number.isInteger(hrs) || hrs < 1 || hrs > 48) {
+            return res.status(400).json({ ok: false, error: 'Số giờ thưởng Link4M phải từ 1 đến 48.' });
           }
-          newSecretKey = rawSec;
-          patch.link4mSecretKey = rawSec ? '********' : '';
-          patch.link4mSecretKeyCiphertext = rawSec ? encryptSecret(rawSec, encKey) : null;
+          patch.link4mRewardHours = hrs;
         }
-      }
-
-      let currentSettings = {};
-      if (typeof store.getSetting === 'function') {
-        const persisted = await store.getSetting('system_settings').catch(() => null);
-        if (persisted && typeof persisted === 'object') {
-          currentSettings = persisted;
+        if (rawPatch.link4mDailyLimit !== undefined) {
+          const lim = Number(rawPatch.link4mDailyLimit);
+          if (!Number.isInteger(lim) || lim < 1 || lim > 10) {
+            return res.status(400).json({ ok: false, error: 'Giới hạn lượt Link4M/ngày phải từ 1 đến 10.' });
+          }
+          patch.link4mDailyLimit = lim;
         }
-      } else if (store.client) {
-        const { data } = await Promise.resolve(
-          store.client.from('manager_settings').select('value').eq('key', 'system_settings').maybeSingle()
-        ).catch(() => ({}));
-        if (data?.value && typeof data.value === 'object') {
-          currentSettings = data.value;
+
+        const currentRaw = await readPersistedSystemSettingsStrict();
+        const currentSettings = currentRaw && typeof currentRaw === 'object' ? { ...currentRaw } : {};
+        delete currentSettings.updatedAt;
+        if (currentSettings.link4mApiToken === '********' && !currentSettings.link4mApiTokenCiphertext) {
+          delete currentSettings.link4mApiToken;
         }
-      }
-
-      const mergedSettings = {
-        publicBaseUrl: config.publicBaseUrl || '',
-        renderApiKey: config.renderApiKey ? '********' : '',
-        link4mRewardEnabled: Boolean(config.link4mRewardEnabled),
-        link4mMode: 'api',
-        link4mUrl: '',
-        link4mApiToken: config.link4mApiToken ? '********' : '',
-        link4mRewardHours: Number(config.link4mRewardHours || 12),
-        link4mDailyLimit: Number(config.link4mDailyLimit || 2),
-        link4mSecretKey: config.link4mSecretKey ? '********' : '',
-        wispbyteEnabled: true,
-        trialGiftEnabled: Boolean(config.trialGiftEnabled ?? false),
-        trialDays: Number(config.trialDays || 3),
-        ...currentSettings,
-        ...patch
-      };
-
-      if (typeof store.setSetting === 'function') {
-        await store.setSetting('system_settings', mergedSettings);
-      } else if (store.client) {
-        await store.client.from('manager_settings').upsert({
-          key: 'system_settings',
-          value: mergedSettings,
-          updated_at: new Date().toISOString()
-        }, { onConflict: 'key' });
-      }
-
-      // Synchronize live Link4mService runtime config immediately without mutating frozen config in place
-      if (link4mService) {
-        if (typeof link4mService.configure === 'function' && (
-          patch.link4mRewardEnabled !== undefined ||
-          patch.link4mRewardHours !== undefined ||
-          patch.link4mDailyLimit !== undefined
-        )) {
-          await link4mService.configure({
-            enabled: mergedSettings.link4mRewardEnabled,
-            rewardHours: mergedSettings.link4mRewardHours,
-            dailyLimit: mergedSettings.link4mDailyLimit
-          }).catch(() => {});
+        if (currentSettings.link4mSecretKey === '********' && !currentSettings.link4mSecretKeyCiphertext) {
+          delete currentSettings.link4mSecretKey;
         }
-        const hasCredUpdates = patch.publicBaseUrl !== undefined || newApiToken !== null || newSecretKey !== null;
-        if (hasCredUpdates) {
+
+        const encKey = registry?.encryptionKey || config?.encryptionKey;
+        let newApiToken = null;
+        if (rawPatch.link4mApiToken !== undefined) {
+          const rawTok = String(rawPatch.link4mApiToken || '').trim();
+          if (rawTok !== '********') {
+            if (rawTok && !encKey) {
+              return res.status(500).json({ ok: false, error: 'Chưa cấu hình MANAGER_ENCRYPTION_KEY để mã hóa Link4M API token.' });
+            }
+            newApiToken = rawTok;
+            patch.hasLink4mApiToken = Boolean(rawTok);
+            patch.link4mApiToken = rawTok ? '********' : '';
+            patch.link4mApiTokenCiphertext = rawTok ? encryptSecret(rawTok, encKey) : null;
+          }
+        }
+        let newSecretKey = null;
+        if (rawPatch.link4mSecretKey !== undefined) {
+          const rawSec = String(rawPatch.link4mSecretKey || '').trim();
+          if (rawSec !== '********') {
+            if (rawSec && !encKey) {
+              return res.status(500).json({ ok: false, error: 'Chưa cấu hình MANAGER_ENCRYPTION_KEY để mã hóa Link4M secret key.' });
+            }
+            newSecretKey = rawSec;
+            patch.hasLink4mSecretKey = Boolean(rawSec);
+            patch.link4mSecretKey = rawSec ? '********' : '';
+            patch.link4mSecretKeyCiphertext = rawSec ? encryptSecret(rawSec, encKey) : null;
+          }
+        }
+
+        const existingTokCheck = newApiToken === null ? tryDecryptSystemSecret(currentSettings.link4mApiTokenCiphertext) : null;
+        const existingSecCheck = newSecretKey === null ? tryDecryptSystemSecret(currentSettings.link4mSecretKeyCiphertext) : null;
+        const resolvedApiToken = newApiToken !== null
+          ? newApiToken
+          : (existingTokCheck?.ok ? existingTokCheck.value : null);
+        const resolvedSecretKey = newSecretKey !== null
+          ? newSecretKey
+          : (existingSecCheck?.ok ? existingSecCheck.value : null);
+
+        const mergedSettings = {
+          publicBaseUrl: config.publicBaseUrl || '',
+          renderApiKey: config.renderApiKey ? '********' : '',
+          link4mRewardEnabled: Boolean(config.link4mRewardEnabled),
+          link4mMode: 'api',
+          link4mUrl: '',
+          link4mRewardHours: Number(config.link4mRewardHours || 12),
+          link4mDailyLimit: Number(config.link4mDailyLimit || 2),
+          wispbyteEnabled: true,
+          trialGiftEnabled: Boolean(config.trialGiftEnabled ?? false),
+          trialDays: Number(config.trialDays || 3),
+          ...currentSettings,
+          ...patch
+        };
+        if (!mergedSettings.publicBaseUrl && config.publicBaseUrl) {
+          mergedSettings.publicBaseUrl = config.publicBaseUrl;
+        }
+        const effectiveHasApiToken = Boolean(
+          mergedSettings.link4mApiTokenCiphertext ||
+          (mergedSettings.hasLink4mApiToken !== false && config.link4mApiToken)
+        );
+        const effectiveHasSecretKey = Boolean(
+          mergedSettings.link4mSecretKeyCiphertext ||
+          (mergedSettings.hasLink4mSecretKey !== false && config.link4mSecretKey)
+        );
+        mergedSettings.link4mApiToken = effectiveHasApiToken ? '********' : '';
+        mergedSettings.link4mSecretKey = effectiveHasSecretKey ? '********' : '';
+
+        if (typeof store.setSetting === 'function') {
+          await store.setSetting('system_settings', mergedSettings);
+        } else if (store.client) {
+          const { error } = await store.client.from('manager_settings').upsert({
+            key: 'system_settings',
+            value: mergedSettings,
+            updated_at: new Date().toISOString()
+          }, { onConflict: 'key' });
+          if (error) throw error;
+        }
+
+        // Sync durable manager_runtime secrets if ManagerRuntimeSettings is wired
+        if (managerRuntimeSettings && typeof managerRuntimeSettings.update === 'function') {
+          const rtPatch = {};
+          if (patch.publicBaseUrl !== undefined) rtPatch.publicBaseUrl = mergedSettings.publicBaseUrl;
+          if (resolvedApiToken !== null) rtPatch.link4mApiToken = resolvedApiToken;
+          if (resolvedSecretKey !== null) rtPatch.link4mSecretKey = resolvedSecretKey;
+          if (Object.keys(rtPatch).length > 0) {
+            await managerRuntimeSettings.update(rtPatch);
+          }
+        }
+
+        // Synchronize live Link4mService runtime config immediately without mutating frozen config in place
+        if (link4mService) {
+          if (typeof link4mService.configure === 'function' && (
+            patch.link4mRewardEnabled !== undefined ||
+            patch.link4mRewardHours !== undefined ||
+            patch.link4mDailyLimit !== undefined ||
+            patch.link4mMode !== undefined ||
+            patch.link4mUrl !== undefined
+          )) {
+            await link4mService.configure({
+              enabled: mergedSettings.link4mRewardEnabled,
+              rewardHours: mergedSettings.link4mRewardHours,
+              dailyLimit: mergedSettings.link4mDailyLimit
+            });
+          }
           const credUpdate = {
-            ...(patch.publicBaseUrl !== undefined ? { publicBaseUrl: mergedSettings.publicBaseUrl } : {}),
-            ...(newApiToken !== null ? { link4mApiToken: newApiToken } : {}),
-            ...(newSecretKey !== null ? { link4mSecretKey: newSecretKey } : {})
+            ...(mergedSettings.publicBaseUrl ? { publicBaseUrl: mergedSettings.publicBaseUrl } : {}),
+            ...(patch.publicBaseUrl === '' ? { publicBaseUrl: '' } : {}),
+            ...(mergedSettings.link4mMode !== undefined ? { link4mMode: mergedSettings.link4mMode } : {}),
+            ...(mergedSettings.link4mUrl !== undefined ? { link4mUrl: mergedSettings.link4mUrl } : {}),
+            ...(resolvedApiToken !== null ? { link4mApiToken: resolvedApiToken } : {}),
+            ...(resolvedSecretKey !== null ? { link4mSecretKey: resolvedSecretKey } : {})
           };
-          if (typeof link4mService.setRuntimeCredentials === 'function') {
-            link4mService.setRuntimeCredentials(credUpdate);
-          } else if (link4mService.config) {
-            link4mService.config = { ...link4mService.config, ...credUpdate };
+          if (Object.keys(credUpdate).length > 0) {
+            if (typeof link4mService.setRuntimeCredentials === 'function') {
+              link4mService.setRuntimeCredentials(credUpdate);
+            } else if (link4mService.config) {
+              link4mService.config = { ...link4mService.config, ...credUpdate };
+            }
           }
         }
+
+        const publicResponse = { ...mergedSettings };
+        delete publicResponse.link4mApiTokenCiphertext;
+        delete publicResponse.link4mSecretKeyCiphertext;
+
+        return res.json({
+          ok: true,
+          message: 'Đã cập nhật cấu hình hệ thống.',
+          settings: publicResponse
+        });
+      } catch (error) {
+        const status = error.status === 400 ? 400 : 500;
+        return res.status(status).json({ ok: false, error: error.message });
       }
-
-      const publicResponse = { ...mergedSettings };
-      delete publicResponse.link4mApiTokenCiphertext;
-      delete publicResponse.link4mSecretKeyCiphertext;
-
-      return res.json({
-        ok: true,
-        message: 'Đã cập nhật cấu hình hệ thống.',
-        settings: publicResponse
-      });
-    } catch (error) {
-      const status = error.status === 400 ? 400 : 500;
-      return res.status(status).json({ ok: false, error: error.message });
-    }
+    };
+    const next = systemSettingsChain.then(run, run);
+    systemSettingsChain = next.catch(() => {});
+    return next;
   });
 
   async function listAllBotCredentials() {

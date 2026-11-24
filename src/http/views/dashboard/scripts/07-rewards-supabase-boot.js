@@ -215,28 +215,38 @@ async function toggleLink4mSetting() {
   }
 }
 
+var savingLink4mConfig = false;
+
 async function openLink4mConfigModal() {
   try {
     const res = await requestJson('/api/manager/settings/system');
-    if (res.ok && res.data?.settings) {
-      const s = res.data.settings;
-      const enabledCb = document.getElementById('link4mModalEnabled');
-      if (enabledCb) enabledCb.checked = s.link4mRewardEnabled === true;
-      const modeSel = document.getElementById('link4mModalMode');
-      if (modeSel) modeSel.value = s.link4mMode || 'custom_url';
-      const urlInp = document.getElementById('link4mModalUrl');
-      if (urlInp) urlInp.value = s.link4mUrl || '';
-      const apiTokenInp = document.getElementById('link4mModalApiToken');
-      if (apiTokenInp) apiTokenInp.value = s.link4mApiToken || '';
-      const hoursInp = document.getElementById('link4mModalHours');
-      if (hoursInp) hoursInp.value = s.link4mRewardHours || 12;
-      const limitInp = document.getElementById('link4mModalDailyLimit');
-      if (limitInp) limitInp.value = s.link4mDailyLimit || 2;
-      const secretInp = document.getElementById('link4mModalSecretKey');
-      if (secretInp) secretInp.value = s.link4mSecretKey || '';
-      updateLink4mModalFields();
+    if (!res.ok || !res.data?.settings) {
+      showToast(res.data?.error || 'Không thể tải cấu hình Link4M từ máy chủ, vui lòng thử lại.');
+      return;
     }
-  } catch (_) {}
+    const s = res.data.settings;
+    const enabledCb = document.getElementById('link4mModalEnabled');
+    if (enabledCb) enabledCb.checked = s.link4mRewardEnabled === true;
+    const modeSel = document.getElementById('link4mModalMode');
+    if (modeSel) modeSel.value = s.link4mMode || 'api';
+    const urlInp = document.getElementById('link4mModalUrl');
+    if (urlInp) urlInp.value = s.link4mUrl || '';
+    const apiTokenInp = document.getElementById('link4mModalApiToken');
+    if (apiTokenInp) apiTokenInp.value = s.link4mApiToken || '';
+    const hoursInp = document.getElementById('link4mModalHours');
+    if (hoursInp) hoursInp.value = s.link4mRewardHours || 12;
+    const limitInp = document.getElementById('link4mModalDailyLimit');
+    if (limitInp) limitInp.value = s.link4mDailyLimit || 2;
+    const secretInp = document.getElementById('link4mModalSecretKey');
+    if (secretInp) secretInp.value = s.link4mSecretKey || '';
+    updateLink4mModalFields();
+    if (s.link4mTokenDecryptionFailed) {
+      showToast('Không thể giải mã API Token Link4M cũ, vui lòng nhập lại API Token và bấm Lưu.');
+    }
+  } catch (err) {
+    showToast('Không thể tải cấu hình Link4M: ' + (err?.message || 'Lỗi kết nối'));
+    return;
+  }
   const modal = document.getElementById('link4mSettingsModal');
   if (modal) modal.classList.remove('hidden');
 }
@@ -247,7 +257,7 @@ function closeLink4mConfigModal() {
 }
 
 function updateLink4mModalFields() {
-  const mode = document.getElementById('link4mModalMode')?.value || 'custom_url';
+  const mode = document.getElementById('link4mModalMode')?.value || 'api';
   const customGrp = document.getElementById('link4mCustomUrlGroup');
   const apiGrp = document.getElementById('link4mApiTokenGroup');
   if (customGrp) customGrp.style.display = mode === 'custom_url' ? 'block' : 'none';
@@ -255,14 +265,25 @@ function updateLink4mModalFields() {
 }
 
 async function saveLink4mConfigModal() {
+  if (savingLink4mConfig) return;
   const enabled = document.getElementById('link4mModalEnabled')?.checked === true;
-  const mode = document.getElementById('link4mModalMode')?.value || 'custom_url';
+  const mode = document.getElementById('link4mModalMode')?.value || 'api';
   const url = document.getElementById('link4mModalUrl')?.value || '';
   const apiToken = document.getElementById('link4mModalApiToken')?.value || '';
   const hours = parseInt(document.getElementById('link4mModalHours')?.value, 10) || 12;
   const dailyLimit = parseInt(document.getElementById('link4mModalDailyLimit')?.value, 10) || 2;
   const secretKey = document.getElementById('link4mModalSecretKey')?.value || '';
 
+  if (enabled && mode === 'api' && !apiToken.trim()) {
+    showToast('Vui lòng nhập Link4M Publisher API Token khi bật chế độ API!');
+    return;
+  }
+  if (enabled && mode === 'custom_url' && !url.trim()) {
+    showToast('Vui lòng nhập đường dẫn Link4M cố định khi bật chế độ Link cố định!');
+    return;
+  }
+
+  savingLink4mConfig = true;
   try {
     const res = await requestJson('/api/manager/settings/system', {
       method: 'POST',
@@ -287,6 +308,8 @@ async function saveLink4mConfigModal() {
     }
   } catch (err) {
     showToast('Lỗi: ' + err.message);
+  } finally {
+    savingLink4mConfig = false;
   }
 }
 

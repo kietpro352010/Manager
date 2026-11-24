@@ -270,39 +270,19 @@ async function hasAuthorizedRole(interaction, services) {
   if (services?.config?.adminUserId && services.config.adminUserId === userId) return true;
   if (services?.accessControl?.adminUserId && services.accessControl.adminUserId === userId) return true;
 
-  // Enforce allowed guild fail-closed before checking guild owner/admin perm/roles (DISCORD-01/03)
+  // Enforce allowed guild fail-closed before checking setup roles (never guild ownership or raw permissions)
   const allowedGuildId = await resolveAllowedGuildId(services);
   if (!allowedGuildId || interaction.guildId !== allowedGuildId) {
     return false;
   }
 
-  // 2. Server Owner (scoped to configured guild)
-  const ownerId = interaction.guild?.ownerId;
-  if (ownerId && ownerId === userId) return true;
-
-  // 3. Discord Administrator permission (scoped to configured guild)
-  try {
-    if (interaction?.memberPermissions?.has?.('Administrator') || interaction?.memberPermissions?.has?.(8n)) {
-      return true;
-    }
-  } catch (_) {}
-  try {
-    if (typeof interaction?.member?.permissions?.has === 'function') {
-      if (interaction.member.permissions.has('Administrator') || interaction.member.permissions.has(8n)) {
-        return true;
-      }
-    } else if (interaction?.member?.permissions && (BigInt(interaction.member.permissions) & 8n)) {
-      return true;
-    }
-  } catch (_) {}
-
-  // 4. Resolve configured role IDs
+  // 2. Resolve configured role IDs
   const { adminRoleId, userRoleId } = await getEffectiveRoleIds(services);
 
   // If neither role is configured yet inside the allowed guild, allow interactions (initial unconfigured setup state)
   if (!adminRoleId && !userRoleId) return true;
 
-  // 5. Check member roles
+  // 3. Check member roles
   let member = interaction?.member;
   if (!member?.roles?.cache && !Array.isArray(member?.roles) && interaction.guild?.members?.fetch) {
     member = await interaction.guild.members.fetch(userId).catch(() => null);
@@ -329,27 +309,33 @@ async function resolveLinkedUser(interaction, services) {
 
   const allowedGuildId = await resolveAllowedGuildId(services);
   const isAllowedGuild = Boolean(allowedGuildId && interaction.guildId === allowedGuildId);
+  const { adminRoleId: effectiveAdminRoleId } = await getEffectiveRoleIds(services);
 
-  // 1. Check if user qualifies as configured admin or configured-guild admin
+  // 1. Strictly recognize admin ONLY via configured Admin Discord User ID or configured Admin Role in allowed guild
+  const configuredAdminUserId = String(services?.config?.adminUserId || services?.accessControl?.adminUserId || '').trim();
   const isConfiguredAdmin = Boolean(
     (services?.config?.adminUserId && services.config.adminUserId === discordUserId) ||
     (services?.accessControl?.adminUserId && services.accessControl.adminUserId === discordUserId)
   );
-  const isOwner = Boolean(isAllowedGuild && interaction.guild?.ownerId === discordUserId);
-  const hasAdminPerm = Boolean(isAllowedGuild && (
-    interaction.memberPermissions?.has?.('Administrator') ||
-    interaction.memberPermissions?.has?.(8n) ||
-    interaction.member?.permissions?.has?.('Administrator') ||
-    interaction.member?.permissions?.has?.(8n)
+  const memberRoles = Array.isArray(interaction?.member?.roles)
+    ? interaction.member.roles.map(String)
+    : interaction?.member?.roles?.cache
+      ? [...interaction.member.roles.cache.keys()].map(String)
+      : (Array.isArray(interaction?.member?._roles) ? interaction.member._roles.map(String) : []);
+  const hasAdminRole = Boolean(isAllowedGuild && (
+    services?.accessControl?.roleFor?.(interaction.member, interaction) === 'admin' ||
+    (effectiveAdminRoleId && memberRoles.includes(String(effectiveAdminRoleId)))
   ));
-  const hasAdminRole = Boolean(isAllowedGuild && services?.accessControl?.roleFor?.(interaction.member, interaction) === 'admin');
-  const qualifiesAsDiscordAdmin = isConfiguredAdmin || isOwner || hasAdminPerm || hasAdminRole;
+  const qualifiesAsDiscordAdmin = isConfiguredAdmin || hasAdminRole;
+  const hasDiscordAdminConfig = Boolean(configuredAdminUserId || effectiveAdminRoleId);
 
   // 2. Check if user is linked to a Web Manager account
   const linked = await services?.accessStore?.getUserByDiscordId?.(discordUserId);
   let resolved = null;
   if (linked) {
     if (String(linked.status || '').toLowerCase() === 'disabled') {
+      resolved = null;
+    } else if (linked.role === 'admin' && hasDiscordAdminConfig && !qualifiesAsDiscordAdmin) {
       resolved = null;
     } else {
       resolved = qualifiesAsDiscordAdmin && linked.role !== 'admin'
@@ -638,7 +624,7 @@ async function handlePanelInteraction(interaction, services) {
     const { isSuperAdmin } = require('./interaction-handler');
     if (!isSuperAdmin(interaction, services, effectiveGuildId)) {
       return safeReply(interaction, {
-        embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Chỉ Chủ sở hữu server hoặc SuperAdmin mới có quyền đổi mật khẩu quản trị viên.', 0xef4444)]
+        embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Chỉ Admin được gán biến môi trường hoặc có Admin Role đã thiết lập mới có quyền đổi mật khẩu quản trị viên.', 0xef4444)]
       });
     }
 
@@ -945,13 +931,34 @@ async function handlePanelInteraction(interaction, services) {
     }
   }
 
-  // 1. Back to / Refresh Bots list: bots:list, bots:refresh, bots:page:{num}
-  if (customId === 'bots:list' || customId === 'bots:refresh' || customId.startsWith('bots:page:')) {
-    let page = 0;
-    if (customId.startsWith('bots:page:')) {
-      page = Number(customId.split(':')[2]) || 0;
-    }
+  // 1. Back to / Refresh / Paginate Bots list: bots:list, bots:refresh, bots:first, bots:last, bots:page:{num}
+  if (
+    customId === 'bots:list' ||
+    customId === 'bots:refresh' ||
+    customId === 'bots:first' ||
+    customId === 'bots:last' ||
+    customId.startsWith('bots:page:')
+  ) {
     const userBots = await getUserBots(user, services);
+    const totalPages = Math.max(1, Math.ceil(userBots.length / 5));
+    let page = 0;
+    if (customId === 'bots:first' || customId === 'bots:list') {
+      page = 0;
+    } else if (customId === 'bots:last') {
+      page = totalPages - 1;
+    } else if (customId.startsWith('bots:page:')) {
+      page = Number(customId.split(':')[2]) || 0;
+    } else if (customId === 'bots:refresh') {
+      const footerText = String(
+        interaction.message?.embeds?.[0]?.footer?.text ||
+        interaction.message?.embeds?.[0]?.data?.footer?.text ||
+        ''
+      );
+      const match = footerText.match(/Trang\s+(\d+)\s*\//i);
+      if (match) {
+        page = Math.max(0, Math.min(totalPages - 1, Number(match[1]) - 1));
+      }
+    }
     const view = renderBotsList({ user, workers: userBots, page });
     return safeUpdate(interaction, view);
   }

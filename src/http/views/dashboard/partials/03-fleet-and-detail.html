@@ -175,7 +175,7 @@
         <button type="button" class="tab-btn" id="tabUnreachable" onclick="setStatusFilter('unreachable')">⚠️ Lỗi/Unreachable (<span id="countUnreachable">0</span>)</button>
       </div>
       <div class="fleet-search-sort-wrap">
-        <input id="searchInput" type="search" aria-label="Tìm kiếm bot theo tên, tài khoản ingame hoặc IP" class="search-box" placeholder="🔍 Tìm bot, username, IP..." oninput="filterBots()">
+        <input id="searchInput" type="search" aria-label="Tìm kiếm bot theo ID, tên, tài khoản ingame hoặc IP" class="search-box" placeholder="🔍 Tìm ID (01, 22), tên bot, username, IP..." oninput="filterBots()">
         <select id="sortBotsSelect" aria-label="Sắp xếp danh sách bot" class="sort-select" onchange="changeBotSort(this.value)">
           <option value="default">Sắp xếp: Mặc định</option>
           <option value="status">Sắp xếp: Ưu tiên Online</option>

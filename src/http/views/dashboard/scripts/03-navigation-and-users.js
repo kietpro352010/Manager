@@ -802,7 +802,7 @@ function renderUserTable() {
     const discordDisplay = String(u.discordDisplayName || '').trim();
     const discordHandle = String(u.discordUsername || '').trim();
 
-    // Lọc theo từ khóa tìm kiếm
+    // Lọc theo từ khóa tìm kiếm (username, ghi chú, gói, Discord, ID bot được gán như 01, 22)
     if (searchQuery) {
       const matchUser = String(u.username || '').toLowerCase().includes(searchQuery);
       const matchNote = String(u.note || '').toLowerCase().includes(searchQuery);
@@ -811,7 +811,34 @@ function renderUserTable() {
         discordIdRaw.toLowerCase().includes(searchQuery) ||
         discordDisplay.toLowerCase().includes(searchQuery) ||
         discordHandle.toLowerCase().includes(searchQuery);
-      if (!matchUser && !matchNote && !matchPlan && !matchDiscord) return false;
+      const assignedBotList = Array.isArray(u.assignedBotIds)
+        ? u.assignedBotIds
+        : (Array.isArray(u.workerIds) ? u.workerIds : []);
+      const searchTerms = searchQuery.split(',').map(s => s.trim()).filter(Boolean);
+      const matchAssignedBots = assignedBotList.some((rawBotId) => {
+        const cand = String(rawBotId || '').toLowerCase().trim();
+        if (!cand) return false;
+        const paddedCand = /^\d+$/.test(cand) ? cand.padStart(2, '0') : cand;
+        const knownBot = (typeof bots !== 'undefined' && Array.isArray(bots))
+          ? bots.find((b) => String(b?.id ?? b?.workerId ?? '').toLowerCase().trim() === cand)
+          : null;
+        const botNumCand = knownBot && knownBot.botNumber !== undefined && knownBot.botNumber !== null
+          ? String(knownBot.botNumber).toLowerCase().trim()
+          : '';
+        const paddedBotNum = /^\d+$/.test(botNumCand) ? botNumCand.padStart(2, '0') : botNumCand;
+        return searchTerms.some((term) => {
+          const tok = term.replace(/^(?:bot\s*#?|id\s*:?\s*#?|#)\s*/i, '').trim();
+          if (!tok) return false;
+          if (/^\d+$/.test(tok)) {
+            const qNum = Number(tok);
+            const paddedTok = tok.padStart(2, '0');
+            return cand === tok || paddedCand === paddedTok || (/^\d+$/.test(cand) && Number(cand) === qNum) ||
+              (botNumCand && (botNumCand === tok || paddedBotNum === paddedTok || (/^\d+$/.test(botNumCand) && Number(botNumCand) === qNum)));
+          }
+          return cand.includes(tok) || (knownBot?.label && String(knownBot.label).toLowerCase().includes(tok));
+        });
+      });
+      if (!matchUser && !matchNote && !matchPlan && !matchDiscord && !matchAssignedBots) return false;
     }
 
     // Lọc theo trạng thái và trạng thái liên kết Discord (UX-01: chỉ coi là Vĩnh Viễn khi isPermanent === true)

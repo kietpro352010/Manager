@@ -108,7 +108,7 @@ function loadConfig(env = process.env) {
 
   const adminRoleId = String(env.ADMIN_ROLE_ID || '').trim();
   const userRoleId = String(env.USER_ROLE_ID || '').trim();
-  const adminUserId = String(env.ADMIN_DISCORD_USER_ID || env.ADMIN_USER_ID || '').trim();
+  const adminUserId = String(env.ADMIN_DISCORD_USER_ID || env.ADMIN_USER_ID || env.DISCORD_ADMIN_USER_ID || env.DISCORD_ADMIN_ID || '').trim();
   const adminUsername = String(env.ADMIN_USERNAME || 'admin').trim();
   const adminPassword = String(env.ADMIN_PASSWORD || '').trim();
   if (adminPassword && (adminPassword.length < 6 || adminPassword.length > 256)) {

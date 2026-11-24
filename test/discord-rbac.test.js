@@ -47,14 +47,23 @@ test('DISCORD-RBAC-01: hasAuthorizedRole correctly identifies role status', asyn
   };
   assert.strictEqual(await hasAuthorizedRole(adminInteraction, mockServices), true);
 
-  // 4. Guild Owner in configured guild -> TRUE even without roles
+  // 4. Guild Owner WITHOUT configured role or adminUserId -> FALSE (strict RBAC: only configured role & env ID)
   const ownerInteraction = {
     guildId: 'guild_rbac_1',
     user: { id: '888888888888888888' },
     member: { roles: { cache: new Map() } },
     guild: { id: 'guild_rbac_1', ownerId: '888888888888888888' }
   };
-  assert.strictEqual(await hasAuthorizedRole(ownerInteraction, mockServices), true);
+  assert.strictEqual(await hasAuthorizedRole(ownerInteraction, mockServices), false);
+
+  // 5. Configured adminUserId -> TRUE
+  const configuredAdminInteraction = {
+    guildId: 'guild_rbac_1',
+    user: { id: '999999999999999999' },
+    member: { roles: { cache: new Map() } },
+    guild: { id: 'guild_rbac_1', ownerId: '888888888888888888' }
+  };
+  assert.strictEqual(await hasAuthorizedRole(configuredAdminInteraction, mockServices), true);
 });
 
 test('DISCORD-RBAC-02: /login grants role and /logout revokes role', async () => {

@@ -78,7 +78,7 @@ async function execute(interaction, services) {
   if (subcommand === 'setup') {
     if (!checkSuperAdmin(interaction, services, allowedGuildId)) {
       return {
-        embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Chỉ Chủ sở hữu server hoặc SuperAdmin mới có quyền chạy setup.', 0xef4444)]
+        embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Chỉ Admin được gán biến môi trường hoặc có Admin Role đã thiết lập mới có quyền chạy setup.', 0xef4444)]
       };
     }
 
@@ -133,7 +133,7 @@ async function execute(interaction, services) {
           `Đã cấu hình quyền hạn cho Discord Server này:\n\n` +
           `• **Admin Role:** <@&${adminRole.id}>\n` +
           `• **User Role:** <@&${userRole.id}>\n` +
-          `• **Super Admin:** ${adminUser ? `<@${adminUser.id}>` : (services.config.adminUserId ? `<@${services.config.adminUserId}>` : 'Chủ sở hữu máy chủ')}`,
+          `• **Super Admin:** ${adminUser ? `<@${adminUser.id}>` : (services.config.adminUserId ? `<@${services.config.adminUserId}>` : 'Theo biến ADMIN_DISCORD_USER_ID / Admin Role')}`,
           0x22c55e
         )
       ]
@@ -144,7 +144,7 @@ async function execute(interaction, services) {
   if (subcommand === 'password') {
     if (!checkSuperAdmin(interaction, services, allowedGuildId)) {
       return {
-        embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Chỉ Chủ sở hữu server hoặc SuperAdmin mới có quyền đổi mật khẩu quản trị viên.', 0xef4444)]
+        embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Chỉ Admin được gán biến môi trường hoặc có Admin Role đã thiết lập mới có quyền đổi mật khẩu quản trị viên.', 0xef4444)]
       };
     }
 

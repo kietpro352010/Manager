@@ -19,25 +19,46 @@ async function getEffectiveAllowedGuildId(config, services) {
   return '';
 }
 
+function extractMemberRoleIds(member) {
+  if (!member) return [];
+  if (Array.isArray(member.roles)) return member.roles.map(String);
+  if (member.roles?.cache) return [...member.roles.cache.keys()].map(String);
+  if (Array.isArray(member._roles)) return member._roles.map(String);
+  return [];
+}
+
+function hasConfiguredAdminRole(interaction, services) {
+  const configuredAdminRoleId = String(services?.accessControl?.adminRoleId || services?.config?.adminRoleId || '').trim();
+  const memberRoles = extractMemberRoleIds(interaction?.member);
+  if (configuredAdminRoleId && memberRoles.includes(configuredAdminRoleId)) {
+    return true;
+  }
+  if (typeof services?.accessControl?.roleFor === 'function') {
+    return services.accessControl.roleFor(interaction?.member, interaction) === 'admin';
+  }
+  return false;
+}
+
 function isSuperAdmin(interaction, services, resolvedAllowedGuildId = undefined) {
   if (!interaction?.guildId) return false;
   const userId = interaction?.user?.id;
   if (!userId) return false;
 
+  // 1. Configured Admin Discord User ID (env / discord_access setting)
   const isConfiguredAdmin = Boolean(
     (services?.config?.adminUserId && services.config.adminUserId === userId) ||
     (services?.accessControl?.adminUserId && services.accessControl.adminUserId === userId)
   );
   if (isConfiguredAdmin) return true;
 
+  // 2. Setup Admin Role strictly scoped to configured guild (never guild ownership or raw Discord Administrator perm)
   const allowedGuildId = resolvedAllowedGuildId !== undefined
     ? String(resolvedAllowedGuildId || '').trim()
     : String(services?.config?.discordGuildId || '').trim();
   const isAllowedGuild = Boolean(allowedGuildId && interaction.guildId === allowedGuildId);
   if (!isAllowedGuild) return false;
 
-  const ownerId = interaction?.guild?.ownerId;
-  return Boolean(ownerId && ownerId === userId);
+  return hasConfiguredAdminRole(interaction, services);
 }
 
 function isUserAdmin(interaction, services, user, resolvedAllowedGuildId = undefined) {
@@ -45,43 +66,30 @@ function isUserAdmin(interaction, services, user, resolvedAllowedGuildId = undef
   const userId = interaction?.user?.id;
   if (!userId) return false;
 
-  // 1. Configured Admin User ID
+  // 1. Configured Admin Discord User ID (env / discord_access setting)
   if (services?.config?.adminUserId && services.config.adminUserId === userId) return true;
   if (services?.accessControl?.adminUserId && services.accessControl.adminUserId === userId) return true;
 
+  // 2. Setup Admin Role strictly scoped to configured guild (never guild ownership or raw Discord Administrator perm)
   const allowedGuildId = resolvedAllowedGuildId !== undefined
     ? String(resolvedAllowedGuildId || '').trim()
     : String(services?.config?.discordGuildId || '').trim();
   const isAllowedGuild = Boolean(allowedGuildId && interaction.guildId === allowedGuildId);
 
-  if (isAllowedGuild) {
-    // 2. Server Owner (scoped to configured guild)
-    const ownerId = interaction?.guild?.ownerId;
-    if (ownerId && ownerId === userId) return true;
-
-    // 3. Discord Administrator Permission (scoped to configured guild)
-    try {
-      if (interaction?.memberPermissions?.has?.('Administrator') || interaction?.memberPermissions?.has?.(8n)) {
-        return true;
-      }
-    } catch (_) {}
-    try {
-      if (typeof interaction?.member?.permissions?.has === 'function') {
-        if (interaction.member.permissions.has('Administrator') || interaction.member.permissions.has(8n)) {
-          return true;
-        }
-      } else if (interaction?.member?.permissions && (BigInt(interaction.member.permissions) & 8n)) {
-        return true;
-      }
-    } catch (_) {}
-
-    // 4. Configured Manager Admin Role (scoped to configured guild)
-    const role = services?.accessControl?.roleFor?.(interaction?.member, interaction);
-    if (role === 'admin') return true;
+  if (isAllowedGuild && hasConfiguredAdminRole(interaction, services)) {
+    return true;
   }
 
-  // 5. Linked Database User Role (must not be disabled)
-  if (user?.role === 'admin' && String(user?.status || 'active').toLowerCase() !== 'disabled') return true;
+  // 3. Fallback only when no Discord admin ID/role is configured (for isolated E2E mocks)
+  const hasDiscordAdminConfig = Boolean(
+    services?.config?.adminUserId ||
+    services?.accessControl?.adminUserId ||
+    services?.config?.adminRoleId ||
+    services?.accessControl?.adminRoleId
+  );
+  if (!hasDiscordAdminConfig && user?.role === 'admin' && String(user?.status || 'active').toLowerCase() !== 'disabled') {
+    return true;
+  }
 
   return false;
 }
