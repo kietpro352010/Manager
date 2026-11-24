@@ -794,7 +794,7 @@ class WorkerRegistry {
             safeStatus[numKey] = ex[numKey];
           }
         }
-        if (!safeStatus.transport && ex.transport) {
+        if (!safeStatus.transport && ex.transport && !(source === 'worker-heartbeat' && ex.transport === 'wispbyte-poll')) {
           safeStatus.transport = ex.transport;
         }
         if (!Object.hasOwn(rawStatus, 'connectedAt') && ex.connectedAt) {
@@ -1147,25 +1147,55 @@ class WorkerRegistry {
         next.tags = tags;
       }
       if (Object.hasOwn(patch, 'rentable')) next.rentable = patch.rentable !== false;
-      if (Object.hasOwn(patch, 'provider') && patch.provider !== undefined && patch.provider !== null) {
+      const hasProvider = Object.hasOwn(patch, 'provider') && patch.provider !== undefined && patch.provider !== null;
+      const hasServiceUrl = Object.hasOwn(patch, 'serviceUrl');
+      if (hasProvider) {
         const nextProvider = String(patch.provider).trim().toLowerCase();
         if (!['render', 'wispbyte'].includes(nextProvider)) {
-          throw new Error('Provider must be render or wispbyte.');
+          throw Object.assign(new Error('Provider must be render or wispbyte.'), { status: 400 });
         }
         recordPatch.provider = nextProvider;
       }
-      if (Object.hasOwn(patch, 'serviceUrl')) {
-        const serviceUrl = await validateWorkerServiceUrl(patch.serviceUrl || '');
+      if (hasServiceUrl) {
+        let serviceUrl;
+        try {
+          serviceUrl = await validateWorkerServiceUrl(patch.serviceUrl || '');
+        } catch (urlErr) {
+          if (urlErr && !urlErr.status) urlErr.status = 400;
+          throw urlErr;
+        }
         const targetProvider = recordPatch.provider || worker.provider;
         if (!serviceUrl && targetProvider === 'render' && !worker.renderServiceId) {
-          if (Object.hasOwn(patch, 'provider') && recordPatch.provider === 'render') {
-            throw new Error('Render workers need a service URL or Render service ID.');
+          if (hasProvider && recordPatch.provider === 'render') {
+            throw Object.assign(new Error('Render workers need a service URL or Render service ID.'), { status: 400 });
           }
           recordPatch.provider = 'wispbyte';
-        } else if (serviceUrl && !Object.hasOwn(patch, 'provider') && worker.provider === 'wispbyte') {
+        } else if (serviceUrl && !hasProvider && worker.provider === 'wispbyte') {
           recordPatch.provider = 'render';
         }
         recordPatch.serviceUrl = serviceUrl;
+      }
+      if (hasProvider || hasServiceUrl) {
+        const effectiveProvider = recordPatch.provider || worker.provider;
+        const rawCandidateUrl = Object.hasOwn(recordPatch, 'serviceUrl')
+          ? recordPatch.serviceUrl
+          : String(worker.serviceUrl || '').trim();
+        const effectiveServiceUrl = isWispbyteControlPanelUrl(rawCandidateUrl) ? '' : rawCandidateUrl;
+        if (effectiveProvider === 'render' && !effectiveServiceUrl && !worker.renderServiceId) {
+          throw Object.assign(new Error('Render workers need a service URL or Render service ID.'), { status: 400 });
+        }
+        if (effectiveProvider === 'wispbyte') {
+          if ((hasProvider && recordPatch.provider === 'wispbyte') || !effectiveServiceUrl) {
+            recordPatch.serviceUrl = '';
+          }
+        }
+        if (effectiveProvider === 'render' && (worker.status?.transport === 'wispbyte-poll' || worker.status?.source === 'wispbyte-poll')) {
+          recordPatch.status = {
+            ...(worker.status || {}),
+            transport: 'render-http',
+            source: 'admin-config'
+          };
+        }
       }
     if (Object.hasOwn(patch, 'afkMode')) {
       next.afkMode = 'still';
@@ -1303,6 +1333,9 @@ class WorkerRegistry {
     }
     if (Object.keys(recordPatch).length > 0) {
       await this.store.update(worker.workerId, recordPatch);
+      if (recordPatch.status || Object.hasOwn(recordPatch, 'provider')) {
+        this.summaryCache.delete(id);
+      }
     }
     const updated = Object.keys(next).length > 0
       ? (typeof this.store.patchSettings === 'function'
@@ -1463,12 +1496,10 @@ class WorkerRegistry {
       for (const w of workers) {
         if (!w || !w.workerId) continue;
         const hasPanelUrl = isWispbyteControlPanelUrl(w.serviceUrl);
-        const emptyRender = w.provider === 'render'
-          && !String(w.serviceUrl || '').trim()
-          && !String(w.renderServiceId || '').trim();
         const pollTelemetryOnRender = w.provider === 'render'
+          && (!String(w.serviceUrl || '').trim() || hasPanelUrl)
           && (w.status?.transport === 'wispbyte-poll' || w.status?.source === 'wispbyte-poll');
-        if (hasPanelUrl || emptyRender || pollTelemetryOnRender) {
+        if (hasPanelUrl || pollTelemetryOnRender) {
           try {
             await this.store.update(w.workerId, {
               provider: 'wispbyte',

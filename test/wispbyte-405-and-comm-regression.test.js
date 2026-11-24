@@ -565,3 +565,449 @@ test('7. Discord logs:refresh renders renderBotLogs & Dashboard UI/CDN contracts
   assert.match(DASHBOARD.HTML, /id="editBotProvider"/);
   assert.match(DASHBOARD.HTML, /stage === 'cdn'/);
 });
+
+test('8. WorkerRegistry.load() preserves Render empty-URL placeholder & migrated Render URLs while healing Wispbyte poll/panel rows', async () => {
+  const secretA = 'a'.repeat(32);
+  const secretB = 'b'.repeat(32);
+  const secretC = 'c'.repeat(32);
+  const secretD = 'd'.repeat(32);
+  const env = await startRegressionHarness({
+    seedWorkers: [
+      {
+        worker_id: 'placeholder-render',
+        bot_number: 1,
+        name: 'Seeded Placeholder Render',
+        enabled: true,
+        provider: 'render',
+        service_url: '',
+        render_service_id: '',
+        secret: secretA,
+        settings: {},
+        status: { state: 'offline', online: false },
+        events: [],
+        created_at: new Date().toISOString()
+      },
+      {
+        worker_id: 'migrated-render-with-old-poll',
+        bot_number: 2,
+        name: 'Migrated Render',
+        enabled: true,
+        provider: 'render',
+        service_url: 'https://bot-2.onrender.com',
+        render_service_id: '',
+        secret: secretB,
+        settings: {},
+        status: { state: 'online', transport: 'wispbyte-poll', source: 'wispbyte-poll' },
+        events: [],
+        created_at: new Date().toISOString()
+      },
+      {
+        worker_id: 'empty-render-with-poll',
+        bot_number: 3,
+        name: 'Poll Render No URL',
+        enabled: true,
+        provider: 'render',
+        service_url: '',
+        render_service_id: '',
+        secret: secretC,
+        settings: {},
+        status: { state: 'online', transport: 'wispbyte-poll', source: 'wispbyte-poll' },
+        events: [],
+        created_at: new Date().toISOString()
+      },
+      {
+        worker_id: 'panel-render',
+        bot_number: 4,
+        name: 'Panel URL Render',
+        enabled: true,
+        provider: 'render',
+        service_url: 'https://panel.wispbyte.com/client/servers/xyz999',
+        render_service_id: '',
+        secret: secretD,
+        settings: {},
+        status: { state: 'offline' },
+        events: [],
+        created_at: new Date().toISOString()
+      }
+    ]
+  });
+
+  try {
+    const p1 = await env.registry.find('placeholder-render', { bypassCache: true });
+    assert.equal(p1.provider, 'render', 'Seeded Render placeholder without poll telemetry must remain render on load()');
+
+    const p2 = await env.registry.find('migrated-render-with-old-poll', { bypassCache: true });
+    assert.equal(p2.provider, 'render', 'Render worker with valid HTTPS serviceUrl must NOT be flipped to wispbyte on load()');
+    assert.equal(p2.serviceUrl, 'https://bot-2.onrender.com');
+
+    const p3 = await env.registry.find('empty-render-with-poll', { bypassCache: true });
+    assert.equal(p3.provider, 'wispbyte', 'Render worker with empty URL and wispbyte-poll telemetry must heal to wispbyte');
+
+    const p4 = await env.registry.find('panel-render', { bypassCache: true });
+    assert.equal(p4.provider, 'wispbyte', 'Render worker with subdomain Wispbyte panel URL must heal to wispbyte');
+    assert.equal(p4.serviceUrl, '');
+  } finally {
+    await env.close();
+  }
+});
+
+test('9. Wispbyte -> Render migration resets wispbyte-poll transport, survives partial heartbeat + reboot, and dispatches via HTTP', async () => {
+  const workerSecret = 'w'.repeat(32);
+  let receivedRenderDispatch = null;
+
+  // Spin up lightweight mock Render worker HTTP endpoint
+  const renderWorkerSrv = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      receivedRenderDispatch = {
+        url: req.url,
+        body: JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')
+      };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, result: { ok: true, state: 'online', transport: 'render-http' } }));
+    });
+  });
+  await new Promise((resolve) => renderWorkerSrv.listen(0, '127.0.0.1', resolve));
+  const renderWorkerUrl = `http://127.0.0.1:${renderWorkerSrv.address().port}`;
+
+  const env = await startRegressionHarness({
+    seedWorkers: [{
+      worker_id: 'mig-01',
+      bot_number: 1,
+      name: 'Migrating Bot',
+      enabled: true,
+      provider: 'wispbyte',
+      service_url: '',
+      render_service_id: '',
+      secret: workerSecret,
+      settings: { ecoMode: true, rentable: true },
+      status: { state: 'online', online: true, transport: 'wispbyte-poll', source: 'wispbyte-poll' },
+      events: [],
+      created_at: new Date().toISOString()
+    }],
+    fetchImpl: global.fetch
+  });
+
+  try {
+    // Prime summaryCache with stale wispbyte-poll status
+    await env.registry.updateStatus('mig-01', { state: 'online', online: true, transport: 'wispbyte-poll' }, 'wispbyte-poll');
+    assert.ok(env.registry.summaryCache.has('mig-01'));
+
+    // Admin migrates bot from Wispbyte -> Render via PATCH
+    const patchRes = await fetch(`${env.baseUrl}/api/manager/bot/mig-01`, {
+      method: 'PATCH',
+      headers: env.adminHeaders,
+      body: JSON.stringify({ provider: 'render', url: renderWorkerUrl })
+    });
+    assert.equal(patchRes.status, 200);
+    const patchJson = await patchRes.json();
+    assert.equal(patchJson.bot.provider, 'render');
+    assert.equal(patchJson.bot.url, renderWorkerUrl);
+
+    // summaryCache must be cleared & status transport reset to render-http
+    assert.equal(env.registry.summaryCache.has('mig-01'), false);
+    const afterPatch = await env.registry.find('mig-01', { bypassCache: true });
+    assert.equal(afterPatch.status?.transport, 'render-http');
+    assert.equal(afterPatch.status?.source, 'admin-config');
+    assert.equal(env.broker._shouldUsePollTransport(afterPatch), false, 'Broker must immediately route via render-http');
+
+    // Partial worker-heartbeat without transport must NOT inherit stale wispbyte-poll or revert provider
+    const hbRes = await fetch(`${env.baseUrl}/api/v1/workers/mig-01/heartbeat`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-worker-secret': workerSecret,
+        'x-manager-bot-id': 'mig-01'
+      },
+      body: JSON.stringify({ status: { state: 'online', online: true } })
+    });
+    assert.equal(hbRes.status, 200);
+    const afterHb = await env.registry.find('mig-01', { bypassCache: true });
+    assert.equal(afterHb.provider, 'render');
+    assert.notEqual(afterHb.status?.transport, 'wispbyte-poll');
+
+    // Simulated reboot via registry.load() keeps provider === 'render'
+    await env.registry.load();
+    const afterReboot = await env.registry.find('mig-01', { bypassCache: true });
+    assert.equal(afterReboot.provider, 'render');
+
+    // Dispatching command executes via Render HTTP push
+    const dispatchRes = await env.broker.dispatch('mig-01', 'status', {});
+    assert.equal(dispatchRes.delivered, true);
+    assert.ok(receivedRenderDispatch, 'Command must be dispatched to Render HTTP endpoint');
+    assert.equal(receivedRenderDispatch.body.action, 'status');
+  } finally {
+    await env.close();
+    await new Promise((resolve) => {
+      renderWorkerSrv.close(resolve);
+      renderWorkerSrv.closeAllConnections?.();
+    });
+  }
+});
+
+test('10. Provider PATCH/registry invariants & renderServiceId admin-only visibility', async () => {
+  const sec1 = 'p'.repeat(32);
+  const sec2 = 'z'.repeat(32);
+  const env = await startRegressionHarness({
+    seedWorkers: [
+      {
+        worker_id: 'wisp-no-url',
+        bot_number: 1,
+        name: 'Wisp Only',
+        enabled: true,
+        provider: 'wispbyte',
+        service_url: '',
+        render_service_id: '',
+        secret: sec1,
+        settings: { ecoMode: true, rentable: true },
+        status: { state: 'offline' },
+        events: []
+      },
+      {
+        worker_id: 'render-with-srvid',
+        bot_number: 2,
+        name: 'Render SrvId',
+        enabled: true,
+        provider: 'render',
+        service_url: 'https://bot-srv.onrender.com',
+        render_service_id: 'srv-abc123456',
+        secret: sec2,
+        settings: { ecoMode: true, rentable: true },
+        status: { state: 'offline' },
+        events: []
+      }
+    ]
+  });
+
+  try {
+    // 10a. PATCH { provider: 'render' } without URL & without renderServiceId -> 400
+    const badPatch = await fetch(`${env.baseUrl}/api/manager/bot/wisp-no-url`, {
+      method: 'PATCH',
+      headers: env.adminHeaders,
+      body: JSON.stringify({ provider: 'render' })
+    });
+    assert.equal(badPatch.status, 400);
+
+    // Direct registry.updateSettings({ provider: 'render' }) must also throw
+    await assert.rejects(
+      () => env.registry.updateSettings('wisp-no-url', { provider: 'render' }),
+      /Render workers need a service URL/i
+    );
+
+    // 10b. PATCH { provider: 'render', url: 'https://panel.wispbyte.com/client/servers/abc123' } -> forces wispbyte & empty url
+    const forcedPanel = await fetch(`${env.baseUrl}/api/manager/bot/wisp-no-url`, {
+      method: 'PATCH',
+      headers: env.adminHeaders,
+      body: JSON.stringify({ provider: 'render', url: 'https://panel.wispbyte.com/client/servers/abc123' })
+    });
+    assert.equal(forcedPanel.status, 200);
+    const forcedPanelJson = await forcedPanel.json();
+    assert.equal(forcedPanelJson.bot.provider, 'wispbyte');
+    assert.equal(forcedPanelJson.bot.url, '');
+
+    // 10c. Switching Render -> Wispbyte clears stale serviceUrl (even when old Render URL passed or omitted)
+    const toWispStaleUrl = await fetch(`${env.baseUrl}/api/manager/bot/render-with-srvid`, {
+      method: 'PATCH',
+      headers: env.adminHeaders,
+      body: JSON.stringify({ provider: 'wispbyte', url: 'https://bot-srv.onrender.com' })
+    });
+    assert.equal(toWispStaleUrl.status, 200);
+    const toWispJson = await toWispStaleUrl.json();
+    assert.equal(toWispJson.bot.provider, 'wispbyte');
+    assert.equal(toWispJson.bot.url, '', 'Switching to wispbyte must clear stale Render serviceUrl');
+    assert.equal(toWispJson.bot.renderServiceId, 'srv-abc123456', 'PATCH response must include renderServiceId');
+
+    // SSRF URL with provider: 'wispbyte' must still be rejected with 400
+    const ssrfWisp = await fetch(`${env.baseUrl}/api/manager/bot/wisp-no-url`, {
+      method: 'PATCH',
+      headers: env.adminHeaders,
+      body: JSON.stringify({ provider: 'wispbyte', url: 'http://169.254.169.254/latest/meta-data' })
+    });
+    assert.equal(ssrfWisp.status, 400);
+
+    // 10d. Admin sees renderServiceId in GET /bots & /snapshot, non-admin does NOT
+    const { encryptUserPassword } = require('../src/utils/secrets');
+    await env.store.setAccess('usr_nonadmin', {
+      id: 'usr_nonadmin',
+      username: 'regular_user',
+      password: encryptUserPassword('UserPass!99'),
+      role: 'user',
+      status: 'active',
+      isPermanent: true,
+      workerIds: ['render-with-srvid']
+    }, 'test-seed');
+    const userLogin = await fetch(`${env.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'regular_user', password: 'UserPass!99' })
+    });
+    const userToken = (await userLogin.json()).token;
+
+    const adminBots = await (await fetch(`${env.baseUrl}/api/manager/bots`, { headers: env.adminHeaders })).json();
+    const adminBot2 = adminBots.bots.find((b) => b.workerId === 'render-with-srvid');
+    assert.equal(adminBot2.renderServiceId, 'srv-abc123456');
+
+    const userBots = await (await fetch(`${env.baseUrl}/api/user/bots`, {
+      headers: { Authorization: `Bearer ${userToken}` }
+    })).json();
+    const userBot2 = userBots.bots.find((b) => b.workerId === 'render-with-srvid');
+    assert.equal(userBot2.renderServiceId, undefined, 'Non-admin must NOT see renderServiceId');
+    assert.equal(userBot2.serviceId, undefined, 'Non-admin must NOT see serviceId');
+
+    const userSnap = await (await fetch(`${env.baseUrl}/api/user/bot/render-with-srvid/snapshot`, {
+      headers: { Authorization: `Bearer ${userToken}` }
+    })).json();
+    assert.equal(userSnap.bot.renderServiceId, undefined, 'Non-admin snapshot must NOT expose renderServiceId');
+  } finally {
+    await env.close();
+  }
+});
+
+test('11. Dashboard editBot/saveEditBot VM tests: Wispbyte panel URL detection, Render validation guard & provider switch', async () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const vm = require('node:vm');
+
+  const elements = new Map();
+  const makeEl = (id) => {
+    if (!elements.has(id)) {
+      const classes = new Set(['hidden']);
+      elements.set(id, {
+        id,
+        value: '',
+        textContent: '',
+        innerHTML: '',
+        placeholder: '',
+        checked: false,
+        disabled: false,
+        style: {},
+        dataset: {},
+        classList: {
+          add: (...c) => c.forEach((x) => classes.add(x)),
+          remove: (...c) => c.forEach((x) => classes.delete(x)),
+          contains: (x) => classes.has(x)
+        },
+        setAttribute: () => {},
+        getAttribute: () => null,
+        removeAttribute: () => {},
+        appendChild: () => {},
+        addEventListener: () => {}
+      });
+    }
+    return elements.get(id);
+  };
+
+  const toasts = [];
+  const patchRequests = [];
+  const doc = {
+    getElementById: (id) => makeEl(id),
+    querySelectorAll: () => [],
+    addEventListener: () => {},
+    createElement: (tag) => makeEl(`__dyn_${tag}_${Math.random()}`),
+    hidden: false
+  };
+  const win = {
+    __INITIAL_USER__: null,
+    location: { protocol: 'https:', host: 'mgr.example.com' },
+    addEventListener: () => {}
+  };
+  const ctx = {
+    window: win,
+    document: doc,
+    URL,
+    localStorage: { getItem: () => null, setItem: () => {} },
+    sessionStorage: { getItem: () => null, setItem: () => {} },
+    navigator: { onLine: true, clipboard: { writeText: async () => {} } },
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    console
+  };
+  ctx.globalThis = ctx;
+  vm.createContext(ctx);
+
+  const scriptSrc = fs.readFileSync(
+    path.join(__dirname, '../src/http/views/dashboard/scripts/01-core-and-cards.js'),
+    'utf8'
+  );
+  vm.runInContext(scriptSrc, ctx);
+
+  // Stub UI refresh & requestJson after script loads
+  ctx.showToast = (msg, type) => toasts.push({ msg, type });
+  ctx.updateTagPills = () => {};
+  ctx.filterBots = () => {};
+  ctx.refreshHome = async () => {};
+  ctx.requestJson = async (url, opts) => {
+    patchRequests.push({ url, opts, body: opts?.body ? JSON.parse(opts.body) : null });
+    return {
+      ok: true,
+      status: 200,
+      data: {
+        ok: true,
+        message: 'Đã cập nhật bot.',
+        bot: {
+          workerId: 'b1',
+          label: 'Bot 1',
+          tags: [],
+          rentable: true,
+          provider: JSON.parse(opts.body).provider || 'wispbyte',
+          url: JSON.parse(opts.body).url || '',
+          renderServiceId: ''
+        }
+      }
+    };
+  };
+
+  // 11a. Consistent Wispbyte panel URL detection
+  assert.equal(ctx.isClientWispbyteControlPanelUrl('https://wispbyte.com/client/servers/abc123'), true);
+  assert.equal(ctx.isClientWispbyteControlPanelUrl('https://panel.wispbyte.com/dashboard'), true);
+  assert.equal(ctx.isClientWispbyteControlPanelUrl('https://other.host/client/servers/srv-1'), true);
+  assert.equal(ctx.isClientWispbyteControlPanelUrl('https://bot-1.onrender.com'), false);
+
+  // 11b. Admin editing Render bot without URL & without renderServiceId/serviceId is blocked client-side
+  vm.runInContext(`
+    currentUser = { role: 'admin', username: 'admin' };
+    bots = [
+      { workerId: 'b-no-id', id: 'b-no-id', label: 'NoId', provider: 'wispbyte', url: '', renderServiceId: '' },
+      { workerId: 'b-has-id', id: 'b-has-id', label: 'HasId', provider: 'render', url: '', renderServiceId: 'srv-123' },
+      { workerId: 'b-render', id: 'b-render', label: 'Ren', provider: 'render', url: 'https://bot-1.onrender.com', renderServiceId: '' }
+    ];
+  `, ctx);
+
+  ctx.editBot(null, 'b-no-id');
+  doc.getElementById('editBotProvider').value = 'render';
+  doc.getElementById('editBotUrl').value = '';
+  toasts.length = 0;
+  await ctx.saveEditBot();
+  assert.equal(patchRequests.length, 0, 'Must NOT send PATCH for Render without URL and without renderServiceId');
+  assert.ok(toasts.some((t) => /Web URL|Service ID/i.test(t.msg)));
+
+  // 11c. Render bot WITH renderServiceId allows saving empty URL
+  ctx.editBot(null, 'b-has-id');
+  assert.equal(doc.getElementById('editBotProvider').value, 'render');
+  await ctx.saveEditBot();
+  assert.equal(patchRequests.length, 1);
+  assert.equal(patchRequests[0].body.provider, 'render');
+
+  // 11d. Switching Render -> Wispbyte clears #editBotUrl UX cleanly and sends url: ''
+  patchRequests.length = 0;
+  ctx.editBot(null, 'b-render');
+  assert.equal(doc.getElementById('editBotProvider').value, 'render');
+  assert.equal(doc.getElementById('editBotUrl').value, 'https://bot-1.onrender.com');
+  doc.getElementById('editBotProvider').value = 'wispbyte';
+  ctx.handleEditBotProviderChange();
+  assert.equal(doc.getElementById('editBotUrl').value, '', 'Switching provider to wispbyte must clear #editBotUrl');
+  // Switching back before saving restores stashed Render URL
+  doc.getElementById('editBotProvider').value = 'render';
+  ctx.handleEditBotProviderChange();
+  assert.equal(doc.getElementById('editBotUrl').value, 'https://bot-1.onrender.com');
+  // Switching to wispbyte & saving sends url: ''
+  doc.getElementById('editBotProvider').value = 'wispbyte';
+  ctx.handleEditBotProviderChange();
+  await ctx.saveEditBot();
+  assert.equal(patchRequests.length, 1);
+  assert.equal(patchRequests[0].body.provider, 'wispbyte');
+  assert.equal(patchRequests[0].body.url, '');
+});

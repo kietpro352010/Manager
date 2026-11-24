@@ -243,7 +243,7 @@
     </div>
     <div class="form-row admin-only" style="margin-bottom:10px;">
       <label for="editBotProvider" style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600;">Loại hạ tầng Worker (Provider)</label>
-      <select id="editBotProvider" class="form-input" style="width:100%;box-sizing:border-box;">
+      <select id="editBotProvider" class="form-input" style="width:100%;box-sizing:border-box;" onchange="handleEditBotProviderChange()">
         <option value="wispbyte">Wispbyte (Pull Mode — Không cần URL)</option>
         <option value="render">Render (Web Service — Cần HTTPS URL)</option>
       </select>

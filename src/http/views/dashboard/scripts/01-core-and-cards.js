@@ -965,6 +965,44 @@ function renderEditBotTagPreviews(raw) {
 }
 window.renderEditBotTagPreviews = renderEditBotTagPreviews;
 
+function isClientWispbyteControlPanelUrl(rawUrl) {
+  const raw = String(rawUrl || '').trim();
+  if (!raw) return false;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    if (host === 'wispbyte.com' || host.endsWith('.wispbyte.com')) return true;
+    return /^\/client\/servers\/[a-z0-9_-]+/i.test(parsed.pathname || '');
+  } catch (_) {
+    return false;
+  }
+}
+window.isClientWispbyteControlPanelUrl = isClientWispbyteControlPanelUrl;
+
+function handleEditBotProviderChange({ preserveUrl = false } = {}) {
+  const provEl = document.getElementById('editBotProvider');
+  const urlEl = document.getElementById('editBotUrl');
+  if (!provEl || !urlEl) return;
+  const provider = String(provEl.value || '').trim().toLowerCase();
+  if (provider === 'wispbyte') {
+    const currentVal = String(urlEl.value || '').trim();
+    if (currentVal && !isClientWispbyteControlPanelUrl(currentVal)) {
+      urlEl.dataset.prevRenderUrl = currentVal;
+    }
+    if (!preserveUrl || isClientWispbyteControlPanelUrl(currentVal)) {
+      urlEl.value = '';
+    }
+    urlEl.placeholder = 'Để trống — Wispbyte dùng chế độ Pull (không cần URL)';
+  } else {
+    if (!String(urlEl.value || '').trim() && urlEl.dataset?.prevRenderUrl) {
+      urlEl.value = urlEl.dataset.prevRenderUrl;
+    }
+    urlEl.placeholder = 'https://kbot-instance.onrender.com (hoặc để trống nếu có Service ID)';
+  }
+}
+window.handleEditBotProviderChange = handleEditBotProviderChange;
+
 function editBot(event,id){
   if(event)event.stopPropagation();
   const requestedId=String(id);
@@ -973,12 +1011,17 @@ function editBot(event,id){
   const workerId=String(bot.workerId||bot.id||id);
   document.getElementById('editBotId').value=workerId;
   const provEl = document.getElementById('editBotProvider');
+  const urlEl = document.getElementById('editBotUrl');
+  if (urlEl && urlEl.dataset) delete urlEl.dataset.prevRenderUrl;
+  const looksWispPanel = isClientWispbyteControlPanelUrl(bot.url || '');
   if (provEl) {
     const pLower = String(bot.provider || '').trim().toLowerCase();
-    const looksWispPanel = /wispbyte\.com\/client\/servers/i.test(String(bot.url || ''));
     provEl.value = (pLower === 'wispbyte' || looksWispPanel || (!pLower && !bot.url)) ? 'wispbyte' : 'render';
   }
-  document.getElementById('editBotUrl').value=bot.url||'';
+  if (urlEl) {
+    urlEl.value = looksWispPanel ? '' : (bot.url || '');
+  }
+  handleEditBotProviderChange({ preserveUrl: true });
   document.getElementById('editBotLabel').value=bot.label||'';
   const secInput = document.getElementById('editBotSecretKey');
   if (secInput) {
@@ -1007,7 +1050,7 @@ function closeEditBotModal(){document.getElementById('editBotModal').classList.a
 async function saveEditBot(){
   const id=String(document.getElementById('editBotId').value||'').trim();
   if(!id){showToast('Không xác định được bot cần sửa.');return;}
-  const url=document.getElementById('editBotUrl').value.trim();
+  let url=document.getElementById('editBotUrl').value.trim();
   const label=document.getElementById('editBotLabel').value.trim();
   const secInput = document.getElementById('editBotSecretKey');
   const secretKey = secInput ? secInput.value.trim() : undefined;
@@ -1016,9 +1059,19 @@ async function saveEditBot(){
   const rentable = document.getElementById('editBotRentable') ? document.getElementById('editBotRentable').checked : true;
   const selectedProvider = String(document.getElementById('editBotProvider')?.value || '').trim().toLowerCase();
   const targetBotObj = bots.find(b => String(b.workerId || b.id) === id);
-  const targetProvider = String(selectedProvider || targetBotObj?.provider || targetBotObj?.source || '').toLowerCase();
+  const isPanelUrl = isClientWispbyteControlPanelUrl(url);
+  const targetProvider = isPanelUrl
+    ? 'wispbyte'
+    : String(selectedProvider || targetBotObj?.provider || targetBotObj?.source || '').toLowerCase();
   const isRenderProvider = targetProvider === 'render';
-  if(currentUser?.role !== 'user' && isRenderProvider && Boolean(targetBotObj?.serviceId) && !url){showToast('URL không được trống đối với bot Render gắn Service ID.');return;}
+  const hasRenderServiceId = Boolean(String(targetBotObj?.renderServiceId || targetBotObj?.serviceId || '').trim());
+  if (targetProvider === 'wispbyte' || isPanelUrl) {
+    url = '';
+  }
+  if (currentUser?.role !== 'user' && isRenderProvider && !url && !hasRenderServiceId) {
+    showToast('Bot Render cần nhập Web URL (https://...) hoặc có sẵn Render Service ID.', 'warning');
+    return;
+  }
   try{
     let data;
     if (currentUser?.role === 'user') {
@@ -1038,8 +1091,8 @@ async function saveEditBot(){
       }
     } else {
       const payload = { url, label, tags, rentable };
-      if (selectedProvider === 'render' || selectedProvider === 'wispbyte') {
-        payload.provider = selectedProvider;
+      if (targetProvider === 'render' || targetProvider === 'wispbyte') {
+        payload.provider = targetProvider;
       }
       if (secretKey) payload.secretKey = secretKey;
       const result=await requestJson('/api/manager/bot/'+encodeURIComponent(id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
@@ -1052,6 +1105,7 @@ async function saveEditBot(){
         found.rentable = data.bot.rentable !== false;
         if (data.bot.provider) found.provider = data.bot.provider;
         if (data.bot.url !== undefined) found.url = data.bot.url;
+        if (data.bot.renderServiceId !== undefined) found.renderServiceId = data.bot.renderServiceId;
       }
       if (detailBot && String(detailBot.workerId||detailBot.id) === id && data.bot?.label) {
         detailBot.label = data.bot.label;

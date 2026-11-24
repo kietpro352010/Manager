@@ -162,7 +162,7 @@ function sanitizeBotForSession(botData, session) {
   for (const key of [
     'cpuPercent', 'rssMb', 'heapUsedMb', 'ramRss', 'ramHeap', 'ramPercent',
     'netDownKb', 'netUpKb', 'netTotalRxMb', 'memory', 'hostHardware',
-    'provider', 'platform'
+    'provider', 'platform', 'renderServiceId', 'serviceId'
   ]) {
     delete copy[key];
   }
@@ -532,6 +532,7 @@ function createUserApi({
       assignedPlan: assignment?.planName || null,
       summary: summaryData,
       url: worker.serviceUrl || '',
+      renderServiceId: worker.renderServiceId || '',
       proxy: worker.proxy || null,
       currentWindow: compact ? null : (worker.status?.currentWindow || null),
       history: {

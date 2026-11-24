@@ -1116,7 +1116,7 @@ function createAdminApi({
         const serviceUrl = rawServiceUrl.trim().replace(/\/+$/, '');
         if (serviceUrl && isWispbyteControlPanelUrl(serviceUrl)) {
           patch.serviceUrl = '';
-          if (!patch.provider) patch.provider = 'wispbyte';
+          patch.provider = 'wispbyte';
         } else {
           if (serviceUrl) {
             try {
@@ -1133,7 +1133,18 @@ function createAdminApi({
               patch.provider = 'wispbyte';
             }
           }
-          patch.serviceUrl = serviceUrl;
+          patch.serviceUrl = patch.provider === 'wispbyte' ? '' : serviceUrl;
+        }
+      }
+      if (patch.provider === 'wispbyte' && !Object.hasOwn(patch, 'serviceUrl')) {
+        patch.serviceUrl = '';
+      }
+      if (patch.provider === 'render') {
+        const candidateUrl = Object.hasOwn(patch, 'serviceUrl')
+          ? patch.serviceUrl
+          : (isWispbyteControlPanelUrl(worker.serviceUrl) ? '' : String(worker.serviceUrl || '').trim());
+        if (!candidateUrl && !worker.renderServiceId) {
+          return res.status(400).json({ ok: false, error: 'Render worker cần URL hoặc Render service ID.' });
         }
       }
 
@@ -1176,11 +1187,16 @@ function createAdminApi({
           tags: updated.tags || [],
           rentable: updated.rentable !== false,
           provider: updated.provider,
-          url: updated.serviceUrl || ''
+          url: updated.serviceUrl || '',
+          renderServiceId: updated.renderServiceId || ''
         }
       });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message });
+      const status = (error?.status >= 400 && error?.status < 500)
+        || /Provider must be|Render workers need|Worker URL|Proxy |must be an array|không hợp lệ|Wispbyte/i.test(error?.message || '')
+        ? (error?.status >= 400 && error?.status < 500 ? error.status : 400)
+        : 500;
+      return res.status(status).json({ ok: false, error: error.message });
     }
   });
 

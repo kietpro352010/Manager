@@ -17,19 +17,19 @@ jobs:
 
     steps:
       - name: Checkout Manager repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: manager
 
       - name: Checkout sibling BotWorker repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: kietpro352010/BotWorker
           ref: main
           path: worker
 
       - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
@@ -59,4 +59,4 @@ jobs:
         working-directory: manager
         env:
           WORKER_DIR: ${{ github.workspace }}/worker
-        run: node test/e2e/runner.js --all
+        run: node test/e2e/runner.js --harness --all
