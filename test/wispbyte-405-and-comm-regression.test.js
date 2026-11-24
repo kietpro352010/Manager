@@ -1274,3 +1274,212 @@ test('14. Offline Wispbyte worker can be marked stopped (with manuallyStopped bo
     await env.close();
   }
 });
+
+test('15. Active poller reachability, idle poll single-take, in-place _listCache, clock-skew recovery, and UI unreachable vs STOPPED classification', async () => {
+  const vm = require('node:vm');
+  const fs = require('node:fs');
+  const path = require('node:path');
+
+  const secret24 = 'k'.repeat(32);
+  const oldStateAt = new Date(Date.now() + 600000).toISOString(); // Future-skewed worker clock
+  const env = await startRegressionHarness({
+    workerPollWaitMs: 120,
+    seedWorkers: [{
+      worker_id: '24',
+      bot_number: 24,
+      name: 'Wispbyte Bot 24',
+      enabled: true,
+      provider: 'wispbyte',
+      service_url: '',
+      render_service_id: '',
+      secret: secret24,
+      settings: { ecoMode: true, rentable: true },
+      status: { state: 'stopped', online: false, manuallyStopped: true, lastStateAt: oldStateAt },
+      events: [],
+      last_heartbeat: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    }]
+  });
+
+  try {
+    // 15a. Before any check-in, worker 24 is unreachable; once /poll is open (waiting), worker 24 is reachable=true & available=true!
+    let listBefore = await env.registry.list();
+    assert.equal(listBefore.find((w) => w.workerId === '24')?.reachable, false);
+
+    // Count idle commandStore.take() invocations during a timed-out poll
+    let takeCount = 0;
+    const origTake = env.commandStore.take.bind(env.commandStore);
+    env.commandStore.take = async (...args) => {
+      takeCount += 1;
+      return origTake(...args);
+    };
+
+    let pollPromise;
+    try {
+      pollPromise = fetch(`${env.baseUrl}/api/v1/workers/24/poll`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-worker-secret': secret24 },
+        body: JSON.stringify({ status: { state: 'stopped', online: false, manuallyStopped: true, isLightweight: true }, waitMs: 180 })
+      });
+
+      // Wait briefly until poll enters broker.pollWaiters
+      const deadline = Date.now() + 1000;
+      while (!env.broker.hasActivePoller('24') && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      assert.equal(env.broker.hasActivePoller('24'), true, 'Broker must register active poller while waiting');
+
+      // Wipe liveHeartbeats and DB last_heartbeat to simulate stale DB + active poller only
+      env.registry.liveHeartbeats.delete('24');
+      await env.workerStore.update('24', { lastHeartbeat: null }, { returning: false });
+      const activeList = await env.registry.list();
+      assert.equal(activeList.find((w) => w.workerId === '24')?.reachable, true, 'Active poller must keep worker reachable=true even when DB heartbeat is null');
+
+      const pollRes = await pollPromise;
+      assert.equal(pollRes.status, 200);
+      const pollJson = await pollRes.json();
+      assert.equal(pollJson.command, null);
+      assert.equal(takeCount, 1, 'Idle timed-out /poll must call commandStore.take() only ONCE, not twice');
+      assert.ok(env.registry.liveHeartbeats.has('24'), 'Completed /poll must refresh liveHeartbeat for inter-poll gap');
+    } finally {
+      env.commandStore.take = origTake;
+      if (pollPromise) await pollPromise.catch(() => {});
+    }
+
+    // 15b. In-place _listCache patching on store.update(..., { returning: false }) avoids redundant full list() queries
+    const cachedPrime = await env.registry.list();
+    assert.ok(cachedPrime.length >= 1);
+    let listSelects = 0;
+    const origFrom = env.workerStore.client.from.bind(env.workerStore.client);
+    env.workerStore.client.from = (tbl) => {
+      const builder = origFrom(tbl);
+      if (tbl === 'manager_workers') {
+        const origSelect = builder.select.bind(builder);
+        builder.select = (...sArgs) => {
+          listSelects += 1;
+          return origSelect(...sArgs);
+        };
+      }
+      return builder;
+    };
+    try {
+      await env.workerStore.update('24', { status: { state: 'stopped', online: false, manuallyStopped: true } }, { returning: false });
+      const cachedAfterUpdate = await env.registry.list();
+      assert.equal(listSelects, 0, 'store.update(..., { returning: false }) must update _listCache in-place without forcing full DB SELECT');
+      assert.equal(cachedAfterUpdate.find((w) => w.workerId === '24')?.status?.state, 'stopped');
+
+      env.workerStore.invalidateCache('24');
+      await env.registry.list();
+      assert.equal(listSelects, 1, 'Explicit invalidateCache() must still bypass and trigger a fresh SELECT');
+    } finally {
+      env.workerStore.client.from = origFrom;
+    }
+
+    // 15c. Worker with clock skew behind previous offline-stop status still recovers back to online
+    env.registry.lastDbStatusPersistAt.clear();
+    await env.registry.updateStatus('24', { state: 'online', online: true, lastStateAt: oldStateAt }, 'wispbyte-poll');
+    await env.registry.markOfflineStopped('24', { source: 'user-offline-stop' });
+    const earlierWorkerClock = new Date(Date.now() - 30000).toISOString();
+    await env.registry.updateStatus('24', { state: 'online', online: true, manuallyStopped: false, lastStateAt: earlierWorkerClock }, 'wispbyte-poll');
+    const recovered = await env.registry.find('24');
+    assert.equal(recovered.status?.state, 'online', 'Worker reporting online after manager offline-stop must not be dropped by SYNC-16-01');
+    assert.equal(recovered.status?.manuallyStopped, false);
+
+    // 15d. Dashboard UI separates STOPPED (available=false, manuallyStopped=true) from kpiUnreachable & status-unreachable
+    const elements = new Map();
+    const makeEl = (id) => {
+      if (!elements.has(id)) {
+        const classes = new Set();
+        elements.set(id, {
+          id,
+          value: '',
+          textContent: '',
+          innerHTML: '',
+          style: {},
+          dataset: {},
+          children: [],
+          classList: {
+            add: (...c) => c.forEach((x) => classes.add(x)),
+            remove: (...c) => c.forEach((x) => classes.delete(x)),
+            toggle: (x, force) => { if (force) classes.add(x); else classes.delete(x); },
+            contains: (x) => classes.has(x)
+          },
+          querySelectorAll: () => [],
+          setAttribute: () => {},
+          getAttribute: () => null,
+          removeAttribute: () => {},
+          appendChild: () => {},
+          addEventListener: () => {}
+        });
+      }
+      return elements.get(id);
+    };
+    const doc = {
+      getElementById: (id) => makeEl(id),
+      querySelectorAll: () => [],
+      addEventListener: () => {},
+      createElement: (tag) => makeEl(`__dyn_${tag}_${Math.random()}`),
+      hidden: false
+    };
+    const win = {
+      __INITIAL_USER__: null,
+      location: { protocol: 'https:', host: 'mgr.example.com' },
+      addEventListener: () => {}
+    };
+    const ctx = {
+      window: win,
+      document: doc,
+      URL,
+      localStorage: { getItem: () => null, setItem: () => {} },
+      sessionStorage: { getItem: () => null, setItem: () => {} },
+      navigator: { onLine: true, clipboard: { writeText: async () => {} } },
+      setTimeout,
+      clearTimeout,
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+      console
+    };
+    ctx.globalThis = ctx;
+    vm.createContext(ctx);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/http/views/dashboard/scripts/01-core-and-cards.js'), 'utf8'), ctx);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/http/views/dashboard/scripts/04-fleet-and-admin-modals.js'), 'utf8'), ctx);
+
+    vm.runInContext(`
+      currentUser = { role: 'admin', username: 'admin' };
+      bots = [
+        { id: 'w-stop', workerId: 'w-stop', botNumber: 1, label: 'StoppedBot', status: 'stopped', available: false, manuallyStopped: true, provider: 'wispbyte' },
+        { id: 'w-dead', workerId: 'w-dead', botNumber: 2, label: 'DeadBot', status: 'offline', available: false, manuallyStopped: false, provider: 'wispbyte', lastError: 'Worker offline' },
+        { id: 'w-live', workerId: 'w-live', botNumber: 3, label: 'LiveBot', status: 'online', online: true, available: true, manuallyStopped: false, provider: 'wispbyte' }
+      ];
+      updateTagPills = () => {};
+      renderHome = () => {};
+      updateKpis();
+    `, ctx);
+
+    assert.equal(doc.getElementById('kpiTotal').textContent, '3');
+    assert.equal(doc.getElementById('kpiOnline').textContent, '1');
+    assert.equal(doc.getElementById('kpiOffline').textContent, '1', 'Manually stopped offline bot must count in kpiOffline');
+    assert.equal(doc.getElementById('kpiUnreachable').textContent, '1', 'Manually stopped bot must NOT inflate kpiUnreachable');
+
+    const stoppedCardHtml = ctx.botCardHtml({ id: 'w-stop', workerId: 'w-stop', botNumber: 1, label: 'StoppedBot', status: 'stopped', available: false, manuallyStopped: true });
+    assert.ok(stoppedCardHtml.includes('status-offline'), 'STOPPED card must use status-offline styling, not status-unreachable');
+    assert.ok(!stoppedCardHtml.includes('status-unreachable'));
+    assert.ok(stoppedCardHtml.includes('STOPPED'));
+
+    const deadCardHtml = ctx.botCardHtml({ id: 'w-dead', workerId: 'w-dead', botNumber: 2, label: 'DeadBot', status: 'offline', available: false, manuallyStopped: false, lastError: 'Worker offline' });
+    assert.ok(deadCardHtml.includes('status-unreachable'));
+
+    // Tab filter verification: unreachable filter includes only DeadBot, offline filter includes StoppedBot
+    vm.runInContext(`
+      window.__lastFilteredIds = [];
+      reconcileBotCards = (list) => { window.__lastFilteredIds = list.map((x) => x.id); };
+    `, ctx);
+    ctx.setStatusFilter('unreachable');
+    assert.deepEqual(Array.from(win.__lastFilteredIds), ['w-dead']);
+    ctx.setStatusFilter('offline');
+    assert.deepEqual(Array.from(win.__lastFilteredIds), ['w-stop']);
+  } finally {
+    await env.close();
+  }
+});

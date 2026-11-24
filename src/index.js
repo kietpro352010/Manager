@@ -199,6 +199,7 @@ async function main() {
 
   // 5. Adaptive Memory Sweeper (Trụ cột 1.1)
   const ramThresholdMb = config.ramWarningMb || config.rssWarningThresholdMb || 280;
+  let lastManagerGcAt = 0;
   const memorySweepInterval = setInterval(() => {
     const memory = process.memoryUsage();
     const rssMb = Math.round(memory.rss / (1024 * 1024));
@@ -207,7 +208,10 @@ async function main() {
 
     if (rssMb > ramThresholdMb || heapUsedMb > 0.75 * heapTotalMb) {
       registry.pruneStaleMemory();
-      const collected = runGarbageCollection();
+      const now = Date.now();
+      const collected = (now - lastManagerGcAt >= 120000 || heapUsedMb > 0.85 * heapTotalMb)
+        ? (() => { lastManagerGcAt = now; return runGarbageCollection(); })()
+        : false;
       logger.info('adaptive_memory_sweep', { rssMb, heapUsedMb, heapTotalMb, collected });
     }
   }, config.gcIntervalMs || 30000);

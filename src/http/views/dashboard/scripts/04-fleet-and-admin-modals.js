@@ -50,8 +50,7 @@ async function quickBotAction(event, id, action) {
         showToast('Đã thực hiện ' + action + ' Bot ' + id + ' thành công!', 'success');
         lastHomeSig = '';
         void refreshHome();
-        setTimeout(() => { lastHomeSig = ''; void refreshHome(); }, 800);
-        setTimeout(() => { lastHomeSig = ''; void refreshHome(); }, 2000);
+        setTimeout(() => { if (typeof document === 'undefined' || !document.hidden) void refreshHome(); }, 1200);
       } else {
         var errText = res.data?.error || ('Lỗi khi ' + action + ' bot.');
         if (errText.indexOf('username') !== -1 || errText.indexOf('password') !== -1 || errText.indexOf('chưa có') !== -1) {
@@ -84,6 +83,7 @@ let activeStatusFilter = 'all';
 const MINECRAFT_ONLINE_STATES = new Set(['online', 'waking', 'connecting', 'authenticating', 'entering']);
 const MINECRAFT_ACTIVE_STATES = new Set([...MINECRAFT_ONLINE_STATES, 'afk']);
 function isMinecraftOffline(bot) {
+  if (typeof isBotIntentionallyStopped === 'function' && isBotIntentionallyStopped(bot)) return true;
   const status = String(bot?.status || '').toLowerCase();
   return bot?.available === true && !MINECRAFT_ACTIVE_STATES.has(status);
 }
@@ -307,7 +307,7 @@ function updateKpis() {
   const online = bots.filter(b => b.available && (b.status === 'online' || b.status === 'afk' || b.online)).length;
   const connecting = bots.filter(b => b.available && ['waking', 'connecting', 'authenticating', 'entering'].includes(String(b.status || '').toLowerCase()) && b.status !== 'online' && b.status !== 'afk').length;
   const offline = bots.filter(isMinecraftOffline).length;
-  const unreachable = bots.filter(b => b.available !== true).length;
+  const unreachable = bots.filter(b => typeof isBotUnreachable === 'function' ? isBotUnreachable(b) : b.available !== true).length;
 
   const tEl = document.getElementById('kpiTotal'); if(tEl) tEl.textContent = String(total);
   const oEl = document.getElementById('kpiOnline'); if(oEl) oEl.textContent = String(online);
@@ -493,7 +493,7 @@ function filterBots() {
     if (activeStatusFilter === 'online' && !(b.available && (status === 'online' || status === 'afk' || b.online))) return false;
     if (activeStatusFilter === 'connecting' && !(b.available && ['waking', 'connecting', 'authenticating', 'entering'].includes(status) && status !== 'online' && status !== 'afk')) return false;
     if (activeStatusFilter === 'offline' && !isMinecraftOffline(b)) return false;
-    if (activeStatusFilter === 'unreachable' && b.available === true) return false;
+    if (activeStatusFilter === 'unreachable' && !(typeof isBotUnreachable === 'function' ? isBotUnreachable(b) : b.available !== true)) return false;
 
     // 2. Lọc theo Tag phân loại & Trạng thái thuê
     if (activeTagFilter) {
@@ -1376,9 +1376,10 @@ async function cleanDeadBots() {
     return;
   }
   // Nhóm 1 — bằng chứng mạnh: 404 (endpoint tin cậy xác nhận "không còn tồn tại").
-  const deadBots = bots.filter(b => !b.available && classifyUnreachableBotEvidence(b) === '404');
+  const checkUnreachable = (b) => (typeof isBotUnreachable === 'function' ? isBotUnreachable(b) : !b.available);
+  const deadBots = bots.filter(b => checkUnreachable(b) && classifyUnreachableBotEvidence(b) === '404');
   // Nhóm 2 — chưa xác minh/unreachable: chỉ cảnh báo, tuyệt đối không xóa hàng loạt.
-  const unreachables = bots.filter(b => !b.available && classifyUnreachableBotEvidence(b) !== '404');
+  const unreachables = bots.filter(b => checkUnreachable(b) && classifyUnreachableBotEvidence(b) !== '404');
 
   if (deadBots.length === 0) {
     if (unreachables.length === 0) {

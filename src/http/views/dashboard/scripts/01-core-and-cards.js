@@ -164,6 +164,19 @@ document.addEventListener('change',event=>{
   }
 });
 
+function isBotIntentionallyStopped(bot) {
+  if (!bot) return false;
+  const status = String(bot.status || '').toLowerCase();
+  return Boolean(bot.manuallyStopped) && (['stopped', 'offline', 'kicked'].includes(status) || !bot.available);
+}
+window.isBotIntentionallyStopped = isBotIntentionallyStopped;
+
+function isBotUnreachable(bot) {
+  if (!bot) return false;
+  return bot.available !== true && !isBotIntentionallyStopped(bot);
+}
+window.isBotUnreachable = isBotUnreachable;
+
 function statusMeta(status, available=true, manuallyStopped=false, bot=null) {
   const isStopped = Boolean(manuallyStopped || bot?.manuallyStopped);
   if (isStopped && (status === 'offline' || status === 'kicked' || status === 'stopped' || !available)) {
@@ -551,7 +564,7 @@ function botCardHtml(bot) {
 
   const isOnlineIngame = bot.status === 'online' || bot.status === 'afk' || Boolean(bot.online);
   const isConnectingWaiting = ['waking', 'connecting', 'authenticating', 'entering'].includes(String(bot.status || '').toLowerCase());
-  const statusGlowClass = !bot.available ? 'status-unreachable' : (isOnlineIngame ? 'status-online' : (isConnectingWaiting ? 'status-waiting' : 'status-offline'));
+  const statusGlowClass = isBotUnreachable(bot) ? 'status-unreachable' : (isOnlineIngame ? 'status-online' : (isConnectingWaiting ? 'status-waiting' : 'status-offline'));
   const displayNum = bot.displayIndex !== undefined ? bot.displayIndex : (bot.botNumber || id);
   const idStr = String(displayNum).padStart(2, '0');
 
@@ -867,6 +880,10 @@ window.quickRedeemKeyOnCard = quickRedeemKeyOnCard;
 
 let lastGraceExpireRefreshAt = 0;
 function updateCardGraceCountdowns() {
+  if (typeof currentUser === 'undefined' || !currentUser || currentUser.role === 'admin') return;
+  const hasActiveGrace = Boolean(currentUser.inGracePeriod)
+    || Boolean(typeof getUserExpirationInfo === 'function' && getUserExpirationInfo()?.inGracePeriod);
+  if (!hasActiveGrace) return;
   const timers = document.querySelectorAll('.grace-countdown-timer[data-expiry]');
   if (!timers || timers.length === 0) return;
   const now = Date.now();

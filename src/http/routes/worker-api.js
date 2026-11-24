@@ -155,6 +155,7 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
       });
       const command = await broker.poll(req.workerId, pollOpts);
       if (res.writableEnded || ac.signal.aborted) return undefined;
+      registry.touchLiveHeartbeat?.(req.workerId);
       const settingsRevision = typeof registry.getSettingsRevision === 'function'
         ? registry.getSettingsRevision(req.workerId)
         : 1;

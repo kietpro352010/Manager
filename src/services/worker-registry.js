@@ -7,6 +7,8 @@ const { encryptSecret, decryptSecret, generateWorkerSecret } = require('../utils
 const { extractChatMessage } = require('../utils/text-format');
 const { isWispbyteControlPanelUrl } = require('../utils/http');
 
+const REACHABLE_WINDOW_MS = 180000;
+
 async function validateWorkerServiceUrl(rawUrl) {
   const urlStr = String(rawUrl || '').trim().replace(/\/+$/, '');
   if (!urlStr) return '';
@@ -273,7 +275,36 @@ class WorkerRegistry {
     this.botChatLogRev = new Map(); // botId -> integer chat log revision counter
     this._secretRefreshPromises = new Map(); // botId -> in-flight credential lookup promise
     this._lastBypassReloadAt = new Map(); // botId -> ms (throttle 1-shot bypassCache reload on secret mismatch)
+    this._hasActivePoller = null;
     this.statusLock = new AsyncKeyLock();
+  }
+
+  setPollerCheck(fn) {
+    this._hasActivePoller = typeof fn === 'function' ? fn : null;
+  }
+
+  touchLiveHeartbeat(workerId) {
+    const id = String(workerId || '').trim().toLowerCase();
+    if (!id) return;
+    this.liveHeartbeats.set(id, new Date());
+  }
+
+  isWorkerReachable(record) {
+    if (!record) return false;
+    const id = String(record.workerId || '').trim().toLowerCase();
+    if (id && typeof this._hasActivePoller === 'function') {
+      try {
+        if (this._hasActivePoller(record.workerId) || this._hasActivePoller(id)) {
+          return true;
+        }
+      } catch (_) {}
+    }
+    const now = Date.now();
+    const liveHb = id ? this.liveHeartbeats.get(id) : null;
+    if (liveHb && (now - new Date(liveHb).getTime() <= REACHABLE_WINDOW_MS)) {
+      return true;
+    }
+    return Boolean(record.lastHeartbeat && (now - new Date(record.lastHeartbeat).getTime() <= REACHABLE_WINDOW_MS));
   }
 
   getLogRevisions(workerId) {
@@ -495,7 +526,7 @@ class WorkerRegistry {
 
   computeReachable(record) {
     if (!record) return null;
-    record.reachable = Boolean(record.lastHeartbeat && Date.now() - new Date(record.lastHeartbeat).getTime() <= 120000);
+    record.reachable = this.isWorkerReachable(record);
     return record;
   }
 
@@ -789,16 +820,30 @@ class WorkerRegistry {
         if (!Object.hasOwn(rawStatus, 'locationState') && ex.locationState) {
           safeStatus.locationState = ex.locationState;
         }
-        for (const numKey of ['health', 'food', 'tps', 'pingMs', 'totemCount', 'goldenAppleCount', 'foodCount', 'uptimeSeconds']) {
+        for (const numKey of ['health', 'food', 'tps', 'pingMs', 'totemCount', 'goldenAppleCount', 'foodCount', 'uptimeSeconds', 'reconnectAttempts', 'reconnectCount', 'cpuPercent', 'rssMb', 'heapUsedMb']) {
           if (!Object.hasOwn(rawStatus, numKey) && ex[numKey] !== undefined && ex[numKey] !== null) {
             safeStatus[numKey] = ex[numKey];
           }
+        }
+        for (const strKey of ['lastError', 'lastKickReason', 'restriction', 'maintenanceTimeZone', 'maintenanceStart', 'maintenanceEnd']) {
+          if (!Object.hasOwn(rawStatus, strKey) && ex[strKey] !== undefined) {
+            safeStatus[strKey] = ex[strKey];
+          }
+        }
+        if (!Object.hasOwn(rawStatus, 'maintenanceWindow') && ex.maintenanceWindow !== undefined) {
+          safeStatus.maintenanceWindow = Boolean(ex.maintenanceWindow);
         }
         if (!safeStatus.transport && ex.transport && !(source === 'worker-heartbeat' && ex.transport === 'wispbyte-poll')) {
           safeStatus.transport = ex.transport;
         }
         if (!Object.hasOwn(rawStatus, 'connectedAt') && ex.connectedAt) {
           safeStatus.connectedAt = ex.connectedAt;
+        }
+        if (!Object.hasOwn(rawStatus, 'lastStateAt') && !safeStatus.lastStateAt && ex.lastStateAt) {
+          const prevStateAt = ex.lastStateAt instanceof Date ? ex.lastStateAt : new Date(ex.lastStateAt);
+          if (!Number.isNaN(prevStateAt.getTime())) {
+            safeStatus.lastStateAt = prevStateAt;
+          }
         }
       }
       if (source === 'wispbyte-poll' && !safeStatus.transport) {
@@ -835,8 +880,10 @@ class WorkerRegistry {
       const managerNow = new Date();
 
       // SYNC-16-01: Chống ghi đè trạng thái nếu payload cũ hơn trạng thái đang có (Worker time lastStateAt),
-      // nhưng VẪN PHẢI cập nhật lastHeartbeat (Manager time) để tránh clock skew làm worker bị coi là offline/unreachable
-      if (safeStatus.lastStateAt && existing.status?.lastStateAt) {
+      // nhưng VẪN PHẢI cập nhật lastHeartbeat (Manager time) để tránh clock skew làm worker bị coi là offline/unreachable.
+      // Riêng trường hợp bản ghi trước đó là offline-stop của Manager thì luôn cho phép worker thực ghi đè khi online lại.
+      const wasOfflineStop = String(existing.status?.source || '').includes('offline-stop');
+      if (!wasOfflineStop && safeStatus.lastStateAt && existing.status?.lastStateAt) {
         if (safeStatus.lastStateAt.getTime() < new Date(existing.status.lastStateAt).getTime()) {
           this.liveHeartbeats.set(id, managerNow);
           const lastPersistAt = this.lastDbStatusPersistAt.get(id) || 0;
@@ -900,7 +947,7 @@ class WorkerRegistry {
       const isHeartbeatSource = source === 'worker-heartbeat' || source === 'wispbyte-poll';
       const isLightweight = Boolean(status?.isLightweight === true || status?.digestUnchanged === true);
       const lastPersistAt = this.lastDbStatusPersistAt.get(id) || 0;
-      const canCoalesceDbWrite = !needsProviderHeal && isHeartbeatSource && isLightweight && prevFingerprint === fingerprint && (Date.now() - lastPersistAt < 90000);
+      const canCoalesceDbWrite = !needsProviderHeal && isHeartbeatSource && isLightweight && prevFingerprint === fingerprint && (Date.now() - lastPersistAt < 105000);
 
       if (canCoalesceDbWrite) {
         return { ...existing, status: safeStatus, lastHeartbeat: managerNow };
@@ -970,12 +1017,15 @@ class WorkerRegistry {
         uptimeSeconds: 0,
         reconnectAttempts: 0,
         manuallyStopped: true,
-        lastStateAt: new Date().toISOString()
+        lastStateAt: baseStatus.lastStateAt || null
       }, source);
 
       this.summaryLastAppliedSeq.set(id, requestSeq);
       this.summaryCache.set(id, { timestamp: Date.now(), data: safeStatus });
-      // Preserve lastHeartbeat / liveHeartbeats untouched so computeReachable() stays false while offline.
+      if (!(this._hasActivePoller?.(existing.workerId) || this._hasActivePoller?.(id))) {
+        this.liveHeartbeats.delete(id);
+      }
+      // Preserve lastHeartbeat untouched so DB staleness remains honest when poller is offline.
       const rawUpdated = await this.store.update(id, { status: safeStatus }, { returning: false });
       this.lastDbStatusPersistAt.set(id, Date.now());
       this.lastDbStatusFingerprint.delete(id);
@@ -996,7 +1046,7 @@ class WorkerRegistry {
       const hasRenderUrl = Boolean(String(existing.serviceUrl || '').trim()) && !hasPanelUrl;
       const needsHeal = fromPoll && ((existing.provider === 'render' && !hasRenderUrl) || hasPanelUrl);
       const lastPersistAt = this.lastDbStatusPersistAt.get(id) || 0;
-      const canCoalesce = Boolean(fromPoll) && !needsHeal && lastPersistAt > 0 && (Date.now() - lastPersistAt < 90000);
+      const canCoalesce = Boolean(fromPoll) && !needsHeal && lastPersistAt > 0 && (Date.now() - lastPersistAt < 105000);
       const patch = {
         lastHeartbeat: now,
         ...(needsHeal ? { provider: 'wispbyte', ...(hasPanelUrl ? { serviceUrl: '' } : {}) } : {})
@@ -1103,7 +1153,7 @@ class WorkerRegistry {
       autoChatSchedules: Array.isArray(settings.autoChatSchedules) ? settings.autoChatSchedules : [],
       botSchedules: Array.isArray(settings.botSchedules) ? settings.botSchedules : []
     };
-    safe.reachable = Boolean(record.lastHeartbeat && Date.now() - new Date(record.lastHeartbeat).getTime() <= 120000);
+    safe.reachable = this.isWorkerReachable(record);
     safe.serverHost = record.status?.serverHost || record.status?.server || settings.serverHost || record.serverHost || 'kingmc.vn';
     safe.server = safe.serverHost;
     safe.ipAddress = record.status?.clientIp || record.status?.hostIp || record.status?.ip || record.clientIp || record.hostIp || null;
@@ -1594,9 +1644,11 @@ WorkerRegistry.WorkerRegistry = WorkerRegistry;
 WorkerRegistry.ACTIONS = ACTIONS;
 WorkerRegistry.validateWorkerStatus = validateWorkerStatus;
 WorkerRegistry.VALID_WORKER_STATES = VALID_WORKER_STATES;
+WorkerRegistry.REACHABLE_WINDOW_MS = REACHABLE_WINDOW_MS;
 
 module.exports = WorkerRegistry;
 module.exports.WorkerRegistry = WorkerRegistry;
 module.exports.ACTIONS = ACTIONS;
 module.exports.validateWorkerStatus = validateWorkerStatus;
 module.exports.VALID_WORKER_STATES = VALID_WORKER_STATES;
+module.exports.REACHABLE_WINDOW_MS = REACHABLE_WINDOW_MS;

@@ -471,8 +471,9 @@ window.toggleTrialGiftSetting = toggleTrialGiftSetting;
 window.saveTrialDaysSetting = saveTrialDaysSetting;
 
 function updateDetailUptime(){
+  if (typeof selectedBotId === 'undefined' || selectedBotId === null || !detailBot) return;
   const st = String(detailBot?.status || '').toLowerCase();
-  if(!detailBot || !['online', 'afk'].includes(st)) return;
+  if(!['online', 'afk'].includes(st)) return;
   let seconds = 0;
   const connectedMs = detailBot.connectedAt ? Date.parse(detailBot.connectedAt) : NaN;
   if (Number.isFinite(connectedMs) && connectedMs > 0) {
@@ -1033,8 +1034,8 @@ function scheduleNextManagerPoll() {
     managerPollTimerId = null;
   }
   if (!currentUser) return;
-  const isIdle = Date.now() - lastUserActivityAt > 90 * 1000;
-  const delay = document.hidden ? 30000 : (isIdle ? 20000 : 5000); // 5s active poll, 20s idle (>90s), 30s guard while hidden
+  const idleMs = Date.now() - lastUserActivityAt;
+  const delay = document.hidden ? 30000 : (idleMs > 180000 ? 25000 : (idleMs > 60000 ? 12000 : 5000));
   managerPollTimerId = setTimeout(async () => {
     managerPollTimerId = null;
     if (!currentUser || document.hidden) return; // BW-02: pause polling completely while tab is hidden

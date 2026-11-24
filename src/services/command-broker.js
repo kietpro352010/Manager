@@ -29,6 +29,7 @@ class CommandBroker {
     this.stateSyncRunning = false;
     this.stateSyncBlockedReason = null;
     this.missingAtomicRpcLogged = false;
+    this.registry?.setPollerCheck?.((workerId) => this.hasActivePoller(workerId));
   }
 
   getStateSyncLeaseConfig() {
@@ -265,7 +266,8 @@ class CommandBroker {
       return this.dispatchRender(worker, command);
     }
 
-    const hasRecentHeartbeat = Boolean(worker.lastHeartbeat && Date.now() - new Date(worker.lastHeartbeat).getTime() <= 120000);
+    const reachWindowMs = this.registry?.constructor?.REACHABLE_WINDOW_MS || 180000;
+    const hasRecentHeartbeat = Boolean(worker.lastHeartbeat && Date.now() - new Date(worker.lastHeartbeat).getTime() <= reachWindowMs);
     if (!this.hasActivePoller(worker.workerId) && !hasRecentHeartbeat) {
       const err = new Error(`Wispbyte worker ${workerId} has not checked in recently.`);
       err.code = 'WORKER_UNAVAILABLE';
@@ -622,7 +624,7 @@ class CommandBroker {
     if (!waiters || !waiters.length) return;
     this.wakeVersions.set(workerId, (this.wakeVersions.get(workerId) || 0) + 1);
     for (const waiter of waiters.splice(0, waiters.length)) {
-      waiter();
+      waiter(true);
     }
   }
 
@@ -631,6 +633,7 @@ class CommandBroker {
     if (next || signal?.aborted) return next;
 
     const currentVersion = this.wakeVersions.get(workerId) || 0;
+    let woken = false;
     await new Promise((resolve) => {
       let resolved = false;
       let timer = null;
@@ -647,9 +650,10 @@ class CommandBroker {
         }
       };
 
-      const onWake = () => {
+      const onWake = (explicit = false) => {
         if (resolved) return;
         resolved = true;
+        if (explicit === true) woken = true;
         cleanup();
         resolve();
       };
@@ -659,17 +663,17 @@ class CommandBroker {
           resolve();
           return;
         }
-        onAbort = () => onWake();
+        onAbort = () => onWake(false);
         signal.addEventListener?.('abort', onAbort, { once: true });
       }
 
       timer = setTimeout(() => {
-        onWake();
+        onWake(false);
       }, Math.max(100, Math.min(waitMs, 30000)));
       timer.unref?.();
 
       if ((this.wakeVersions.get(workerId) || 0) !== currentVersion) {
-        onWake();
+        onWake(true);
         return;
       }
 
@@ -679,7 +683,7 @@ class CommandBroker {
       this.pollWaiters.get(workerId).push(onWake);
     });
 
-    if (signal?.aborted) return null;
+    if (signal?.aborted || !woken) return null;
     return this.commandStore.take(workerId);
   }
 

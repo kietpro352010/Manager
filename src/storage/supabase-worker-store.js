@@ -87,15 +87,59 @@ class SupabaseWorkerStore {
 
   _cloneWorker(worker) {
     if (!worker) return null;
-    try {
-      return structuredClone(worker);
-    } catch (_) {
-      return {
-        ...worker,
-        ...(worker.settings && typeof worker.settings === 'object' ? { settings: { ...worker.settings } } : {}),
-        ...(worker.status && typeof worker.status === 'object' ? { status: { ...worker.status } } : {}),
-        ...(Array.isArray(worker.events) ? { events: worker.events.slice() } : {})
-      };
+    return {
+      ...worker,
+      ...(worker.settings && typeof worker.settings === 'object' ? { settings: { ...worker.settings } } : {}),
+      ...(worker.status && typeof worker.status === 'object' ? { status: { ...worker.status } } : {}),
+      ...(Array.isArray(worker.events) ? { events: worker.events.slice() } : {})
+    };
+  }
+
+  _applyPatchToCaches(workerId, patch, updatedAtIso, mapped = null) {
+    this._cacheGen += 1;
+    const id = String(workerId || '');
+    const now = Date.now();
+    const buildUpdated = (entry) => {
+      if (!entry) return null;
+      if (mapped) return this._cloneWorker(mapped);
+      const next = { ...entry, ...patch, updatedAt: updatedAtIso };
+      if (patch.settings && typeof patch.settings === 'object') next.settings = patch.settings;
+      if (patch.status && typeof patch.status === 'object') next.status = patch.status;
+      return next;
+    };
+
+    const cachedHit = this._itemCache.get(id);
+    const existingItem = cachedHit?.data || mapped;
+    const prevNumber = existingItem?.botNumber;
+    if (mapped) {
+      if (prevNumber !== undefined && prevNumber !== null && prevNumber !== mapped.botNumber) {
+        this._numberCache.delete(Number(prevNumber));
+      }
+      this._cacheWorker(mapped);
+    } else if (existingItem && this.cacheTtlMs > 0) {
+      const nextItem = buildUpdated(existingItem);
+      if (prevNumber !== undefined && prevNumber !== null && nextItem.botNumber !== prevNumber) {
+        this._numberCache.delete(Number(prevNumber));
+      }
+      this._cacheWorker(nextItem);
+    } else {
+      this._itemCache.delete(id);
+      this._numberCache.clear();
+    }
+
+    if (this._listCache && now < this._listCache.expiresAt && Array.isArray(this._listCache.data)) {
+      const idx = this._listCache.data.findIndex((w) => String(w?.workerId || '') === id);
+      if (idx !== -1) {
+        const listEntry = buildUpdated(this._listCache.data[idx]);
+        this._listCache.data[idx] = listEntry;
+        if (listEntry && !mapped && this.cacheTtlMs > 0) {
+          this._cacheWorker(listEntry);
+        }
+      } else {
+        this._listCache = null;
+      }
+    } else {
+      this._listCache = null;
     }
   }
 
@@ -216,19 +260,23 @@ class SupabaseWorkerStore {
   }
 
   async update(workerId, patch, { returning = true } = {}) {
-    const query = this.client.from(TABLE).update({ ...toRow(patch), updated_at: new Date().toISOString() })
+    const updatedAtIso = new Date().toISOString();
+    const query = this.client.from(TABLE).update({ ...toRow(patch), updated_at: updatedAtIso })
       .eq('worker_id', workerId);
     if (!returning) {
       const { error } = await query;
       if (error) throw error;
-      this.invalidateCache(workerId);
+      this._applyPatchToCaches(workerId, patch, updatedAtIso, null);
       return null;
     }
     const { data, error } = await query.select(WORKER_LIST_COLUMNS).maybeSingle();
     if (error) throw error;
     const mapped = fromRow(data);
-    this.invalidateCache(workerId);
-    if (mapped) this._cacheWorker(mapped);
+    if (mapped) {
+      this._applyPatchToCaches(workerId, patch, updatedAtIso, mapped);
+    } else {
+      this.invalidateCache(workerId);
+    }
     return this._cloneWorker(mapped);
   }
 
