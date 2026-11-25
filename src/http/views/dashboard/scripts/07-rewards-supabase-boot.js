@@ -1058,7 +1058,9 @@ function scheduleNextManagerPoll() {
   }
   if (!currentUser) return;
   const idleMs = Date.now() - lastUserActivityAt;
-  const delay = document.hidden ? 30000 : (idleMs > 180000 ? 25000 : (idleMs > 60000 ? 12000 : 5000));
+  const hasActiveGui = selectedBotId !== null && typeof detailBot === 'object' && detailBot && Boolean(detailBot.currentWindow);
+  const activeDelay = hasActiveGui ? 4500 : (selectedBotId !== null ? 6500 : 8000);
+  const delay = document.hidden ? 30000 : (idleMs > 180000 ? 30000 : (idleMs > 60000 ? 15000 : activeDelay));
   managerPollTimerId = setTimeout(async () => {
     managerPollTimerId = null;
     if (!currentUser || document.hidden) return; // BW-02: pause polling completely while tab is hidden
@@ -1086,14 +1088,19 @@ document.addEventListener('visibilitychange', () => {
     return;
   }
   lastUserActivityAt = Date.now();
-  lastHomeSig = ''; // Force immediate fresh reconciliation on tab focus
+  // Preserve lastHomeSig so unchanged fleet state reconciles in <120B without full DOM teardown
   if (selectedBotId === null) void refreshHome();
-  else void refreshDetail(true);
+  else void refreshDetail(false);
   scheduleNextManagerPoll();
 });
 
 // Network-Aware Sync Engine (Online / Offline non-intrusive banner)
 window.addEventListener('offline', () => {
+  const staticBanner = document.getElementById('networkOfflineBanner');
+  if (staticBanner) {
+    staticBanner.classList.remove('hidden');
+    return;
+  }
   let banner = document.getElementById('offlineBanner');
   if (!banner) {
     banner = document.createElement('div');
@@ -1107,6 +1114,8 @@ window.addEventListener('offline', () => {
 });
 
 window.addEventListener('online', () => {
+  const staticBanner = document.getElementById('networkOfflineBanner');
+  if (staticBanner) staticBanner.classList.add('hidden');
   const banner = document.getElementById('offlineBanner');
   if (banner) banner.style.display = 'none';
   if (!currentUser) return;

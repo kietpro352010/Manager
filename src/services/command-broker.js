@@ -65,7 +65,7 @@ class CommandBroker {
         this._scheduleNextOutboxTick(this.outboxIntervalMs);
       } else {
         this.idleOutboxTicks = Math.min(10, this.idleOutboxTicks + 1);
-        const backoffSchedule = [this.outboxIntervalMs, 60000, 180000, 300000];
+        const backoffSchedule = [this.outboxIntervalMs, 60000, 180000, 420000, 900000];
         const nextDelay = backoffSchedule[Math.min(this.idleOutboxTicks, backoffSchedule.length - 1)];
         this._scheduleNextOutboxTick(Math.max(this.outboxIntervalMs, nextDelay));
       }
@@ -348,7 +348,8 @@ class CommandBroker {
         headers: {
           'content-type': 'application/json',
           'x-worker-secret': secret,
-          'x-manager-bot-id': String(worker.workerId)
+          'x-manager-bot-id': String(worker.workerId),
+          ...(command?.commandId ? { 'x-request-id': String(command.commandId) } : {})
         },
         body: JSON.stringify({ action: command.action, payload: command.payload }),
         redirect: 'manual',
@@ -620,6 +621,7 @@ class CommandBroker {
   }
 
   wakePoller(workerId) {
+    this.commandStore?.invalidateIdleGate?.(workerId);
     const waiters = this.pollWaiters.get(workerId);
     if (!waiters || !waiters.length) return;
     this.wakeVersions.set(workerId, (this.wakeVersions.get(workerId) || 0) + 1);
@@ -669,7 +671,7 @@ class CommandBroker {
 
       timer = setTimeout(() => {
         onWake(false);
-      }, Math.max(100, Math.min(waitMs, 30000)));
+      }, Math.max(100, Math.min(waitMs, 55000)));
       timer.unref?.();
 
       if ((this.wakeVersions.get(workerId) || 0) !== currentVersion) {

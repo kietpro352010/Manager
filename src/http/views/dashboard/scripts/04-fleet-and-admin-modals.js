@@ -564,6 +564,9 @@ function filterBots() {
   const grid = document.getElementById('botGrid');
   if(!grid) return;
   const isAdmin = Boolean(currentUser && currentUser.role === 'admin');
+  const queryTerms = query
+    ? (query.includes(',') ? query.split(',').map(s => s.trim()).filter(Boolean) : [query])
+    : null;
   const filtered = bots.filter(b => {
     // 1. Lọc theo Tab trạng thái
     const status = String(b.status || '').toLowerCase();
@@ -581,14 +584,14 @@ function filterBots() {
       } else if (activeTagFilter === 'sys:not-rentable' || activeTagFilter === 'not-rentable' || activeTagFilter === 'khong-cho-thue') {
         if (b.rentable !== false) return false;
       } else {
-        const bTags = Array.isArray(b.tags) ? b.tags.map(t => String(t).toLowerCase().replace(/^#/, '')) : [];
-        if (!bTags.includes(activeTagFilter)) return false;
+        if (!Array.isArray(b.tags) || !b.tags.some(t => String(t).toLowerCase().replace(/^#/, '') === activeTagFilter)) return false;
       }
     }
 
     // 3. Lọc theo Từ khóa tìm kiếm (hỗ trợ ID như 01, 22, #01, 01,22, tên bot, username, IP...)
-    if(!query) return true;
-    return matchesBotSearchQuery(b, query, isAdmin);
+    if (!queryTerms || !queryTerms.length) return true;
+    if (queryTerms.length === 1) return matchesSingleBotTerm(b, queryTerms[0], isAdmin);
+    return queryTerms.some(term => matchesSingleBotTerm(b, term, isAdmin));
   });
 
   // 3. Sắp xếp theo chế độ được chọn
@@ -619,22 +622,28 @@ function filterBots() {
   reconcileBotCards(filtered);
 }
 
-function computeBotCardSig(b) {
+function buildSharedCardSigContext() {
   const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : null;
   const expKey = userExp && userExp.isExpired ? (userExp.inGracePeriod ? 'grace' : 'expired') : 'ok';
   const maintKey = window.systemMaintenance?.enabled ? ('maint:' + (window.systemMaintenance.message || '')) : 'ok';
+  return { role: currentUser?.role || '', expKey, maintKey };
+}
+
+function computeBotCardSig(b, sharedCtx) {
+  const ctx = sharedCtx || buildSharedCardSigContext();
   const pos = b.position || b.roundedLocation || null;
   const posStr = pos && Number.isFinite(Number(pos.x)) ? `${Math.round(pos.x)},${Math.round(pos.y)},${Math.round(pos.z)}` : '';
   return JSON.stringify([
-    b.status, b.available, !!b.manuallyStopped, b.label, b.username,
+    b.status, b.available, !!b.online, !!b.manuallyStopped, b.label, b.username,
+    b.displayIndex ?? b.botNumber ?? null, b.provider || '', b.httpStatus ?? null,
     b.ping !== null && b.ping !== undefined ? Math.round(Number(b.ping) / 10) : null,
     b.tps !== null && b.tps !== undefined ? Number(b.tps).toFixed(1) : null,
     b.health, b.totemCount, Math.floor(Number(b.uptimeSeconds || 0) / 60),
-    posStr, b.ecoMode, b.rentable, b.assignedUsername, b.lastError, b.lastKickReason,
-    b.ipAddress, b.tags,
+    posStr, b.ecoMode, b.settings?.ecoMode, b.rentable, b.assignedUsername, b.assignedPlan || '',
+    b.lastError, b.lastKickReason, b.ipAddress, b.tags,
     b.hostHardware?.botRssMb ?? b.hardware?.botRamMb ?? null,
     b.hostHardware?.cpuPercent ?? b.hardware?.hostCpuPercent ?? null,
-    currentUser?.role || '', expKey, maintKey
+    ctx.role, ctx.expKey, ctx.maintKey
   ]);
 }
 
@@ -642,32 +651,34 @@ function reconcileBotCards(filtered) {
   const grid = document.getElementById('botGrid');
   if (!grid || draggedBotId !== null) return;
 
-  // Remove non-card elements (such as empty filter state)
-  Array.from(grid.children).forEach(child => {
-    if (!child.classList.contains('bot-card')) {
-      child.remove();
-    }
-  });
-
-  const currentCards = Array.from(grid.querySelectorAll('.bot-card'));
   const currentMap = new Map();
-  currentCards.forEach(c => {
-    const id = c.getAttribute('data-bot-id');
-    if (id) currentMap.set(id, c);
-  });
+  for (let i = grid.children.length - 1; i >= 0; i--) {
+    const child = grid.children[i];
+    if (!child.classList || !child.classList.contains('bot-card')) {
+      child.remove();
+    } else {
+      const id = child.getAttribute('data-bot-id');
+      if (id) currentMap.set(id, child);
+    }
+  }
 
-  const nextIds = new Set(filtered.map(b => String(b.workerId || b.id)));
+  const nextIds = new Set();
+  for (let i = 0; i < filtered.length; i++) {
+    nextIds.add(String(filtered[i].workerId || filtered[i].id));
+  }
 
   // Remove cards that no longer exist
   for (const [id, card] of currentMap.entries()) {
     if (!nextIds.has(id)) card.remove();
   }
 
+  const sharedCtx = buildSharedCardSigContext();
+
   // Update existing cards or insert new cards in exact sorted order
   filtered.forEach((b, idx) => {
     const id = String(b.workerId || b.id);
     const existing = currentMap.get(id);
-    const cardSig = computeBotCardSig(b);
+    const cardSig = computeBotCardSig(b, sharedCtx);
 
     if (existing) {
       if (existing.dataset.cardSig !== cardSig) {

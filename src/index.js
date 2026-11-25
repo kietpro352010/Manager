@@ -23,10 +23,11 @@ function runGarbageCollection() {
 }
 
 const http = require('node:http');
-const { Client, GatewayIntentBits, Events } = require('discord.js');
+const { Client, GatewayIntentBits, Events, Options } = require('discord.js');
 const { loadConfig } = require('./config/env');
 const { detectHostPlatformAndPort, detectHostRuntime, listenHttpServer } = require('./config/host-runtime');
 const { createLogger } = require('./utils/logger');
+const { configureGlobalHttpDispatcher, closeGlobalHttpDispatcher } = require('./utils/http');
 
 const SupabaseWorkerStore = require('./storage/supabase-worker-store');
 const SupabaseDashboardStore = require('./storage/supabase-dashboard-store');
@@ -53,6 +54,7 @@ const { attachMessagePointsHandler } = require('./discord/handlers/points-messag
 const { registerCommands } = require('./discord/register-commands');
 
 async function main() {
+  configureGlobalHttpDispatcher();
   const config = loadConfig();
   const hostDetector = typeof detectHostPlatformAndPort === 'function' ? detectHostPlatformAndPort : detectHostRuntime;
   const hostPlatform = typeof hostDetector === 'function' ? hostDetector() : { port: config.port, platform: config.platform };
@@ -60,7 +62,9 @@ async function main() {
 
   // 1. Storage & Database Setup
   const supabase = createSupabaseClient({ url: config.supabaseUrl, secretKey: config.supabaseSecretKey });
-  const store = new SupabaseWorkerStore(supabase);
+  const store = new SupabaseWorkerStore(supabase, {
+    cacheTtlMs: Number(process.env.WORKER_STORE_CACHE_TTL_MS) || 180000
+  });
   const accessStore = new SupabaseDashboardStore(supabase);
   const commandStore = new SupabaseCommandStore(supabase);
 
@@ -121,8 +125,41 @@ async function main() {
     });
   }
 
-  // 4. Discord Client & Admin Notifier
-  const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
+  // 4. Discord Client & Admin Notifier (bounded caches + periodic sweepers for 384MB container stability)
+  const client = new Client({
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
+    makeCache: typeof Options?.cacheWithLimits === 'function'
+      ? Options.cacheWithLimits({
+          ...Options.DefaultMakeCacheSettings,
+          MessageManager: 10,
+          PresenceManager: 0,
+          ReactionManager: 0,
+          VoiceStateManager: 0,
+          StageInstanceManager: 0,
+          GuildScheduledEventManager: 0,
+          AutoModerationRuleManager: 0,
+          GuildStickerManager: 0,
+          BaseGuildEmojiManager: 25,
+          ThreadManager: 10,
+          UserManager: 200,
+          GuildMemberManager: {
+            maxSize: 200,
+            keepOverLimit: (member) => member.id === member.client?.user?.id
+          }
+        })
+      : undefined,
+    sweepers: Options?.DefaultSweeperSettings
+      ? {
+          ...Options.DefaultSweeperSettings,
+          messages: { interval: 900, lifetime: 900 },
+          users: {
+            interval: 1800,
+            filter: () => (user) => user.id !== user.client?.user?.id && !user.bot
+          },
+          threads: { interval: 1800, lifetime: 3600 }
+        }
+      : undefined
+  });
   const adminNotifier = new AdminNotifier({
     client,
     store: accessStore,
@@ -203,7 +240,7 @@ async function main() {
     } catch (err) {
       logger.warn('expired_users_check_failed', { error: err.message });
     }
-  }, 120000);
+  }, 180000);
   expiredCheckInterval.unref();
 
   // 5. Adaptive Memory Sweeper (Trụ cột 1.1: so sánh theo V8 heap_size_limit, tránh GC liên tục khi heap idle nhỏ)
@@ -295,6 +332,9 @@ async function main() {
   services.invalidateUserSessions = app.invalidateUserSessions;
 
   const server = http.createServer(app);
+  // Align HTTP keep-alive above Render/Cloudflare 60s upstream idle timeout to prevent 502 races
+  server.keepAliveTimeout = 65000;
+  server.headersTimeout = 66000;
   await listenHttpServer(server, runtimeConfig.port, config.host || '0.0.0.0', { logger });
 
   logger.info('manager_http_started', {
@@ -319,7 +359,8 @@ async function main() {
         const commandRegistration = await registerCommands({
           token: config.discordToken,
           clientId: cId,
-          guildId: gId || null
+          guildId: gId || null,
+          store: accessStore
         });
         logger.info('discord_commands_registered', commandRegistration);
       } catch (regErr) {
@@ -374,6 +415,7 @@ async function main() {
     }
     process.exitCode = exitCode;
     shutdownPromise = (async () => {
+      app.setShuttingDown?.(true);
       logger.info('manager_shutdown', { signal, exitCode });
       clearInterval(expiredCheckInterval);
       clearInterval(memorySweepInterval);
@@ -410,6 +452,7 @@ async function main() {
         logger.error('manager_storage_shutdown_failed', { error: error?.message || String(error) });
         process.exitCode = 1;
       }
+      await closeGlobalHttpDispatcher().catch(() => {});
     })();
     return shutdownPromise;
   };

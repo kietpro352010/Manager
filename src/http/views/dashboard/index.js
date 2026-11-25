@@ -36,8 +36,49 @@ function readAsset(relPath) {
   return fs.readFileSync(path.join(__dirname, relPath), 'utf8').replace(/\s+$/, '');
 }
 
+function minifyCssSafe(cssText) {
+  // Strip CSS block comments outside strings and trim redundant leading indentation / blank lines
+  let out = '';
+  let i = 0;
+  let quote = '';
+  const len = cssText.length;
+  while (i < len) {
+    const ch = cssText[i];
+    if (quote) {
+      out += ch;
+      if (ch === '\\' && i + 1 < len) {
+        out += cssText[i + 1];
+        i += 2;
+        continue;
+      }
+      if (ch === quote) quote = '';
+      i += 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      out += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === '/' && cssText[i + 1] === '*') {
+      const end = cssText.indexOf('*/', i + 2);
+      if (end === -1) break;
+      i = end + 2;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out
+    .replace(/^[ \t]+/gm, '')
+    .replace(/[ \t]+$/gm, '')
+    .replace(/\n{2,}/g, '\n')
+    .trim();
+}
+
 const HEAD = readAsset('head.html');
-const STYLES = STYLE_FILES.map(readAsset).join('\n');
+const STYLES = minifyCssSafe(STYLE_FILES.map(readAsset).join('\n'));
 const BODY = PARTIAL_FILES.map(readAsset).join('\n');
 const SCRIPTS = SCRIPT_FILES.map(readAsset).join('\n');
 
@@ -67,6 +108,8 @@ ${SCRIPTS}
 
 // Lightweight HTML shell referencing content-hashed immutable static CSS/JS assets (BW-01)
 const SHELL_HTML = `${HEAD}
+<link rel="preload" href="${CSS_PATH}" as="style">
+<link rel="preload" href="${JS_PATH}" as="script">
 <link rel="stylesheet" href="${CSS_PATH}">
 </head>
 ${BODY}

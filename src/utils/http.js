@@ -177,8 +177,61 @@ async function fetchWithRetry(
   }
 }
 
-function acceptsGzipEncoding(req) {
+let sharedHttpAgent = null;
+let previousGlobalDispatcher = null;
+
+function configureGlobalHttpDispatcher({
+  keepAliveTimeout = 30000,
+  keepAliveMaxTimeout = 90000,
+  connections = 64,
+  pipelining = 1,
+  connectTimeout = 10000
+} = {}) {
+  if (sharedHttpAgent) return sharedHttpAgent;
+  try {
+    const undici = require('undici');
+    if (typeof undici?.Agent !== 'function' || typeof undici?.setGlobalDispatcher !== 'function') {
+      return null;
+    }
+    if (typeof undici.getGlobalDispatcher === 'function') {
+      previousGlobalDispatcher = undici.getGlobalDispatcher();
+    }
+    const agent = new undici.Agent({
+      keepAliveTimeout,
+      keepAliveMaxTimeout,
+      connections,
+      pipelining,
+      connect: { timeout: connectTimeout }
+    });
+    undici.setGlobalDispatcher(agent);
+    sharedHttpAgent = agent;
+    return agent;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function closeGlobalHttpDispatcher() {
+  const agent = sharedHttpAgent;
+  const fallbackDispatcher = previousGlobalDispatcher;
+  sharedHttpAgent = null;
+  previousGlobalDispatcher = null;
+  if (fallbackDispatcher) {
+    try {
+      const undici = require('undici');
+      if (typeof undici?.setGlobalDispatcher === 'function') {
+        undici.setGlobalDispatcher(fallbackDispatcher);
+      }
+    } catch (_) {}
+  }
+  if (agent && typeof agent.close === 'function') {
+    await agent.close().catch(() => {});
+  }
+}
+
+function negotiateResponseEncoding(req) {
   const header = String(req?.headers?.['accept-encoding'] || '');
+  let brQuality = null;
   let gzipQuality = null;
   let wildcardQuality = null;
   for (const entry of header.split(',')) {
@@ -188,16 +241,25 @@ function acceptsGzipEncoding(req) {
     const qParam = params.find((p) => /^\s*q\s*=/.test(p));
     const quality = qParam ? Number(qParam.split('=')[1]) : 1;
     if (!Number.isFinite(quality) || quality < 0 || quality > 1) continue;
-    if (name === 'gzip') gzipQuality = quality;
+    if (name === 'br') brQuality = quality;
+    else if (name === 'gzip') gzipQuality = quality;
     else if (name === '*') wildcardQuality = quality;
   }
-  if (gzipQuality !== null) return gzipQuality > 0;
-  return wildcardQuality !== null && wildcardQuality > 0;
+  const brAllowed = brQuality !== null ? brQuality > 0 : (wildcardQuality !== null && wildcardQuality > 0);
+  const gzipAllowed = gzipQuality !== null ? gzipQuality > 0 : (wildcardQuality !== null && wildcardQuality > 0);
+  if (brAllowed && typeof zlib.brotliCompressSync === 'function') {
+    if (brQuality === null || gzipQuality === null || brQuality >= gzipQuality) {
+      return 'br';
+    }
+  }
+  if (gzipAllowed) return 'gzip';
+  return null;
 }
 
-function createGzipMiddleware({ minLength = 512, level = 5 } = {}) {
+function createGzipMiddleware({ minLength = 512, level = 5, brotliMinLength = 1024, brotliQuality = 4 } = {}) {
   return function gzipMiddleware(req, res, next) {
-    if (!acceptsGzipEncoding(req)) return next();
+    const encoding = negotiateResponseEncoding(req);
+    if (!encoding) return next();
 
     const originalSend = res.send;
     res.send = function (body) {
@@ -235,6 +297,20 @@ function createGzipMiddleware({ minLength = 512, level = 5 } = {}) {
         res.setHeader('Vary', curVary ? `${curVary}, Accept-Encoding` : 'Accept-Encoding');
       }
 
+      if (encoding === 'br' && buffer.length >= brotliMinLength) {
+        try {
+          const compressed = zlib.brotliCompressSync(buffer, {
+            params: {
+              [zlib.constants.BROTLI_PARAM_QUALITY]: brotliQuality,
+              [zlib.constants.BROTLI_PARAM_MODE]: zlib.constants.BROTLI_MODE_TEXT
+            }
+          });
+          res.setHeader('Content-Encoding', 'br');
+          res.removeHeader('Content-Length');
+          return originalSend.call(this, compressed);
+        } catch (_) {}
+      }
+
       if (buffer.length >= minLength) {
         try {
           const gzipped = zlib.gzipSync(buffer, { level });
@@ -255,5 +331,7 @@ module.exports = {
   isWispbyteControlPanelUrl,
   readJson,
   fetchWithRetry,
-  createGzipMiddleware
+  createGzipMiddleware,
+  configureGlobalHttpDispatcher,
+  closeGlobalHttpDispatcher
 };

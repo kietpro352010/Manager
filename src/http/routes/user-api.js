@@ -436,13 +436,28 @@ function createUserApi({
     };
   }
 
+  // Memoize non-secret Minecraft username by ciphertext to avoid N AES-256-GCM decryptions per /bots poll
+  const decryptedUsernameCache = new Map();
+  const MAX_DECRYPTED_USERNAME_CACHE = 512;
+
   // Helper: Extract decrypted Minecraft username from worker credentials if configured
   function getBotUsername(worker) {
     if (!worker) return '';
     const ciphertext = worker.settings?.mcCredentialsCiphertext;
     if (ciphertext && registry.encryptionKey) {
+      const cacheKey = `${String(registry.encryptionKey).slice(0, 8)}:${ciphertext}`;
+      const cached = decryptedUsernameCache.get(cacheKey);
+      if (cached !== undefined) return cached;
       const creds = safeDecryptJson(ciphertext, registry.encryptionKey);
-      if (creds && creds.username) return creds.username;
+      if (creds && creds.username) {
+        const uname = String(creds.username);
+        if (decryptedUsernameCache.size >= MAX_DECRYPTED_USERNAME_CACHE) {
+          const oldest = decryptedUsernameCache.keys().next().value;
+          if (oldest !== undefined) decryptedUsernameCache.delete(oldest);
+        }
+        decryptedUsernameCache.set(cacheKey, uname);
+        return uname;
+      }
     }
     if (worker.username) return worker.username;
     if (worker.status?.username) return worker.status.username;
@@ -717,36 +732,29 @@ function createUserApi({
         assignedBotIds: Array.isArray(session.assignedBotIds) ? session.assignedBotIds : [],
         inGracePeriod: Boolean(session.inGracePeriod)
       };
-      // Compute stable signature excluding per-second volatile fields (lastSeen, raw uptimeSeconds, connectedAt)
-      const sigBots = payload.map((b) => {
-        const copy = { ...b };
-        delete copy.lastSeen;
-        delete copy.connectedAt;
-        copy._rev = registry.workerStateRev
-          ? (registry.workerStateRev.get(String(b.workerId || b.id || '').toLowerCase()) || 0)
-          : 0;
-        copy.uptime = Math.floor(Number(copy.uptime || 0) / 60);
-        copy.uptimeSeconds = copy.uptime;
-        copy.ping = Math.round(Number(copy.ping || 0) / 25) * 25;
-        if (copy.summary && typeof copy.summary === 'object') {
-          const sCopy = { ...copy.summary };
-          delete sCopy.updatedAt;
-          delete sCopy.lastStateAt;
-          delete sCopy.uptimeSeconds;
-          delete sCopy.connectedAt;
-          copy.summary = sCopy;
-        }
-        return copy;
-      });
-      const sig = crypto
-        .createHash('sha1')
-        .update(JSON.stringify({
-          bots: sigBots,
-          currentUser: currentUserSnapshot,
-          maintenance: { enabled: maintenance.enabled, message: maintenance.message }
-        }))
-        .digest('hex')
-        .slice(0, 16);
+      // Compute stable signature excluding per-second volatile fields without cloning every bot object
+      const sigHash = crypto.createHash('sha1');
+      sigHash.update(JSON.stringify({
+        currentUser: currentUserSnapshot,
+        maintenance: { enabled: maintenance.enabled, message: maintenance.message }
+      }));
+      for (let i = 0; i < payload.length; i += 1) {
+        const b = payload[i];
+        const widLower = String(b.workerId || b.id || '').toLowerCase();
+        const revNum = registry.workerStateRev ? (registry.workerStateRev.get(widLower) || 0) : 0;
+        const uptimeMin = Math.floor(Number(b.uptime || 0) / 60);
+        const pingBucket = Math.round(Number(b.ping || 0) / 25) * 25;
+        sigHash.update(
+          `\n${b.id}|${revNum}|${b.label}|${b.username}|${b.available ? 1 : 0}|${b.enabled ? 1 : 0}|` +
+          `${b.status}|${b.online ? 1 : 0}|${b.manuallyStopped ? 1 : 0}|${b.lastKickReason || ''}|${b.lastError || ''}|` +
+          `${b.server || ''}|${b.dimension || ''}|${b.locationState || ''}|${b.health ?? ''}|${b.food ?? ''}|` +
+          `${b.totemCount ?? 0}|${b.goldenAppleCount ?? 0}|${b.pos?.x ?? 0},${b.pos?.y ?? 0},${b.pos?.z ?? 0}|` +
+          `${pingBucket}|${b.tps ?? ''}|${uptimeMin}|${b.reconnectAttempts ?? 0}|${b.reconnectCount ?? 0}|` +
+          `${b.rentable ? 1 : 0}|${b.assignedUsername || ''}|${b.assignedPlan || ''}|${b.ipAddress || ''}|${b.url || ''}|` +
+          `${Array.isArray(b.tags) ? b.tags.join(',') : ''}|${b.hostHardware?.botRssMb ?? ''}|${b.hostHardware?.cpuPercent ?? ''}`
+        );
+      }
+      const sig = sigHash.digest('hex').slice(0, 16);
 
       if (typeof req.query?.sig === 'string' && req.query.sig === sig) {
         return res.json({

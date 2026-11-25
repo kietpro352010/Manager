@@ -429,7 +429,7 @@ class WorkerRegistry {
   pruneStaleMemory() {
     const now = Date.now();
     for (const [botId, entry] of this.summaryCache.entries()) {
-      if (now - entry.timestamp > 60000) {
+      if (now - entry.timestamp > REACHABLE_WINDOW_MS) {
         this.summaryCache.delete(botId);
       }
     }
@@ -1008,22 +1008,27 @@ class WorkerRegistry {
       const isHeartbeatSource = source === 'worker-heartbeat' || source === 'wispbyte-poll';
       const isLightweight = Boolean(status?.isLightweight === true || status?.digestUnchanged === true);
       const lastPersistAt = this.lastDbStatusPersistAt.get(id) || 0;
-      const canCoalesceDbWrite = !needsProviderHeal && isHeartbeatSource && isLightweight && prevFingerprint === fingerprint && (Date.now() - lastPersistAt < 105000);
+      const isUnchangedLightweightHeartbeat = !needsProviderHeal && isHeartbeatSource && isLightweight && prevFingerprint === fingerprint;
+      const canCoalesceDbWrite = isUnchangedLightweightHeartbeat && (Date.now() - lastPersistAt < 150000);
 
       if (canCoalesceDbWrite) {
         return { ...existing, status: safeStatus, lastHeartbeat: managerNow };
       }
 
-      const updatePatch = {
-        status: safeStatus,
-        lastHeartbeat: managerNow,
-        ...(needsProviderHealToWispbyte ? { provider: 'wispbyte', ...(hasPanelUrl ? { serviceUrl: '' } : {}) } : {}),
-        ...(needsProviderHealToRender ? { provider: 'render' } : {})
-      };
+      // Delta-only DB heartbeat write: when status + inventory fingerprint in DB is already identical,
+      // persist ONLY lastHeartbeat (~48B) instead of re-sending the entire 8-12KB status + 46-slot inventory JSONB!
+      const updatePatch = isUnchangedLightweightHeartbeat
+        ? { lastHeartbeat: managerNow }
+        : {
+            status: safeStatus,
+            lastHeartbeat: managerNow,
+            ...(needsProviderHealToWispbyte ? { provider: 'wispbyte', ...(hasPanelUrl ? { serviceUrl: '' } : {}) } : {}),
+            ...(needsProviderHealToRender ? { provider: 'render' } : {})
+          };
 
       // Bảo tồn cờ enabled của admin, KHÔNG tự ý set enabled: true
       const rawUpdated = await this.store.update(id, updatePatch, { returning: false });
-      const updated = rawUpdated || { ...existing, ...updatePatch, updatedAt: managerNow };
+      const updated = rawUpdated || { ...existing, ...updatePatch, status: safeStatus, updatedAt: managerNow };
       this.lastDbStatusFingerprint.set(id, fingerprint);
       this.lastDbStatusPersistAt.set(id, Date.now());
 
@@ -1125,7 +1130,7 @@ class WorkerRegistry {
       const hasRenderUrl = Boolean(String(existing.serviceUrl || '').trim()) && !hasPanelUrl;
       const needsHeal = fromPoll && ((existing.provider === 'render' && !hasRenderUrl) || hasPanelUrl);
       const lastPersistAt = this.lastDbStatusPersistAt.get(id) || 0;
-      const canCoalesce = Boolean(fromPoll) && !needsHeal && lastPersistAt > 0 && (Date.now() - lastPersistAt < 105000);
+      const canCoalesce = Boolean(fromPoll) && !needsHeal && lastPersistAt > 0 && (Date.now() - lastPersistAt < 150000);
       const patch = {
         lastHeartbeat: now,
         ...(needsHeal ? { provider: 'wispbyte', ...(hasPanelUrl ? { serviceUrl: '' } : {}) } : {})

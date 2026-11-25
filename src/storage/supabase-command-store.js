@@ -112,6 +112,10 @@ class SupabaseCommandStore {
     this.adapter = client?.adapter || null;
     this.coalesceLock = new AsyncKeyLock();
     this.allowUnsafeSingleInstanceFallback = Boolean(options?.allowUnsafeSingleInstanceFallback);
+    const parsedIdleMs = Number(options?.idleEmptyCacheMs);
+    this.idleEmptyCacheMs = Number.isFinite(parsedIdleMs) && parsedIdleMs >= 0 ? parsedIdleMs : 600000;
+    this._emptyQueueVerifiedUntil = new Map();
+    this._noPendingSyncUntil = 0;
     this.stateSyncRpcState = {
       ok: true,
       checked: false,
@@ -260,7 +264,33 @@ class SupabaseCommandStore {
     } catch (_) {}
   }
 
+  invalidateIdleGate(workerId = null) {
+    if (workerId === null || workerId === undefined) {
+      this._emptyQueueVerifiedUntil.clear();
+      return;
+    }
+    const raw = String(workerId);
+    this._emptyQueueVerifiedUntil.delete(raw);
+    this._emptyQueueVerifiedUntil.delete(raw.toLowerCase());
+  }
+
+  _markQueueVerifiedEmpty(workerId) {
+    if (this.idleEmptyCacheMs <= 0) return;
+    if (this._emptyQueueVerifiedUntil.size >= 1000) {
+      const now = Date.now();
+      for (const [k, until] of this._emptyQueueVerifiedUntil.entries()) {
+        if (now >= until) this._emptyQueueVerifiedUntil.delete(k);
+      }
+      if (this._emptyQueueVerifiedUntil.size >= 1000) {
+        this._emptyQueueVerifiedUntil.clear();
+      }
+    }
+    this._emptyQueueVerifiedUntil.set(String(workerId), Date.now() + this.idleEmptyCacheMs);
+  }
+
   async initialize() {
+    this.invalidateIdleGate();
+    this._noPendingSyncUntil = 0;
     try {
       const { error: checkError } = await this.client.from(TABLE).select('command_id').limit(0);
       if (checkError && checkError.code !== 'PGRST116') {
@@ -282,6 +312,7 @@ class SupabaseCommandStore {
 
   async enqueue(command) {
     const workerIdStr = String(command.workerId);
+    this.invalidateIdleGate(workerIdStr);
     const actionStr = String(command.action);
     const commandId = command.commandId || ('cmd_' + crypto.randomUUID());
     const createdAt = command.createdAt || new Date().toISOString();
@@ -390,12 +421,25 @@ class SupabaseCommandStore {
   }
 
   async take(workerId) {
+    const wid = String(workerId);
+    if (this.idleEmptyCacheMs > 0) {
+      const verifiedUntil = this._emptyQueueVerifiedUntil.get(wid) || 0;
+      if (Date.now() < verifiedUntil) {
+        return null;
+      }
+    }
+
     // 1. Thử gọi RPC manager_take_worker_command (thực thi FOR UPDATE SKIP LOCKED trong SQL)
     try {
-      const { data, error } = await this.client.rpc('manager_take_worker_command', { p_worker_id: String(workerId) });
+      const { data, error } = await this.client.rpc('manager_take_worker_command', { p_worker_id: wid });
       if (!error) {
         const row = unwrap(data);
-        return row ? fromRow(row) : null;
+        if (row) {
+          this.invalidateIdleGate(wid);
+          return fromRow(row);
+        }
+        this._markQueueVerifiedEmpty(wid);
+        return null;
       }
       if (!isRpcUnavailableError(error)) {
         const err = new Error(error.message || 'manager_take_worker_command failed');
@@ -413,14 +457,18 @@ class SupabaseCommandStore {
         const now = new Date().toISOString();
         const { data, error } = await this.client.from(TABLE)
           .select('*')
-          .eq('worker_id', String(workerId))
+          .eq('worker_id', wid)
           .eq('status', 'queued')
           .gt('expires_at', now)
           .order('created_at', { ascending: true })
           .limit(1)
           .maybeSingle();
 
-        if (error || !data) {
+        if (error) {
+          return null;
+        }
+        if (!data) {
+          this._markQueueVerifiedEmpty(wid);
           return null;
         }
 
@@ -432,6 +480,7 @@ class SupabaseCommandStore {
           .maybeSingle();
 
         if (!updErr && updated) {
+          this.invalidateIdleGate(wid);
           return fromRow(updated);
         }
         // Tranh chấp: command vừa được worker khác lấy, tiếp tục vòng lặp để lấy command tiếp theo
@@ -489,6 +538,7 @@ class SupabaseCommandStore {
   } = {}) {
     const wid = String(workerId);
     const cid = String(commandId);
+    this._noPendingSyncUntil = 0;
     const nowIso = new Date().toISOString();
     const effectiveLeaseMs = computeLeaseMs(leaseSeconds, leaseMs, 60000);
     const rpcLeaseSec = computeRpcLeaseSeconds(effectiveLeaseMs);
@@ -837,6 +887,7 @@ class SupabaseCommandStore {
     const wid = String(workerId);
     const cid = String(commandId);
     const safeSyncState = cloneObj(syncState);
+    this._noPendingSyncUntil = 0;
 
     try {
       const { data, error } = await this.client.rpc('manager_mark_command_sync_pending', {
@@ -969,6 +1020,9 @@ class SupabaseCommandStore {
   }
 
   async claimPendingStateSyncBatch(leaseOwner, limit = 10, leaseSeconds = 60, { leaseMs = null } = {}) {
+    if (this.idleEmptyCacheMs > 0 && Date.now() < this._noPendingSyncUntil) {
+      return [];
+    }
     const cleanOwner = String(leaseOwner || `mgr_${process.pid}`);
     const safeLimit = Math.max(1, Math.min(100, Number(limit) || 10));
     const effectiveLeaseMs = computeLeaseMs(leaseSeconds, leaseMs, 60000);
@@ -982,6 +1036,11 @@ class SupabaseCommandStore {
       });
       if (!error && Array.isArray(data)) {
         this.markRpcVerified('manager_claim_pending_command_syncs');
+        if (data.length === 0 && this.idleEmptyCacheMs > 0) {
+          this._noPendingSyncUntil = Date.now() + Math.max(this.idleEmptyCacheMs, 900000);
+        } else if (data.length > 0) {
+          this._noPendingSyncUntil = 0;
+        }
         return data.map(fromRow);
       }
       if (error && !isRpcUnavailableError(error)) {
@@ -1065,6 +1124,7 @@ class SupabaseCommandStore {
 
   async clearWorker(workerId, { excludeCommandIds = [] } = {}) {
     const wid = String(workerId);
+    this.invalidateIdleGate(wid);
     const excluded = (Array.isArray(excludeCommandIds) ? excludeCommandIds : [excludeCommandIds])
       .map((id) => String(id || '').trim())
       .filter(Boolean);

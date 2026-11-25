@@ -1065,7 +1065,10 @@ async function refreshDetail(force=false) {
         const bIdx = bots.findIndex(b => String(b.workerId||b.id) === String(requestBotId));
         if (bIdx !== -1) {
           bots[bIdx] = { ...bots[bIdx], ...detailBot };
-          if (typeof renderHome === 'function') renderHome();
+          const homeEl = typeof document !== 'undefined' ? document.getElementById('homePage') : null;
+          if (!homeEl || !homeEl.classList || !homeEl.classList.contains('hidden')) {
+            if (typeof renderHome === 'function') renderHome();
+          }
         }
       }
       uptimeSyncAt=Date.now();

@@ -19,6 +19,12 @@ function hasFiniteCoord(val) {
   return val !== null && val !== undefined && String(val).trim() !== '' && Number.isFinite(Number(val));
 }
 
+function sendCompactWorkerJson(res, payload) {
+  const raw = JSON.stringify(payload);
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  return res.end(raw);
+}
+
 function createWorkerApi({ registry, broker, workerStore, adminNotifier, config, logger }) {
   const router = express.Router({ mergeParams: true });
   for (const method of ['get', 'post', 'put', 'patch', 'delete', 'all']) {
@@ -51,23 +57,33 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
       const settingsRevision = typeof registry.getSettingsRevision === 'function'
         ? registry.getSettingsRevision(req.workerId)
         : 1;
-      return res.json({ ok: true, settingsRevision });
+      return sendCompactWorkerJson(res, { ok: true, settingsRevision });
     } catch (error) { return next(error); }
   });
 
   router.post('/events', auth, async (req, res, next) => {
     try {
-      const event = req.body || {};
-      const result = await registry.addEvent(req.workerId, event);
-      if (!result) {
-        return res.status(404).json({ ok: false, error: 'worker_not_found_or_disabled' });
+      const body = req.body || {};
+      const incomingEvents = Array.isArray(body.events)
+        ? body.events.filter((e) => e && typeof e === 'object' && !Array.isArray(e)).slice(0, 50)
+        : [body];
+      if (incomingEvents.length === 0) {
+        return res.json({ ok: true, count: 0 });
       }
 
-      // Check alerts (resolve human-friendly bot label and pass exact parameter order)
-      if (adminNotifier) {
-        if (['bot_death', 'low_totem', 'afk_kicked', 'afk_recovered', 'reconnect_exhausted'].includes(event.type)) {
+      let workerMeta = undefined;
+      for (const event of incomingEvents) {
+        const result = await registry.addEvent(req.workerId, event);
+        if (!result) {
+          return res.status(404).json({ ok: false, error: 'worker_not_found_or_disabled' });
+        }
+
+        // Check alerts (resolve human-friendly bot label once per batch and pass exact parameter order)
+        if (adminNotifier && ['bot_death', 'low_totem', 'afk_kicked', 'afk_recovered', 'reconnect_exhausted'].includes(event.type)) {
           try {
-            const workerMeta = await registry.find(req.workerId).catch(() => null);
+            if (workerMeta === undefined) {
+              workerMeta = await registry.find(req.workerId).catch(() => null);
+            }
             const botLabel = workerMeta?.settings?.alias || workerMeta?.alias || workerMeta?.name || req.workerId;
             if (event.type === 'bot_death') {
               await Promise.resolve(adminNotifier.notifyBotDeath?.(req.workerId, botLabel, event.coords || event.position || event.reason || null)).catch(() => {});
@@ -100,7 +116,7 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
         }
       }
 
-      return res.json({ ok: true });
+      return sendCompactWorkerJson(res, Array.isArray(body.events) ? { ok: true, count: incomingEvents.length } : { ok: true });
     } catch (error) { return next(error); }
   });
 
@@ -143,9 +159,10 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
       }
 
       const requestedWait = Number(req.body?.waitMs);
+      const defaultPollWaitMs = config.workerPollWaitMs || 45000;
       const waitMs = Number.isFinite(requestedWait)
-        ? Math.max(0, Math.min(config.workerPollWaitMs || 15000, requestedWait))
-        : (config.workerPollWaitMs || 15000);
+        ? Math.max(0, Math.min(defaultPollWaitMs, requestedWait))
+        : defaultPollWaitMs;
 
       const pollOpts = { waitMs };
       Object.defineProperty(pollOpts, 'signal', {
@@ -159,6 +176,9 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
       const settingsRevision = typeof registry.getSettingsRevision === 'function'
         ? registry.getSettingsRevision(req.workerId)
         : 1;
+      if (!command) {
+        return sendCompactWorkerJson(res, { ok: true, command: null, settingsRevision });
+      }
       return res.json({ ok: true, command, settingsRevision });
     } catch (error) {
       return next(error);

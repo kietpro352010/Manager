@@ -24,29 +24,44 @@ const { getMaintenanceState } = require('../../utils/maintenance');
 
 const panelControlLock = new AsyncKeyLock();
 const resolvedUserCache = new WeakMap();
+const resolvedGuildCache = new WeakMap();
+const resolvedRolesCache = new WeakMap();
 
-async function resolveAllowedGuildId(services) {
+async function resolveAllowedGuildId(services, interaction = null) {
+  if (interaction && typeof interaction === 'object' && resolvedGuildCache.has(interaction)) {
+    return resolvedGuildCache.get(interaction);
+  }
+  let resolved = '';
   if (services?.config?.discordGuildId && String(services.config.discordGuildId).trim()) {
-    return String(services.config.discordGuildId).trim();
+    resolved = String(services.config.discordGuildId).trim();
   }
-  const snap = services?.managerRuntimeSettings?.snapshot?.();
-  if (snap && (snap.guildId || snap.discordGuildId)) {
-    const id = String(snap.guildId || snap.discordGuildId).trim();
-    if (id) return id;
+  if (!resolved) {
+    const snap = services?.managerRuntimeSettings?.snapshot?.();
+    if (snap && (snap.guildId || snap.discordGuildId)) {
+      const id = String(snap.guildId || snap.discordGuildId).trim();
+      if (id) resolved = id;
+    }
   }
-  try {
-    const roleSettings = await services?.managerRuntimeSettings?.getRoleSettings?.();
-    if (roleSettings?.guildId && String(roleSettings.guildId).trim()) {
-      return String(roleSettings.guildId).trim();
-    }
-  } catch (_) {}
-  try {
-    const stored = await services?.accessStore?.getSetting?.('discord_access');
-    if (stored?.guildId && String(stored.guildId).trim()) {
-      return String(stored.guildId).trim();
-    }
-  } catch (_) {}
-  return '';
+  if (!resolved) {
+    try {
+      const roleSettings = await services?.managerRuntimeSettings?.getRoleSettings?.();
+      if (roleSettings?.guildId && String(roleSettings.guildId).trim()) {
+        resolved = String(roleSettings.guildId).trim();
+      }
+    } catch (_) {}
+  }
+  if (!resolved) {
+    try {
+      const stored = await services?.accessStore?.getSetting?.('discord_access');
+      if (stored?.guildId && String(stored.guildId).trim()) {
+        resolved = String(stored.guildId).trim();
+      }
+    } catch (_) {}
+  }
+  if (interaction && typeof interaction === 'object') {
+    resolvedGuildCache.set(interaction, resolved);
+  }
+  return resolved;
 }
 
 function isIgnorable(err) {
@@ -201,7 +216,10 @@ setInterval(() => {
 }, 10 * 60 * 1000).unref();
 
 // Resolve authenticated user & verify admin
-async function getEffectiveRoleIds(services) {
+async function getEffectiveRoleIds(services, interaction = null) {
+  if (interaction && typeof interaction === 'object' && resolvedRolesCache.has(interaction)) {
+    return resolvedRolesCache.get(interaction);
+  }
   let adminRoleId = services?.accessControl?.adminRoleId || services?.config?.adminRoleId || '';
   let userRoleId = services?.accessControl?.userRoleId || services?.config?.userRoleId || '';
   if (!adminRoleId || !userRoleId) {
@@ -224,7 +242,11 @@ async function getEffectiveRoleIds(services) {
       }
     } catch (_) {}
   }
-  return { adminRoleId, userRoleId };
+  const result = { adminRoleId, userRoleId };
+  if (interaction && typeof interaction === 'object') {
+    resolvedRolesCache.set(interaction, result);
+  }
+  return result;
 }
 
 async function addMemberRole(interaction, roleId) {
@@ -271,13 +293,13 @@ async function hasAuthorizedRole(interaction, services) {
   if (services?.accessControl?.adminUserId && services.accessControl.adminUserId === userId) return true;
 
   // Enforce allowed guild fail-closed before checking setup roles (never guild ownership or raw permissions)
-  const allowedGuildId = await resolveAllowedGuildId(services);
+  const allowedGuildId = await resolveAllowedGuildId(services, interaction);
   if (!allowedGuildId || interaction.guildId !== allowedGuildId) {
     return false;
   }
 
   // 2. Resolve configured role IDs
-  const { adminRoleId, userRoleId } = await getEffectiveRoleIds(services);
+  const { adminRoleId, userRoleId } = await getEffectiveRoleIds(services, interaction);
 
   // If neither role is configured yet inside the allowed guild, allow interactions (initial unconfigured setup state)
   if (!adminRoleId && !userRoleId) return true;
@@ -307,9 +329,9 @@ async function resolveLinkedUser(interaction, services) {
     return resolvedUserCache.get(interaction);
   }
 
-  const allowedGuildId = await resolveAllowedGuildId(services);
+  const allowedGuildId = await resolveAllowedGuildId(services, interaction);
   const isAllowedGuild = Boolean(allowedGuildId && interaction.guildId === allowedGuildId);
-  const { adminRoleId: effectiveAdminRoleId } = await getEffectiveRoleIds(services);
+  const { adminRoleId: effectiveAdminRoleId } = await getEffectiveRoleIds(services, interaction);
 
   // 1. Strictly recognize admin ONLY via configured Admin Discord User ID or configured Admin Role in allowed guild
   const configuredAdminUserId = String(services?.config?.adminUserId || services?.accessControl?.adminUserId || '').trim();
@@ -408,7 +430,7 @@ async function handlePanelInteraction(interaction, services) {
     return;
   }
 
-  const effectiveGuildId = await resolveAllowedGuildId(services);
+  const effectiveGuildId = await resolveAllowedGuildId(services, interaction);
   if (!effectiveGuildId || interaction.guildId !== effectiveGuildId) {
     await safeReply(interaction, {
       content: 'This manager is available only in its configured Discord server.',
@@ -1117,9 +1139,12 @@ async function handlePanelInteraction(interaction, services) {
       const stats = { totalWorkers: allWorkers.length, onlineWorkers };
       let dbCheck = { ok: true, latencyMs: 0 };
       const dbStore = services.accessStore?.adapter ? services.accessStore : services.store;
-      if (dbStore?.adapter && typeof dbStore.adapter.testConnection === 'function') {
+      if (dbStore?.adapter && (typeof dbStore.adapter.ping === 'function' || typeof dbStore.adapter.testConnection === 'function')) {
         const start = Date.now();
-        const testRes = await dbStore.adapter.testConnection().catch((err) => ({ ok: false, error: err.message }));
+        const probeFn = typeof dbStore.adapter.ping === 'function'
+          ? () => dbStore.adapter.ping()
+          : () => dbStore.adapter.testConnection();
+        const testRes = await probeFn().catch((err) => ({ ok: false, error: err.message }));
         dbCheck = { ok: Boolean(testRes?.ok), latencyMs: Date.now() - start, error: testRes?.error };
       } else if (dbStore && typeof dbStore.ping === 'function') {
         const start = Date.now();

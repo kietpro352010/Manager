@@ -356,17 +356,32 @@ function renderAdminBots({ workers = [], page = 0, pageSize = 5, notice = '' }) 
   }
 
   const navRow = new ActionRowBuilder();
-  if (totalPages > 1) {
+  if (totalPages > 2) {
     navRow.addComponents(
-      button('◀ Trang trước', `admin:bots:${currentPage - 1}`, ButtonStyle.Secondary, currentPage <= 0),
-      button('Trang sau ▶', `admin:bots:${currentPage + 1}`, ButtonStyle.Secondary, currentPage >= totalPages - 1)
+      button('⏮ Đầu', 'admin:bots:0', ButtonStyle.Secondary, currentPage <= 0),
+      button('◀ Trước', `admin:bots:${currentPage - 1}`, ButtonStyle.Secondary, currentPage <= 0),
+      button('Sau ▶', `admin:bots:${currentPage + 1}`, ButtonStyle.Secondary, currentPage >= totalPages - 1),
+      button('Cuối ⏭', `admin:bots:${totalPages - 1}`, ButtonStyle.Secondary, currentPage >= totalPages - 1)
     );
+    components.push(navRow);
+    const ctrlRow = new ActionRowBuilder().addComponents(
+      button('Tổng quan Admin', 'admin:status', ButtonStyle.Primary, false, '🛡️'),
+      button('Làm mới', `admin:bots:${currentPage}`, ButtonStyle.Success, false, '🔄')
+    );
+    components.push(ctrlRow);
+  } else {
+    if (totalPages > 1) {
+      navRow.addComponents(
+        button('◀ Trang trước', `admin:bots:${currentPage - 1}`, ButtonStyle.Secondary, currentPage <= 0),
+        button('Trang sau ▶', `admin:bots:${currentPage + 1}`, ButtonStyle.Secondary, currentPage >= totalPages - 1)
+      );
+    }
+    navRow.addComponents(
+      button('Tổng quan Admin', 'admin:status', ButtonStyle.Primary, false, '🛡️'),
+      button('Làm mới', `admin:bots:${currentPage}`, ButtonStyle.Success, false, '🔄')
+    );
+    components.push(navRow);
   }
-  navRow.addComponents(
-    button('Tổng quan Admin', 'admin:status', ButtonStyle.Primary, false, '🛡️'),
-    button('Làm mới', `admin:bots:${currentPage}`, ButtonStyle.Success, false, '🔄')
-  );
-  components.push(navRow);
 
   return { embeds: [adminEmbed], components };
 }

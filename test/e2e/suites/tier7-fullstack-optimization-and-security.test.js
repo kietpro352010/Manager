@@ -1322,11 +1322,17 @@ async function runAll() {
     let homeRefreshes = 0;
     sandbox.ctx.refreshHome = async () => { homeRefreshes++; };
 
-    // 1. Active tab -> 5000ms timer; offline skips refreshHome
+    // 1. Active Home tab -> 8000ms bandwidth-saver timer (6500ms Detail, 4500ms when GUI open); offline skips refreshHome
     sandbox.doc.hidden = false;
     sandbox.ctx.scheduleNextManagerPoll();
     const tActive = sandbox.capturedTimers.timeouts.at(-1);
-    assert.strictEqual(tActive.ms, 5000);
+    assert.strictEqual(tActive.ms, 8000);
+
+    vm.runInContext("selectedBotId = '15'; detailBot = { id: '15', currentWindow: { title: 'Menu', slots: [{}] } };", sandbox.ctx);
+    sandbox.ctx.scheduleNextManagerPoll();
+    const tGuiActive = sandbox.capturedTimers.timeouts.at(-1);
+    assert.strictEqual(tGuiActive.ms, 4500);
+    vm.runInContext('selectedBotId = null; detailBot = null;', sandbox.ctx);
 
     sandbox.localWin.navigator.onLine = false;
     await tActive.fn();

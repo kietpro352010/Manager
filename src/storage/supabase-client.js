@@ -170,6 +170,7 @@ class SupabaseAdapter {
         const headers = {
             'apikey': this.key,
             'Content-Type': 'application/json',
+            'Accept-Encoding': 'br, gzip',
             ...extra
         };
         if (typeof this.key === 'string' && this.key.split('.').length === 3) {
@@ -186,6 +187,7 @@ class SupabaseAdapter {
                 const signal = options.signal || AbortSignal.timeout(timeoutMs);
                 const res = await fetch(url, { ...options, signal });
                 if (attempt < maxRetries && [408, 429, 500, 502, 503, 504].includes(res.status)) {
+                    await res.body?.cancel?.().catch(() => {});
                     const delay = Math.min(maxDelayMs, initialDelayMs * Math.pow(2, attempt - 1)) + Math.floor(Math.random() * 200);
                     console.warn(`[SUPABASE RETRY] HTTP ${res.status} khi gọi ${url.split('?')[0]}. Thử lại lần ${attempt}/${maxRetries} sau ${delay}ms...`);
                     await new Promise(r => setTimeout(r, delay));
@@ -380,6 +382,33 @@ class SupabaseAdapter {
         if (!text) return null;
         try { return JSON.parse(text); }
         catch (_) { throw new Error('Supabase RPC ' + name + ' trả JSON không hợp lệ.'); }
+    }
+
+    async ping() {
+        if (!this.isEnabled()) return { ok: false, error: 'Chưa cấu hình Supabase URL hoặc API Key' };
+        if (!this.lastPingOk) {
+            return this.testConnection();
+        }
+        try {
+            const res = await this.fetchWithRetry(
+                `${this.url}/rest/v1/manager_settings?select=key&limit=1`,
+                { headers: this.getHeaders() },
+                { timeoutMs: 5000, maxRetries: 2 }
+            );
+            await res.body?.cancel?.().catch(() => {});
+            if (!res.ok) {
+                this.lastPingOk = false;
+                this.lastPingError = `HTTP ${res.status}`;
+                return { ok: false, error: this.lastPingError };
+            }
+            this.lastPingOk = true;
+            this.lastPingError = '';
+            return { ok: true, lightweight: true, rpcVerified: true };
+        } catch (err) {
+            this.lastPingOk = false;
+            this.lastPingError = err?.message || String(err);
+            return { ok: false, error: `Lỗi kết nối Supabase: ${this.lastPingError}` };
+        }
     }
 
     async testConnection() {
@@ -2434,7 +2463,7 @@ class SupabaseAdapter {
                 method: 'POST',
                 headers: {
                     ...this.getHeaders(),
-                    'Prefer': 'resolution=merge-duplicates'
+                    'Prefer': 'resolution=merge-duplicates,return=minimal'
                 },
                 body: JSON.stringify(row)
             }, { timeoutMs: 8000, maxRetries: 2 });
@@ -2453,7 +2482,7 @@ function createSupabaseClient({ url, secretKey }) {
   const cleanKey = String(secretKey || '').trim();
   const client = createClient(cleanUrl, cleanKey, {
     auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false },
-    global: { headers: { 'x-application-name': 'kingmc-worker-manager' } }
+    global: { headers: { 'x-application-name': 'kingmc-worker-manager', 'Accept-Encoding': 'br, gzip' } }
   });
   client.adapter = new SupabaseAdapter({ url: cleanUrl, key: cleanKey });
   return client;

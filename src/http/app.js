@@ -4,8 +4,30 @@ const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
 const crypto = require('node:crypto');
+const { monitorEventLoopDelay } = require('node:perf_hooks');
 const express = require('express');
 const helmet = require('helmet');
+
+const SAFE_REQUEST_ID_REGEX = /^[A-Za-z0-9._:-]{8,64}$/;
+const DANGEROUS_PROTO_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function sanitizeObjectInPlace(target, depth = 0) {
+  if (!target || typeof target !== 'object' || depth > 12) return target;
+  if (Array.isArray(target)) {
+    for (let i = 0; i < target.length; i++) {
+      sanitizeObjectInPlace(target[i], depth + 1);
+    }
+    return target;
+  }
+  for (const key of Object.keys(target)) {
+    if (DANGEROUS_PROTO_KEYS.has(key)) {
+      delete target[key];
+    } else {
+      sanitizeObjectInPlace(target[key], depth + 1);
+    }
+  }
+  return target;
+}
 
 const { PUBLIC_LOGIN_HTML } = require('./views/login-html');
 const {
@@ -19,10 +41,12 @@ const {
 function prepareCompressedView(content, contentType = 'text/html; charset=utf-8') {
   const raw = Buffer.from(String(content || ''), 'utf8');
   const gzip = zlib.gzipSync(raw, { level: 9 });
+  const maxBrotliQuality = zlib.constants?.BROTLI_MAX_QUALITY ?? 11;
   const brotli = typeof zlib.brotliCompressSync === 'function'
     ? zlib.brotliCompressSync(raw, {
         params: {
-          [zlib.constants.BROTLI_PARAM_QUALITY]: 9,
+          [zlib.constants.BROTLI_PARAM_QUALITY]: maxBrotliQuality,
+          [zlib.constants.BROTLI_PARAM_LGWIN]: 22,
           [zlib.constants.BROTLI_PARAM_MODE]: zlib.constants.BROTLI_MODE_TEXT
         }
       })
@@ -121,8 +145,33 @@ function createApp({
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
 
-  app.use((req, _res, next) => {
+  let isShuttingDown = false;
+  let loopDelayMonitor = null;
+  try {
+    if (typeof monitorEventLoopDelay === 'function') {
+      loopDelayMonitor = monitorEventLoopDelay({ resolution: 20 });
+      loopDelayMonitor.enable();
+      // Do not keep test event loops open — monitorEventLoopDelay uses an internal unref-capable handle
+    }
+  } catch (_) {
+    loopDelayMonitor = null;
+  }
+
+  function getEventLoopLagSnapshot() {
+    if (!loopDelayMonitor) return { mean: 0, p99: 0 };
+    const mean = Number((loopDelayMonitor.mean / 1e6).toFixed(2));
+    const p99 = Number((loopDelayMonitor.percentile(99) / 1e6).toFixed(2));
+    return {
+      mean: Number.isFinite(mean) ? mean : 0,
+      p99: Number.isFinite(p99) ? p99 : 0
+    };
+  }
+
+  app.use((req, res, next) => {
     req.clientIp = resolveClientIp(req);
+    const incomingReqId = typeof req.headers['x-request-id'] === 'string' ? req.headers['x-request-id'].trim() : '';
+    req.requestId = SAFE_REQUEST_ID_REGEX.test(incomingReqId) ? incomingReqId : crypto.randomUUID();
+    res.setHeader('X-Request-Id', req.requestId);
     next();
   });
 
@@ -218,7 +267,7 @@ function createApp({
       } catch (_) {
         return originalSend.call(this, body);
       }
-      if (buffer.length < 512) return originalSend.call(this, body);
+      if (buffer.length < 384) return originalSend.call(this, body);
       if (preferredEncoding === 'br' && typeof zlib.brotliCompress === 'function') {
         zlib.brotliCompress(buffer, {
           params: {
@@ -246,28 +295,41 @@ function createApp({
     next();
   });
 
-  // 2. Security Headers & Caching
-  app.use(helmet({
+  // 2. Security Headers & Caching (skip browser-only headers on machine-to-machine Worker endpoints to save ~780B/response)
+  const helmetMiddleware = helmet({
     contentSecurityPolicy: false,
     crossOriginEmbedderPolicy: false
-  }));
-
+  });
   app.use((req, res, next) => {
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-    res.setHeader('Content-Security-Policy', "default-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:; img-src 'self' data: https: blob:; media-src 'self' https: data: blob:; connect-src 'self' https:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self';");
-
-    if (isHttps(req, config?.publicBaseUrl)) {
-      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    if (req.path.startsWith('/api/v1/workers/') || req.path.startsWith('/api/worker/')) {
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('X-Frame-Options', 'DENY');
+      res.setHeader('Cache-Control', 'no-store');
+      if (isHttps(req, config?.publicBaseUrl)) {
+        res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+      }
+      return next();
     }
+    return helmetMiddleware(req, res, () => {
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('X-Frame-Options', 'DENY');
+      res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+      res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), browsing-topics=()');
+      res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+      res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+      res.setHeader('Content-Security-Policy', "default-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:; img-src 'self' data: https: blob:; media-src 'self' https: data: blob:; connect-src 'self' https:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self';");
 
-    if (req.path.startsWith('/api/') || req.path === '/health' || req.path === '/ready') {
-      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-      res.setHeader('Pragma', 'no-cache');
-      res.setHeader('Expires', '0');
-    }
-    next();
+      if (isHttps(req, config?.publicBaseUrl)) {
+        res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+      }
+
+      if (req.path.startsWith('/api/') || req.path === '/health' || req.path === '/ready') {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+      }
+      next();
+    });
   });
 
   // 2.5 Static GUI Textures Route (mounted BEFORE session auth so 32x32 PNGs never trigger DB queries!)
@@ -296,6 +358,11 @@ function createApp({
       })
     );
   }
+  // Short-circuit missing /textures/* assets with 0-byte 24h cached 404 before body-parser & session auth
+  app.use('/textures', (_req, res) => {
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    return res.status(404).end();
+  });
 
   // 2.6 Content-Hashed Static Dashboard CSS/JS Assets (BW-01: immutable 1-year cache, 0 DB hits, Brotli+Gzip)
   app.get(DASHBOARD_CSS_PATH, (req, res) => {
@@ -312,9 +379,14 @@ function createApp({
     });
   });
 
-  // 3. Body Parsers
+  // 3. Body Parsers + Prototype Pollution Sanitizer (OWASP A05)
   app.use(express.json({ limit: '512kb', strict: true }));
   app.use(express.urlencoded({ extended: false, limit: '128kb' }));
+  app.use((req, _res, next) => {
+    if (req.body && typeof req.body === 'object') sanitizeObjectInPlace(req.body);
+    if (req.query && typeof req.query === 'object') sanitizeObjectInPlace(req.query);
+    next();
+  });
 
   // 4. CSRF Protection for Browser State-Changing Requests
   function resolveExpectedOrigin(req) {
@@ -514,11 +586,11 @@ function createApp({
     }
   }
 
-  const READ_POLL_AUTH_CACHE_TTL_MS = Math.max(0, Number(config?.sessionAuthCacheTtlMs ?? 15000) || 0);
+  const READ_POLL_AUTH_CACHE_TTL_MS = Math.max(0, Number(config?.sessionAuthCacheTtlMs ?? 30000) || 0);
   function isCacheablePollRead(req) {
     if (req.method !== 'GET' || READ_POLL_AUTH_CACHE_TTL_MS <= 0) return false;
     const p = String(req.path || '');
-    return /^\/api\/(?:manager|user)\/(?:bots|announcement|bot\/[^/]+\/(?:snapshot|logs|chat-logs))$/.test(p);
+    return /^\/api\/(?:manager|user)\/(?:bots|announcement|maintenance|rewards\/status|bot\/[^/]+\/(?:snapshot|logs|chat-logs|settings))$/.test(p);
   }
 
   // 5. Dynamic Session Authentication Middleware
@@ -679,10 +751,10 @@ function createApp({
     const memory = process.memoryUsage();
     const { link4mHealth, commandSyncHealth, warnings, degraded } = getDegradedChecks();
     return res.json({
-      ok: true,
+      ok: !isShuttingDown,
       degraded,
       service: 'KingMC AFK Bot Cloud 24/7',
-      status: degraded ? 'degraded' : 'healthy',
+      status: isShuttingDown ? 'shutting_down' : (degraded ? 'degraded' : 'healthy'),
       checks: {
         link4m: link4mHealth,
         commandSyncRpc: commandSyncHealth
@@ -693,6 +765,7 @@ function createApp({
         rssMb: Math.round(memory.rss / (1024 * 1024)),
         heapUsedMb: Math.round(memory.heapUsed / (1024 * 1024))
       },
+      eventLoopLagMs: getEventLoopLagSnapshot(),
       time: new Date().toISOString()
     });
   });
@@ -700,9 +773,18 @@ function createApp({
   // 6.2 Readiness Probe (validates Database connectivity and Discord Gateway; DB probe cached 10s)
   let readyDbCache = null;
   app.get(['/ready', '/api/ready'], async (_req, res) => {
+    if (isShuttingDown) {
+      return res.status(503).json({
+        ok: false,
+        degraded: false,
+        status: 'shutting_down',
+        service: 'KingMC AFK Bot Cloud 24/7',
+        time: new Date().toISOString()
+      });
+    }
     let dbOk = true;
     let dbLatencyMs = 0;
-    if (store?.adapter && typeof store.adapter.testConnection === 'function') {
+    if (store?.adapter && (typeof store.adapter.ping === 'function' || typeof store.adapter.testConnection === 'function')) {
       const now = Date.now();
       if (readyDbCache && (now - readyDbCache.checkedAt < 10000)) {
         dbOk = readyDbCache.ok;
@@ -710,7 +792,10 @@ function createApp({
       } else {
         const start = Date.now();
         try {
-          const testRes = await store.adapter.testConnection();
+          const probeFn = typeof store.adapter.ping === 'function'
+            ? store.adapter.ping.bind(store.adapter)
+            : store.adapter.testConnection.bind(store.adapter);
+          const testRes = await probeFn();
           dbOk = Boolean(testRes?.ok);
           dbLatencyMs = Date.now() - start;
         } catch (_) {
@@ -821,24 +906,37 @@ function createApp({
   app.use('/api/worker', workerRouter);
 
   // 8. 404 Handler
-  app.use((_req, res) => {
-    return res.status(404).json({ ok: false, error: 'not_found' });
+  app.use((req, res) => {
+    return res.status(404).json({ ok: false, error: 'not_found', requestId: req.requestId });
   });
 
-  // 9. Error Handler
-  app.use((err, _req, res, _next) => {
+  // 9. Error Handler (OWASP A10: clean 400/413 separation without false 500 alerts or stack leaks)
+  app.use((err, req, res, _next) => {
+    if (err && (err.type === 'entity.too.large' || err.status === 413 || err.statusCode === 413)) {
+      return res.status(413).json({
+        ok: false,
+        error: 'Dữ liệu yêu cầu vượt quá giới hạn dung lượng cho phép.',
+        requestId: req?.requestId
+      });
+    }
     if (err && (err.type === 'entity.parse.failed' || err instanceof SyntaxError)) {
-      return res.status(400).json({ ok: false, error: 'JSON request không hợp lệ.' });
+      return res.status(400).json({ ok: false, error: 'JSON request không hợp lệ.', requestId: req?.requestId });
     }
     if (err instanceof TypeError && /Cannot convert object to primitive value/i.test(err.message || '')) {
-      return res.status(400).json({ ok: false, error: 'Tham số yêu cầu không hợp lệ.' });
+      return res.status(400).json({ ok: false, error: 'Tham số yêu cầu không hợp lệ.', requestId: req?.requestId });
     }
-    logger?.error('HTTP Server Error', { error: err?.message, stack: err?.stack });
-    return res.status(500).json({ ok: false, error: 'internal_server_error' });
+    logger?.error('HTTP Server Error', { requestId: req?.requestId, error: err?.message, stack: err?.stack });
+    return res.status(500).json({ ok: false, error: 'internal_server_error', requestId: req?.requestId });
   });
 
   app.invalidateAdminSessions = invalidateAdminSessions;
   app.invalidateUserSessions = invalidateUserSessions;
+  app.setShuttingDown = (nextVal = true) => {
+    isShuttingDown = Boolean(nextVal);
+    if (isShuttingDown) {
+      try { loopDelayMonitor?.disable?.(); } catch (_) {}
+    }
+  };
 
   return app;
 }

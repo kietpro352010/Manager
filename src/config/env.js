@@ -178,7 +178,7 @@ function loadConfig(env = process.env) {
     masterKeyPrevious: String(env.MANAGER_MASTER_KEY_PREVIOUS || '').trim(),
     renderApiKey: String(env.RENDER_API_KEY || '').trim(),
     renderApiBaseUrl: String(env.RENDER_API_BASE_URL || 'https://api.render.com/v1').replace(/\/+$/, ''),
-    workerPollWaitMs: positiveInt(env.WORKER_POLL_WAIT_MS, 25000, 1000, 30000),
+    workerPollWaitMs: positiveInt(env.WORKER_POLL_WAIT_MS, 45000, 1000, 55000),
     commandResultTimeoutMs: positiveInt(env.COMMAND_RESULT_TIMEOUT_MS, 35000, 5000, 120000),
     publicBaseUrl: hostRuntime.publicBaseUrl,
     publicUrlSource: hostRuntime.publicUrlSource,

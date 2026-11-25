@@ -52,6 +52,16 @@ function toRow(record, { omit = [] } = {}) {
   return out;
 }
 
+const WORKER_STALE_IF_ERROR_MS = 5 * 60 * 1000;
+
+function isTransientWorkerStoreError(err) {
+  if (!err) return false;
+  const status = Number(err.status || err.statusCode || 0);
+  if ([408, 429, 500, 502, 503, 504, 520, 521, 522, 524].includes(status)) return true;
+  const msg = String(err.message || err.code || '');
+  return /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|timeout|aborted|HTTP 5\d\d|HTTP 429/i.test(msg);
+}
+
 class SupabaseWorkerStore {
   constructor(client, { cacheTtlMs = 30000 } = {}) {
     this.client = client;
@@ -63,6 +73,7 @@ class SupabaseWorkerStore {
     this.cacheTtlMs = Number.isFinite(parsedTtl) && parsedTtl >= 0 ? parsedTtl : 30000;
     this._cacheGen = 0;
     this._listCache = null;
+    this._listInFlight = null;
     this._itemCache = new Map();
     this._numberCache = new Map();
   }
@@ -70,6 +81,7 @@ class SupabaseWorkerStore {
   invalidateCache(workerId = null) {
     this._cacheGen += 1;
     this._listCache = null;
+    this._listInFlight = null;
     if (workerId) {
       const id = String(workerId);
       const prev = this._itemCache.get(id);
@@ -206,17 +218,42 @@ class SupabaseWorkerStore {
     if (!bypassCache && this.cacheTtlMs > 0 && this._listCache && Date.now() < this._listCache.expiresAt) {
       return this._listCache.data.map((w) => this._cloneWorker(w));
     }
-    const gen = this._cacheGen;
-    const { data, error } = await this.client.from(TABLE).select(WORKER_LIST_COLUMNS).order('bot_number', { ascending: true }).order('created_at', { ascending: true });
-    if (error && error.code !== 'PGRST116') throw error;
-    const mapped = (data || []).map(fromRow);
-    if (this.cacheTtlMs > 0 && gen === this._cacheGen) {
-      const expiresAt = Date.now() + this.cacheTtlMs;
-      this._listCache = { data: mapped, expiresAt };
-      this._itemCache.clear();
-      this._numberCache.clear();
-      for (const w of mapped) this._cacheWorker(w);
+    if (!bypassCache && this._listInFlight) {
+      const shared = await this._listInFlight;
+      return shared.map((w) => this._cloneWorker(w));
     }
+    const fetchList = async () => {
+      const gen = this._cacheGen;
+      const { data, error } = await this.client.from(TABLE).select(WORKER_LIST_COLUMNS).order('bot_number', { ascending: true }).order('created_at', { ascending: true });
+      if (error && error.code !== 'PGRST116') throw error;
+      const mapped = (data || []).map(fromRow);
+      if (this.cacheTtlMs > 0 && gen === this._cacheGen) {
+        const expiresAt = Date.now() + this.cacheTtlMs;
+        this._listCache = { data: mapped, expiresAt, staleUntil: expiresAt + WORKER_STALE_IF_ERROR_MS };
+        this._itemCache.clear();
+        this._numberCache.clear();
+        for (const w of mapped) this._cacheWorker(w);
+      }
+      return mapped;
+    };
+    if (bypassCache) {
+      const mapped = await fetchList();
+      return mapped.map((w) => this._cloneWorker(w));
+    }
+    const promise = fetchList()
+      .catch((err) => {
+        if (isTransientWorkerStoreError(err) && this._listCache && Date.now() < (this._listCache.staleUntil || 0)) {
+          return this._listCache.data;
+        }
+        throw err;
+      })
+      .finally(() => {
+        if (this._listInFlight === promise) {
+          this._listInFlight = null;
+        }
+      });
+    this._listInFlight = promise;
+    const mapped = await promise;
     return mapped.map((w) => this._cloneWorker(w));
   }
 
@@ -357,7 +394,7 @@ class SupabaseWorkerStore {
     try {
       const { error } = await this.client.rpc('manager_append_worker_event', { p_worker_id: workerId, p_event: event });
       if (!error) {
-        this.invalidateCache(workerId);
+        this._applyPatchToCaches(workerId, { lastEvent: event }, new Date().toISOString(), null);
         return;
       }
       rpcError = error;

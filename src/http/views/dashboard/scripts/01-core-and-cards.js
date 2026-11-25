@@ -750,9 +750,9 @@ function botCardHtml(bot) {
     ? ' is-card-expired is-card-maintenance'
     : (isCardLocked ? (' is-card-expired ' + (userExp.inGracePeriod ? 'grace-period' : 'grace-expired')) : '');
 
-  return '<div class="bot-card ' + statusGlowClass + lockedCardClasses + '" data-bot-id="' + escapeHtml(id) + '" draggable="' + (isAdmin ? 'true' : 'false') + '" ' +
+  return '<div class="bot-card ' + statusGlowClass + lockedCardClasses + '" data-bot-id="' + escapeHtml(id) + '" tabindex="0" draggable="' + (isAdmin ? 'true' : 'false') + '" ' +
     (isAdmin ? 'ondragstart="startBotDrag(event,' + escapeHtml(idArg) + ')" ondragover="allowBotDrop(event)" ondrop="dropBot(event,' + escapeHtml(idArg) + ')" ondragend="endBotDrag(event)"' : '') +
-    ' onclick="openBot(this.dataset.botId)">' +
+    ' onkeydown="handleBotCardKeydown(event, this.dataset.botId)" onclick="openBot(this.dataset.botId)">' +
     cardOverlayHtml +
 
     '<div class="bot-card-topbar">' +
@@ -1353,4 +1353,61 @@ async function copyText(value){
   try{await navigator.clipboard.writeText(String(value??''));showToast('Đã copy.');}
   catch(_){showToast('Không thể copy trên trình duyệt này.');}
 }
+
+function handleBotCardKeydown(event, botId) {
+  if (!event || event.target !== event.currentTarget) return;
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    if (typeof openBot === 'function' && botId) {
+      openBot(botId);
+    }
+  }
+}
+window.handleBotCardKeydown = handleBotCardKeydown;
+
+(function attachKeyboardAndOfflineResilience() {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+
+  function syncOfflineBanner() {
+    const banner = document.getElementById('networkOfflineBanner');
+    if (!banner || !banner.classList) return;
+    const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+    if (isOffline && typeof banner.classList.remove === 'function') banner.classList.remove('hidden');
+    else if (!isOffline && typeof banner.classList.add === 'function') banner.classList.add('hidden');
+  }
+  syncOfflineBanner();
+
+  document.addEventListener('keydown', (event) => {
+    if (!event || event.defaultPrevented) return;
+    if (event.key === 'Escape') {
+      const openModals = Array.from(document.querySelectorAll('.modal:not(.hidden)'));
+      if (openModals.length > 0) {
+        const topModal = openModals[openModals.length - 1];
+        topModal.classList.add('hidden');
+        event.preventDefault();
+        return;
+      }
+      const profileDropdown = document.getElementById('globalUserProfileDropdown');
+      if (profileDropdown && !profileDropdown.classList.contains('hidden')) {
+        if (typeof closeUserProfileDropdown === 'function') closeUserProfileDropdown();
+        else profileDropdown.classList.add('hidden');
+        return;
+      }
+      if (typeof closeMobileSidebar === 'function') closeMobileSidebar();
+      return;
+    }
+
+    const activeTag = String(document.activeElement?.tagName || '').toUpperCase();
+    const isTyping = activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT' || Boolean(document.activeElement?.isContentEditable);
+    if (!isTyping && (event.key === '/' || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k'))) {
+      const searchEl = document.getElementById('searchInput');
+      const homeSection = document.getElementById('homePage');
+      if (searchEl && homeSection && !homeSection.classList.contains('hidden')) {
+        event.preventDefault();
+        searchEl.focus();
+        searchEl.select?.();
+      }
+    }
+  });
+})();
 

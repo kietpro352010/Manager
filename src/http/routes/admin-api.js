@@ -1686,7 +1686,10 @@ function createAdminApi({
     if (isEnabled) {
       const start = Date.now();
       try {
-        const testRes = await store.adapter.testConnection();
+        const checkFn = typeof store.adapter.ping === 'function'
+          ? () => store.adapter.ping()
+          : () => store.adapter.testConnection();
+        const testRes = await checkFn();
         connected = Boolean(testRes?.ok);
         pingMs = Date.now() - start;
       } catch (_) {}

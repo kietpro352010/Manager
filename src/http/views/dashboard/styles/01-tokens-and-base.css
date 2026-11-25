@@ -474,3 +474,41 @@ select option {
   background: #0b1222;
   color: var(--text-primary);
 }
+
+.skip-to-main {
+  position: fixed;
+  top: -100px;
+  left: 16px;
+  z-index: 2000;
+  padding: 10px 16px;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #ffffff;
+  font-weight: 700;
+  font-size: 13px;
+  text-decoration: none;
+  box-shadow: var(--shadow-lg);
+  transition: top 0.15s ease;
+}
+
+.skip-to-main:focus {
+  top: 12px;
+}
+
+.network-offline-banner {
+  position: fixed;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1900;
+  padding: 9px 16px;
+  border-radius: 999px;
+  background: rgba(127, 29, 29, 0.96);
+  border: 1px solid rgba(248, 113, 113, 0.55);
+  color: #fecaca;
+  font-size: 12.5px;
+  font-weight: 700;
+  box-shadow: var(--shadow-lg);
+  max-width: calc(100vw - 24px);
+  text-align: center;
+}

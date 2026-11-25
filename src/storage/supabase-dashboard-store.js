@@ -171,22 +171,58 @@ function unwrapRpc(data) {
   return Array.isArray(data) ? (data[0] || null) : data;
 }
 
+function isTransientUpstreamError(err) {
+  if (!err) return false;
+  const status = Number(err.status || err.statusCode || 0);
+  if ([408, 429, 500, 502, 503, 504, 520, 521, 522, 524].includes(status)) return true;
+  const msg = String(err.message || err.code || '');
+  return /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|timeout|aborted|HTTP 5\d\d|HTTP 429/i.test(msg);
+}
+
+const DEFAULT_STALE_GRACE_MS = 5 * 60 * 1000; // 5 minutes stale-if-error window
+
 class SupabaseDashboardStore {
   constructor(client) {
     this.client = client;
     this.adapter = client.adapter || null;
     this.cache = new Map();
+    this._inFlight = new Map();
     this._fallbackLock = new AsyncKeyLock();
+  }
+
+  _dedupeInFlight(key, fn) {
+    const existing = this._inFlight.get(key);
+    if (existing) return existing;
+    const promise = Promise.resolve().then(fn).finally(() => {
+      if (this._inFlight.get(key) === promise) {
+        this._inFlight.delete(key);
+      }
+    });
+    this._inFlight.set(key, promise);
+    return promise;
   }
 
   getCachedEntry(key) {
     const entry = this.cache.get(key);
     if (!entry) return { hit: false, data: null };
-    if (Date.now() > entry.expiresAt) {
-      this.cache.delete(key);
-      return { hit: false, data: null };
+    const now = Date.now();
+    if (now <= entry.expiresAt) {
+      return { hit: true, data: entry.data };
     }
-    return { hit: true, data: entry.data };
+    if (!entry.staleUntil || now > entry.staleUntil) {
+      this.cache.delete(key);
+    }
+    return { hit: false, data: null };
+  }
+
+  getStaleFallback(key) {
+    const entry = this.cache.get(key);
+    if (!entry) return { found: false, data: null };
+    if (entry.staleUntil && Date.now() <= entry.staleUntil) {
+      return { found: true, data: entry.data };
+    }
+    this.cache.delete(key);
+    return { found: false, data: null };
   }
 
   getCached(key) {
@@ -194,11 +230,11 @@ class SupabaseDashboardStore {
     return entry.hit ? entry.data : null;
   }
 
-  setCached(key, data, ttlMs = 15000) {
+  setCached(key, data, ttlMs = 15000, staleGraceMs = DEFAULT_STALE_GRACE_MS) {
     if (this.cache.size >= 1000 && !this.cache.has(key)) {
       const now = Date.now();
       for (const [k, v] of this.cache.entries()) {
-        if (!v || now > v.expiresAt) this.cache.delete(k);
+        if (!v || now > (v.staleUntil || v.expiresAt)) this.cache.delete(k);
       }
       while (this.cache.size >= 1000) {
         const oldest = this.cache.keys().next().value;
@@ -206,7 +242,13 @@ class SupabaseDashboardStore {
         this.cache.delete(oldest);
       }
     }
-    this.cache.set(key, { data, expiresAt: Date.now() + ttlMs });
+    const nowMs = Date.now();
+    const expiresAt = nowMs + ttlMs;
+    this.cache.set(key, {
+      data,
+      expiresAt,
+      staleUntil: expiresAt + Math.max(0, Number(staleGraceMs) || 0)
+    });
   }
 
   invalidateUserCache(userId, username = '') {
@@ -233,6 +275,7 @@ class SupabaseDashboardStore {
 
   invalidateCache() {
     this.cache.clear();
+    this._inFlight.clear();
     this.cachedMaintenance = undefined;
     this.cachedMaintenanceAt = 0;
     this.cachedAnnouncement = undefined;
@@ -246,11 +289,16 @@ class SupabaseDashboardStore {
       const nowMs = Date.now();
       const auditCutoff = new Date(nowMs - 30 * 24 * 60 * 60 * 1000).toISOString();
       const posCutoff = new Date(nowMs - 14 * 24 * 60 * 60 * 1000).toISOString();
+      const outboxCutoff = new Date(nowMs - 7 * 24 * 60 * 60 * 1000).toISOString();
+      const cmdCutoff = new Date(nowMs - 3 * 24 * 60 * 60 * 1000).toISOString();
       await Promise.allSettled([
         this.client.from(AUDIT_LOGS).delete().lt('timestamp', auditCutoff),
         this.client.from('bot_position_logs').delete().lt('changed_at', posCutoff),
         this.client.from(LINK_ATTEMPTS).delete().lt('purge_at', now),
-        this.client.from(SESSIONS).delete().lt('expires_at', nowMs)
+        this.client.from(SESSIONS).delete().lt('expires_at', nowMs),
+        this.client.from(OUTBOX).delete().in('status', ['completed', 'dead_letter']).lt('updated_at', outboxCutoff),
+        this.client.from('manager_commands').delete().in('status', ['completed', 'failed', 'expired']).lt('created_at', cmdCutoff),
+        this.client.from('manager_locks').delete().lt('expires_at', now)
       ]);
     } catch (_) {}
   }
@@ -357,8 +405,12 @@ class SupabaseDashboardStore {
     if (!bypassCache) {
       const cached = this.getCached(normCacheKey);
       if (cached) return cached;
+      return this._dedupeInFlight(normCacheKey, () => this._fetchAccessUncached(userId, normCacheKey));
     }
+    return this._fetchAccessUncached(userId, normCacheKey);
+  }
 
+  async _fetchAccessUncached(userId, normCacheKey) {
     // 1. Thử đọc từ manager_users (id hoặc username)
     const userData = await this.resolveUserRow(userId, USER_ACCESS_COLUMNS);
     if (userData) {
@@ -402,7 +454,16 @@ class SupabaseDashboardStore {
   async listAccess() {
     const cached = this.getCached('access:all');
     if (cached) return cached;
+    return this._dedupeInFlight('access:all', () => this._fetchListAccessUncached()).catch((err) => {
+      if (isTransientUpstreamError(err)) {
+        const stale = this.getStaleFallback('access:all');
+        if (stale.found) return stale.data;
+      }
+      throw err;
+    });
+  }
 
+  async _fetchListAccessUncached() {
     // Batch fetch active Discord links to guarantee 100% parity across tables
     const discordLinkMap = new Map();
     try {
@@ -1647,8 +1708,14 @@ class SupabaseDashboardStore {
   async getUserByDiscordId(discordUserId) {
     if (!discordUserId) return null;
     const dId = String(discordUserId).trim();
-    const cached = this.getCached(`discord_user:${dId}`);
+    const cacheKey = `discord_user:${dId}`;
+    const cached = this.getCached(cacheKey);
     if (cached) return cached;
+    return this._dedupeInFlight(cacheKey, () => this._fetchUserByDiscordIdUncached(dId, cacheKey));
+  }
+
+  async _fetchUserByDiscordIdUncached(dId, cacheKey) {
+    const DISCORD_USER_CACHE_TTL_MS = 30000;
 
     // 1. Check manager_discord_links table
     try {
@@ -1656,7 +1723,7 @@ class SupabaseDashboardStore {
       if (link && link.username) {
         const user = await this.getUser(link.username);
         if (user) {
-          this.setCached(`discord_user:${dId}`, user, 5000);
+          this.setCached(cacheKey, user, DISCORD_USER_CACHE_TTL_MS);
           return user;
         }
         if (String(link.username).toLowerCase() === 'admin') {
@@ -1670,7 +1737,7 @@ class SupabaseDashboardStore {
             assignedBotIds: null,
             discordUserId: dId
           };
-          this.setCached(`discord_user:${dId}`, adminUser, 5000);
+          this.setCached(cacheKey, adminUser, DISCORD_USER_CACHE_TTL_MS);
           return adminUser;
         }
       }
@@ -1707,7 +1774,7 @@ class SupabaseDashboardStore {
           createdAt: data.created_at,
           updatedAt: data.updated_at
         };
-        this.setCached(`discord_user:${dId}`, user, 5000);
+        this.setCached(cacheKey, user, DISCORD_USER_CACHE_TTL_MS);
         return user;
       }
     } catch (_) {}
@@ -1718,7 +1785,7 @@ class SupabaseDashboardStore {
       if (setting && setting.username) {
         const user = await this.getUser(setting.username);
         if (user) {
-          this.setCached(`discord_user:${dId}`, user, 5000);
+          this.setCached(cacheKey, user, DISCORD_USER_CACHE_TTL_MS);
           return user;
         }
         if (String(setting.username).toLowerCase() === 'admin') {
@@ -1732,7 +1799,7 @@ class SupabaseDashboardStore {
             assignedBotIds: null,
             discordUserId: dId
           };
-          this.setCached(`discord_user:${dId}`, adminUser, 5000);
+          this.setCached(cacheKey, adminUser, DISCORD_USER_CACHE_TTL_MS);
           return adminUser;
         }
       }
@@ -1863,7 +1930,18 @@ class SupabaseDashboardStore {
     if (!bypassCache) {
       const cached = this.getCachedEntry(cacheKey);
       if (cached.hit) return cached.data;
+      return this._dedupeInFlight(cacheKey, () => this._fetchSettingUncached(key, cacheKey)).catch((err) => {
+        if (isTransientUpstreamError(err)) {
+          const stale = this.getStaleFallback(cacheKey);
+          if (stale.found) return stale.data;
+        }
+        throw err;
+      });
     }
+    return this._fetchSettingUncached(key, cacheKey);
+  }
+
+  async _fetchSettingUncached(key, cacheKey) {
     const { data, error } = await this.client.from(SETTINGS).select('value,updated_at').eq('key', key).maybeSingle();
     if (error && error.code !== 'PGRST116') throw error;
     let resolved = null;
@@ -1877,7 +1955,19 @@ class SupabaseDashboardStore {
   }
 
   async setSetting(key, value) {
-    const { error } = await this.client.from(SETTINGS).upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+    const updatedAtIso = new Date().toISOString();
+    const upsertQuery = this.client.from(SETTINGS).upsert({ key, value, updated_at: updatedAtIso }, { onConflict: 'key' });
+    let savedData = null;
+    let error = null;
+    if (upsertQuery && typeof upsertQuery.select === 'function') {
+      const selQuery = upsertQuery.select('value,updated_at');
+      const res = typeof selQuery?.maybeSingle === 'function' ? await selQuery.maybeSingle() : await selQuery;
+      error = res?.error || null;
+      savedData = Array.isArray(res?.data) ? (res.data[0] || null) : (res?.data || null);
+    } else {
+      const res = await upsertQuery;
+      error = res?.error || null;
+    }
     if (error) throw error;
     this.cache.delete(`setting:${key}`);
     if (key === 'system_maintenance') {
@@ -1886,6 +1976,14 @@ class SupabaseDashboardStore {
     } else if (key === 'system_announcement') {
       this.cachedAnnouncement = undefined;
       this.cachedAnnouncementAt = 0;
+    }
+    if (savedData && Object.prototype.hasOwnProperty.call(savedData, 'value')) {
+      let resolved = null;
+      if (Array.isArray(savedData.value)) resolved = savedData.value;
+      else if (savedData.value && typeof savedData.value === 'object') resolved = { ...savedData.value, updatedAt: savedData.updated_at || updatedAtIso };
+      else resolved = savedData.value ?? null;
+      this.setCached(`setting:${key}`, resolved, 30000);
+      return resolved;
     }
     return this.getSetting(key, { bypassCache: true });
   }

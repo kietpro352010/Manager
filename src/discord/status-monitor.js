@@ -67,10 +67,13 @@ async function collectSystemStatus(services, { intervalMs = 15 * 60 * 1000 } = {
   let dbOk = false;
   let dbLatencyMs = -1;
   const store = services?.accessStore?.adapter ? services.accessStore : (services?.store || services?.supabaseClient);
-  if (store?.adapter && typeof store.adapter.testConnection === 'function') {
+  if (store?.adapter && (typeof store.adapter.ping === 'function' || typeof store.adapter.testConnection === 'function')) {
     const start = Date.now();
     try {
-      const testRes = await store.adapter.testConnection();
+      const probeFn = typeof store.adapter.ping === 'function'
+        ? store.adapter.ping.bind(store.adapter)
+        : store.adapter.testConnection.bind(store.adapter);
+      const testRes = await probeFn();
       dbOk = Boolean(testRes?.ok !== false);
       dbLatencyMs = Date.now() - start;
     } catch (_) {
