@@ -1300,7 +1300,7 @@ function createAdminApi({
         WORKER_TRANSPORT: transport,
         WORKER_ID_1: String(worker.workerId),
         WORKER_SECRET_1: secretAvailable ? secret.trim() : '<CAN_DAT_SECRET_MOI_MIN_32_KY_TU>',
-        ...(provider === 'wispbyte' ? { NODE_OPTIONS: '--max-old-space-size=160' } : {})
+        ...(provider === 'wispbyte' ? { NODE_OPTIONS: '--max-old-space-size=400' } : {})
       };
       const envText = Object.entries(vars).map(([k, v]) => `${k}=${v}`).join('\n');
 

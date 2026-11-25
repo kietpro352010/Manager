@@ -1268,7 +1268,7 @@ test('14. Offline Wispbyte worker can be marked stopped (with manuallyStopped bo
       WORKER_TRANSPORT: 'wispbyte-poll',
       WORKER_ID_1: '23',
       WORKER_SECRET_1: secret23,
-      NODE_OPTIONS: '--max-old-space-size=160'
+      NODE_OPTIONS: '--max-old-space-size=400'
     });
     assert.ok(envJson.envText.includes(`WORKER_SECRET_1=${secret23}`));
     assert.ok(envJson.envText.includes('WORKER_TRANSPORT=wispbyte-poll'));
