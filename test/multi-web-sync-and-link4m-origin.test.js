@@ -528,190 +528,195 @@ test('Multi-web Supabase sync: active URLs, Discord points merge, worker logs/cl
 });
 
 test('Multi-web sync: cross-instance Wispbyte poll wakeup/result, settingsRevision, AdminNotifier & KeepAlive', async () => {
-  const backend = createSharedMockBackend();
-  const { dashboardStore, supabaseClient } = backend;
-  const encKey = crypto.randomBytes(32).toString('hex');
-
-  // 1. Cross-web Wispbyte command dispatch (Web #2) -> wakes Worker polling Web #1 -> result returns to Web #2
-  const commandsMap = new Map();
-  const makeCmdClient = () => ({
-    adapter: null,
-    rpc: async () => ({ data: null, error: { code: '42883', message: 'function does not exist' } }),
-    from: (tableName) => {
-      const st = { op: 'select', filters: [], gtFilters: [], inFilters: [], payload: null, limitVal: null };
-      const matches = (row) => {
-        if (tableName !== 'manager_commands') return false;
-        if (!st.filters.every(([k, v]) => String(row?.[k] ?? '') === String(v ?? ''))) return false;
-        if (!st.inFilters.every(([k, vals]) => Array.isArray(vals) && vals.map(String).includes(String(row?.[k] ?? '')))) return false;
-        if (!st.gtFilters.every(([k, v]) => String(row?.[k] ?? '') > String(v ?? ''))) return false;
-        return true;
-      };
-      const exec = async () => {
-        if (tableName !== 'manager_commands') return { data: [], error: null };
-        if (st.op === 'insert') {
-          const row = { ...st.payload };
-          commandsMap.set(row.command_id, row);
-          return { data: [row], error: null };
-        }
-        if (st.op === 'update') {
-          let updated = null;
-          for (const [cid, row] of commandsMap.entries()) {
-            if (matches(row)) {
-              updated = { ...row, ...st.payload };
-              commandsMap.set(cid, updated);
-            }
-          }
-          return { data: updated ? [updated] : [], error: null };
-        }
-        let rows = [...commandsMap.values()].filter(matches);
-        rows.sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
-        if (st.limitVal) rows = rows.slice(0, st.limitVal);
-        return { data: rows, error: null };
-      };
-      const chain = {
-        select: () => chain,
-        insert: (row) => { st.op = 'insert'; st.payload = row; return chain; },
-        update: (patch) => { st.op = 'update'; st.payload = patch; return chain; },
-        delete: () => { st.op = 'delete'; return chain; },
-        eq: (k, v) => { st.filters.push([k, v]); return chain; },
-        in: (k, vals) => { st.inFilters.push([k, vals]); return chain; },
-        gt: (k, v) => { st.gtFilters.push([k, v]); return chain; },
-        lte: () => chain,
-        lt: () => chain,
-        order: () => chain,
-        limit: (n) => { st.limitVal = n; return chain; },
-        maybeSingle: async () => {
-          const res = await exec();
-          return { data: res.data?.[0] || null, error: res.error };
-        },
-        then: (resolve, reject) => exec().then(resolve, reject)
-      };
-      return chain;
-    }
-  });
-
-  const sharedCmdClient = makeCmdClient();
-  const cmdStore1 = new SupabaseCommandStore(sharedCmdClient, { allowUnsafeSingleInstanceFallback: true, idleEmptyCacheMs: 4000 });
-  const cmdStore2 = new SupabaseCommandStore(sharedCmdClient, { allowUnsafeSingleInstanceFallback: true, idleEmptyCacheMs: 4000 });
-
-  const storeA = new SupabaseWorkerStore(supabaseClient, { cacheTtlMs: 0 });
-  const storeB = new SupabaseWorkerStore(supabaseClient, { cacheTtlMs: 0 });
-  const regA = new WorkerRegistry({ store: storeA, accessStore: dashboardStore, encryptionKey: encKey });
-  const regB = new WorkerRegistry({ store: storeB, accessStore: dashboardStore, encryptionKey: encKey });
-
-  await regA.add({ workerId: '01', provider: 'wispbyte', name: 'Cross Web Bot' });
-  regB.touchLiveHeartbeat('01');
-
-  const brokerA = new CommandBroker({
-    registry: regA,
-    commandStore: cmdStore1,
-    config: { workerPollWaitMs: 3000, commandResultTimeoutMs: 3000, crossInstancePollCheckMs: 80 },
-    logger: silentLogger
-  });
-  const brokerB = new CommandBroker({
-    registry: regB,
-    commandStore: cmdStore2,
-    config: { workerPollWaitMs: 3000, commandResultTimeoutMs: 3000, crossInstancePollCheckMs: 80 },
-    logger: silentLogger
-  });
-
+  const keepAlive = setInterval(() => {}, 500);
   try {
-    // Prime cmdStore1's idleEmptyCacheMs gate before starting long-poll on Web #1
-    assert.strictEqual(await cmdStore1.take('01'), null);
+    const backend = createSharedMockBackend();
+    const { dashboardStore, supabaseClient } = backend;
+    const encKey = crypto.randomBytes(32).toString('hex');
 
-    const pollPromise = brokerA.poll('01', { waitMs: 2500 });
-    await new Promise((r) => setTimeout(r, 30));
-    assert.strictEqual(brokerA.hasActivePoller('01'), true);
-
-    const dispatchPromise = brokerB.dispatch('01', 'chat', { message: 'hello-cross-web' });
-    const polledCmd = await pollPromise;
-    assert.ok(polledCmd, 'Web #1 poller must wake when Web #2 enqueues command in Supabase');
-    assert.strictEqual(polledCmd.action, 'chat');
-    assert.strictEqual(polledCmd.payload.message, 'hello-cross-web');
-
-    const acceptOutcome = await brokerA.acceptResult('01', {
-      commandId: polledCmd.commandId,
-      action: 'chat',
-      ok: true,
-      message: 'hello-cross-web'
+    // 1. Cross-web Wispbyte command dispatch (Web #2) -> wakes Worker polling Web #1 -> result returns to Web #2
+    const commandsMap = new Map();
+    const makeCmdClient = () => ({
+      adapter: null,
+      rpc: async () => ({ data: null, error: { code: '42883', message: 'function does not exist' } }),
+      from: (tableName) => {
+        const st = { op: 'select', filters: [], gtFilters: [], inFilters: [], payload: null, limitVal: null };
+        const matches = (row) => {
+          if (tableName !== 'manager_commands') return false;
+          if (!st.filters.every(([k, v]) => String(row?.[k] ?? '') === String(v ?? ''))) return false;
+          if (!st.inFilters.every(([k, vals]) => Array.isArray(vals) && vals.map(String).includes(String(row?.[k] ?? '')))) return false;
+          if (!st.gtFilters.every(([k, v]) => String(row?.[k] ?? '') > String(v ?? ''))) return false;
+          return true;
+        };
+        const exec = async () => {
+          if (tableName !== 'manager_commands') return { data: [], error: null };
+          if (st.op === 'insert') {
+            const row = { ...st.payload };
+            commandsMap.set(row.command_id, row);
+            return { data: [row], error: null };
+          }
+          if (st.op === 'update') {
+            let updated = null;
+            for (const [cid, row] of commandsMap.entries()) {
+              if (matches(row)) {
+                updated = { ...row, ...st.payload };
+                commandsMap.set(cid, updated);
+              }
+            }
+            return { data: updated ? [updated] : [], error: null };
+          }
+          let rows = [...commandsMap.values()].filter(matches);
+          rows.sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
+          if (st.limitVal) rows = rows.slice(0, st.limitVal);
+          return { data: rows, error: null };
+        };
+        const chain = {
+          select: () => chain,
+          insert: (row) => { st.op = 'insert'; st.payload = row; return chain; },
+          update: (patch) => { st.op = 'update'; st.payload = patch; return chain; },
+          delete: () => { st.op = 'delete'; return chain; },
+          eq: (k, v) => { st.filters.push([k, v]); return chain; },
+          in: (k, vals) => { st.inFilters.push([k, vals]); return chain; },
+          gt: (k, v) => { st.gtFilters.push([k, v]); return chain; },
+          lte: () => chain,
+          lt: () => chain,
+          order: () => chain,
+          limit: (n) => { st.limitVal = n; return chain; },
+          maybeSingle: async () => {
+            const res = await exec();
+            return { data: res.data?.[0] || null, error: res.error };
+          },
+          then: (resolve, reject) => exec().then(resolve, reject)
+        };
+        return chain;
+      }
     });
-    assert.notStrictEqual(acceptOutcome, false);
 
-    const dispatchOutcome = await dispatchPromise;
-    assert.strictEqual(dispatchOutcome.ok, true);
-    assert.strictEqual(dispatchOutcome.delivered, true);
-    assert.strictEqual(dispatchOutcome.result.message, 'hello-cross-web');
+    const sharedCmdClient = makeCmdClient();
+    const cmdStore1 = new SupabaseCommandStore(sharedCmdClient, { allowUnsafeSingleInstanceFallback: true, idleEmptyCacheMs: 4000 });
+    const cmdStore2 = new SupabaseCommandStore(sharedCmdClient, { allowUnsafeSingleInstanceFallback: true, idleEmptyCacheMs: 4000 });
+
+    const storeA = new SupabaseWorkerStore(supabaseClient, { cacheTtlMs: 0 });
+    const storeB = new SupabaseWorkerStore(supabaseClient, { cacheTtlMs: 0 });
+    const regA = new WorkerRegistry({ store: storeA, accessStore: dashboardStore, encryptionKey: encKey });
+    const regB = new WorkerRegistry({ store: storeB, accessStore: dashboardStore, encryptionKey: encKey });
+
+    await regA.add({ workerId: '01', provider: 'wispbyte', name: 'Cross Web Bot' });
+    regB.touchLiveHeartbeat('01');
+
+    const brokerA = new CommandBroker({
+      registry: regA,
+      commandStore: cmdStore1,
+      config: { workerPollWaitMs: 3000, commandResultTimeoutMs: 3000, crossInstancePollCheckMs: 80 },
+      logger: silentLogger
+    });
+    const brokerB = new CommandBroker({
+      registry: regB,
+      commandStore: cmdStore2,
+      config: { workerPollWaitMs: 3000, commandResultTimeoutMs: 3000, crossInstancePollCheckMs: 80 },
+      logger: silentLogger
+    });
+
+    try {
+      // Prime cmdStore1's idleEmptyCacheMs gate before starting long-poll on Web #1
+      assert.strictEqual(await cmdStore1.take('01'), null);
+
+      const pollPromise = brokerA.poll('01', { waitMs: 2500 });
+      await new Promise((r) => setTimeout(r, 30));
+      assert.strictEqual(brokerA.hasActivePoller('01'), true);
+
+      const dispatchPromise = brokerB.dispatch('01', 'chat', { message: 'hello-cross-web' });
+      const polledCmd = await pollPromise;
+      assert.ok(polledCmd, 'Web #1 poller must wake when Web #2 enqueues command in Supabase');
+      assert.strictEqual(polledCmd.action, 'chat');
+      assert.strictEqual(polledCmd.payload.message, 'hello-cross-web');
+
+      const acceptOutcome = await brokerA.acceptResult('01', {
+        commandId: polledCmd.commandId,
+        action: 'chat',
+        ok: true,
+        message: 'hello-cross-web'
+      });
+      assert.notStrictEqual(acceptOutcome, false);
+
+      const dispatchOutcome = await dispatchPromise;
+      assert.strictEqual(dispatchOutcome.ok, true);
+      assert.strictEqual(dispatchOutcome.delivered, true);
+      assert.strictEqual(dispatchOutcome.result.message, 'hello-cross-web');
+    } finally {
+      brokerA.stopOutboxProcessor();
+      brokerB.stopOutboxProcessor();
+    }
+
+    // 2. Cross-web settingsRevision persistence & sync via Supabase without leaking _settingsRevision
+    const revBeforeB = await regB.syncSettingsRevision('01');
+    await regA.updateSettings('01', { ecoMode: false });
+    const revAfterEcoB = await regB.syncSettingsRevision('01');
+    assert.ok(revAfterEcoB > revBeforeB, 'Web #2 must see incremented settingsRevision persisted by Web #1');
+    await regA.updateCredentials('01', { username: 'PlayerCrossWeb', password: 'pw' });
+    const bootB = await regB.bootstrap('01');
+    assert.strictEqual(bootB.settingsRevision, revAfterEcoB + 1);
+    assert.strictEqual(bootB.credentials.username, 'PlayerCrossWeb');
+    const pubB = regB.publicView(await regB.find('01'));
+    assert.strictEqual(pubB.settings._settingsRevision, undefined, '_settingsRevision must stay internal');
+
+    // 3. Cross-web AdminNotifier webhook sync
+    const notifier = new AdminNotifier({ store: dashboardStore, encryptionKey: encKey, logger: silentLogger });
+    await dashboardStore.setSetting('webhook_settings', {
+      enabled: true,
+      discordUrlCiphertext: encryptSecret('https://discord.com/api/webhooks/123456789012345678/abcDEF_123', encKey),
+      notifyOnOffline: false
+    });
+    await notifier._refreshSettingsFromStoreIfStale(0);
+    assert.strictEqual(notifier.discordWebhookUrl, 'https://discord.com/api/webhooks/123456789012345678/abcDEF_123');
+    assert.strictEqual(notifier.webhookRules.notifyOnOffline, false);
+
+    // 4. WispbyteKeepAlive skipFreshWithinMs avoids duplicate scraping across multiple Web instances
+    const pingedUrls = [];
+    await dashboardStore.setSetting('wispbyte_accounts', [
+      {
+        id: 'acc_fresh',
+        name: 'Fresh Acc',
+        cookie: 'session=fresh_cookie_123456',
+        panelUrl: 'https://wispbyte.com/client',
+        lastStatus: 'ok',
+        lastPingAt: new Date().toISOString(),
+        renewCount: 3
+      },
+      {
+        id: 'acc_stale',
+        name: 'Stale Acc',
+        cookie: 'session=stale_cookie_123456',
+        panelUrl: 'https://wispbyte.com/client',
+        lastStatus: 'ok',
+        lastPingAt: new Date(Date.now() - 25 * 3600 * 1000).toISOString(),
+        renewCount: 1
+      }
+    ]);
+    const ka = new WispbyteKeepAliveManager({
+      store: dashboardStore,
+      config: { encryptionKey: encKey },
+      logger: silentLogger,
+      fetchImpl: async (url) => {
+        pingedUrls.push(url);
+        return { status: 200, headers: { get: () => null }, text: async () => '<html>Wispbyte Dashboard logout</html>' };
+      }
+    });
+    ka.pingAccount = async (acc) => {
+      pingedUrls.push(acc.panelUrl);
+      return { id: acc.id, name: acc.name, success: true, status: 'ok', message: 'HTTP 200' };
+    };
+
+    const skippedRun = await ka.checkAll({ notifyDiscord: false, skipFreshWithinMs: 18 * 3600 * 1000 });
+    assert.strictEqual(skippedRun.okCount, 2);
+    assert.strictEqual(pingedUrls.length, 1, 'Background keepalive must skip account recently pinged by peer web');
+    assert.strictEqual(skippedRun.results.find((r) => r.id === 'acc_fresh')?.skippedFresh, true);
+
+    pingedUrls.length = 0;
+    const forcedRun = await ka.checkAll({ notifyDiscord: false });
+    assert.strictEqual(forcedRun.okCount, 2);
+    assert.strictEqual(pingedUrls.length, 2, 'Manual checkAll() without skipFreshWithinMs must ping all accounts');
   } finally {
-    brokerA.stopOutboxProcessor();
-    brokerB.stopOutboxProcessor();
+    clearInterval(keepAlive);
   }
-
-  // 2. Cross-web settingsRevision persistence & sync via Supabase without leaking _settingsRevision
-  const revBeforeB = await regB.syncSettingsRevision('01');
-  await regA.updateSettings('01', { ecoMode: false });
-  const revAfterEcoB = await regB.syncSettingsRevision('01');
-  assert.ok(revAfterEcoB > revBeforeB, 'Web #2 must see incremented settingsRevision persisted by Web #1');
-  await regA.updateCredentials('01', { username: 'PlayerCrossWeb', password: 'pw' });
-  const bootB = await regB.bootstrap('01');
-  assert.strictEqual(bootB.settingsRevision, revAfterEcoB + 1);
-  assert.strictEqual(bootB.credentials.username, 'PlayerCrossWeb');
-  const pubB = regB.publicView(await regB.find('01'));
-  assert.strictEqual(pubB.settings._settingsRevision, undefined, '_settingsRevision must stay internal');
-
-  // 3. Cross-web AdminNotifier webhook sync
-  const notifier = new AdminNotifier({ store: dashboardStore, encryptionKey: encKey, logger: silentLogger });
-  await dashboardStore.setSetting('webhook_settings', {
-    enabled: true,
-    discordUrlCiphertext: encryptSecret('https://discord.com/api/webhooks/123456789012345678/abcDEF_123', encKey),
-    notifyOnOffline: false
-  });
-  await notifier._refreshSettingsFromStoreIfStale(0);
-  assert.strictEqual(notifier.discordWebhookUrl, 'https://discord.com/api/webhooks/123456789012345678/abcDEF_123');
-  assert.strictEqual(notifier.webhookRules.notifyOnOffline, false);
-
-  // 4. WispbyteKeepAlive skipFreshWithinMs avoids duplicate scraping across multiple Web instances
-  const pingedUrls = [];
-  await dashboardStore.setSetting('wispbyte_accounts', [
-    {
-      id: 'acc_fresh',
-      name: 'Fresh Acc',
-      cookie: 'session=fresh_cookie_123456',
-      panelUrl: 'https://wispbyte.com/client',
-      lastStatus: 'ok',
-      lastPingAt: new Date().toISOString(),
-      renewCount: 3
-    },
-    {
-      id: 'acc_stale',
-      name: 'Stale Acc',
-      cookie: 'session=stale_cookie_123456',
-      panelUrl: 'https://wispbyte.com/client',
-      lastStatus: 'ok',
-      lastPingAt: new Date(Date.now() - 25 * 3600 * 1000).toISOString(),
-      renewCount: 1
-    }
-  ]);
-  const ka = new WispbyteKeepAliveManager({
-    store: dashboardStore,
-    config: { encryptionKey: encKey },
-    logger: silentLogger,
-    fetchImpl: async (url) => {
-      pingedUrls.push(url);
-      return { status: 200, headers: { get: () => null }, text: async () => '<html>Wispbyte Dashboard logout</html>' };
-    }
-  });
-  ka.pingAccount = async (acc) => {
-    pingedUrls.push(acc.panelUrl);
-    return { id: acc.id, name: acc.name, success: true, status: 'ok', message: 'HTTP 200' };
-  };
-
-  const skippedRun = await ka.checkAll({ notifyDiscord: false, skipFreshWithinMs: 18 * 3600 * 1000 });
-  assert.strictEqual(skippedRun.okCount, 2);
-  assert.strictEqual(pingedUrls.length, 1, 'Background keepalive must skip account recently pinged by peer web');
-  assert.strictEqual(skippedRun.results.find((r) => r.id === 'acc_fresh')?.skippedFresh, true);
-
-  pingedUrls.length = 0;
-  const forcedRun = await ka.checkAll({ notifyDiscord: false });
-  assert.strictEqual(forcedRun.okCount, 2);
-  assert.strictEqual(pingedUrls.length, 2, 'Manual checkAll() without skipFreshWithinMs must ping all accounts');
 });
