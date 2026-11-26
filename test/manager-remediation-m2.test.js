@@ -230,10 +230,10 @@ test('M2-03: ManagerRuntimeSettings getRoleSettings method returns stored settin
   assert.strictEqual(roles.userRoleId, 'user_role_1');
 });
 
-test('M2-04: Worker secret length validation (>= 32 chars) in registry and API', async () => {
+test('M2-04: ID-only worker registration allows omitted/empty secret without failing', async () => {
   const mockStore = {
     workers: new Map(),
-    async nextBotNumber() { return 1; },
+    async nextBotNumber() { return this.workers.size + 1; },
     async get(id) { return this.workers.get(id) || null; },
     async create(rec) { this.workers.set(rec.workerId, rec); },
     async set(id, rec) { this.workers.set(id, rec); },
@@ -249,51 +249,16 @@ test('M2-04: Worker secret length validation (>= 32 chars) in registry and API',
     logger: createMockLogger()
   });
 
-  // Short secret (< 32 characters) must be rejected
-  await assert.rejects(
-    async () => {
-      await registry.add({
-        workerId: 'test-short',
-        secret: 'too-short-secret'
-      });
-    },
-    /Worker secret must be at least 32 characters/
-  );
+  // Registration with omitted, empty, or optional secret succeeds (ID-only worker auth)
+  const noSec = await registry.add({ workerId: 'test-no-sec' });
+  assert.strictEqual(noSec.worker.workerId, 'test-no-sec');
+  assert.strictEqual(noSec.secret, '');
+  assert.strictEqual(mockStore.workers.get('test-no-sec').secretCiphertext, '');
 
-  // Empty string secret ("") must be rejected (not auto-generated)
-  await assert.rejects(
-    async () => {
-      await registry.add({
-        workerId: 'test-empty',
-        secret: ''
-      });
-    },
-    /Worker secret must be at least 32 characters/
-  );
+  const emptySec = await registry.add({ workerId: 'test-empty', secret: '' });
+  assert.strictEqual(emptySec.secret, '');
 
-  // Whitespace-only secret must be rejected
-  await assert.rejects(
-    async () => {
-      await registry.add({
-        workerId: 'test-whitespace',
-        secret: '   '
-      });
-    },
-    /Worker secret must be at least 32 characters/
-  );
-
-  // Non-string secret (boolean/number) must be rejected
-  await assert.rejects(
-    async () => {
-      await registry.add({
-        workerId: 'test-bool',
-        secret: false
-      });
-    },
-    /Worker secret must be at least 32 characters/
-  );
-
-  // Valid secret (>= 32 characters) must be accepted
+  // Optional custom secret is also accepted when provided
   const validSecret = 'valid-custom-secret-key-that-is-at-least-32-chars-long';
   const added = await registry.add({
     workerId: 'test-valid',
@@ -301,29 +266,8 @@ test('M2-04: Worker secret length validation (>= 32 chars) in registry and API',
   });
   assert.strictEqual(added.secret, validSecret);
 
-  // setSecret with short secret must be rejected
-  await assert.rejects(
-    async () => {
-      await registry.setSecret('test-valid', 'short');
-    },
-    /Worker secret must be at least 32 characters/
-  );
-
-  // setSecret with empty string secret must be rejected
-  await assert.rejects(
-    async () => {
-      await registry.setSecret('test-valid', '');
-    },
-    /Worker secret must be at least 32 characters/
-  );
-
-  // setSecret with whitespace secret must be rejected
-  await assert.rejects(
-    async () => {
-      await registry.setSecret('test-valid', '   ');
-    },
-    /Worker secret must be at least 32 characters/
-  );
+  // setSecret allows clearing secret cleanly
+  assert.strictEqual(await registry.setSecret('test-valid', ''), '');
 });
 
 test('M2-05: Customer reset dispatches stop to worker broker before wiping data', async () => {
@@ -399,10 +343,13 @@ test('M2-05: Customer reset dispatches stop to worker broker before wiping data'
   }
 });
 
-test('M2-06: Custom worker secret < 32 chars rejected with 400 Bad Request via admin API', async () => {
+test('M2-06: Admin API bot creation succeeds without secret and omits WORKER_SECRET/MANAGER_URL from envConfig', async () => {
   const { createAdminApi } = require('../src/http/routes/admin-api');
   const mockRegistry = {
-    add: async () => { throw new Error('Should not be called'); }
+    add: async ({ name }) => ({
+      worker: { workerId: '01', botNumber: 1, name: name || 'Bot 01', provider: 'wispbyte' },
+      secret: ''
+    })
   };
 
   const adminRouter = createAdminApi({
@@ -429,61 +376,17 @@ test('M2-06: Custom worker secret < 32 chars rejected with 400 Bad Request via a
   const port = server.address().port;
 
   try {
-    // 1. Short secret (< 32 chars) rejected with 400
-    const resShort = await fetch(`http://127.0.0.1:${port}/api/admin/bots`, {
+    const resCreated = await fetch(`http://127.0.0.1:${port}/api/admin/bots`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: 'Test Bot Short',
-        secret: 'short_secret'
-      })
+      body: JSON.stringify({ name: 'ID Only Bot' })
     });
-    assert.strictEqual(resShort.status, 400, 'Secret < 32 chars must return 400 Bad Request');
-    const jsonShort = await resShort.json();
-    assert.strictEqual(jsonShort.ok, false);
-    assert.strictEqual(jsonShort.error, 'Worker secret must be at least 32 characters');
-
-    // 2. Empty string secret ("") rejected with 400
-    const resEmpty = await fetch(`http://127.0.0.1:${port}/api/admin/bots`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: 'Test Bot Empty',
-        secret: ''
-      })
-    });
-    assert.strictEqual(resEmpty.status, 400, 'Secret "" must return 400 Bad Request');
-    const jsonEmpty = await resEmpty.json();
-    assert.strictEqual(jsonEmpty.ok, false);
-    assert.strictEqual(jsonEmpty.error, 'Worker secret must be at least 32 characters');
-
-    // 3. Whitespace-only secret rejected with 400
-    const resWhitespace = await fetch(`http://127.0.0.1:${port}/api/admin/bots`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: 'Test Bot Whitespace',
-        secret: '   '
-      })
-    });
-    assert.strictEqual(resWhitespace.status, 400, 'Whitespace secret must return 400 Bad Request');
-    const jsonWhitespace = await resWhitespace.json();
-    assert.strictEqual(jsonWhitespace.ok, false);
-    assert.strictEqual(jsonWhitespace.error, 'Worker secret must be at least 32 characters');
-
-    // 4. secretKey empty string rejected with 400
-    const resSecretKeyEmpty = await fetch(`http://127.0.0.1:${port}/api/admin/bots`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: 'Test Bot SecretKey Empty',
-        secretKey: ''
-      })
-    });
-    assert.strictEqual(resSecretKeyEmpty.status, 400, 'secretKey "" must return 400 Bad Request');
-    const jsonSecretKeyEmpty = await resSecretKeyEmpty.json();
-    assert.strictEqual(jsonSecretKeyEmpty.ok, false);
-    assert.strictEqual(jsonSecretKeyEmpty.error, 'Worker secret must be at least 32 characters');
+    assert.strictEqual(resCreated.status, 201);
+    const jsonCreated = await resCreated.json();
+    assert.strictEqual(jsonCreated.ok, true);
+    assert.ok(String(jsonCreated.envConfig || '').includes('WORKER_ID_1=01'));
+    assert.ok(!String(jsonCreated.envConfig || '').includes('MANAGER_URL='));
+    assert.ok(!String(jsonCreated.envConfig || '').includes('WORKER_SECRET_1='));
   } finally {
     server.close();
     server.closeIdleConnections?.();

@@ -500,7 +500,7 @@ class WispbyteKeepAliveManager {
     }
   }
 
-  async checkAll({ notifyDiscord = true } = {}) {
+  async checkAll({ notifyDiscord = true, skipFreshWithinMs = 0 } = {}) {
     if (this.isChecking) {
       return { success: false, message: 'Check is already running in background.' };
     }
@@ -515,10 +515,31 @@ class WispbyteKeepAliveManager {
       this.logger.info?.('wispbyte_keepalive_check_all_started', { count: accounts.length });
       const results = [];
       const now = new Date().toISOString();
+      const nowMs = Date.now();
 
       const statusById = new Map();
       for (let i = 0; i < accounts.length; i++) {
         const acc = accounts[i];
+        const lastPingMs = acc.lastPingAt ? Date.parse(acc.lastPingAt) : NaN;
+        if (
+          skipFreshWithinMs > 0 &&
+          acc.lastStatus === 'ok' &&
+          Number.isFinite(lastPingMs) &&
+          (nowMs - lastPingMs) >= 0 &&
+          (nowMs - lastPingMs) < skipFreshWithinMs
+        ) {
+          results.push({
+            id: acc.id,
+            name: acc.name || acc.id,
+            success: true,
+            skippedFresh: true,
+            status: 'ok',
+            message: acc.lastMessage || 'Skipped (already verified recently by peer instance)',
+            lastPingAt: acc.lastPingAt,
+            renewCount: acc.renewCount || 0
+          });
+          continue;
+        }
         const snapshotCookie = acc.cookie;
         const res = await this.pingAccount(acc);
         acc.lastPingAt = now;
@@ -603,13 +624,14 @@ class WispbyteKeepAliveManager {
       intervalHours: Math.round(this.intervalMs / 3600000)
     });
 
+    const freshWindowMs = Math.max(60000, Math.floor(this.intervalMs * 0.75));
     this.initialTimer = setTimeout(() => {
-      void this.checkAll({ notifyDiscord: true }).catch(() => {});
+      void this.checkAll({ notifyDiscord: true, skipFreshWithinMs: freshWindowMs }).catch(() => {});
     }, 60000);
     this.initialTimer.unref?.();
 
     this.timer = setInterval(() => {
-      void this.checkAll({ notifyDiscord: true }).catch(() => {});
+      void this.checkAll({ notifyDiscord: true, skipFreshWithinMs: freshWindowMs }).catch(() => {});
     }, this.intervalMs);
     this.timer.unref?.();
   }

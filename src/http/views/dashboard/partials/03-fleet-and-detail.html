@@ -1,62 +1,66 @@
   <main id="mainContent" class="app-main-content" role="main">
   <section id="homePage">
-    <!-- FLEET HERO WELCOME HEADER -->
+    <!-- FLEET WELCOME HEADER -->
     <div class="fleet-welcome-header">
       <div class="fleet-welcome-text">
         <div class="fleet-welcome-title-wrap">
-          <h1 class="fleet-welcome-title">Bảng Điều Khiển Hệ Thống Bot</h1>
-          <span class="vip-pill">👑 KBOT V12.1.1 PRO</span>
-          <span id="userRoleBadge" class="vip-pill" style="background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.3);">🔒 CHƯA ĐĂNG NHẬP</span>
-          <span class="platform-pill admin-only">⚡ RENDER CLOUD</span>
-          <span class="ram-pill admin-only">📊 RAM: <strong id="managerRamUsage">-- MB</strong></span>
+          <h1 class="fleet-welcome-title">Bảng điều khiển hệ thống Bot</h1>
+          <span class="vip-pill">KBOT V12.1.1 PRO</span>
+          <span id="userRoleBadge" class="vip-pill" style="background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.3);">CHƯA ĐĂNG NHẬP</span>
+          <span class="platform-pill admin-only">RENDER CLOUD</span>
+          <span class="ram-pill admin-only">RAM: <strong id="managerRamUsage">-- MB</strong></span>
         </div>
-        <div id="homeSubtitle" class="fleet-welcome-subtitle">Hệ Thống Cho Thuê Bot AFK KingMC Tự Động • Giám Sát Đa Máy Chủ Real-Time • Uptime 99.9%</div>
+        <div id="homeSubtitle" class="fleet-welcome-subtitle">Giám sát trạng thái, túi đồ và lịch hoạt động Bot AFK KingMC theo thời gian thực</div>
       </div>
       <div class="fleet-welcome-actions">
-        <button class="primary admin-only" onclick="openAddBotModal()">＋ Thêm Bot Mới</button>
-        <button id="btnAnnouncementAdmin" class="admin-only" onclick="openAnnouncementAdminModal()">📢 Thông Báo User</button>
-        <button class="admin-only" onclick="openBatchSettingsModal()">⚙ Đồng Bộ Setting</button>
-        <button class="admin-only" onclick="openAdminModal()">🔑 Mật Khẩu Bot</button>
-        <button class="secondary admin-only" onclick="openSupabaseModal()" title="Mở trung tâm sao lưu & phục hồi dữ liệu Supabase Cloud">☁️ Supabase Cloud</button>
+        <button class="primary admin-only" onclick="openAddBotModal()">＋ Thêm Bot mới</button>
+        <button id="btnAnnouncementAdmin" class="admin-only" onclick="openAnnouncementAdminModal()">Thông báo User</button>
+        <button class="admin-only" onclick="openBatchSettingsModal()">Đồng bộ Setting</button>
+        <button class="admin-only" onclick="openAdminModal()">Mật khẩu Bot</button>
+        <button class="secondary admin-only" onclick="openSupabaseModal()" title="Mở trung tâm sao lưu & phục hồi dữ liệu Supabase Cloud">Supabase Cloud</button>
       </div>
     </div>
 
-    <!-- System Maintenance Banner (Shown to all users when enabled; Admin gets quick reopen button) -->
+    <!-- System Maintenance Banner -->
     <div id="systemMaintenanceBanner" class="system-maintenance-banner hidden" role="status" aria-live="polite">
       <div class="system-maintenance-banner-body">
-        <div class="system-maintenance-icon" aria-hidden="true">🛠️</div>
+        <div class="system-maintenance-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--yellow)" stroke-width="1.75"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        </div>
         <div>
-          <div id="systemMaintenanceBannerTitle" class="system-maintenance-title">HỆ THỐNG ĐANG BẢO TRÌ</div>
+          <div id="systemMaintenanceBannerTitle" class="system-maintenance-title">Hệ thống đang bảo trì</div>
           <div id="systemMaintenanceBannerMessage" class="system-maintenance-msg">Hệ thống đang bảo trì nâng cấp máy chủ. Tạm khóa thao tác điều khiển worker, vui lòng quay lại sau.</div>
         </div>
       </div>
       <div id="systemMaintenanceAdminActions" class="admin-only" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-        <button type="button" class="small primary" onclick="toggleMaintenanceSetting()">🔓 Mở lại Worker</button>
-        <button type="button" class="small secondary" onclick="openMaintenanceConfigModal()">✏️ Sửa thông báo</button>
+        <button type="button" class="small primary" onclick="toggleMaintenanceSetting()">Mở lại Worker</button>
+        <button type="button" class="small secondary" onclick="openMaintenanceConfigModal()">Sửa thông báo</button>
       </div>
     </div>
 
-    <!-- User Rental Banner (Prominently displaying expiration date, hours, minutes and live countdown) -->
-    <div id="userRentalDashboardBanner" class="user-rental-dashboard-banner" style="display:none;margin-bottom:16px;padding:14px 18px;border-radius:12px;background:rgba(30,41,59,0.7);border:1px solid rgba(59,130,246,0.35);backdrop-filter:blur(8px);align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+    <!-- User Rental Banner -->
+    <div id="userRentalDashboardBanner" class="user-rental-dashboard-banner" style="display:none;margin-bottom:16px;padding:14px 18px;border-radius:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
       <div style="display:flex;align-items:center;gap:12px;min-width:0;flex:1 1 auto;">
-        <div style="font-size:26px;flex-shrink:0;" id="userRentalBannerIcon">⏳</div>
+        <div style="display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:8px;background:var(--accent-soft);border:1px solid var(--border-strong);color:var(--accent-text);flex-shrink:0;" id="userRentalBannerIcon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+        </div>
         <div style="min-width:0;">
-          <div style="font-size:14px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-            <span id="userRentalBannerTitle">Thông Tin Thuê Dịch Vụ Của Bạn:</span>
-            <span id="userRentalBannerPlan" style="font-size:12px;padding:2px 8px;border-radius:6px;background:rgba(59,130,246,0.2);color:#60a5fa;border:1px solid rgba(59,130,246,0.3);white-space:nowrap;flex-shrink:0;">Gói thường</span>
+          <div style="font-size:13.5px;font-weight:600;color:var(--text);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <span id="userRentalBannerTitle">Thông tin gói thuê của bạn</span>
+            <span id="userRentalBannerPlan" style="font-size:11.5px;padding:2px 8px;border-radius:6px;background:var(--accent-soft);color:var(--accent-text);border:1px solid var(--border-subtle);white-space:nowrap;flex-shrink:0;">Gói thường</span>
           </div>
-          <div style="font-size:13px;color:var(--muted);margin-top:3px;">
-            Hạn sử dụng: <b id="userRentalBannerExactTime" style="color:var(--text);font-family:monospace;">--:-- - --/--/----</b>
-            • Trạng thái: <span id="userRentalBannerCountdown" style="font-weight:700;color:var(--green);">Còn -- ngày -- giờ -- phút</span>
+          <div style="font-size:12.5px;color:var(--muted);margin-top:3px;">
+            Hạn sử dụng: <b id="userRentalBannerExactTime" style="color:var(--text);font-family:var(--font-mono);font-variant-numeric:tabular-nums;">--:-- - --/--/----</b>
+            • Trạng thái: <span id="userRentalBannerCountdown" style="font-weight:600;color:var(--green);font-variant-numeric:tabular-nums;">Còn -- ngày -- giờ -- phút</span>
           </div>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-        <button type="button" id="btnUserLink4mReward" class="small secondary" onclick="startLink4mReward(this)" style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;font-weight:700;color:#38bdf8;border-color:rgba(56,189,248,0.4);background:rgba(56,189,248,0.12);" title="Vượt link quảng cáo để nhận thêm 12 giờ sử dụng">
-          <span>⚡</span> Vượt link +12h <span id="link4mUsageBadge" style="font-size:11px;background:rgba(56,189,248,0.25);padding:2px 6px;border-radius:4px;color:#fff;">0/2 lượt</span>
+        <button type="button" id="btnUserLink4mReward" class="small secondary" onclick="startLink4mReward(this)" style="display:inline-flex;align-items:center;gap:6px;padding:8px 12px;font-weight:600;color:var(--accent-text);border-color:var(--border-strong);background:var(--accent-soft);" title="Vượt link quảng cáo để nhận thêm 12 giờ sử dụng">
+          <span>Vượt link +12h</span> <span id="link4mUsageBadge" style="font-size:11px;background:var(--card2);padding:1px 6px;border-radius:4px;color:var(--text-primary);">0/2 lượt</span>
         </button>
         <button type="button" class="small primary" onclick="openRenewModal()" style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;font-weight:600;">
-          <span>🎁</span> Nạp Key Gia Hạn
+          <span>Nạp Key gia hạn</span>
         </button>
       </div>
     </div>
@@ -64,118 +68,128 @@
     <!-- Fleet Resource Bar (Eco & RAM Watchdog) -->
     <div class="fleet-resource-bar admin-only" id="fleetResourceBar">
       <div class="fleet-res-item">
-        <span class="fleet-res-icon">🌱</span>
+        <span class="fleet-res-icon" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+        </span>
         <div>
-          <div class="fleet-res-label">Chế Độ Eco</div>
+          <div class="fleet-res-label">Chế độ Eco</div>
           <div class="fleet-res-val"><span id="fleetEcoCount">0</span>/<span id="fleetEcoTotal">0</span> Active</div>
         </div>
       </div>
       <div class="fleet-res-item">
-        <span class="fleet-res-icon">🧠</span>
+        <span class="fleet-res-icon" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/></svg>
+        </span>
         <div>
           <div class="fleet-res-label">Tổng RAM Bot</div>
           <div class="fleet-res-val" id="fleetTotalRam">0 MB</div>
         </div>
       </div>
       <div class="fleet-res-item">
-        <span class="fleet-res-icon">⚡</span>
+        <span class="fleet-res-icon" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        </span>
         <div>
-          <div class="fleet-res-label">RAM TB / Bot</div>
+          <div class="fleet-res-label">RAM trung bình</div>
           <div class="fleet-res-val" id="fleetAvgRam">0 MB</div>
         </div>
       </div>
       <div class="fleet-res-item">
-        <span class="fleet-res-icon">📉</span>
+        <span class="fleet-res-icon" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        </span>
         <div>
-          <div class="fleet-res-label">CPU Tiết Kiệm (AFK)</div>
+          <div class="fleet-res-label">Tiết kiệm CPU AFK</div>
           <div class="fleet-res-val" style="color:var(--green);" id="fleetCpuSaved">~80%</div>
         </div>
       </div>
       <div class="fleet-res-item">
-        <span class="fleet-res-icon">🛡️</span>
+        <span class="fleet-res-icon" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        </span>
         <div>
-          <div class="fleet-res-label">Watchdog Lock</div>
-          <div class="fleet-res-val" style="color:#38bdf8;">220 MB RAM Limit</div>
+          <div class="fleet-res-label">Ngưỡng Watchdog</div>
+          <div class="fleet-res-val" style="color:var(--accent-text);">220 MB RAM</div>
         </div>
       </div>
     </div>
 
-    <!-- BENTO KPI CARDS GRID -->
+    <!-- KPI STAT CARDS GRID (NUMBERS + SEMANTIC STATUS DOTS) -->
     <div class="kpi-grid">
       <div class="kpi-card kpi-total">
         <div class="kpi-header">
-          <span class="kpi-title">Tổng Số Bot</span>
-          <span class="kpi-icon">🤖</span>
+          <span class="kpi-title">Tổng số bot</span>
+          <span class="pulse-status-dot blue" aria-hidden="true"></span>
         </div>
         <div id="kpiTotal" class="kpi-value">0</div>
-        <div class="kpi-sub">Tổng số bot đang quản lý</div>
+        <div class="kpi-sub">Đang đăng ký trên hệ thống</div>
       </div>
       <div class="kpi-card kpi-online">
         <div class="kpi-header">
-          <span class="kpi-title">Đang Online Ingame</span>
-          <span class="kpi-icon pulse-icon">🟢</span>
+          <span class="kpi-title">Đang online ingame</span>
+          <span class="pulse-status-dot green" aria-hidden="true"></span>
         </div>
         <div id="kpiOnline" class="kpi-value" style="color:var(--green)">0</div>
-        <div class="kpi-sub">Bot đang hoạt động trực tiếp</div>
+        <div class="kpi-sub">Đang hoạt động trực tiếp</div>
       </div>
       <div class="kpi-card kpi-connecting">
         <div class="kpi-header">
-          <span class="kpi-title">Đang Kết Nối / Chờ</span>
-          <span class="kpi-icon">🟡</span>
+          <span class="kpi-title">Đang kết nối / Chờ</span>
+          <span class="pulse-status-dot yellow" aria-hidden="true"></span>
         </div>
         <div id="kpiConnecting" class="kpi-value" style="color:var(--yellow)">0</div>
-        <div class="kpi-sub">Đang vào server / sảnh chờ</div>
+        <div class="kpi-sub">Đang vào server hoặc sảnh chờ</div>
       </div>
       <div class="kpi-card kpi-offline">
         <div class="kpi-header">
           <span class="kpi-title">Offline / Kicked</span>
-          <span class="kpi-icon">🔴</span>
+          <span class="pulse-status-dot red" aria-hidden="true"></span>
         </div>
         <div id="kpiOffline" class="kpi-value" style="color:var(--red)">0</div>
-        <div class="kpi-sub">Mất kết nối server / Bị kick</div>
+        <div class="kpi-sub">Ngắt kết nối hoặc bị kick</div>
       </div>
       <div class="kpi-card kpi-unreachable">
         <div class="kpi-header">
           <span class="kpi-title">Lỗi / Unreachable</span>
-          <span class="kpi-icon">⚠️</span>
+          <span class="pulse-status-dot orange" aria-hidden="true"></span>
         </div>
         <div id="kpiUnreachable" class="kpi-value" style="color:#f97316">0</div>
-        <div class="kpi-sub">Mất kết nối máy chủ bot con</div>
+        <div class="kpi-sub">Mất kết nối container worker</div>
       </div>
     </div>
 
-    <!-- FLEET COMMAND CENTER: ROW 1 (PRIMARY BATCH CONTROLS & UTILITIES) -->
+    <!-- FLEET TOOLBAR -->
     <div class="fleet-toolbar">
       <div class="fleet-toolbar-primary">
         <button type="button" id="allStartButton" class="primary" onclick="runAllAction('start')">▶ Chạy tất cả</button>
-        <button type="button" id="allStopButton" class="danger" onclick="runAllAction('stop')">⏹ Dừng tất cả</button>
+        <button type="button" id="allStopButton" class="danger" onclick="runAllAction('stop')">■ Dừng tất cả</button>
         <button type="button" id="allRestartButton" class="small" onclick="runAllAction('restart')">↻ Chạy lại tất cả</button>
-        <button type="button" id="allReconnectButton" class="small warning-btn" onclick="reconnectOfflineBots()" title="Chỉ kết nối lại các bot đang Offline hoặc Kicked">⚡ Reconnect lỗi</button>
-        <button type="button" id="btnCleanDeadBots" class="small danger-btn admin-only" onclick="cleanDeadBots()" title="Tự động phát hiện và dọn dẹp các bot chết (404/Unreachable)">🧹 Dọn bot chết</button>
+        <button type="button" id="allReconnectButton" class="small warning-btn" onclick="reconnectOfflineBots()" title="Chỉ kết nối lại các bot đang Offline hoặc Kicked">Reconnect lỗi</button>
+        <button type="button" id="btnCleanDeadBots" class="small danger-btn admin-only" onclick="cleanDeadBots()" title="Tự động phát hiện và dọn dẹp các bot chết (404/Unreachable)">Dọn bot chết</button>
       </div>
       <div class="fleet-toolbar-tools">
-        <button type="button" id="soundAlertBtn" class="small sound-btn" onclick="toggleSoundAlert()">🔕 Cảnh báo: TẮT</button>
-        <button type="button" id="discordDmNotifyBtn" class="small" onclick="toggleDiscordNotifications()" title="Bật/Tắt nhận tin nhắn riêng Discord (DM) khi bot đang AFK bị kick, die hoặc reconnect (chỉ tài khoản Web đã liên kết Discord)">🔔 TB Discord: BẬT</button>
-        <button type="button" id="btnUserRenewKey" class="small user-only" onclick="openRenewModal()" title="Nhập mã key gia hạn hạn thuê">🎁 Nhập Key</button>
-        <button type="button" class="small admin-only" onclick="openKeyManagementModal()" title="Quản lý mã key kích hoạt / gia hạn">🎟️ Quản Lý Key</button>
-        <button type="button" class="small admin-only" onclick="openWebhookModal()" title="Cài đặt thông báo Discord / Telegram khi bot offline">🔔 Webhook</button>
-        <button type="button" class="small admin-only" onclick="exportBotList()" title="Sao lưu danh sách bot ra file JSON">📥 Backup</button>
-        <button type="button" class="small admin-only" onclick="triggerImport()" title="Khôi phục danh sách bot từ file JSON">📤 Restore</button>
+        <button type="button" id="soundAlertBtn" class="small sound-btn" onclick="toggleSoundAlert()">Cảnh báo âm: TẮT</button>
+        <button type="button" id="discordDmNotifyBtn" class="small" onclick="toggleDiscordNotifications()" title="Bật/Tắt nhận tin nhắn riêng Discord (DM) khi bot đang AFK bị kick, die hoặc reconnect (chỉ tài khoản Web đã liên kết Discord)">TB Discord: BẬT</button>
+        <button type="button" id="btnUserRenewKey" class="small user-only" onclick="openRenewModal()" title="Nhập mã key gia hạn hạn thuê">Nhập Key</button>
+        <button type="button" class="small admin-only" onclick="openKeyManagementModal()" title="Quản lý mã key kích hoạt / gia hạn">Quản lý Key</button>
+        <button type="button" class="small admin-only" onclick="openWebhookModal()" title="Cài đặt thông báo Discord / Telegram khi bot offline">Webhook</button>
+        <button type="button" class="small admin-only" onclick="exportBotList()" title="Sao lưu danh sách bot ra file JSON">Backup</button>
+        <button type="button" class="small admin-only" onclick="triggerImport()" title="Khôi phục danh sách bot từ file JSON">Restore</button>
         <input type="file" id="importFileInput" accept=".json" style="display:none" onchange="handleImportFile(event)">
       </div>
     </div>
 
-    <!-- FLEET SEARCH & FILTER: ROW 2 -->
+    <!-- FLEET SEARCH & FILTER -->
     <div class="fleet-search-filter-row">
       <div class="filter-tabs" role="tablist" aria-label="Lọc trạng thái bot">
         <button type="button" class="tab-btn active" id="tabAll" onclick="setStatusFilter('all')">Tất cả (<span id="countAll">0</span>)</button>
-        <button type="button" class="tab-btn" id="tabOnline" onclick="setStatusFilter('online')">🟢 Đang Online (<span id="countOnline">0</span>)</button>
-        <button type="button" class="tab-btn" id="tabConnecting" onclick="setStatusFilter('connecting')">🟡 Đang Kết Nối (<span id="countConnecting">0</span>)</button>
-        <button type="button" class="tab-btn" id="tabOffline" onclick="setStatusFilter('offline')">🔴 Offline/Kicked (<span id="countOffline">0</span>)</button>
-        <button type="button" class="tab-btn" id="tabUnreachable" onclick="setStatusFilter('unreachable')">⚠️ Lỗi/Unreachable (<span id="countUnreachable">0</span>)</button>
+        <button type="button" class="tab-btn" id="tabOnline" onclick="setStatusFilter('online')"><span class="pulse-status-dot green" style="margin-right:6px;"></span>Online (<span id="countOnline">0</span>)</button>
+        <button type="button" class="tab-btn" id="tabConnecting" onclick="setStatusFilter('connecting')"><span class="pulse-status-dot yellow" style="margin-right:6px;"></span>Đang kết nối (<span id="countConnecting">0</span>)</button>
+        <button type="button" class="tab-btn" id="tabOffline" onclick="setStatusFilter('offline')"><span class="pulse-status-dot red" style="margin-right:6px;"></span>Offline / Kicked (<span id="countOffline">0</span>)</button>
+        <button type="button" class="tab-btn" id="tabUnreachable" onclick="setStatusFilter('unreachable')"><span class="pulse-status-dot orange" style="margin-right:6px;"></span>Unreachable (<span id="countUnreachable">0</span>)</button>
       </div>
       <div class="fleet-search-sort-wrap">
-        <input id="searchInput" type="search" aria-label="Tìm kiếm bot theo ID, tên, tài khoản ingame hoặc IP" class="search-box" placeholder="🔍 Tìm ID (01, 22), tên bot, username, IP..." oninput="filterBots()">
+        <input id="searchInput" type="search" aria-label="Tìm kiếm bot theo ID, tên, tài khoản ingame hoặc IP" class="search-box" placeholder="Tìm theo ID, tên bot, username hoặc IP" oninput="filterBots()">
         <select id="sortBotsSelect" aria-label="Sắp xếp danh sách bot" class="sort-select" onchange="changeBotSort(this.value)">
           <option value="default">Sắp xếp: Mặc định</option>
           <option value="status">Sắp xếp: Ưu tiên Online</option>
@@ -187,8 +201,8 @@
     </div>
 
     <!-- FLEET TAG FILTER BAR -->
-    <div id="fleetTagFilterRow" class="fleet-tag-filter-row" style="display:flex;gap:8px;align-items:center;margin-top:10px;margin-bottom:6px;flex-wrap:wrap;">
-      <span style="font-size:12px;color:var(--muted);font-weight:700;">🏷️ TAGS:</span>
+    <div id="fleetTagFilterRow" class="fleet-tag-filter-row" style="display:flex;gap:8px;align-items:center;margin-top:8px;margin-bottom:8px;flex-wrap:wrap;">
+      <span style="font-size:12px;color:var(--muted);font-weight:500;">Nhãn lọc:</span>
       <div id="tagPillsContainer" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
     </div>
 
@@ -198,235 +212,239 @@
   <section id="detailPage" class="hidden">
     <div id="detailMaintenanceBanner" class="system-maintenance-banner hidden" role="status" aria-live="polite" style="margin-bottom:12px;">
       <div class="system-maintenance-banner-body">
-        <div class="system-maintenance-icon" aria-hidden="true">🛠️</div>
+        <div class="system-maintenance-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--yellow)" stroke-width="1.75"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        </div>
         <div>
-          <div class="system-maintenance-title">HỆ THỐNG ĐANG BẢO TRÌ</div>
+          <div class="system-maintenance-title">Hệ thống đang bảo trì</div>
           <div id="detailMaintenanceBannerMessage" class="system-maintenance-msg">Tạm khóa thao tác điều khiển worker đối với người dùng.</div>
         </div>
       </div>
     </div>
     <div class="detail-header">
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-        <button type="button" class="small back-btn" onclick="goHome()">← Quay về Dashboard</button>
+        <button type="button" class="small back-btn" onclick="goHome()">← Về Dashboard</button>
         <div class="title-wrap">
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <div id="detailTitle" class="detail-title">Bot</div>
-            <button type="button" class="small" onclick="renameDetailBotAlias()" title="Đổi tên hiển thị / Ghi chú cho bot này" style="padding:4px 10px;font-size:11.5px;font-weight:600;border-radius:6px;white-space:nowrap;flex-shrink:0;">✏️ Đổi tên / Ghi chú</button>
+            <button type="button" class="small" onclick="renameDetailBotAlias()" title="Đổi tên hiển thị / Ghi chú cho bot này" style="padding:4px 10px;font-size:11.5px;font-weight:500;border-radius:6px;white-space:nowrap;flex-shrink:0;">Đổi tên / Ghi chú</button>
           </div>
-          <div class="detail-subtitle">Quản lý, theo dõi và đồng bộ cấu hình bot</div>
+          <div class="detail-subtitle">Theo dõi thông số, tương tác GUI và đồng bộ cấu hình bot</div>
         </div>
       </div>
       <div class="detail-hud" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-        <span class="vip-pill">👑 KBOT V12.1.1 PRO</span>
-        <span id="detailUserRoleBadge" class="vip-pill" style="background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.3);">🔒 CHƯA ĐĂNG NHẬP</span>
-        <span class="platform-pill admin-only">⚡ RENDER CLOUD</span>
-        <span class="ram-pill admin-only">📊 RAM: <strong id="detailManagerRamUsage">-- MB</strong></span>
+        <span class="vip-pill">KBOT V12.1.1 PRO</span>
+        <span id="detailUserRoleBadge" class="vip-pill" style="background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.3);">CHƯA ĐĂNG NHẬP</span>
+        <span class="platform-pill admin-only">RENDER CLOUD</span>
+        <span class="ram-pill admin-only">RAM: <strong id="detailManagerRamUsage">-- MB</strong></span>
       </div>
     </div>
 
     <div class="grid detail-grid">
 
-      <!-- PANEL 1: BẢNG TRẠNG THÁI / THEO DÕI -->
+      <!-- PANEL 1: TRẠNG THÁI -->
       <div class="panel" id="detailStatusPanel">
-        <h3>Trạng thái</h3>
+        <h3>Trạng thái vận hành</h3>
         <div id="detailStatus" class="big-status"></div>
         <div class="info">
-          <div class="info-item"><div class="info-label">BOT ID</div><div id="detailBotId" class="info-value">-</div></div>
-          <div class="info-item copyable" onclick="copyToClipboard(document.getElementById('detailUsername')?.innerText, 'Username')" title="Click để copy Username"><div class="info-label">USERNAME 📋</div><div id="detailUsername" class="info-value">-</div></div>
-          <div class="info-item"><div class="info-label">SERVER</div><div id="detailServer" class="info-value">-</div></div>
-          <div class="info-item"><div class="info-label">PING</div><div id="detailPing" class="info-value">-</div></div>
-          <div class="info-item"><div class="info-label">SERVER TPS ⚡</div><div id="detailTps" class="info-value" style="color:var(--green);font-weight:700;">--</div></div>
-          <div class="info-item location-info copyable" onclick="copyToClipboard(document.getElementById('detailPosition')?.innerText, 'Tọa độ')" title="Click để copy Tọa độ"><div class="info-label">LOCATION 📋</div><div class="info-value location-value"><span id="detailPosition" class="position-value">-</span><span class="location-separator">•</span><span id="detailDimension">-</span></div></div>
-          <div class="info-item admin-only"><div class="info-label">RAM MÁY HOST 🧠</div><div id="detailHostRam" class="info-value" style="color:var(--green);font-weight:700;">-</div></div>
-          <div class="info-item admin-only"><div class="info-label">CPU MÁY HOST ⚡</div><div id="detailHostCpu" class="info-value" style="color:#38bdf8;font-weight:700;">-</div></div>
-          <div class="info-item admin-only"><div class="info-label">LƯU LƯỢNG MẠNG 📶</div><div id="detailHostNet" class="info-value" style="color:var(--yellow);font-weight:700;">-</div></div>
-          <div id="detailIpItem" class="info-item copyable admin-only" onclick="copyToClipboard(document.getElementById('detailIp')?.innerText, 'IP')" title="Click để copy IP"><div class="info-label">BOT IP 📋</div><div id="detailIp" class="info-value">-</div></div>
-          <div class="info-item admin-only"><div class="info-label">RAM BOT CON 🤖</div><div id="detailRam" class="info-value" style="color:#38bdf8;font-weight:700;">-</div></div>
-          <div class="info-item"><div class="info-label">UPTIME ⏱</div><div id="detailUptime" class="info-value" style="color:#38bdf8;font-weight:700;">-</div></div>
-          <div class="info-item"><div class="info-label">RECONNECTS 🔄</div><div id="detailReconnects" class="info-value">-</div></div>
+          <div class="info-item"><div class="info-label">Bot ID</div><div id="detailBotId" class="info-value">-</div></div>
+          <div class="info-item copyable" onclick="copyToClipboard(document.getElementById('detailUsername')?.innerText, 'Username')" title="Click để sao chép Username"><div class="info-label">Username (sao chép)</div><div id="detailUsername" class="info-value">-</div></div>
+          <div class="info-item"><div class="info-label">Máy chủ</div><div id="detailServer" class="info-value">-</div></div>
+          <div class="info-item"><div class="info-label">Độ trễ Ping</div><div id="detailPing" class="info-value">-</div></div>
+          <div class="info-item"><div class="info-label">Server TPS</div><div id="detailTps" class="info-value" style="color:var(--green);font-weight:600;">--</div></div>
+          <div class="info-item location-info copyable" onclick="copyToClipboard(document.getElementById('detailPosition')?.innerText, 'Tọa độ')" title="Click để sao chép Tọa độ"><div class="info-label">Tọa độ (sao chép)</div><div class="info-value location-value"><span id="detailPosition" class="position-value">-</span><span class="location-separator">•</span><span id="detailDimension">-</span></div></div>
+          <div class="info-item admin-only"><div class="info-label">RAM máy Host</div><div id="detailHostRam" class="info-value" style="color:var(--green);font-weight:600;">-</div></div>
+          <div class="info-item admin-only"><div class="info-label">CPU máy Host</div><div id="detailHostCpu" class="info-value" style="color:var(--accent-text);font-weight:600;">-</div></div>
+          <div class="info-item admin-only"><div class="info-label">Lưu lượng mạng</div><div id="detailHostNet" class="info-value" style="color:var(--yellow);font-weight:600;">-</div></div>
+          <div id="detailIpItem" class="info-item copyable admin-only" onclick="copyToClipboard(document.getElementById('detailIp')?.innerText, 'IP')" title="Click để sao chép IP"><div class="info-label">Bot IP (sao chép)</div><div id="detailIp" class="info-value">-</div></div>
+          <div class="info-item admin-only"><div class="info-label">RAM Worker</div><div id="detailRam" class="info-value" style="color:var(--accent-text);font-weight:600;">-</div></div>
+          <div class="info-item"><div class="info-label">Thời gian Uptime</div><div id="detailUptime" class="info-value" style="color:var(--accent-text);font-weight:600;">-</div></div>
+          <div class="info-item"><div class="info-label">Số lần Reconnect</div><div id="detailReconnects" class="info-value">-</div></div>
         </div>
         <div class="controls">
           <button type="button" id="detailStartButton" class="primary" onclick="detailAction('start')">▶ Chạy</button>
           <button type="button" id="detailStopButton" class="danger" onclick="detailAction('stop')">■ Dừng</button>
           <button type="button" id="detailRestartButton" onclick="detailAction('restart')">↻ Chạy lại</button>
-          <button type="button" id="detailResetCustomerBtn" class="danger admin-only" onclick="resetCustomerBot()" style="margin-left:auto;background:rgba(239,68,68,0.2);border-color:rgba(239,68,68,0.5);" title="Dừng bot, xóa trắng tài khoản và lịch sử để bàn giao khách mới">🧹 Reset Bàn Giao Khách Mới</button>
+          <button type="button" id="detailResetCustomerBtn" class="danger admin-only" onclick="resetCustomerBot()" style="margin-left:auto;" title="Dừng bot, xóa trắng tài khoản và lịch sử để bàn giao khách mới">Reset bàn giao khách mới</button>
         </div>
         <div class="note" style="margin-top:12px;">
-          <div style="font-weight:700;margin-bottom:6px;">Lịch sử tọa độ gần nhất</div>
+          <div style="font-weight:600;margin-bottom:4px;color:var(--text-secondary);">Lịch sử tọa độ gần nhất</div>
           <div id="detailPositionHistory" style="max-height:180px;overflow:auto;line-height:1.6;">Theo dõi tọa độ trực tiếp ở bảng Trạng thái hiện tại (endpoint lịch sử tọa độ không khả dụng).</div>
         </div>
       </div>
 
-      <!-- PANEL 2: BẢNG GUI INGAME (HIỂN THỊ CỨNG CẠNH BẢNG THEO DÕI) -->
+      <!-- PANEL 2: BẢNG GUI INGAME -->
       <div class="panel" id="detailRemoteGuiCard">
         <div class="chat-title-row">
-          <h3 id="detailRemoteGuiTitle">🖥️ Cửa Sổ GUI / Menu Ingame</h3>
-          <span id="detailRemoteGuiBadge" class="capacity-badge" style="background:var(--accent);color:#fff;display:none;">Đang Mở</span>
+          <h3 id="detailRemoteGuiTitle">Cửa sổ GUI / Menu Ingame</h3>
+          <span id="detailRemoteGuiBadge" class="capacity-badge" style="background:var(--accent);color:#fff;display:none;">Đang mở</span>
           <button id="detailRemoteGuiCloseBtn" type="button" class="small" onclick="closeDetailGuiWindow()" style="display:none;">✕ Đóng GUI</button>
         </div>
-        <div id="detailRemoteGuiPlaceholder" style="text-align:center;padding:55px 16px;color:var(--muted);">
-          <div style="font-size:42px;margin-bottom:10px;opacity:0.75;">🖥️</div>
-          <div style="font-size:15px;font-weight:700;color:var(--text);margin-bottom:6px;">Hiện Chưa Có Cửa Sổ GUI Nào Đang Mở</div>
-          <div style="font-size:12px;color:var(--muted);max-width:320px;margin:0 auto;line-height:1.5;">Khi bot mở Menu (<code>/menu</code>, <code>/warp</code> hoặc mở rương trong game), các ô vật phẩm sẽ xuất hiện tại đây để bạn bấm tương tác trực tiếp.</div>
+        <div id="detailRemoteGuiPlaceholder" style="text-align:center;padding:52px 16px;color:var(--muted);">
+          <div style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:10px;background:var(--surface-soft);border:1px solid var(--border);margin-bottom:12px;color:var(--text-secondary);">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+          </div>
+          <div style="font-size:14.5px;font-weight:600;color:var(--text);margin-bottom:6px;">Chưa có cửa sổ GUI nào đang mở</div>
+          <div style="font-size:12px;color:var(--muted);max-width:320px;margin:0 auto;line-height:1.5;">Khi bot mở <code>/menu</code>, <code>/warp</code> hoặc rương trong game, các ô vật phẩm sẽ hiển thị tại đây để tương tác trực tiếp.</div>
         </div>
         <div id="detailRemoteGuiContent" style="display:none;">
-          <p style="font-size:12px;color:var(--muted);margin:4px 0 10px 0;">Click trực tiếp vào ô vật phẩm bên dưới để chọn chức năng:</p>
-          <div id="detailRemoteGuiSlots" style="display:grid;grid-template-columns:repeat(9, 1fr);gap:5px;max-width:540px;margin:0 auto;background:rgba(0,0,0,0.3);padding:10px;border-radius:8px;border:1px solid var(--border);"></div>
+          <p style="font-size:12px;color:var(--muted);margin:4px 0 10px 0;">Bấm trực tiếp vào ô vật phẩm bên dưới để chọn chức năng:</p>
+          <div id="detailRemoteGuiSlots" style="display:grid;grid-template-columns:repeat(9, 1fr);gap:5px;max-width:540px;margin:0 auto;"></div>
         </div>
       </div>
 
-      <!-- PANEL 3: BẢNG CHAT (BÊN CẠNH EVENT LOG) -->
+      <!-- PANEL 3: BẢNG CHAT -->
       <div class="panel" id="detailChatPanel">
-        <div class="chat-title-row"><h3>Chat</h3><span id="detailChatCount" class="log-count-pill">0 tin</span><button type="button" class="small danger admin-only" style="margin-left:auto;" onclick="clearDetailChat()">Xóa lịch sử</button></div>
+        <div class="chat-title-row"><h3>Chat &amp; Lệnh</h3><span id="detailChatCount" class="log-count-pill">0 tin</span><button type="button" class="small danger admin-only" style="margin-left:auto;" onclick="clearDetailChat()">Xóa lịch sử</button></div>
         <div id="detailChatLogs" class="log"></div>
         <form id="detailChatForm" class="chat-row chat-form" onsubmit="sendDetailMessage(event)">
-          <input id="detailMessageInput" autocomplete="off" aria-label="Nhập chat hoặc lệnh điều khiển bot" placeholder="Nhập chat hoặc command... (↑↓ lịch sử)">
+          <input id="detailMessageInput" autocomplete="off" aria-label="Nhập chat hoặc lệnh điều khiển bot" placeholder="Nhập chat hoặc lệnh (↑↓ xem lại lịch sử)">
           <button id="detailSendButton" class="primary" type="submit">Gửi</button>
         </form>
         <div class="chip-row">
-          <button type="button" class="chip" style="background:rgba(14,165,233,0.18);color:#38bdf8;border-color:rgba(14,165,233,0.45);font-weight:700;" onclick="quickEnterServer()">⚡ Vào Server (Slot 24)</button>
-          <button type="button" class="chip" onclick="quickDetailCommand('/menu')">⚡ /menu</button>
-          <button type="button" class="chip" onclick="quickDetailCommand('/dn')">🔑 /dn [MK]</button>
-          <button type="button" class="chip" onclick="quickDetailCommand('/login')">🔓 /login [MK]</button>
-          <button type="button" class="chip" onclick="quickDetailCommand('/bal')">💵 /bal</button>
-          <button type="button" class="chip" onclick="quickDetailCommand('/team chat')">🛡️ /team chat</button>
-          <button type="button" class="chip" onclick="quickDetailCommand('/spawn')">🏠 /spawn</button>
-          <button type="button" class="chip" onclick="quickDetailCommand('/pay')">💰 /pay</button>
+          <button type="button" class="chip" style="background:var(--accent-soft);color:var(--accent-text);border-color:var(--border-strong);font-weight:600;" onclick="quickEnterServer()">Vào Server (Slot 24)</button>
+          <button type="button" class="chip" onclick="quickDetailCommand('/menu')">/menu</button>
+          <button type="button" class="chip" onclick="quickDetailCommand('/dn')">/dn [MK]</button>
+          <button type="button" class="chip" onclick="quickDetailCommand('/login')">/login [MK]</button>
+          <button type="button" class="chip" onclick="quickDetailCommand('/bal')">/bal</button>
+          <button type="button" class="chip" onclick="quickDetailCommand('/team chat')">/team chat</button>
+          <button type="button" class="chip" onclick="quickDetailCommand('/spawn')">/spawn</button>
+          <button type="button" class="chip" onclick="quickDetailCommand('/pay')">/pay</button>
         </div>
         <div class="note">
-          Bấm chip để gửi nhanh. Dùng phím ↑ ↓ trong ô nhập để xem lại các lệnh đã gửi.
+          Bấm nút tắt để gửi nhanh. Dùng phím ↑ ↓ trong ô nhập để xem lại các lệnh đã gửi.
         </div>
       </div>
 
-      <!-- PANEL 4: BẢNG EVENT LOG (BÊN CẠNH CHAT) -->
+      <!-- PANEL 4: BẢNG EVENT LOG -->
       <div class="panel" id="detailEventPanel">
-        <div class="chat-title-row"><h3>Event Log</h3><span id="detailEventCount" class="log-count-pill">0 sự kiện</span><button type="button" class="small" onclick="exportBotLogs(event,selectedBotId)" style="margin-left:auto;margin-right:8px;">📥 Tải Log</button><button type="button" class="small danger admin-only" onclick="clearDetailLogs()">Xóa lịch sử</button></div>
+        <div class="chat-title-row"><h3>Nhật ký sự kiện</h3><span id="detailEventCount" class="log-count-pill">0 sự kiện</span><button type="button" class="small" onclick="exportBotLogs(event,selectedBotId)" style="margin-left:auto;margin-right:8px;">Tải Log</button><button type="button" class="small danger admin-only" onclick="clearDetailLogs()">Xóa lịch sử</button></div>
         <div id="detailEventLogs" class="log"></div>
       </div>
 
       <!-- PANEL 5: INVENTORY MANAGER -->
       <div class="panel" id="detailInventoryPanel">
         <div class="chat-title-row">
-          <h3>Inventory Manager</h3>
+          <h3>Túi đồ &amp; Trang bị</h3>
           <span id="detailInventoryCapacity" class="capacity-badge">0/36 ô (0%)</span>
-          <button type="button" class="small" style="background:rgba(234,179,8,0.2);color:#fbbf24;border:1px solid rgba(234,179,8,0.5);font-weight:700;margin-left:auto;" onclick="quickEquipTotem()" title="Tự động tìm Totem trong 36 ô rương đồ và lắp vào tay phụ">⚡ Lắp Totem Tay Phụ</button>
+          <button type="button" class="small warning-btn" style="margin-left:auto;" onclick="quickEquipTotem()" title="Tự động tìm Totem trong 36 ô rương đồ và lắp vào tay phụ">Lắp Totem tay phụ</button>
         </div>
         <div class="inventory-grid">
-          <div class="inventory-stat"><div class="info-label">HEALTH</div><div id="detailHealth" class="info-value">20 / 20</div><div class="bar health-bar"><span id="detailHealthBar"></span></div></div>
-          <div class="inventory-stat"><div class="info-label">HUNGER</div><div id="detailFood" class="info-value">20 / 20</div><div class="bar hunger-bar"><span id="detailFoodBar"></span></div></div>
-          <div class="inventory-stat"><div class="info-label">GOLDEN APPLE</div><div id="detailGolden" class="info-value">0</div></div>
-          <div class="inventory-stat"><div class="info-label">TOTEM</div><div id="detailTotem" class="info-value">0</div></div>
-          <div class="inventory-stat"><div class="info-label">OFFHAND</div><div id="detailOffhand" class="info-value">-</div></div>
-          <div class="inventory-stat"><div class="info-label">FOOD COUNT</div><div id="detailFoodCount" class="info-value">0</div></div>
+          <div class="inventory-stat"><div class="info-label">Sinh lực (HP)</div><div id="detailHealth" class="info-value">20 / 20</div><div class="bar health-bar"><span id="detailHealthBar"></span></div></div>
+          <div class="inventory-stat"><div class="info-label">Độ no (Hunger)</div><div id="detailFood" class="info-value">20 / 20</div><div class="bar hunger-bar"><span id="detailFoodBar"></span></div></div>
+          <div class="inventory-stat"><div class="info-label">Táo vàng</div><div id="detailGolden" class="info-value">0</div></div>
+          <div class="inventory-stat"><div class="info-label">Totem dự trữ</div><div id="detailTotem" class="info-value">0</div></div>
+          <div class="inventory-stat"><div class="info-label">Tay phụ (Offhand)</div><div id="detailOffhand" class="info-value">-</div></div>
+          <div class="inventory-stat"><div class="info-label">Thức ăn</div><div id="detailFoodCount" class="info-value">0</div></div>
         </div>
 
-        <div class="info-label">EQUIPMENT / OFFHAND</div>
+        <div class="info-label">Giáp &amp; Tay phụ</div>
         <div class="equipment-row">
-          <div id="equipHeadBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'head')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'head')" onclick="handleDetailEquipmentClick('head')" ondblclick="unequipDetail('head')"><div class="equip-label">HEAD</div><div id="equipHead">-</div></div>
-          <div id="equipTorsoBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'torso')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'torso')" onclick="handleDetailEquipmentClick('torso')" ondblclick="unequipDetail('torso')"><div class="equip-label">CHEST</div><div id="equipTorso">-</div></div>
-          <div id="equipLegsBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'legs')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'legs')" onclick="handleDetailEquipmentClick('legs')" ondblclick="unequipDetail('legs')"><div class="equip-label">LEGS</div><div id="equipLegs">-</div></div>
-          <div id="equipFeetBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'feet')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'feet')" onclick="handleDetailEquipmentClick('feet')" ondblclick="unequipDetail('feet')"><div class="equip-label">FEET</div><div id="equipFeet">-</div></div>
-          <div id="equipOffhandBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'off-hand')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'off-hand')" onclick="handleDetailEquipmentClick('off-hand')" ondblclick="unequipDetail('off-hand')"><div class="equip-label">OFFHAND</div><div id="equipOffhand">-</div></div>
+          <div id="equipHeadBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'head')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'head')" onclick="handleDetailEquipmentClick('head')" ondblclick="unequipDetail('head')"><div class="equip-label">Mũ</div><div id="equipHead">-</div></div>
+          <div id="equipTorsoBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'torso')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'torso')" onclick="handleDetailEquipmentClick('torso')" ondblclick="unequipDetail('torso')"><div class="equip-label">Áo</div><div id="equipTorso">-</div></div>
+          <div id="equipLegsBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'legs')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'legs')" onclick="handleDetailEquipmentClick('legs')" ondblclick="unequipDetail('legs')"><div class="equip-label">Quần</div><div id="equipLegs">-</div></div>
+          <div id="equipFeetBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'feet')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'feet')" onclick="handleDetailEquipmentClick('feet')" ondblclick="unequipDetail('feet')"><div class="equip-label">Giày</div><div id="equipFeet">-</div></div>
+          <div id="equipOffhandBox" class="equipment-slot" draggable="true" ondragstart="startEquipmentDrag(event,'off-hand')" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropEquip(event,'off-hand')" onclick="handleDetailEquipmentClick('off-hand')" ondblclick="unequipDetail('off-hand')"><div class="equip-label">Tay phụ</div><div id="equipOffhand">-</div></div>
         </div>
 
-        <div class="info-label">INVENTORY 27 SLOTS</div>
+        <div class="info-label">Kho đồ (27 ô)</div>
         <div id="detailInventory" class="slot-grid"></div>
-        <div class="info-label" style="margin-top:12px;">HOTBAR 9 SLOTS</div>
+        <div class="info-label" style="margin-top:12px;">Thanh công cụ (9 ô)</div>
         <div id="detailHotbar" class="slot-grid"></div>
-        <div id="detailDropZone" class="drop-zone" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropDetailItemToWorld(event)" onclick="handleDetailDropZoneClick()">Kéo item vào đây để vứt</div>
+        <div id="detailDropZone" class="drop-zone" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropDetailItemToWorld(event)" onclick="handleDetailDropZoneClick()">Kéo vật phẩm vào đây để vứt ra ngoài</div>
         <div id="detailInventoryRevision" class="note">revision 0</div>
       </div>
 
       <!-- PANEL 6: SETTINGS -->
       <div class="panel" id="detailSettingsPanel">
-        <div class="chat-title-row"><h3>Settings</h3><div class="revision">đồng bộ từ bot con</div></div>
+        <div class="chat-title-row"><h3>Cài đặt tự động</h3><div class="revision">đồng bộ từ worker</div></div>
         <div class="setting-list">
-          <label class="check-row"><input id="detailSettingEcoMode" type="checkbox" checked onchange="markDetailSettingsDirty()"> <span>🌱 Eco Mode Siêu Tiết Kiệm (Giảm 80% CPU & giữ RAM &lt; 220MB)</span></label>
-          <label class="check-row"><input id="detailSettingAutoTotem" type="checkbox" checked onchange="markDetailSettingsDirty()"> <span>Auto Totem phản xạ tức thì (&lt; 50ms)</span></label>
-          <label class="check-row"><input id="detailSettingAntiHungry" type="checkbox" checked onchange="markDetailSettingsDirty()"> <span>Anti Hungry / Auto Eat</span></label>
-          <label class="check-row"><input id="detailSettingAutoReconnect" type="checkbox" checked onchange="markDetailSettingsDirty()"> <span>Auto Reconnect + LOGIN/DN/MENU (Anti-Cheat Jitter ±5s, tăng dần &amp; dừng khi quá giới hạn)</span></label>
-          <label class="check-row"><input id="detailSettingAntiAfkKick" type="checkbox" checked onchange="markDetailSettingsDirty()"> <span>Smart Anti-AFK Kick (Xoay đầu, vung tay nhẹ)</span></label>
-          <div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);">
-            <div style="font-size:11.5px;font-weight:700;color:#38bdf8;margin-bottom:2px;">🔔 Tùy chọn Thông báo riêng qua Discord (DM)</div>
-            <div style="font-size:11px;color:var(--muted);margin-bottom:6px;">Chỉ gửi DM tới tài khoản Discord đã liên kết với tài khoản Web đang sở hữu bot này.</div>
+          <label class="check-row"><input id="detailSettingEcoMode" type="checkbox" checked onchange="markDetailSettingsDirty()"> <span>Eco Mode tiết kiệm tài nguyên (giảm tải CPU &amp; giữ RAM &lt; 220 MB)</span></label>
+          <label class="check-row"><input id="detailSettingAutoTotem" type="checkbox" checked onchange="markDetailSettingsDirty()"> <span>Auto Totem phản xạ tức thì (&lt; 50 ms)</span></label>
+          <label class="check-row"><input id="detailSettingAntiHungry" type="checkbox" checked onchange="markDetailSettingsDirty()"> <span>Tự động ăn chống đói (Auto Eat)</span></label>
+          <label class="check-row"><input id="detailSettingAutoReconnect" type="checkbox" checked onchange="markDetailSettingsDirty()"> <span>Auto Reconnect + LOGIN/DN/MENU (kèm độ trễ ngẫu nhiên ±5s)</span></label>
+          <label class="check-row"><input id="detailSettingAntiAfkKick" type="checkbox" checked onchange="markDetailSettingsDirty()"> <span>Chống kick AFK (xoay góc nhìn và vung tay nhẹ)</span></label>
+          <div style="margin-top:8px;padding-top:10px;border-top:1px dashed var(--border);">
+            <div style="font-size:12px;font-weight:600;color:var(--accent-text);margin-bottom:2px;">Thông báo riêng qua Discord (DM)</div>
+            <div style="font-size:11.5px;color:var(--muted);margin-bottom:8px;">Chỉ gửi DM tới tài khoản Discord đã liên kết với tài khoản Web đang sở hữu bot này.</div>
             <label class="check-row"><input id="detailSettingUserNotifyEnabled" type="checkbox" checked onchange="markDetailSettingsDirty()"> <span>Bật nhận tin nhắn thông báo Discord cho bot này</span></label>
-            <label class="check-row"><input id="detailSettingNotifyOnAfkKick" type="checkbox" checked onchange="markDetailSettingsDirty()"> <span>⚠️ Báo ngay khi đang treo AFK mà bị Kick / Văng / Chết</span></label>
-            <label class="check-row"><input id="detailSettingNotifyOnAfkRecover" type="checkbox" checked onchange="markDetailSettingsDirty()"> <span>✅ Báo khi Bot tự kết nối lại vào khu vực AFK thành công</span></label>
-            <label class="check-row"><input id="detailSettingNotifyOnReconnectExhausted" type="checkbox" checked onchange="markDetailSettingsDirty()"> <span>🛑 Báo khi kết nối lại quá nhiều lần không được và tự dừng</span></label>
+            <label class="check-row"><input id="detailSettingNotifyOnAfkKick" type="checkbox" checked onchange="markDetailSettingsDirty()"> <span>Báo khi đang treo AFK mà bị Kick, văng hoặc chết</span></label>
+            <label class="check-row"><input id="detailSettingNotifyOnAfkRecover" type="checkbox" checked onchange="markDetailSettingsDirty()"> <span>Báo khi Bot tự kết nối lại vào khu vực AFK thành công</span></label>
+            <label class="check-row"><input id="detailSettingNotifyOnReconnectExhausted" type="checkbox" checked onchange="markDetailSettingsDirty()"> <span>Báo khi thử kết nối lại quá giới hạn và tự dừng</span></label>
           </div>
-          <label for="detailSpawnCommands" style="display:block;font-size:12px;font-weight:600;margin-top:6px;">⚡ Spawn Commands (lệnh chạy khi vào AFK, phân tách bằng ; hoặc xuống dòng, tự random ±5s)</label>
-          <textarea id="detailSpawnCommands" rows="3" maxlength="1000" style="width:100%;box-sizing:border-box;border-radius:6px;padding:6px 8px;font-family:monospace;font-size:12px;background:rgba(15,23,42,0.6);border:1px solid var(--border);resize:vertical;" placeholder="/server town;&#10;/fly;&#10;/home afk" oninput="markDetailSettingsDirty()"></textarea>
+          <label for="detailSpawnCommands" style="display:block;font-size:12px;font-weight:500;color:var(--text-secondary);margin-top:6px;">Chuỗi lệnh Spawn (chạy khi vào AFK, phân tách bằng dấu ; hoặc xuống dòng)</label>
+          <textarea id="detailSpawnCommands" rows="3" maxlength="1000" style="width:100%;box-sizing:border-box;border-radius:8px;padding:8px 10px;font-family:var(--font-mono);font-size:12px;background:var(--bg-input);border:1px solid var(--border);resize:vertical;" placeholder="/server town;&#10;/fly;&#10;/home afk" oninput="markDetailSettingsDirty()"></textarea>
           <div class="note" style="margin-top:4px;">Nếu hiển thị ******** nghĩa là tài khoản của bạn không có quyền đổi tài khoản Minecraft — giữ nguyên để không thay đổi cấu hình.</div>
         </div>
-        <button type="button" id="saveDetailSettingsButton" class="primary" onclick="saveDetailSettings()">Lưu setting</button>
+        <button type="button" id="saveDetailSettingsButton" class="primary" onclick="saveDetailSettings()">Lưu cài đặt</button>
       </div>
 
       <div class="panel" id="detailAccountPanel">
         <h3>Tài khoản Minecraft Bot</h3>
         <div class="form-row">
-          <label for="detailUsernameInput">Username Ingame</label>
-          <input id="detailUsernameInput" autocomplete="off" placeholder="Username Minecraft bot...">
+          <label for="detailUsernameInput">Tên nhân vật Ingame</label>
+          <input id="detailUsernameInput" autocomplete="off" placeholder="Nhập tên nhân vật Minecraft">
         </div>
         <div class="form-row">
-          <label for="detailPasswordInput">Mật khẩu Minecraft bot (/login)</label>
+          <label for="detailPasswordInput">Mật khẩu Minecraft (/login)</label>
           <div class="password-input-wrap">
-            <input id="detailPasswordInput" type="password" autocomplete="new-password" placeholder="Mật khẩu Minecraft bot...">
-            <button type="button" class="password-toggle-btn" aria-label="Hiện mật khẩu" aria-pressed="false" onclick="togglePasswordVisibility('detailPasswordInput', this)">👁</button>
+            <input id="detailPasswordInput" type="password" autocomplete="new-password" placeholder="Nhập mật khẩu trong game">
+            <button type="button" class="password-toggle-btn" aria-label="Hiện mật khẩu" aria-pressed="false" onclick="togglePasswordVisibility('detailPasswordInput', this)">Hiện</button>
           </div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:10px;">
           <button type="button" class="primary" onclick="saveDetailAccount()">Lưu thay đổi</button>
-          <button type="button" class="small" onclick="saveAndRestartBot()" style="font-weight:700;">💾 Lưu & Chạy lại ngay</button>
+          <button type="button" class="small" onclick="saveAndRestartBot()" style="font-weight:600;">Lưu &amp; Chạy lại ngay</button>
         </div>
-        <div class="note">Áp dụng ngay cho bot. Bấm "Lưu & Chạy lại ngay" để bot đăng nhập tài khoản mới lập tức.</div>
+        <div class="note">Áp dụng ngay cho bot. Bấm "Lưu &amp; Chạy lại ngay" để bot đăng nhập tài khoản mới lập tức.</div>
       </div>
 
       <div id="detailAutoChatPanel" class="panel">
-        <div class="chat-title-row"><h3>Auto Chat</h3><button type="button" class="small primary" onclick="addDetailAutoChatSchedule()">＋ Thêm</button></div>
+        <div class="chat-title-row"><h3>Auto Chat</h3><button type="button" class="small primary" onclick="addDetailAutoChatSchedule()">＋ Thêm dòng</button></div>
         <div id="detailAutoChatSchedules" class="schedule-list"></div>
-        <div class="note">Mỗi dòng là một lịch riêng. Kéo ⋮⋮ để đổi thứ tự; sửa trực tiếp rồi bấm Lưu Auto Chat.</div>
+        <div class="note">Mỗi dòng là một lịch riêng. Kéo ⋮⋮ để đổi thứ tự, sửa trực tiếp rồi bấm Lưu Auto Chat.</div>
         <button type="button" id="saveDetailAutoChatButton" class="primary compact-save" onclick="saveDetailAutoChat()">Lưu Auto Chat</button>
       </div>
 
       <div id="detailBotSchedulePanel" class="panel">
-        <div class="chat-title-row"><h3>Hẹn giờ Bot</h3><button type="button" class="small primary" onclick="addDetailBotSchedule()">＋ Thêm</button></div>
+        <div class="chat-title-row"><h3>Hẹn giờ bật tắt Bot</h3><button type="button" class="small primary" onclick="addDetailBotSchedule()">＋ Thêm lịch</button></div>
         <div class="scheduler-toolbar">
-          <label class="scheduler-mode-box"><span>Chế độ</span>
+          <label class="scheduler-mode-box"><span style="font-size:12px;color:var(--text-secondary);">Chế độ lịch</span>
             <select id="detailBotScheduleMode" onchange="detailBotScheduleModeChanged(this)">
               <option value="fixed">Giờ cố định mỗi ngày</option>
               <option value="cycle">Chu kỳ theo thứ tự</option>
             </select>
           </label>
-          <label class="check-row" style="margin:0;padding:7px 9px;"><input id="detailBotScheduleEnabled" type="checkbox" checked> <span>Kích hoạt lịch</span></label>
+          <label class="check-row" style="margin:0;padding:7px 10px;"><input id="detailBotScheduleEnabled" type="checkbox" checked> <span>Kích hoạt lịch</span></label>
         </div>
         <div id="detailBotScheduleModeNote" class="scheduler-note"></div>
         <div id="detailBotSchedules" class="schedule-list"></div>
-        <div class="note">Chỉ có một chế độ tại một thời điểm. Ở Chu kỳ, thời gian mỗi dòng tính từ dòng kề trên; kéo đổi thứ tự thì cách tính cũng đổi theo.</div>
+        <div class="note">Chỉ chạy một chế độ tại một thời điểm. Ở chế độ Chu kỳ, thời gian mỗi dòng tính nối tiếp từ dòng kề trên.</div>
         <button type="button" id="saveDetailBotSchedulesButton" class="primary compact-save" onclick="saveDetailBotSchedules()">Lưu hẹn giờ Bot</button>
       </div>
 
-      <!-- PANEL CẤU HÌNH PROXY RIÊNG CỦA TỪNG BOT (BUG-19) -->
+      <!-- PANEL CẤU HÌNH PROXY RIÊNG -->
       <div class="panel admin-only" id="detailProxyPanel">
         <div class="chat-title-row">
-          <h3>🌐 Cấu hình Proxy Riêng</h3>
-          <span id="detailProxyBadge" class="capacity-badge" style="background:var(--border);color:var(--muted);">TẮT</span>
+          <h3>Cấu hình Proxy riêng</h3>
+          <span id="detailProxyBadge" class="capacity-badge" style="background:var(--surface-soft);color:var(--muted);">TẮT</span>
         </div>
         <div class="setting-list" style="margin-bottom:12px;">
           <label class="check-row">
             <input id="detailProxyEnabled" type="checkbox">
-            <span>Kích hoạt Proxy khi kết nối Minecraft</span>
+            <span>Kích hoạt định tuyến qua Proxy khi kết nối Minecraft</span>
           </label>
         </div>
         <div class="form-row">
           <label for="detailProxyProtocol">Giao thức (Protocol)</label>
           <select id="detailProxyProtocol" style="width:100%;box-sizing:border-box;">
-            <option value="socks5">SOCKS5 (Khuyên dùng - Hỗ trợ Auth & DNS)</option>
+            <option value="socks5">SOCKS5 (Hỗ trợ xác thực &amp; DNS)</option>
           </select>
         </div>
         <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px;">
           <div class="form-row">
             <label for="detailProxyHost">Host / IP Proxy</label>
-            <input id="detailProxyHost" placeholder="vd: 103.152.112.5" autocomplete="off">
+            <input id="detailProxyHost" placeholder="Ví dụ: 103.152.112.5" autocomplete="off">
           </div>
           <div class="form-row">
             <label for="detailProxyPort">Port</label>
@@ -435,24 +453,23 @@
         </div>
         <div class="form-row">
           <label for="detailProxyUsername">Username (nếu có)</label>
-          <input id="detailProxyUsername" placeholder="Để trống nếu không có auth" autocomplete="off">
+          <input id="detailProxyUsername" placeholder="Để trống nếu không yêu cầu xác thực" autocomplete="off">
         </div>
         <div class="form-row">
           <label for="detailProxyPassword">Password (nếu có)</label>
           <div class="password-input-wrap">
-            <input id="detailProxyPassword" type="password" autocomplete="new-password" placeholder="Mật khẩu proxy...">
-            <button type="button" class="password-toggle-btn" aria-label="Hiện mật khẩu" aria-pressed="false" onclick="togglePasswordVisibility('detailProxyPassword', this)">👁</button>
+            <input id="detailProxyPassword" type="password" autocomplete="new-password" placeholder="Nhập mật khẩu proxy">
+            <button type="button" class="password-toggle-btn" aria-label="Hiện mật khẩu" aria-pressed="false" onclick="togglePasswordVisibility('detailProxyPassword', this)">Hiện</button>
           </div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap;">
-          <button type="button" class="primary" onclick="saveDetailProxy()">💾 Lưu Proxy</button>
-          <button type="button" class="small" onclick="testDetailProxy()" id="detailProxyTestBtn">🧪 Kiểm Tra Kết Nối</button>
+          <button type="button" class="primary" onclick="saveDetailProxy()">Lưu Proxy</button>
+          <button type="button" class="small" onclick="testDetailProxy()" id="detailProxyTestBtn">Kiểm tra kết nối</button>
           <button type="button" class="small danger" onclick="clearDetailProxy()" style="margin-left:auto;">✕ Xóa Proxy</button>
         </div>
         <div id="detailProxyTestResult" class="note" style="margin-top:8px;">
-          Proxy có thể dùng chung giữa các bot. Chỉ hỗ trợ giao thức SOCKS5. Khi bật, bot sẽ định tuyến qua Proxy này để đổi IP an toàn.
+          Proxy có thể dùng chung giữa các bot. Hỗ trợ chuẩn giao thức SOCKS5 để đổi IP kết nối an toàn.
         </div>
       </div>
     </div>
   </section>
-

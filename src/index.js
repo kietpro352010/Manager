@@ -23,6 +23,7 @@ function runGarbageCollection() {
 }
 
 const http = require('node:http');
+const crypto = require('node:crypto');
 const { Client, GatewayIntentBits, Events, Options } = require('discord.js');
 const { loadConfig } = require('./config/env');
 const { detectHostPlatformAndPort, detectHostRuntime, listenHttpServer } = require('./config/host-runtime');
@@ -63,7 +64,7 @@ async function main() {
   // 1. Storage & Database Setup
   const supabase = createSupabaseClient({ url: config.supabaseUrl, secretKey: config.supabaseSecretKey });
   const store = new SupabaseWorkerStore(supabase, {
-    cacheTtlMs: Number(process.env.WORKER_STORE_CACHE_TTL_MS) || 180000
+    cacheTtlMs: Number(process.env.WORKER_STORE_CACHE_TTL_MS) || 5000
   });
   const accessStore = new SupabaseDashboardStore(supabase);
   const commandStore = new SupabaseCommandStore(supabase);
@@ -160,6 +161,11 @@ async function main() {
         }
       : undefined
   });
+  if (config.discordToken && config.discordEnabled !== false) {
+    try {
+      client.rest?.setToken?.(config.discordToken);
+    } catch (_) {}
+  }
   const adminNotifier = new AdminNotifier({
     client,
     store: accessStore,
@@ -207,7 +213,7 @@ async function main() {
     adminNotifier.configureWebhook(savedWebhook);
   }
 
-  const broker = new CommandBroker({ registry, commandStore, config: runtimeConfig, logger });
+  const broker = new CommandBroker({ registry, commandStore, managerRuntimeSettings, config: runtimeConfig, logger });
   const fleetOperations = new FleetOperations({ registry, broker, renderApi, logger });
   const entitlementService = new EntitlementService({
     store: accessStore,
@@ -232,9 +238,11 @@ async function main() {
 
   // Start background workers (optimized intervals to reduce idle Supabase/Render usage)
   broker.startOutboxProcessor({ intervalMs: Number(process.env.OUTBOX_POLL_INTERVAL_MS) || 30000 });
+  let isDiscordStandbyInstance = () => false;
 
   // Định kỳ kiểm tra khách hết hạn và dừng bot êm ái (Graceful Expire Stop)
   const expiredCheckInterval = setInterval(async () => {
+    if (isDiscordStandbyInstance()) return;
     try {
       await entitlementService.checkExpiredUsersAndGracefulStop({ broker, fleetOperations });
     } catch (err) {
@@ -277,6 +285,7 @@ async function main() {
 
   // Định kỳ 12h dọn bản ghi cũ trên Supabase để giữ dung lượng nhẹ
   const maintenanceCleanupInterval = setInterval(async () => {
+    if (isDiscordStandbyInstance()) return;
     try {
       await Promise.allSettled([
         accessStore.runMaintenanceCleanup?.(),
@@ -346,15 +355,87 @@ async function main() {
   // Start Wispbyte keepalive independently of Discord gateway so web-only / Discord outages still keep panels alive
   wispbyteKeepAlive.start({ discordClient: client, adminRoleId: accessControl.adminRoleId });
 
-  // 7. Discord Gateway & Slash Commands
-  if (config.discordToken) {
+  // 7. Discord Gateway & Slash Commands (Single-active Supabase leader election)
+  const discordLeaderOwnerId = `mgr_${process.pid}_${crypto.randomUUID().slice(0, 8)}`;
+  const DISCORD_LOCK_KEY = 'discord_gateway_leader';
+  const DISCORD_LEASE_SECONDS = 90;
+  let discordLeaderHeld = false;
+  let discordLeaderStarted = false;
+  let discordStandbyInterval = null;
+  let discordRenewInterval = null;
+  let discordShuttingDown = false;
+  isDiscordStandbyInstance = () => Boolean(
+    config.discordToken && config.discordEnabled !== false && !discordLeaderHeld && client._standbyMode === true
+  );
+
+  const isMissingLockRpc = (err) => {
+    const code = String(err?.code || '').toUpperCase();
+    const msg = String(err?.message || '').toLowerCase();
+    return code === 'PGRST202' || code === '42883' || msg.includes('could not find the function') || msg.includes('does not exist');
+  };
+
+  async function tryAcquireDiscordLeader() {
+    if (typeof supabase?.rpc !== 'function') return true;
+    try {
+      const { data, error } = await supabase.rpc('acquire_manager_lock', {
+        p_lock_key: DISCORD_LOCK_KEY,
+        p_owner_id: discordLeaderOwnerId,
+        p_lease_seconds: DISCORD_LEASE_SECONDS
+      });
+      if (error) {
+        if (isMissingLockRpc(error)) return true;
+        logger.warn('discord_leader_acquire_rpc_failed', { error: error.message });
+        return false;
+      }
+      if (typeof data === 'object' && data !== null) return data.ok === true;
+      return data === true || (typeof data === 'number' && data > 0);
+    } catch (err) {
+      if (isMissingLockRpc(err)) return true;
+      logger.warn('discord_leader_acquire_error', { error: err?.message || String(err) });
+      return false;
+    }
+  }
+
+  async function renewDiscordLeader() {
+    if (typeof supabase?.rpc !== 'function') return true;
+    try {
+      const { data, error } = await supabase.rpc('renew_manager_lock', {
+        p_lock_key: DISCORD_LOCK_KEY,
+        p_owner_id: discordLeaderOwnerId,
+        p_lease_seconds: DISCORD_LEASE_SECONDS
+      });
+      if (error) {
+        if (isMissingLockRpc(error)) return true;
+        return null; // transient error; keep running unless explicitly lost
+      }
+      const renewed = data === true || (typeof data === 'object' && data !== null && data.ok === true) || (Array.isArray(data) && data[0] === true);
+      return Boolean(renewed);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function releaseDiscordLeader() {
+    if (!discordLeaderHeld || typeof supabase?.rpc !== 'function') return;
+    discordLeaderHeld = false;
+    try {
+      await supabase.rpc('release_manager_lock', {
+        p_lock_key: DISCORD_LOCK_KEY,
+        p_owner_id: discordLeaderOwnerId
+      });
+    } catch (_) {}
+  }
+
+  if (config.discordToken && config.discordEnabled !== false) {
     attachInteractionHandler(client, { config: runtimeConfig, services, logger });
     attachMessagePointsHandler(client, { config: runtimeConfig, services, logger });
 
     const targetGuildId = config.discordGuildId || roleSettings?.guildId || '';
+    let commandsRegistered = false;
     const registerSlash = async (gId = targetGuildId) => {
       const cId = config.discordClientId || client.user?.id;
-      if (!cId) return;
+      if (!cId || commandsRegistered) return;
+      commandsRegistered = true;
       try {
         const commandRegistration = await registerCommands({
           token: config.discordToken,
@@ -364,17 +445,14 @@ async function main() {
         });
         logger.info('discord_commands_registered', commandRegistration);
       } catch (regErr) {
+        commandsRegistered = false;
         logger.warn('discord_commands_registration_failed', { error: regErr.message });
       }
     };
 
-    if (config.discordClientId) {
-      await registerSlash();
-    }
-
-    client.once(Events?.ClientReady || 'clientReady', async () => {
+    client.on(Events?.ClientReady || 'clientReady', async () => {
       try {
-        logger.info('discord_bot_ready', { botUserId: client.user?.id || 'unknown' });
+        logger.info('discord_bot_ready', { botUserId: client.user?.id || 'unknown', leader: discordLeaderOwnerId });
         if (!config.discordClientId || !targetGuildId) {
           const autoGuildId = targetGuildId || client.guilds?.cache?.first()?.id || null;
           await registerSlash(autoGuildId);
@@ -399,11 +477,111 @@ async function main() {
       });
     });
 
-    try {
-      await client.login(config.discordToken);
-    } catch (loginErr) {
-      logger.warn('discord_login_failed', { error: loginErr.message });
+    const syncSharedStateFromStore = async () => {
+      try {
+        const latestRoleSettings = await accessStore.getSetting('discord_access', { bypassCache: true }).catch(() => null);
+        if (latestRoleSettings && typeof latestRoleSettings === 'object') {
+          if (latestRoleSettings.adminRoleId && latestRoleSettings.userRoleId) {
+            try {
+              accessControl.setRoleIds(latestRoleSettings.adminRoleId, latestRoleSettings.userRoleId);
+              runtimeConfig.adminRoleId = accessControl.adminRoleId;
+              runtimeConfig.userRoleId = accessControl.userRoleId;
+            } catch (_) {}
+          }
+          if (latestRoleSettings.adminUserId) {
+            accessControl.setAdminUserId(latestRoleSettings.adminUserId);
+            adminNotifier.setAdminUserId(latestRoleSettings.adminUserId);
+            runtimeConfig.adminUserId = adminNotifier.getAdminUserId();
+          }
+        }
+        const latestAdminCreds = await accessStore.getSetting('admin_credentials', { bypassCache: true }).catch(() => null);
+        if (latestAdminCreds?.passwordHash && typeof registry.setAdminPassword === 'function') {
+          registry.setAdminPassword(latestAdminCreds.passwordHash);
+        }
+        const latestWebhook = await accessStore.getSetting('webhook_settings', { bypassCache: true }).catch(() => null);
+        if (latestWebhook && typeof latestWebhook === 'object' && typeof adminNotifier.configureWebhook === 'function') {
+          adminNotifier.configureWebhook(latestWebhook);
+        }
+      } catch (_) {}
+    };
+
+    const startDiscordAsLeader = async () => {
+      if (discordShuttingDown || discordLeaderStarted) return;
+      discordLeaderStarted = true;
+      discordLeaderHeld = true;
+      client._standbyMode = false;
+      if (discordStandbyInterval) {
+        clearInterval(discordStandbyInterval);
+        discordStandbyInterval = null;
+      }
+      await syncSharedStateFromStore();
+      if (config.discordClientId) {
+        await registerSlash();
+      }
+      try {
+        await client.login(config.discordToken);
+      } catch (loginErr) {
+        logger.warn('discord_login_failed', { error: loginErr.message });
+        discordLeaderStarted = false;
+        client._standbyMode = true;
+        statusMonitor.stop();
+        try { client.destroy(); } catch (_) {}
+        await releaseDiscordLeader();
+        if (!discordStandbyInterval && !discordShuttingDown) {
+          discordStandbyInterval = setInterval(() => { void pollStandbyLeader(); }, 15000);
+          discordStandbyInterval.unref?.();
+        }
+        return;
+      }
+      if (!discordRenewInterval && !discordShuttingDown) {
+        discordRenewInterval = setInterval(async () => {
+          if (discordShuttingDown || !discordLeaderHeld) return;
+          const renewed = await renewDiscordLeader();
+          if (renewed === false) {
+            const reacquired = await tryAcquireDiscordLeader();
+            if (!reacquired) {
+              logger.warn('discord_leader_lost_demoting_to_standby', { owner: discordLeaderOwnerId });
+              discordLeaderHeld = false;
+              discordLeaderStarted = false;
+              client._standbyMode = true;
+              clearInterval(discordRenewInterval);
+              discordRenewInterval = null;
+              statusMonitor.stop();
+              try { client.destroy(); } catch (_) {}
+              if (!discordStandbyInterval && !discordShuttingDown) {
+                discordStandbyInterval = setInterval(() => { void pollStandbyLeader(); }, 15000);
+                discordStandbyInterval.unref?.();
+              }
+            }
+          }
+        }, 30000);
+        discordRenewInterval.unref?.();
+      }
+    };
+
+    const pollStandbyLeader = async () => {
+      if (discordShuttingDown || discordLeaderHeld) return;
+      const won = await tryAcquireDiscordLeader();
+      if (won) {
+        logger.info('discord_leader_acquired_failover', { owner: discordLeaderOwnerId });
+        await startDiscordAsLeader();
+      }
+    };
+
+    const initiallyWon = await tryAcquireDiscordLeader();
+    if (initiallyWon) {
+      await startDiscordAsLeader();
+    } else {
+      client._standbyMode = true;
+      logger.info('discord_gateway_standby', {
+        owner: discordLeaderOwnerId,
+        reason: 'another_manager_holds_discord_gateway_leader_lock'
+      });
+      discordStandbyInterval = setInterval(() => { void pollStandbyLeader(); }, 15000);
+      discordStandbyInterval.unref?.();
     }
+  } else {
+    logger.info('discord_gateway_disabled_on_instance');
   }
 
   // Graceful shutdown and fatal process handlers.
@@ -415,8 +593,17 @@ async function main() {
     }
     process.exitCode = exitCode;
     shutdownPromise = (async () => {
+      discordShuttingDown = true;
       app.setShuttingDown?.(true);
       logger.info('manager_shutdown', { signal, exitCode });
+      if (discordStandbyInterval) {
+        clearInterval(discordStandbyInterval);
+        discordStandbyInterval = null;
+      }
+      if (discordRenewInterval) {
+        clearInterval(discordRenewInterval);
+        discordRenewInterval = null;
+      }
       clearInterval(expiredCheckInterval);
       clearInterval(memorySweepInterval);
       clearInterval(maintenanceCleanupInterval);
@@ -425,6 +612,7 @@ async function main() {
       statusMonitor.stop();
       discordPointsService.stop();
       await discordPointsService.flush().catch(() => {});
+      await releaseDiscordLeader();
       try { client?.destroy?.(); } catch (_) {}
 
       server.closeIdleConnections?.();

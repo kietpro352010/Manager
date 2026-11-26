@@ -1,50 +1,32 @@
 'use strict';
 
 const { SlashCommandBuilder } = require('discord.js');
-const { embed } = require('../panels/renderer');
+const { renderUnauthenticatedPanel, renderLoggedOutPanel } = require('../panels/renderer');
+const { performDiscordLogout, resolvePublicBaseUrl } = require('../handlers/panel-handler');
 
 const definition = new SlashCommandBuilder()
   .setName('logout')
   .setDescription('Đăng xuất và hủy liên kết tài khoản Discord với Web Manager');
 
 async function execute(interaction, services) {
-  const discordUserId = interaction.user?.id;
-  await services.accessStore.unlinkDiscord(discordUserId);
-  try { require('../handlers/points-message-handler').clearMessagePointsLoginCache(discordUserId); } catch (_) {}
-  await services.accessStore?.addAudit?.({
-    action: 'DISCORD_LOGOUT',
-    actorId: discordUserId,
-    targetId: discordUserId,
-    details: { guildId: interaction.guildId || null }
-  }).catch(() => null);
+  const discordUserId = interaction?.user?.id;
+  const res = await performDiscordLogout(interaction, services);
 
-  let roleNote = '';
-  if (services) {
-    const { getEffectiveRoleIds, removeMemberRole } = require('../handlers/panel-handler');
-    const { adminRoleId, userRoleId } = await getEffectiveRoleIds(services);
-    const removed = [];
-    if (userRoleId) {
-      const ok = await removeMemberRole(interaction, userRoleId);
-      if (ok) removed.push(`<@&${userRoleId}>`);
-    }
-    if (adminRoleId) {
-      const ok = await removeMemberRole(interaction, adminRoleId);
-      if (ok) removed.push(`<@&${adminRoleId}>`);
-    }
-    if (removed.length > 0) {
-      roleNote = `\n\n🛡️ Đã thu hồi Role: ${removed.join(', ')}`;
-    }
+  if (res.checkedExisting && !res.wasLoggedIn && res.removedRoles.length === 0) {
+    return renderUnauthenticatedPanel({
+      discordUserId,
+      title: 'ℹ️ BẠN CHƯA ĐĂNG NHẬP',
+      reason: 'Tài khoản Discord của bạn hiện chưa liên kết với tài khoản Web Manager nào.\n\n👉 Bấm nút **Đăng nhập ngay** bên dưới (hoặc dùng `/login`) nếu bạn muốn đăng nhập.',
+      publicBaseUrl: resolvePublicBaseUrl(services)
+    });
   }
 
-  return {
-    embeds: [
-      embed(
-        '🚪 ĐÃ ĐĂNG XUẤT',
-        `Tài khoản Discord của bạn đã được hủy liên kết khỏi Web Manager thành công.${roleNote}\n\nBạn có thể sử dụng lại lệnh \`/login\` bất kỳ lúc nào để đăng nhập lại và nhận lại Role.`,
-        0x0ea5e9
-      )
-    ]
-  };
+  return renderLoggedOutPanel({
+    discordUserId,
+    unlinkedUsername: res.unlinkedUsername,
+    removedRoles: res.removedRoles,
+    includeReloginButton: Boolean(discordUserId)
+  });
 }
 
 module.exports = {

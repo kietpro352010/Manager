@@ -284,18 +284,19 @@ window.humanizeBotErrorForUser = humanizeBotErrorForUser;
 function showToast(message, type = 'info', duration = 3200) {
   const container = document.getElementById('toast');
   if (!container) return;
-  const icons = {
-    success: '✅ ',
-    error: '❌ ',
-    warning: '⚠️ ',
-    info: 'ℹ️ '
+  const dotColors = {
+    success: 'var(--green)',
+    error: 'var(--red)',
+    warning: 'var(--yellow)',
+    info: 'var(--accent)'
   };
-  const icon = icons[type] || '';
   container.className = 'toast-stack';
   container.style.display = 'flex';
 
-  while (container.children.length >= 3) {
-    container.firstElementChild.remove();
+  const activeItems = Array.from(container.children || []).filter(el => !el.classList?.contains('is-leaving'));
+  while (activeItems.length >= 3) {
+    const oldest = activeItems.shift();
+    if (oldest) oldest.remove();
   }
 
   const item = document.createElement('div');
@@ -303,22 +304,47 @@ function showToast(message, type = 'info', duration = 3200) {
   item.style.display = 'block';
   const row = document.createElement('div');
   row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:10px;';
+
+  const leftWrap = document.createElement('div');
+  leftWrap.style.cssText = 'display:flex;align-items:center;gap:8px;min-width:0;flex:1;';
+  const dotSpan = document.createElement('span');
+  dotSpan.setAttribute('aria-hidden', 'true');
+  dotSpan.style.cssText = 'width:7px;height:7px;border-radius:50%;flex-shrink:0;background:' + (dotColors[type] || 'var(--accent)') + ';';
   const textSpan = document.createElement('span');
-  textSpan.textContent = icon + String(message || '');
+  const cleanMsg = String(message || '').replace(/^(?:✅|❌|⚠️|ℹ️|🎉|✨|💤)\s*/u, '');
+  textSpan.textContent = cleanMsg || String(message || '');
+  leftWrap.appendChild(dotSpan);
+  leftWrap.appendChild(textSpan);
+
   const closeBtn = document.createElement('button');
   closeBtn.type = 'button';
   closeBtn.textContent = '✕';
   closeBtn.title = 'Đóng';
   closeBtn.setAttribute('aria-label', 'Đóng thông báo');
-  closeBtn.style.cssText = 'background:transparent;border:none;color:inherit;cursor:pointer;opacity:0.7;font-size:14px;padding:0 2px;line-height:1;';
-  const removeItem = () => {
+  closeBtn.style.cssText = 'background:transparent;border:none;color:inherit;cursor:pointer;opacity:0.7;font-size:13px;padding:0 2px;line-height:1;min-height:24px;box-shadow:none;';
+
+  let dismissed = false;
+  const finalizeRemove = () => {
     item.remove();
     if (!container.children.length) {
       container.style.display = 'none';
     }
   };
+  const removeItem = () => {
+    if (dismissed) return;
+    dismissed = true;
+    const canAnimateExit = typeof window !== 'undefined'
+      && typeof window.matchMedia === 'function'
+      && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (canAnimateExit && item.classList) {
+      item.classList.add('is-leaving');
+      setTimeout(finalizeRemove, 180);
+    } else {
+      finalizeRemove();
+    }
+  };
   closeBtn.addEventListener('click', removeItem);
-  row.appendChild(textSpan);
+  row.appendChild(leftWrap);
   row.appendChild(closeBtn);
   item.appendChild(row);
   container.appendChild(item);
@@ -1016,7 +1042,7 @@ function renderEditBotTagSuggestions() {
   let html = '<div style="font-size:11px;color:var(--muted);margin-bottom:4px;width:100%;">💡 <strong>Bấm chọn nhanh tag riêng đã có:</strong></div>';
   Array.from(allTags).sort().forEach(tag => {
     const isSelected = currentTagSet.has(tag);
-    html += '<button type="button" data-tag="' + escapeHtml(tag) + '" onclick="toggleEditBotTag(this.dataset.tag)" style="padding:2px 8px;font-size:11px;border-radius:12px;cursor:pointer;transition:all 0.15s;font-weight:600;' +
+    html += '<button type="button" data-tag="' + escapeHtml(tag) + '" onclick="toggleEditBotTag(this.dataset.tag)" style="padding:2px 8px;font-size:11px;border-radius:6px;cursor:pointer;transition:background-color 0.18s ease,border-color 0.18s ease,color 0.18s ease;font-weight:600;' +
       (isSelected
         ? 'background:rgba(56,189,248,0.25);color:#38bdf8;border:1px solid #38bdf8;'
         : 'background:rgba(255,255,255,0.05);color:var(--muted);border:1px solid var(--border);') +
@@ -1127,9 +1153,7 @@ async function copyEditBotWispbyteEnv() {
       previewEl.style.display = 'block';
     }
     await copyText(data.envText);
-    if (data.secretAvailable === false) {
-      showToast('Bot chưa có Secret hợp lệ — hãy đặt Secret mới rồi Lưu trước khi dán ENV.', 'warning');
-    }
+    showToast('Đã sao chép ENV Wispbyte (chỉ cần Worker ID, tự đồng bộ URL Manager)!', 'success');
   } catch (err) {
     showToast(err.message || 'Không thể lấy cấu hình ENV Wispbyte.', 'error');
   } finally {

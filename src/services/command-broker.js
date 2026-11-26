@@ -11,9 +11,10 @@ const DEFAULT_MAX_STATE_SYNC_ATTEMPTS = 8;
 const DEFAULT_RENDER_COMMAND_TIMEOUT_MS = 50000;
 
 class CommandBroker {
-  constructor({ registry, commandStore, config, logger, fetchImpl = global.fetch }) {
+  constructor({ registry, commandStore, managerRuntimeSettings = null, config, logger, fetchImpl = global.fetch }) {
     this.registry = registry;
     this.commandStore = commandStore;
+    this.managerRuntimeSettings = managerRuntimeSettings;
     this.config = config;
     this.logger = logger;
     this.fetch = fetchImpl;
@@ -22,6 +23,8 @@ class CommandBroker {
     this.wakeVersions = new Map();
     this.pendingResults = new Map();
     this.resultWaiters = new Map();
+    this._crossPollWatchTimer = null;
+    this._crossPollWatchInFlight = false;
     this.outboxTimer = null;
     this.outboxIntervalMs = 30000;
     this.outboxRunning = false;
@@ -93,6 +96,7 @@ class CommandBroker {
       clearTimeout(this.outboxTimer);
       this.outboxTimer = null;
     }
+    this._stopCrossInstancePollWatcherIfIdle(true);
   }
 
   async processOutboxBatch() {
@@ -333,13 +337,15 @@ class CommandBroker {
       }
     }
 
-    const secret = await this.registry.credential(worker.workerId);
-    if (!secret) {
-      const err = new Error(`Missing worker secret for ${worker.workerId}.`);
-      err.code = 'MISSING_WORKER_SECRET';
-      err.status = 500;
-      throw err;
+    let secret = '';
+    if (typeof this.registry.credential === 'function') {
+      try {
+        secret = (await Promise.resolve(this.registry.credential(worker.workerId))) || '';
+      } catch (_) {}
     }
+    const activeUrls = typeof this.managerRuntimeSettings?.getActiveManagerUrls === 'function'
+      ? this.managerRuntimeSettings.getActiveManagerUrls()
+      : [];
     let response;
     let body;
     try {
@@ -347,8 +353,9 @@ class CommandBroker {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-worker-secret': secret,
+          ...(secret ? { 'x-worker-secret': secret } : {}),
           'x-manager-bot-id': String(worker.workerId),
+          ...(activeUrls.length ? { 'x-manager-urls': activeUrls.join(',') } : {}),
           ...(command?.commandId ? { 'x-request-id': String(command.commandId) } : {})
         },
         body: JSON.stringify({ action: command.action, payload: command.payload }),
@@ -526,6 +533,17 @@ class CommandBroker {
 
     let resolveCompletion;
     const completion = new Promise((resolve) => { resolveCompletion = resolve; });
+    const clearPendingTimers = (target) => {
+      if (!target) return;
+      if (target.timer) {
+        clearTimeout(target.timer);
+        target.timer = null;
+      }
+      if (target.dbPollTimer) {
+        clearTimeout(target.dbPollTimer);
+        target.dbPollTimer = null;
+      }
+    };
     const pending = {
       workerId: worker.workerId,
       commandId: actualCommandId,
@@ -533,6 +551,7 @@ class CommandBroker {
       command,
       done: false,
       timer: null,
+      dbPollTimer: null,
       waiters: [],
       settleWaiters: (payload) => {
         const list = pending.waiters.splice(0, pending.waiters.length);
@@ -543,7 +562,7 @@ class CommandBroker {
       finish: (result) => {
         if (pending.done) return;
         pending.done = true;
-        if (pending.timer) clearTimeout(pending.timer);
+        clearPendingTimers(pending);
         this.pendingResults.delete(actualCommandId);
         const isSuccess = result ? (result.ok !== false) : true;
         const completionPayload = {
@@ -559,6 +578,57 @@ class CommandBroker {
       }
     };
 
+    const startDbResultWatch = (target) => {
+      if (!target || target.done || target.dbPollTimer || typeof this.commandStore?.get !== 'function') return;
+      const calcDelayMs = (capMs) => Math.min(capMs, Math.max(150, Math.floor((Number(this.config?.commandResultTimeoutMs) || 30000) / 5)));
+      const pollOnce = async () => {
+        target.dbPollTimer = null;
+        if (target.done) return;
+        try {
+          const stored = await this.commandStore.get(actualCommandId);
+          if (target.done) return;
+          if (stored?.status === 'completed') {
+            const widLower = String(worker.workerId || '').trim().toLowerCase();
+            this.registry?.store?.invalidateCache?.(worker.workerId);
+            this.registry?.summaryCache?.delete?.(widLower);
+            target.finish(stored.result ?? { ok: true });
+            return;
+          }
+          if (stored?.status === 'failed' || stored?.status === 'state_sync_failed') {
+            const resObj = stored.result && typeof stored.result === 'object' ? stored.result : {};
+            target.finish({
+              ...resObj,
+              ok: false,
+              error: resObj.error || (stored.status === 'state_sync_failed' ? 'RESET_STATE_SYNC_FAILED' : 'command_failed')
+            });
+            return;
+          }
+          if (stored?.status === 'expired') {
+            target.done = true;
+            clearPendingTimers(target);
+            this.pendingResults.delete(actualCommandId);
+            const timeoutPayload = {
+              ok: false,
+              delivered: false,
+              timedOut: true,
+              commandId: actualCommandId,
+              action: stored.action || target.action || command.action,
+              result: null
+            };
+            target.settleWaiters?.(timeoutPayload);
+            target.resolvePrimary?.(timeoutPayload);
+            return;
+          }
+        } catch (_) {}
+        if (!target.done) {
+          target.dbPollTimer = setTimeout(() => { void pollOnce(); }, calcDelayMs(1500));
+          target.dbPollTimer.unref?.();
+        }
+      };
+      target.dbPollTimer = setTimeout(() => { void pollOnce(); }, calcDelayMs(1000));
+      target.dbPollTimer.unref?.();
+    };
+
     const existing = this.pendingResults.get(actualCommandId);
     if (existing) {
       if (existing.timer) {
@@ -572,6 +642,7 @@ class CommandBroker {
         });
         if (existing.done) return;
         existing.done = true;
+        clearPendingTimers(existing);
         this.pendingResults.delete(actualCommandId);
         const timeoutPayload = {
           ok: false,
@@ -585,6 +656,7 @@ class CommandBroker {
         existing.resolvePrimary?.(timeoutPayload);
       }, this.config.commandResultTimeoutMs);
       existing.timer.unref?.();
+      startDbResultWatch(existing);
     } else {
       pending.resolvePrimary = resolveCompletion;
       this.pendingResults.set(actualCommandId, pending);
@@ -595,6 +667,7 @@ class CommandBroker {
           });
           if (pending.done) return;
           pending.done = true;
+          clearPendingTimers(pending);
           this.pendingResults.delete(actualCommandId);
           const timeoutPayload = {
             ok: false,
@@ -608,6 +681,7 @@ class CommandBroker {
           resolveCompletion(timeoutPayload);
         }, this.config.commandResultTimeoutMs);
         pending.timer.unref?.();
+        startDbResultWatch(pending);
       }
     }
 
@@ -630,6 +704,43 @@ class CommandBroker {
     }
   }
 
+  _stopCrossInstancePollWatcherIfIdle(force = false) {
+    if ((force || this.pollWaiters.size === 0) && this._crossPollWatchTimer) {
+      clearInterval(this._crossPollWatchTimer);
+      this._crossPollWatchTimer = null;
+    }
+  }
+
+  _ensureCrossInstancePollWatcher() {
+    if (this._crossPollWatchTimer || this.pollWaiters.size === 0) return;
+    if (typeof this.commandStore?.peekQueuedWorkerIds !== 'function') return;
+    const intervalMs = Math.max(50, Number(this.config?.crossInstancePollCheckMs) || 2000);
+    this._crossPollWatchTimer = setInterval(async () => {
+      if (this.pollWaiters.size === 0) {
+        this._stopCrossInstancePollWatcherIfIdle();
+        return;
+      }
+      if (this._crossPollWatchInFlight) return;
+      this._crossPollWatchInFlight = true;
+      try {
+        const waitedKeys = [...this.pollWaiters.keys()];
+        const queuedIds = await this.commandStore.peekQueuedWorkerIds(waitedKeys);
+        if (Array.isArray(queuedIds) && queuedIds.length > 0) {
+          const readySet = new Set(queuedIds.map((id) => String(id).trim().toLowerCase()));
+          for (const key of waitedKeys) {
+            if (readySet.has(String(key).trim().toLowerCase()) && this.pollWaiters.has(key)) {
+              this.wakePoller(key);
+            }
+          }
+        }
+      } catch (_) {
+      } finally {
+        this._crossPollWatchInFlight = false;
+      }
+    }, intervalMs);
+    this._crossPollWatchTimer.unref?.();
+  }
+
   async poll(workerId, { waitMs = this.config.workerPollWaitMs, signal = null } = {}) {
     const next = await this.commandStore.take(workerId);
     if (next || signal?.aborted) return next;
@@ -650,6 +761,7 @@ class CommandBroker {
           if (index !== -1) currentWaiters.splice(index, 1);
           if (currentWaiters.length === 0) this.pollWaiters.delete(workerId);
         }
+        this._stopCrossInstancePollWatcherIfIdle();
       };
 
       const onWake = (explicit = false) => {
@@ -683,6 +795,10 @@ class CommandBroker {
         this.pollWaiters.set(workerId, []);
       }
       this.pollWaiters.get(workerId).push(onWake);
+      const effectiveWatchMs = Math.max(50, Number(this.config?.crossInstancePollCheckMs) || 2000);
+      if (waitMs >= Math.min(500, effectiveWatchMs)) {
+        this._ensureCrossInstancePollWatcher();
+      }
     });
 
     if (signal?.aborted || !woken) return null;
@@ -936,6 +1052,7 @@ class CommandBroker {
     }
     this.pollWaiters.delete(id);
     this.wakeVersions.delete(id);
+    this._stopCrossInstancePollWatcherIfIdle();
 
     for (const [commandId, pending] of this.pendingResults.entries()) {
       if (pending && pending.workerId === id) {

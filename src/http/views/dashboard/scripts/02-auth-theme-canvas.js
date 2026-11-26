@@ -26,14 +26,14 @@ function toggleDashboardBgEffects() {
   document.body.classList.toggle('cosmic-mode-off', nextDisabled);
   const btn = document.getElementById('bgEffectsToggleBtn');
   if (btn) {
-    btn.textContent = nextDisabled ? '✨ Bật hiệu ứng nền' : '💤 Tắt hiệu ứng nền';
+    btn.textContent = nextDisabled ? 'Bật hiệu ứng nền' : 'Tắt hiệu ứng nền';
     btn.setAttribute('aria-pressed', nextDisabled ? 'true' : 'false');
   }
   if (typeof window.__kbotRefreshAppCosmicEngine === 'function') {
     window.__kbotRefreshAppCosmicEngine();
   }
   if (typeof showToast === 'function') {
-    showToast(nextDisabled ? '💤 Đã tắt hiệu ứng nền để tiết kiệm pin & GPU.' : '✨ Đã bật lại hiệu ứng nền.', 'info');
+    showToast(nextDisabled ? 'Đã tắt hiệu ứng nền để tiết kiệm pin và GPU.' : 'Đã bật lại hiệu ứng nền.', 'info');
   }
 }
 window.toggleDashboardBgEffects = toggleDashboardBgEffects;
@@ -116,7 +116,7 @@ function applyDashboardCosmicMode(mode) {
   else document.body.classList.remove('cosmic-mode-off');
   const bgBtn = document.getElementById('bgEffectsToggleBtn');
   if (bgBtn) {
-    bgBtn.textContent = bgOff ? '✨ Bật hiệu ứng nền' : '💤 Tắt hiệu ứng nền';
+    bgBtn.textContent = bgOff ? 'Bật hiệu ứng nền' : 'Tắt hiệu ứng nền';
     bgBtn.setAttribute('aria-pressed', bgOff ? 'true' : 'false');
   }
 
@@ -130,17 +130,17 @@ function applyDashboardCosmicMode(mode) {
   var btn = document.getElementById('cosmicModeToggleBtn');
   if (btn) {
     if (theme === 'deep-galaxy') {
-      btn.textContent = '🌌 Deep Galaxy';
-      btn.title = 'Theme: Deep Galaxy (Mặc định) — Bấm để chuyển sang Ocean Abyss';
+      btn.textContent = 'Deep Galaxy';
+      btn.title = 'Theme: Deep Galaxy — Bấm để chuyển sang Ocean Abyss';
     } else if (theme === 'ocean-abyss') {
-      btn.textContent = '🌊 Ocean Abyss';
-      btn.title = 'Theme: Ocean Abyss (Xanh Biển) — Bấm để chuyển sang Violet Dusk';
+      btn.textContent = 'Ocean Abyss';
+      btn.title = 'Theme: Ocean Abyss — Bấm để chuyển sang Violet Dusk';
     } else if (theme === 'violet-dusk') {
-      btn.textContent = '🌙 Violet Dusk';
+      btn.textContent = 'Violet Dusk';
       btn.title = 'Theme: Violet Dusk — Bấm để chuyển sang Moonlight';
     } else {
-      btn.textContent = '☀️ Moonlight';
-      btn.title = 'Theme: Moonlight (Sáng Rõ Viền) — Bấm để chuyển sang Deep Galaxy';
+      btn.textContent = 'Moonlight';
+      btn.title = 'Theme: Moonlight — Bấm để chuyển sang Deep Galaxy';
     }
   }
 
@@ -157,10 +157,10 @@ function cycleDashboardCosmicMode() {
   applyDashboardCosmicMode(next);
   if (typeof showToast === 'function') {
     var toastMap = {
-      'deep-galaxy': '🌌 Đã chuyển sang Deep Galaxy (Tím Vũ Trụ)',
-      'ocean-abyss': '🌊 Đã chuyển sang Ocean Abyss (Xanh Biển Sâu)',
-      'violet-dusk': '🌙 Đã chuyển sang Violet Dusk (Tím Trầm Dịu Mắt)',
-      'moonlight': '☀️ Đã chuyển sang Moonlight (Giao Diện Sáng Rõ Viền)'
+      'deep-galaxy': 'Đã chuyển sang Deep Galaxy (Tối tiêu chuẩn)',
+      'ocean-abyss': 'Đã chuyển sang Ocean Abyss (Xanh biển sâu)',
+      'violet-dusk': 'Đã chuyển sang Violet Dusk (Tím trầm dịu mắt)',
+      'moonlight': 'Đã chuyển sang Moonlight (Giao diện sáng)'
     };
     showToast(toastMap[next] || 'Đã chuyển đổi giao diện', 'info');
   }
@@ -446,24 +446,22 @@ window.drawSparkleStar = drawSparkleStar;
   resize();
 
   var stars = [];
-  var shootingStars = [];
-  var starCount = isMobile ? 60 : 100;
+  var starCount = isMobile ? 32 : 56;
 function initCosmicStars() {
   stars = [];
-  starCount = isMobile ? 60 : 100;
+  starCount = isMobile ? 32 : 56;
   for (var i = 0; i < starCount; i++) {
     stars.push({
       x: Math.random() * (w || 1920),
       y: Math.random() * (h || 1080),
-      z: Math.random() * 1.6 + 0.4,
-      r: Math.random() * 0.85 + 0.35,
-      a: Math.random() * 0.6 + 0.3,
-      da: (Math.random() * 0.008 + 0.003) * (Math.random() < 0.5 ? 1 : -1),
-      rgb: Math.random() < 0.7 ? '248,250,252' : (Math.random() < 0.5 ? '226,232,240' : '219,234,254'),
+      z: Math.random() * 1.2 + 0.4,
+      r: Math.random() * 0.8 + 0.4,
+      a: Math.random() * 0.45 + 0.15,
+      da: (Math.random() * 0.005 + 0.002) * (Math.random() < 0.5 ? 1 : -1),
+      rgb: Math.random() < 0.7 ? '226,232,240' : '196,181,253',
       seed: Math.random() * 100,
       phase: Math.random() * Math.PI * 2,
-      trail: [],
-      isAnchor: i < 8
+      isAnchor: i < 5
     });
   }
 }
@@ -517,7 +515,7 @@ function initCosmicStars() {
   }
 
   var lastTime = 0;
-  var frameInterval = 1000 / 30;
+  var frameInterval = 1000 / 24;
 
   function render(timestamp) {
     rafId = null;
@@ -532,285 +530,67 @@ function initCosmicStars() {
       rafId = requestAnimationFrame(render);
       return;
     }
-    var frameDelta = timestamp && lastTime ? (timestamp - lastTime) : 16.667;
     lastTime = timestamp || (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
     ctx.clearRect(0, 0, w, h);
 
     var curTheme = getSavedDashboardTheme();
+    var dotRgb = '203, 213, 225';
+    var lineRgba = 'rgba(148, 163, 184, 0.06)';
+    var alphaScale = 0.6;
 
     if (curTheme === 'ocean-abyss') {
-      // THEME 2: Ocean Abyss - Marine Life (Sinusoidal Fish & Pulsating Jellyfish)
-      var ocean = getOceanEntities();
-      updateFishSchool(ocean.fish, w, h, frameDelta);
-      updateJellyfish(ocean.jellyfish, w, h, frameDelta);
-
-      // Draw marine life: fish school
-      for (var fIdx = 0; fIdx < ocean.fish.length; fIdx++) {
-        drawAquariumFish(ctx, ocean.fish[fIdx]);
-      }
-
-      // Draw jellyfish
-      for (var jIdx = 0; jIdx < ocean.jellyfish.length; jIdx++) {
-        drawAquariumJellyfish(ctx, ocean.jellyfish[jIdx]);
-      }
-
-      var tOcean = (timestamp || Date.now()) * 0.0006;
-      var rayAlpha1 = 0.045 + Math.sin(tOcean * 1.1) * 0.02;
-      var rayAlpha2 = 0.035 + Math.cos(tOcean * 0.85) * 0.015;
-
-      if (!render._oceanGradCache || render._oceanGradCache.w !== w || render._oceanGradCache.h !== h) {
-        var cg1 = ctx.createLinearGradient(w * 0.05, 0, w * 0.45, h * 0.9);
-        cg1.addColorStop(0, 'rgba(56, 189, 248, 1)');
-        cg1.addColorStop(0.4, 'rgba(14, 165, 233, 0.45)');
-        cg1.addColorStop(1, 'rgba(4, 13, 26, 0)');
-        var cg2 = ctx.createLinearGradient(w * 0.38, 0, w * 0.78, h * 0.9);
-        cg2.addColorStop(0, 'rgba(56, 189, 248, 1)');
-        cg2.addColorStop(0.5, 'rgba(2, 132, 199, 0.4)');
-        cg2.addColorStop(1, 'rgba(4, 13, 26, 0)');
-        render._oceanGradCache = { w: w, h: h, gRay1: cg1, gRay2: cg2 };
-      }
-
-      var prevAlpha = ctx.globalAlpha;
-      ctx.globalAlpha = rayAlpha1;
-      ctx.fillStyle = render._oceanGradCache.gRay1;
-      ctx.beginPath();
-      ctx.moveTo(w * 0.05, 0);
-      ctx.lineTo(w * 0.38, 0);
-      ctx.lineTo(w * 0.68, h);
-      ctx.lineTo(w * 0.22, h);
-      ctx.closePath();
-      ctx.fill();
-
-      ctx.globalAlpha = rayAlpha2;
-      ctx.fillStyle = render._oceanGradCache.gRay2;
-      ctx.beginPath();
-      ctx.moveTo(w * 0.35, 0);
-      ctx.lineTo(w * 0.62, 0);
-      ctx.lineTo(w * 0.96, h);
-      ctx.lineTo(w * 0.58, h);
-      ctx.closePath();
-      ctx.fill();
-      ctx.globalAlpha = prevAlpha;
-
-      for (var i = 0; i < stars.length; i++) {
-        var s = stars[i];
-        s.y -= (0.42 + s.z * 0.24) * dt;
-        s.x += Math.sin(s.seed + s.y * 0.012) * 0.52 * dt;
-        s.a += s.da * 0.8 * dt;
-        if (s.a > 0.9 || s.a < 0.2) s.da = -s.da;
-
-        if (s.y < -25) {
-          s.y = h + 20;
-          s.x = Math.random() * w;
-          s.seed = Math.random() * 100;
-        }
-        if (s.x < -20) s.x = w + 10;
-        else if (s.x > w + 20) s.x = -10;
-
-        var bRad = Math.max(1.8, s.r * s.z * 1.35);
-
-        if (i % 2 === 0) {
-          ctx.beginPath();
-          ctx.arc(s.x | 0, s.y | 0, bRad, 0, Math.PI * 2);
-          ctx.strokeStyle = 'rgba(56, 189, 248, ' + (s.a * 0.85).toFixed(2) + ')';
-          ctx.lineWidth = 1.3;
-          ctx.fillStyle = 'rgba(14, 165, 233, ' + (s.a * 0.16).toFixed(2) + ')';
-          ctx.fill();
-          ctx.stroke();
-
-          ctx.beginPath();
-          ctx.arc((s.x - bRad * 0.34) | 0, (s.y - bRad * 0.34) | 0, Math.max(0.6, bRad * 0.24), 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(255, 255, 255, ' + (s.a * 0.9).toFixed(2) + ')';
-          ctx.fill();
-        } else {
-          ctx.beginPath();
-          ctx.arc(s.x | 0, s.y | 0, Math.max(1, bRad * 0.65), 0, Math.PI * 2);
-          ctx.fillStyle = (i % 4 === 1)
-            ? 'rgba(56, 189, 248, ' + (s.a * 0.8).toFixed(2) + ')'
-            : 'rgba(52, 211, 153, ' + (s.a * 0.75).toFixed(2) + ')';
-          ctx.fill();
-
-          ctx.beginPath();
-          ctx.arc(s.x | 0, s.y | 0, bRad * 1.8, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(14, 165, 233, ' + (s.a * 0.15).toFixed(2) + ')';
-          ctx.fill();
-        }
-      }
+      dotRgb = '125, 211, 252';
+      lineRgba = 'rgba(56, 189, 248, 0.07)';
+      alphaScale = 0.65;
     } else if (curTheme === 'violet-dusk') {
-      // THEME 3: Violet Dusk - Floating mystic fireflies / embers meandering in twilight
-      for (var i = 0; i < stars.length; i++) {
-        var s = stars[i];
-        s.phase += 0.015 * dt;
-        s.x += Math.cos(s.seed + s.phase) * 0.45 * dt;
-        s.y += (Math.sin(s.seed * 1.3 + s.phase * 0.8) * 0.35 - 0.08) * dt;
-        s.a += s.da * 0.6 * dt;
-        if (s.a > 0.85 || s.a < 0.16) s.da = -s.da;
-        if (s.y < -20) s.y = h + 15;
-        if (s.y > h + 20) s.y = -10;
-        if (s.x < -20) s.x = w + 15;
-        if (s.x > w + 20) s.x = -10;
-
-        var emberRadius = Math.max(1.2, s.r * s.z * 0.95);
-        var isWarmAmber = (i % 2 === 0);
-        var emberColor = isWarmAmber ? '251, 191, 36' : '216, 180, 254';
-
-        ctx.beginPath();
-        ctx.arc(s.x | 0, s.y | 0, emberRadius * 2.2, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(' + emberColor + ', ' + (s.a * 0.16).toFixed(2) + ')';
-        ctx.fill();
-
-        ctx.beginPath();
-        ctx.arc(s.x | 0, s.y | 0, emberRadius, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(' + emberColor + ', ' + (s.a * 0.75).toFixed(2) + ')';
-        ctx.fill();
-      }
+      dotRgb = '196, 181, 253';
+      lineRgba = 'rgba(167, 139, 250, 0.05)';
+      alphaScale = 0.5;
     } else if (curTheme === 'moonlight') {
-      // THEME 4: Moonlight - Cartoon Anime Crescent Moon, Clouds & Sparkles
-      drawCartoonCrescentMoon(ctx, w, h);
-      drawAnimeClouds(ctx, w, h, frameDelta);
-      for (var msIdx = 0; msIdx < 6; msIdx++) {
-        var sx = (w * (0.15 + msIdx * 0.14)) % w;
-        var sy = (h * (0.12 + (msIdx % 3) * 0.08)) % h;
-        drawSparkleStar(ctx, sx, sy, 5, 0.75);
-      }
-      var tMoon = (timestamp || Date.now()) * 0.0004;
-      var ring1R = (Math.min(w, h) * 0.42) + Math.sin(tMoon) * 18;
-      var ring2R = (Math.min(w, h) * 0.65) + Math.cos(tMoon * 0.8) * 24;
+      dotRgb = '79, 70, 229';
+      lineRgba = 'rgba(79, 70, 229, 0.045)';
+      alphaScale = 0.35;
+    }
 
-      ctx.lineWidth = 1;
+    var maxDist = isMobile ? 65 : 90;
+    var maxDistSq = maxDist * maxDist;
+    ctx.lineWidth = 0.75;
+    ctx.strokeStyle = lineRgba;
+    ctx.beginPath();
+    var connectLimit = Math.min(stars.length, isMobile ? 16 : 26);
+    for (var c1 = 0; c1 < connectLimit; c1++) {
+      var s1 = stars[c1];
+      for (var c2 = c1 + 1; c2 < connectLimit; c2++) {
+        var s2 = stars[c2];
+        var dx = s1.x - s2.x;
+        var dy = s1.y - s2.y;
+        if (dx * dx + dy * dy < maxDistSq) {
+          ctx.moveTo(s1.x | 0, s1.y | 0);
+          ctx.lineTo(s2.x | 0, s2.y | 0);
+        }
+      }
+    }
+    ctx.stroke();
+
+    for (var i = 0; i < stars.length; i++) {
+      var s = stars[i];
+      s.y -= 0.14 * s.z * dt;
+      s.x += Math.sin(s.seed + s.y * 0.008) * 0.14 * dt;
+      s.a += s.da * dt;
+      if (s.a > 0.65 || s.a < 0.12) s.da = -s.da;
+      if (s.y < -12) {
+        s.y = h + 12;
+        s.x = Math.random() * w;
+      }
+      if (s.x < -12) s.x = w + 10;
+      else if (s.x > w + 12) s.x = -10;
+
+      var r = Math.max(0.9, s.r * s.z * 0.75);
       ctx.beginPath();
-      ctx.arc(w * 0.5, h * 0.45, ring1R, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(99, 102, 241, 0.055)';
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.arc(w * 0.5, h * 0.45, ring2R, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(79, 70, 229, 0.038)';
-      ctx.stroke();
-
-      for (var i = 0; i < stars.length; i++) {
-        var s = stars[i];
-        s.y -= 0.08 * s.z * dt;
-        s.x += Math.sin(s.seed + s.y * 0.006) * 0.16 * dt;
-        s.a += s.da * 0.5 * dt;
-        if (s.a > 0.8 || s.a < 0.15) s.da = -s.da;
-        if (s.y < -12) { s.y = h + 10; s.x = Math.random() * w; }
-        if (s.x < -10) s.x = w + 5;
-        if (s.x > w + 10) s.x = -5;
-
-        var mRad = Math.max(1, s.r * 0.85);
-
-        ctx.beginPath();
-        ctx.arc(s.x | 0, s.y | 0, mRad, 0, Math.PI * 2);
-        ctx.fillStyle = (i % 3 === 0)
-          ? 'rgba(79, 70, 229, ' + (s.a * 0.35).toFixed(2) + ')'
-          : 'rgba(14, 165, 233, ' + (s.a * 0.28).toFixed(2) + ')';
-        ctx.fill();
-
-        if (s.isAnchor) {
-          ctx.beginPath();
-          ctx.arc(s.x | 0, s.y | 0, mRad * 2.4, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(99, 102, 241, ' + (s.a * 0.08).toFixed(2) + ')';
-          ctx.fill();
-        }
-      }
-    } else {
-      // THEME 1: Deep Galaxy - High-Performance Constellation Web & Micro Dust (0 radial gradients)
-      var maxDist = isMobile ? 65 : 95;
-      var maxDistSq = maxDist * maxDist;
-      ctx.lineWidth = 0.8;
-      ctx.strokeStyle = 'rgba(226, 232, 240, 0.10)';
-      ctx.beginPath();
-      var connectLimit = Math.min(stars.length, isMobile ? 22 : 36);
-      for (var i = 0; i < connectLimit; i++) {
-        var s1 = stars[i];
-        for (var j = i + 1; j < connectLimit; j++) {
-          var s2 = stars[j];
-          var dx = s1.x - s2.x;
-          var dy = s1.y - s2.y;
-          var distSq = dx * dx + dy * dy;
-          if (distSq < maxDistSq) {
-            ctx.moveTo(s1.x | 0, s1.y | 0);
-            ctx.lineTo(s2.x | 0, s2.y | 0);
-          }
-        }
-      }
-      ctx.stroke();
-
-      for (var i = 0; i < stars.length; i++) {
-        var s = stars[i];
-        s.y -= 0.22 * s.z * dt;
-        s.a += s.da * dt;
-        if (s.a > 0.95 || s.a < 0.2) s.da = -s.da;
-        if (s.y < -15) {
-          s.y = h + 15;
-          s.x = Math.random() * w;
-        }
-
-        var r = Math.max(1, s.r * s.z * 0.75);
-        ctx.beginPath();
-        ctx.arc(s.x | 0, s.y | 0, r, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(' + s.rgb + ',' + s.a.toFixed(2) + ')';
-        ctx.fill();
-
-        if (s.isAnchor && !isMobile) {
-          var spike = 5 + s.z * 2.5;
-          ctx.strokeStyle = 'rgba(237, 233, 254, ' + (s.a * 0.45).toFixed(2) + ')';
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo((s.x - spike) | 0, s.y | 0);
-          ctx.lineTo((s.x + spike) | 0, s.y | 0);
-          ctx.moveTo(s.x | 0, (s.y - spike) | 0);
-          ctx.lineTo(s.x | 0, (s.y + spike) | 0);
-          ctx.stroke();
-
-          ctx.beginPath();
-          ctx.arc(s.x | 0, s.y | 0, r * 2.6, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(167, 139, 250, ' + (s.a * 0.15).toFixed(2) + ')';
-          ctx.fill();
-        }
-      }
-
-      if (!isMobile) {
-        if (shootingStars.length < 1 && Math.random() < 0.007) {
-          shootingStars.push({
-            x: Math.random() * w * 0.7 + w * 0.15,
-            y: Math.random() * h * 0.35,
-            len: Math.random() * 120 + 80,
-            speed: Math.random() * 7 + 7,
-            a: 0.95
-          });
-        }
-        for (var j = shootingStars.length - 1; j >= 0; j--) {
-          var st = shootingStars[j];
-          st.x -= st.speed * dt;
-          st.y += st.speed * 0.52 * dt;
-          st.a -= 0.02 * dt;
-          if (st.a <= 0) {
-            shootingStars.splice(j, 1);
-            continue;
-          }
-          var tailX = st.x + st.len;
-          var tailY = st.y - st.len * 0.52;
-          var grad = ctx.createLinearGradient(st.x, st.y, tailX, tailY);
-          grad.addColorStop(0, 'rgba(255, 255, 255, ' + st.a.toFixed(2) + ')');
-          grad.addColorStop(0.25, 'rgba(196, 181, 253, ' + (st.a * 0.85).toFixed(2) + ')');
-          grad.addColorStop(0.6, 'rgba(56, 189, 248, ' + (st.a * 0.4).toFixed(2) + ')');
-          grad.addColorStop(1, 'rgba(124, 58, 237, 0)');
-          ctx.strokeStyle = grad;
-          ctx.lineWidth = 2.2;
-          ctx.beginPath();
-          ctx.moveTo(st.x, st.y);
-          ctx.lineTo(tailX, tailY);
-          ctx.stroke();
-
-          ctx.beginPath();
-          ctx.arc(st.x, st.y, 2.5, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(255, 255, 255, ' + st.a.toFixed(2) + ')';
-          ctx.fill();
-        }
-      }
+      ctx.arc(s.x | 0, s.y | 0, r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(' + dotRgb + ', ' + (s.a * alphaScale).toFixed(2) + ')';
+      ctx.fill();
     }
 
     rafId = requestAnimationFrame(render);
@@ -824,14 +604,14 @@ function togglePasswordVisibility(inputId, btn) {
   if (input.type === 'password') {
     input.type = 'text';
     if (btn) {
-      btn.textContent = '🙈';
+      btn.textContent = 'Ẩn';
       btn.setAttribute('aria-pressed', 'true');
       btn.setAttribute('aria-label', 'Ẩn mật khẩu');
     }
   } else {
     input.type = 'password';
     if (btn) {
-      btn.textContent = '👁';
+      btn.textContent = 'Hiện';
       btn.setAttribute('aria-pressed', 'false');
       btn.setAttribute('aria-label', 'Hiện mật khẩu');
     }
@@ -1017,15 +797,15 @@ function applyUserRoleUI() {
     });
     ['userAvatarBadge', 'detailUserAvatarBadge', 'globalUserAvatarBadge', 'dropdownAvatar', 'detailDropdownAvatar', 'globalDropdownAvatar'].forEach(id => {
       const el = document.getElementById(id);
-      if (el) el.textContent = '🔑';
+      if (el) el.textContent = 'K';
     });
     return;
   }
 
   const username = currentUser.username || (currentUser.role === 'admin' ? 'admin' : 'User');
   const isAdmin = currentUser.role === 'admin';
-  const avatar = isAdmin ? '👑' : '👤';
-  const roleText = isAdmin ? '👑 Quản trị viên (Toàn quyền)' : '👤 Người vận hành (' + (Array.isArray(currentUser.assignedBotIds) ? currentUser.assignedBotIds.length : 0) + ' Bot)';
+  const avatar = isAdmin ? 'A' : String(username.charAt(0) || 'U').toUpperCase();
+  const roleText = isAdmin ? 'Quản trị viên (Toàn quyền)' : 'Người vận hành (' + (Array.isArray(currentUser.assignedBotIds) ? currentUser.assignedBotIds.length : 0) + ' Bot)';
 
   // Kiểm tra hạn thuê và tạm khóa cho tài khoản User
   if (!isAdmin) {
@@ -1055,19 +835,19 @@ function applyUserRoleUI() {
     appEl?.classList.remove('user-mode');
     document.body?.classList?.remove('user-mode');
     badges.forEach(b => {
-      b.innerHTML = '👑 <strong>ADMIN (Toàn quyền)</strong>';
-      b.style.background = 'rgba(234,179,8,0.2)';
-      b.style.color = '#eab308';
-      b.style.borderColor = 'rgba(234,179,8,0.4)';
+      b.innerHTML = '<strong>ADMIN (Toàn quyền)</strong>';
+      b.style.background = 'rgba(229, 153, 52, 0.14)';
+      b.style.color = 'var(--yellow)';
+      b.style.borderColor = 'rgba(229, 153, 52, 0.34)';
     });
   } else {
     appEl?.classList.add('user-mode');
     document.body?.classList?.add('user-mode');
     badges.forEach(b => {
-      b.innerHTML = '👤 <strong>USER: ' + escapeHtml(currentUser.username) + '</strong>';
-      b.style.background = 'rgba(56,189,248,0.2)';
-      b.style.color = '#38bdf8';
-      b.style.borderColor = 'rgba(56,189,248,0.4)';
+      b.innerHTML = '<strong>USER: ' + escapeHtml(currentUser.username) + '</strong>';
+      b.style.background = 'var(--accent-soft)';
+      b.style.color = 'var(--accent-text)';
+      b.style.borderColor = 'var(--border-strong)';
     });
   }
 
@@ -1097,16 +877,16 @@ function applyUserRoleUI() {
     } else {
       expEl.style.display = 'block';
       if (isPermanentUser) {
-        expEl.textContent = '👑 VIP Vĩnh Viễn';
-        expEl.style.color = '#eab308';
+        expEl.textContent = 'VIP Vĩnh viễn';
+        expEl.style.color = 'var(--yellow)';
       } else if (!currentUser.expiresAt) {
-        expEl.textContent = '⚪ Chưa kích hoạt gói';
-        expEl.style.color = '#94a3b8';
+        expEl.textContent = 'Chưa kích hoạt gói';
+        expEl.style.color = 'var(--text-muted)';
       } else {
         const expDate = new Date(currentUser.expiresAt);
         const isExp = Date.now() > expDate.getTime();
-        expEl.textContent = (isExp ? '⛔ Đã hết hạn: ' : '⏳ Hạn dùng: ') + expDate.toLocaleDateString('vi-VN');
-        expEl.style.color = isExp ? '#ef4444' : '#38bdf8';
+        expEl.textContent = (isExp ? 'Đã hết hạn: ' : 'Hạn dùng: ') + expDate.toLocaleDateString('vi-VN');
+        expEl.style.color = isExp ? 'var(--red)' : 'var(--accent-text)';
       }
     }
   }
@@ -1172,10 +952,10 @@ function renderDiscordNotifyControls() {
   const toolbarBtn = document.getElementById('discordDmNotifyBtn');
   if (toolbarBtn) {
     if (!linked && currentDiscordLinkState.loaded && !isAdmin) {
-      toolbarBtn.textContent = '💬 TB Discord: Chưa liên kết';
+      toolbarBtn.textContent = 'TB Discord: Chưa liên kết';
       toolbarBtn.title = 'Hãy liên kết tài khoản Web với Discord để bật nhận tin nhắn riêng (DM)';
     } else {
-      toolbarBtn.textContent = enabled ? '🔔 TB Discord: BẬT' : '🔕 TB Discord: TẮT';
+      toolbarBtn.textContent = enabled ? 'TB Discord: BẬT' : 'TB Discord: TẮT';
       toolbarBtn.title = enabled
         ? 'Đang BẬT nhận thông báo riêng qua Discord (DM) — bấm để tắt'
         : 'Đang TẮT nhận thông báo riêng qua Discord (DM) — bấm để bật lại';
@@ -1187,11 +967,11 @@ function renderDiscordNotifyControls() {
   const toggleBtn = document.getElementById('discordNotifyToggleBtn');
   const hint = document.getElementById('discordNotifyHint');
   if (statusText) {
-    statusText.style.color = enabled ? '#10b981' : '#f59e0b';
-    statusText.textContent = enabled ? '🔔 ĐANG BẬT' : '🔕 ĐANG TẮT';
+    statusText.style.color = enabled ? 'var(--green)' : 'var(--yellow)';
+    statusText.textContent = enabled ? 'Đang bật' : 'Đang tắt';
   }
   if (toggleBtn) {
-    toggleBtn.textContent = enabled ? '🔕 Tắt thông báo Discord' : '🔔 Bật thông báo Discord';
+    toggleBtn.textContent = enabled ? 'Tắt thông báo Discord' : 'Bật thông báo Discord';
     toggleBtn.className = enabled ? 'small danger' : 'small primary';
   }
   if (hint) {

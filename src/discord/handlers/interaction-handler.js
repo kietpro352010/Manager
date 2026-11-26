@@ -123,7 +123,7 @@ async function safeDeferReply(interaction, options = { ephemeral: true }) {
     return true;
   } catch (err) {
     const code = err?.code || err?.rawError?.code;
-    if (code === 10062) return false;
+    if (code === 10062 || code === 40060) return false;
     if (isIgnorableDiscordError(err)) return true;
     throw err;
   }
@@ -244,7 +244,7 @@ function attachInteractionHandler(client, { config, services, logger }) {
           || (typeof command.shouldSkipDefer === 'function' && command.shouldSkipDefer(interaction));
         if (shouldSkip) {
           const message = await command.execute(interaction, services);
-          if (message && !interaction.replied && !interaction.deferred) {
+          if (message && typeof message.toJSON !== 'function' && !interaction.modal && !interaction.replied && !interaction.deferred) {
             await safeEditReply(interaction, { ...commandReply(message), allowedMentions: { parse: [] }, ephemeral: true });
           }
           return;
@@ -255,21 +255,27 @@ function attachInteractionHandler(client, { config, services, logger }) {
         const acked = await safeDeferReply(interaction, { ephemeral: isEphemeral });
         if (!acked) return;
 
-        // RBAC Role Gate: /login, /logout and community points commands do not require Web role linkage (DISCORD-12).
-        const PUBLIC_SERVER_COMMANDS = new Set(['login', 'logout', 'diemdanh', 'diem', 'bxh', 'tinnhan']);
+        // RBAC Role Gate: /login, /logout, /help and community points commands do not require Web role linkage (DISCORD-12).
+        const PUBLIC_SERVER_COMMANDS = new Set(['login', 'logout', 'help', 'diemdanh', 'diem', 'bxh', 'tinnhan']);
         if (!PUBLIC_SERVER_COMMANDS.has(interaction.commandName)) {
           const hasRole = await hasAuthorizedRole(interaction, services);
           if (!hasRole) {
-            const { embed } = require('../panels/renderer');
+            const { ActionRowBuilder, ButtonStyle } = require('discord.js');
+            const { embed, button } = require('../panels/renderer');
+            const uid = String(interaction.user?.id || '').trim();
+            const components = uid
+              ? [new ActionRowBuilder().addComponents(button('Đăng nhập ngay', `login:prompt:${uid}`, ButtonStyle.Primary, false, '🔐'))]
+              : [];
             return safeEditReply(interaction, {
               embeds: [
                 embed(
                   '⛔ BẠN CHƯA CÓ ROLE SỬ DỤNG BOT',
                   'Bạn chưa có Role thành viên hoặc chưa đăng nhập tài khoản Web Manager.\n\n' +
-                  '👉 Vui lòng sử dụng lệnh `/login` để đăng nhập và nhận Role tự động.',
+                  '👉 Bấm nút **Đăng nhập ngay** bên dưới (hoặc dùng lệnh `/login`) để liên kết tài khoản và nhận Role tự động.',
                   0xef4444
                 )
               ],
+              components,
               allowedMentions: { parse: [] }
             });
           }
@@ -336,6 +342,8 @@ function attachInteractionHandler(client, { config, services, logger }) {
 
 module.exports = {
   attachInteractionHandler,
+  safeDeferReply,
+  isIgnorableDiscordError,
   isSuperAdmin,
   isUserAdmin,
   hasAuthorizedRole,

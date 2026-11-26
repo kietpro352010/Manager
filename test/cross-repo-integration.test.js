@@ -192,7 +192,7 @@ function createMockSession(initialState = 'online') {
 // SUITE 1: Manager ↔ Worker API Contract & Authentication
 // =========================================================================
 
-test('API-CONTRACT-01: Secret length requirement (>= 32 chars) enforced on both Manager and Worker', async () => {
+test('API-CONTRACT-01: Zero-secret & optional MANAGER_URL worker config and registration', async () => {
   const store = createMockWorkerStore();
   const registry = new WorkerRegistry({
     store,
@@ -200,40 +200,37 @@ test('API-CONTRACT-01: Secret length requirement (>= 32 chars) enforced on both 
     adminNotifier: createSilentLogger()
   });
 
-  // 1. Manager registration rejects secrets < 32 characters
+  // 1. Manager registration succeeds without secret (or with empty/short secret) and still validates workerId format
+  const addedNoSecret = await registry.add({ workerId: 'bot-no-secret' });
+  assert.ok(addedNoSecret.worker);
+  assert.strictEqual(addedNoSecret.worker.workerId, 'bot-no-secret');
+  assert.strictEqual(addedNoSecret.secret, '');
+
+  const addedEmptySecret = await registry.add({ workerId: 'bot-empty-sec', secret: '' });
+  assert.ok(addedEmptySecret.worker);
+
   await assert.rejects(
-    async () => registry.add({ workerId: 'bot-short', secret: SHORT_SECRET }),
-    /Worker secret must be at least 32 characters/
-  );
-  await assert.rejects(
-    async () => registry.add({ workerId: 'bot-empty', secret: '' }),
-    /Worker secret must be at least 32 characters/
-  );
-  await assert.rejects(
-    async () => registry.add({ workerId: 'bot-spaces', secret: '   ' }),
-    /Worker secret must be at least 32 characters/
+    async () => registry.add({ workerId: 'INVALID ID!' }),
+    /Worker ID must be 2–40 lowercase letters/
   );
 
-  // 2. Manager setSecret rejects secrets < 32 characters
+  // 2. Manager setSecret allows empty reset without requiring 32-char secrets
   const valid = await registry.add({ workerId: 'bot-valid', secret: VALID_SECRET_1 });
   assert.ok(valid.worker);
-  await assert.rejects(
-    async () => registry.setSecret('bot-valid', SHORT_SECRET),
-    /Worker secret must be at least 32 characters/
-  );
+  const updatedSec = await registry.setSecret('bot-valid', '');
+  assert.strictEqual(updatedSec, '');
 
-  // 3. Worker loadConfig / readSlot rejects WORKER_SECRET < 32 characters on boot
-  assert.throws(() => {
-    loadConfig({
-      MANAGER_URL: 'http://127.0.0.1:3000',
-      WORKER_BOT_COUNT: '1',
-      WORKER_ID_1: 'bot-worker-1',
-      WORKER_SECRET_1: SHORT_SECRET
-    });
-  }, /WORKER_SECRET_1 must be a unique random secret of at least 32 characters/);
+  // 3. Worker loadConfig defaults MANAGER_URL -> https://kbotmanager.onrender.com and works without WORKER_SECRET
+  const defaultCfg = loadConfig({
+    WORKER_BOT_COUNT: '1',
+    WORKER_ID_1: 'bot-worker-1'
+  });
+  assert.strictEqual(defaultCfg.managerUrl, 'https://kbotmanager.onrender.com');
+  assert.strictEqual(defaultCfg.bots[0].workerId, 'bot-worker-1');
+  assert.strictEqual(defaultCfg.bots[0].secret, '');
 });
 
-test('API-CONTRACT-02: Constant-time authentication and dual-header support (x-worker-secret & Bearer)', async () => {
+test('API-CONTRACT-02: ID-only worker authentication and unregistered/disabled worker rejection', async () => {
   const store = createMockWorkerStore();
   const registry = new WorkerRegistry({
     store,
@@ -246,7 +243,7 @@ test('API-CONTRACT-02: Constant-time authentication and dual-header support (x-w
     logger: createSilentLogger()
   });
 
-  await registry.add({ workerId: 'bot-auth-test', secret: VALID_SECRET_1 });
+  await registry.add({ workerId: 'bot-auth-test' });
   await registry.updateCredentials('bot-auth-test', { username: 'TestPlayer', password: 'SecretPassword123' });
 
   const managerApp = express();
@@ -263,51 +260,39 @@ test('API-CONTRACT-02: Constant-time authentication and dual-header support (x-w
   const { server, url } = await startServer(managerApp);
 
   try {
-    // 1. Success via x-worker-secret header
+    // 1. Success via ID-only x-manager-bot-id header (no secret needed)
     const res1 = await fetch(`${url}/api/v1/workers/bot-auth-test/bootstrap`, {
-      headers: { 'x-worker-secret': VALID_SECRET_1 }
+      headers: { 'x-manager-bot-id': 'bot-auth-test' }
     });
     assert.strictEqual(res1.status, 200);
     const body1 = await res1.json();
     assert.strictEqual(body1.ok, true);
+    assert.ok(Array.isArray(body1.managerUrls) && body1.managerUrls.length >= 1);
     assert.strictEqual(body1.credentials.username, 'TestPlayer');
 
-    // 2. Success via Authorization: Bearer <secret> header
-    const res2 = await fetch(`${url}/api/v1/workers/bot-auth-test/bootstrap`, {
-      headers: { 'authorization': `Bearer ${VALID_SECRET_1}` }
-    });
+    // 2. Success via URL :workerId even without secret headers
+    const res2 = await fetch(`${url}/api/v1/workers/bot-auth-test/bootstrap`);
     assert.strictEqual(res2.status, 200);
-    const body2 = await res2.json();
-    assert.strictEqual(body2.ok, true);
-    assert.strictEqual(body2.credentials.username, 'TestPlayer');
 
-    // 3. Rejection (401) on missing secret
-    const resMissing = await fetch(`${url}/api/v1/workers/bot-auth-test/bootstrap`);
-    assert.strictEqual(resMissing.status, 401);
-    const bodyMissing = await resMissing.json();
-    assert.strictEqual(bodyMissing.ok, false);
-    assert.strictEqual(bodyMissing.error, 'unauthorized');
+    // 3. Rejection (401) for unregistered worker ID
+    const resUnreg = await fetch(`${url}/api/v1/workers/unknown-bot-999/bootstrap`);
+    assert.strictEqual(resUnreg.status, 401);
+    const bodyUnreg = await resUnreg.json();
+    assert.strictEqual(bodyUnreg.ok, false);
+    assert.strictEqual(bodyUnreg.error, 'unauthorized');
 
-    // 4. Rejection (401) on wrong secret
-    const resWrong = await fetch(`${url}/api/v1/workers/bot-auth-test/bootstrap`, {
-      headers: { 'x-worker-secret': 'wrong_secret_that_has_at_least_32_characters_1234567' }
-    });
-    assert.strictEqual(resWrong.status, 401);
+    // 4. Rejection (401) when worker is disabled
+    await registry.setEnabled('bot-auth-test', false);
+    const resDisabled = await fetch(`${url}/api/v1/workers/bot-auth-test/bootstrap`);
+    assert.strictEqual(resDisabled.status, 401);
 
-    // 5. Rejection (401) on secret shorter than 32 chars
-    const resShort = await fetch(`${url}/api/v1/workers/bot-auth-test/bootstrap`, {
-      headers: { 'x-worker-secret': SHORT_SECRET }
-    });
-    assert.strictEqual(resShort.status, 401);
-
-    // 6. Worker-side auth middleware validation (requireWorkerSecret)
+    // 5. Legacy requireWorkerSecret helper still works when explicit secret configured
     const workerApp = express();
     workerApp.use(express.json());
     workerApp.get('/test-worker-auth', requireWorkerSecret(VALID_SECRET_1), (_req, res) => res.json({ ok: true }));
     const workerSrv = await startServer(workerApp);
 
     try {
-      // Worker accepts x-worker-secret
       const wRes1 = await fetch(`${workerSrv.url}/test-worker-auth`, {
         headers: { 'x-worker-secret': VALID_SECRET_1 }
       });
@@ -558,11 +543,11 @@ test('FLEET-01: Slot 1 & Slot 2 independent bootstrap, telemetry, command dispat
     assert.strictEqual(boot2.credentials.username, 'Slot2Player');
     assert.strictEqual(boot2.settings.proxyUrl, 'socks5://user2:pass2@10.0.0.2:1080');
 
-    // Cross-slot secret bleed rejection: Slot 1 secret cannot access Slot 2 bootstrap
-    const crossBoot = await fetch(`${mgrSrv.url}/api/v1/workers/bot-slot-2/bootstrap`, {
-      headers: { 'x-worker-secret': VALID_SECRET_1 }
+    // Unregistered worker slot ID returns 401 (whereas registered bot-slot-2 returns only its own isolated config)
+    const unknownBoot = await fetch(`${mgrSrv.url}/api/v1/workers/bot-slot-unknown/bootstrap`, {
+      headers: { 'x-manager-bot-id': 'bot-slot-unknown' }
     });
-    assert.strictEqual(crossBoot.status, 401);
+    assert.strictEqual(unknownBoot.status, 401);
 
     // 2. Independent Telemetry Reporting
     await fetch(`${mgrSrv.url}/api/v1/workers/bot-slot-1/heartbeat`, {

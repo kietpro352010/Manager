@@ -5,6 +5,7 @@ const net = require('node:net');
 const express = require('express');
 const { validateProxyUrl, resolveAndValidateHost } = require('../../services/proxy-validation');
 const { resolveClientIp } = require('../../services/captcha');
+const { resolveRequestOrigin, DEFAULT_PUBLIC_MANAGER_URL } = require('../../config/host-runtime');
 const { decryptSecret } = require('../../utils/secrets');
 const { getMaintenanceState } = require('../../utils/maintenance');
 
@@ -863,16 +864,16 @@ function createUserApi({
   // 3. GET SYSTEM ANNOUNCEMENT
   router.get('/announcement', requireSession, async (_req, res) => {
     const cacheFresh = store?.cachedAnnouncement !== undefined && (
-      !store?.cachedAnnouncementAt || (Date.now() - Number(store.cachedAnnouncementAt) < 30000)
+      store?.cachedAnnouncementAt && (Date.now() - Number(store.cachedAnnouncementAt) < 5000)
     );
     let rawAnnouncement = cacheFresh ? store.cachedAnnouncement : undefined;
     if (rawAnnouncement === undefined && typeof store?.getSetting === 'function') {
       try {
-        rawAnnouncement = await store.getSetting('system_announcement');
+        rawAnnouncement = await store.getSetting('system_announcement', { bypassCache: true });
         store.cachedAnnouncement = rawAnnouncement || null;
         store.cachedAnnouncementAt = Date.now();
       } catch (_) {
-        rawAnnouncement = null;
+        rawAnnouncement = store?.cachedAnnouncement ?? null;
       }
     }
     const announcement = normalizeAnnouncementValue(rawAnnouncement);
@@ -899,6 +900,7 @@ function createUserApi({
 
     const worker = perm.worker;
     const session = req.managerAuthSession;
+    await registry.refreshLogsFromStore?.(worker.workerId, { kind: 'all', maxAgeMs: 3000 }).catch(() => {});
     const summary = registry.summary(worker.workerId);
     const inventory = isWorkerDisconnectedForInventory(worker)
       ? buildEmptyInventoryPayload(worker.status?.inventory?.revision || 0)
@@ -1059,6 +1061,7 @@ function createUserApi({
   router.get('/bot/:id/logs', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
+    await registry.refreshLogsFromStore?.(perm.worker.workerId, { kind: 'event', maxAgeMs: 3000 }).catch(() => {});
     return res.json({
       ok: true,
       logs: typeof registry.getSystemLogs === 'function'
@@ -1070,6 +1073,7 @@ function createUserApi({
   router.get('/bot/:id/chat-logs', requireSession, async (req, res) => {
     const perm = await checkBotPermissionAsync(req, req.params.id);
     if (!perm.allowed) return res.status(perm.status).json({ ok: false, error: perm.error, ...(perm.code ? { code: perm.code } : {}) });
+    await registry.refreshLogsFromStore?.(perm.worker.workerId, { kind: 'chat', maxAgeMs: 3000 }).catch(() => {});
     return res.json({
       ok: true,
       logs: typeof registry.getChatLogs === 'function'
@@ -1257,18 +1261,17 @@ function createUserApi({
 
     const normId = String(perm.worker.workerId || '').trim().toLowerCase();
     const isChatClear = req.path.includes('chat-logs');
-    if (isChatClear) {
-      if (registry.botChatLogsCache) {
-        registry.botChatLogsCache.set(normId, []);
-      }
+    if (typeof registry.clearLogs === 'function') {
+      await registry.clearLogs(normId, isChatClear ? 'chat' : 'event');
+    } else if (isChatClear) {
+      if (registry.botChatLogsCache) registry.botChatLogsCache.set(normId, []);
       if (registry.botChatLogRev) registry.botChatLogRev.set(normId, (registry.botChatLogRev.get(normId) || 0) + 1);
+      registry.bumpRevision?.(normId);
     } else {
-      if (registry.botLogsCache) {
-        registry.botLogsCache.set(normId, []);
-      }
+      if (registry.botLogsCache) registry.botLogsCache.set(normId, []);
       if (registry.botLogRev) registry.botLogRev.set(normId, (registry.botLogRev.get(normId) || 0) + 1);
+      registry.bumpRevision?.(normId);
     }
-    registry.bumpRevision?.(normId);
     return res.json({ ok: true, message: isChatClear ? 'Đã xóa nhật ký chat.' : 'Đã xóa nhật ký sự kiện.' });
   });
 
@@ -1822,7 +1825,8 @@ function createUserApi({
   // 18. LINK4M REWARDS
   router.get(['/rewards/link4m/status', '/status'], requireSession, async (req, res) => {
     try {
-      const status = await link4mService.getDailyQuotaStatus(req.managerAuthSession.userId);
+      const requestOrigin = resolveRequestOrigin(req, config?.publicBaseUrl || DEFAULT_PUBLIC_MANAGER_URL);
+      const status = await link4mService.getDailyQuotaStatus(req.managerAuthSession.userId, { requestOrigin });
       return res.json({ ok: true, ...status });
     } catch (error) {
       logger?.error?.('Failed to get Link4M status', { error: error.message });
@@ -1833,7 +1837,8 @@ function createUserApi({
   router.post(['/rewards/link4m/start', '/start'], requireSession, async (req, res) => {
     try {
       const clientIp = resolveClientIp(req) || '127.0.0.1';
-      const result = await link4mService.createLinkAttempt(req.managerAuthSession.userId, clientIp);
+      const returnOrigin = resolveRequestOrigin(req, config?.publicBaseUrl || DEFAULT_PUBLIC_MANAGER_URL);
+      const result = await link4mService.createLinkAttempt(req.managerAuthSession.userId, clientIp, { returnOrigin });
       return res.json(result);
     } catch (error) {
       return res.status(400).json({ ok: false, error: error.message });
@@ -1853,8 +1858,10 @@ function createUserApi({
         .replace(/&/g, '\\u0026');
       return res.send(`
         <!DOCTYPE html>
-        <html>
+        <html lang="vi">
         <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
           <title>KingMC - Đang xác nhận phần thưởng...</title>
           <!-- metadata: token: '${encodedToken}', attempt: '${encodedAttempt}' -->
         </head>

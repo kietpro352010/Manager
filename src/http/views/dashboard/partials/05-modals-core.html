@@ -45,21 +45,21 @@
       <div>
         <label for="link4mModalMode" style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Chế độ tạo liên kết:</label>
         <select id="link4mModalMode" style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);" onchange="updateLink4mModalFields()">
+          <option value="api">🤖 Tự Động Gọi API Link4M (Khuyên dùng - tự quay về đúng Web ban đầu)</option>
           <option value="custom_url">🔗 Link Rút Gọn Cố Định (Admin tự tạo link dán vào)</option>
-          <option value="api">🤖 Tự Động Gọi API Link4M (Tạo link động cho từng lượt)</option>
         </select>
       </div>
 
-      <div id="link4mCustomUrlGroup">
+      <div id="link4mCustomUrlGroup" style="display:none;">
         <label for="link4mModalUrl" style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Đường dẫn Link rút gọn gán vào:</label>
         <input type="text" id="link4mModalUrl" placeholder="Ví dụ: https://link4m.co/abcxyz" style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
-        <span style="font-size:11.5px;color:var(--muted);display:block;margin-top:4px;">Khi người dùng bấm vượt link, hệ thống sẽ mở link này.</span>
+        <span style="font-size:11.5px;color:var(--muted);display:block;margin-top:4px;">Khi người dùng bấm vượt link, hệ thống sẽ mở link này. Lưu ý: link cố định tự tạo trên Link4M luôn quay về đích cố định bạn đặt trên Link4M; muốn tự quay về đúng Web Render đang dùng, hãy chọn chế độ Tự Động Gọi API ở trên.</span>
       </div>
 
-      <div id="link4mApiTokenGroup" style="display:none;">
+      <div id="link4mApiTokenGroup">
         <label for="link4mModalApiToken" style="font-weight:700;display:block;margin-bottom:4px;color:var(--text);">Link4M Publisher API Token:</label>
         <input type="password" id="link4mModalApiToken" autocomplete="off" placeholder="Nhập API Token từ tài khoản Link4M của bạn..." style="width:100%;padding:8px 10px;border-radius:6px;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);box-sizing:border-box;">
-        <span style="font-size:11.5px;color:var(--muted);display:block;margin-top:4px;">Backend sẽ tự gọi https://link4m.co/api để rút gọn link trả thưởng động.</span>
+        <span style="font-size:11.5px;color:var(--muted);display:block;margin-top:4px;">Backend sẽ tự gọi Link4M API kèm đúng domain Web mà user đang mở (mặc định https://kbotmanager.onrender.com) để tự động quay về đúng nền tảng ban đầu sau khi vượt xong.</span>
       </div>
 
       <div style="display:flex;gap:12px;">
@@ -203,7 +203,7 @@
         <input id="addBotLabel" autocomplete="off" placeholder="Ví dụ: Bot (Để trống sẽ tự động đặt theo Bot #ID)">
       </div>
       <div class="note" style="line-height:1.5;">
-        💡 <strong>Tự động nhận diện Dual-Slot (2-in-1):</strong> Để trống URL để tạo nhanh cụm <strong>Wispbyte (2 Bot)</strong> chế độ Pull, hoặc dán URL Render để bung <strong>2 Bot độc lập</strong> kèm ID và Secret riêng.
+        💡 <strong>Tự động nhận diện Dual-Slot (2-in-1):</strong> Để trống URL để tạo nhanh cụm <strong>Wispbyte (2 Bot)</strong> chế độ Pull, hoặc dán URL Render để bung <strong>2 Bot độc lập</strong> chỉ cần <strong>ID</strong> (không cần <code>MANAGER_URL</code> hay Secret).
       </div>
       <div class="modal-actions" style="margin-top:16px;">
         <button type="button" onclick="closeAddBotModal()">Hủy</button>
@@ -215,7 +215,7 @@
     <div id="addBotResultView" style="display:none;">
       <div style="background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.35);border-radius:8px;padding:12px;margin-bottom:12px;">
         <div id="addBotResultSuccessTitle" style="color:#4ade80;font-weight:700;font-size:14px;margin-bottom:4px;">🎉 Đã thêm thành công!</div>
-        <div style="font-size:12px;color:var(--text);opacity:0.9;">Hệ thống đã tự động gán ID và sinh khóa bảo mật (Secret Key) riêng biệt cho từng Bot.</div>
+        <div style="font-size:12px;color:var(--text);opacity:0.9;">Hệ thống đã tự động gán ID riêng biệt cho từng Bot (không cần cấu hình <code>MANAGER_URL</code> hay khóa Secret).</div>
       </div>
       <div class="form-row">
         <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;font-size:12px;font-weight:700;color:#38bdf8;">

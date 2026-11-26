@@ -575,11 +575,9 @@ async function testScenario2() {
   const slot1 = addWorkerJson.bots[0];
   const slot2 = addWorkerJson.bots[1];
 
-  // Secrets are returned in the envConfig string for Render configuration
-  const secret1Match = addWorkerJson.envConfig.match(/WORKER_SECRET_1=([^\r\n]+)/);
-  const secret2Match = addWorkerJson.envConfig.match(/WORKER_SECRET_2=([^\r\n]+)/);
-  assert.ok(secret1Match && secret1Match[1].trim().length >= 32, 'Slot 1 secret must be >= 32 characters');
-  assert.ok(secret2Match && secret2Match[1].trim().length >= 32, 'Slot 2 secret must be >= 32 characters');
+  // Clean ID-only envConfig is returned without requiring WORKER_SECRET or MANAGER_URL
+  assert.ok(!addWorkerJson.envConfig.includes('WORKER_SECRET_1='), 'envConfig must omit WORKER_SECRET_1');
+  assert.ok(!addWorkerJson.envConfig.includes('MANAGER_URL='), 'envConfig must omit MANAGER_URL');
   assert.ok(addWorkerJson.envConfig.includes('WORKER_ID_1'), 'envConfig must include WORKER_ID_1');
   assert.ok(addWorkerJson.envConfig.includes('WORKER_ID_2'), 'envConfig must include WORKER_ID_2');
 

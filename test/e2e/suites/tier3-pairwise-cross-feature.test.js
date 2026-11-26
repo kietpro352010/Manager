@@ -557,13 +557,13 @@ async function main() {
   });
 
   // ===========================================================================
-  // T3-PAIR-09: Worker Secret Validation + Custom Secret Rejection (<32 chars)
+  // T3-PAIR-09: ID-Only Bot Registration & Clean ENV Generation (No WORKER_SECRET / MANAGER_URL)
   // ===========================================================================
-  await runTest('T3-PAIR-09', 'Worker Secret Validation + Custom Secret Rejection (<32 chars)', async () => {
+  await runTest('T3-PAIR-09', 'ID-Only Bot Registration & Clean ENV Generation', async () => {
     const adminRouter = createAdminApi({
       store: {},
       entitlementService: {},
-      registry: { add: async () => ({ worker: { workerId: 'w-test' }, secret: 'auto_generated' }) },
+      registry: { add: async () => ({ worker: { workerId: 'w-test' }, secret: '' }) },
       broker: {},
       fleetOperations: {},
       adminNotifier: {},
@@ -574,7 +574,7 @@ async function main() {
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => {
-      req.managerAuthSession = { role: 'admin' };
+      req.managerAuthSession = { role: 'admin', username: 'admin' };
       next();
     });
     app.use('/api/manager', adminRouter);
@@ -583,21 +583,19 @@ async function main() {
     const port = server.address().port;
 
     try {
-      // 1. Submit secret with length < 32 (16 chars)
-      const resShort = await fetch(`http://127.0.0.1:${port}/api/manager/bots`, {
+      const resIdOnly = await fetch(`http://127.0.0.1:${port}/api/manager/bots`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          serviceId: 'srv-render-short',
-          secret: 'only16characters'
+          serviceId: 'srv-render-id-only'
         })
       });
-      assert.strictEqual(resShort.status, 400);
-      const bodyShort = await resShort.json();
-      assert.ok(
-        bodyShort.error.includes('32 characters'),
-        `Error must mention 32 characters, got: ${bodyShort.error}`
-      );
+      assert.strictEqual(resIdOnly.status, 201);
+      const bodyIdOnly = await resIdOnly.json();
+      assert.strictEqual(bodyIdOnly.ok, true);
+      assert.ok(String(bodyIdOnly.envConfig || '').includes('WORKER_ID_1=w-test'));
+      assert.ok(!String(bodyIdOnly.envConfig || '').includes('WORKER_SECRET_1='));
+      assert.ok(!String(bodyIdOnly.envConfig || '').includes('MANAGER_URL='));
     } finally {
       server.closeAllConnections?.();
       server.close();

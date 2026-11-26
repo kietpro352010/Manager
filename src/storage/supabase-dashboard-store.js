@@ -1705,13 +1705,16 @@ class SupabaseDashboardStore {
     return null;
   }
 
-  async getUserByDiscordId(discordUserId) {
+  async getUserByDiscordId(discordUserId, { bypassCache = false } = {}) {
     if (!discordUserId) return null;
     const dId = String(discordUserId).trim();
     const cacheKey = `discord_user:${dId}`;
-    const cached = this.getCached(cacheKey);
-    if (cached) return cached;
-    return this._dedupeInFlight(cacheKey, () => this._fetchUserByDiscordIdUncached(dId, cacheKey));
+    if (!bypassCache) {
+      const cached = this.getCached(cacheKey);
+      if (cached) return cached;
+      return this._dedupeInFlight(cacheKey, () => this._fetchUserByDiscordIdUncached(dId, cacheKey));
+    }
+    return this._fetchUserByDiscordIdUncached(dId, cacheKey);
   }
 
   async _fetchUserByDiscordIdUncached(dId, cacheKey) {

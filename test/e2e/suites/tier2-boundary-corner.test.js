@@ -116,37 +116,30 @@ const silentLogger = {
 // FEATURE 1: Dual-Slot Worker Hosting (T2-F01-01 to T2-F01-05)
 // ===========================================================================
 
-registerTest('T2-F01-01', 1, 'Missing Slot 2 env vars when WORKER_BOT_COUNT=2 throws descriptive error', async () => {
+registerTest('T2-F01-01', 1, 'Missing Slot 2 WORKER_ID_2 when WORKER_BOT_COUNT=2 throws descriptive error', async () => {
   const env = {
-    MANAGER_URL: 'https://manager.test.internal',
     MC_SERVER_HOSTS: 'kingmc.vn',
     WORKER_BOT_COUNT: '2',
-    WORKER_ID_1: 'worker-01',
-    WORKER_SECRET_1: 'a'.repeat(32),
-    WORKER_ID_2: 'worker-02'
-    // Missing WORKER_SECRET_2
+    WORKER_ID_1: 'worker-01'
+    // Missing WORKER_ID_2
   };
   assert.throws(
     () => loadWorkerConfig(env),
-    /WORKER_SECRET_2 must be configured/i
+    /WORKER_ID_2 must be configured/i
   );
 });
 
-registerTest('T2-F01-02', 1, 'Identical secrets for both slots throws unique secret requirement error', async () => {
-  const duplicateSecret = 'b'.repeat(32);
+registerTest('T2-F01-02', 1, 'Dual-slot ID-only config without WORKER_SECRET or MANAGER_URL loads with default Manager URL', async () => {
   const env = {
-    MANAGER_URL: 'https://manager.test.internal',
     MC_SERVER_HOSTS: 'kingmc.vn',
     WORKER_BOT_COUNT: '2',
     WORKER_ID_1: 'worker-01',
-    WORKER_SECRET_1: duplicateSecret,
-    WORKER_ID_2: 'worker-02',
-    WORKER_SECRET_2: duplicateSecret
+    WORKER_ID_2: 'worker-02'
   };
-  assert.throws(
-    () => loadWorkerConfig(env),
-    /Each bot slot must use a different WORKER_SECRET/i
-  );
+  const cfg = loadWorkerConfig(env);
+  assert.strictEqual(cfg.managerUrl, 'https://kbotmanager.onrender.com');
+  assert.strictEqual(cfg.bots[0].secret, '');
+  assert.strictEqual(cfg.bots[1].secret, '');
 });
 
 registerTest('T2-F01-03', 1, 'Identical worker IDs for both slots throws unique ID requirement error', async () => {
@@ -1126,25 +1119,22 @@ registerTest('T2-F13-05', 13, 'Link4M verify with invalid token returns error fr
 });
 
 // ===========================================================================
-// FEATURE 14: Worker Secret Validation (T2-F14-01 to T2-F14-05)
+// FEATURE 14: ID-Only Worker Auth & Secret Independence (T2-F14-01 to T2-F14-05)
 // ===========================================================================
 
-registerTest('T2-F14-01', 14, 'Custom secret with exactly 31 characters rejected with 400 / Error', async () => {
+registerTest('T2-F14-01', 14, 'Registration with short or omitted secret succeeds cleanly without 32-char requirement', async () => {
   const mockStore = createInMemoryWorkerStore();
   const registry = new WorkerRegistry({
     store: mockStore,
     encryptionKey: crypto.randomBytes(32),
     logger: silentLogger
   });
-  await assert.rejects(
-    async () => {
-      await registry.add({
-        workerId: 'bot-short-31',
-        secret: 'a'.repeat(31)
-      });
-    },
-    /Worker secret must be at least 32 characters/i
-  );
+  const res = await registry.add({
+    workerId: 'bot-short-31',
+    secret: 'a'.repeat(31)
+  });
+  assert.strictEqual(res.worker.workerId, 'bot-short-31');
+  assert.strictEqual(await registry.authenticate('bot-short-31', ''), true);
 });
 
 registerTest('T2-F14-02', 14, 'Custom secret with exactly 32 characters accepted successfully', async () => {
@@ -1162,26 +1152,22 @@ registerTest('T2-F14-02', 14, 'Custom secret with exactly 32 characters accepted
   assert.strictEqual(res.secret, secret32);
 });
 
-registerTest('T2-F14-03', 14, 'Secret with leading/trailing whitespace trimmed before length validation', async () => {
+registerTest('T2-F14-03', 14, 'Optional secret with leading/trailing whitespace is trimmed before storing', async () => {
   const mockStore = createInMemoryWorkerStore();
   const registry = new WorkerRegistry({
     store: mockStore,
     encryptionKey: crypto.randomBytes(32),
     logger: silentLogger
   });
-  const paddedShort = '  ' + 'a'.repeat(30) + '  ';
-  await assert.rejects(
-    async () => {
-      await registry.add({
-        workerId: 'bot-pad-short',
-        secret: paddedShort
-      });
-    },
-    /Worker secret must be at least 32 characters/i
-  );
+  const padded = '  optional-secret-val  ';
+  const res = await registry.add({
+    workerId: 'bot-pad-short',
+    secret: padded
+  });
+  assert.strictEqual(res.secret, 'optional-secret-val');
 });
 
-registerTest('T2-F14-04', 14, 'registry.setSecret rejects secrets < 32 characters', async () => {
+registerTest('T2-F14-04', 14, 'registry.setSecret accepts empty secret and preserves ID-only auth', async () => {
   const mockStore = createInMemoryWorkerStore();
   const registry = new WorkerRegistry({
     store: mockStore,
@@ -1189,15 +1175,11 @@ registerTest('T2-F14-04', 14, 'registry.setSecret rejects secrets < 32 character
     logger: silentLogger
   });
   await registry.add({ workerId: 'bot-set-sec', secret: 'a'.repeat(32) });
-  await assert.rejects(
-    async () => {
-      await registry.setSecret('bot-set-sec', 'too_short_secret');
-    },
-    /Worker secret must be at least 32 characters/i
-  );
+  assert.strictEqual(await registry.setSecret('bot-set-sec', ''), '');
+  assert.strictEqual(await registry.authenticate('bot-set-sec', ''), true);
 });
 
-registerTest('T2-F14-05', 14, 'Auto-generated secret when none provided is >= 32 characters', async () => {
+registerTest('T2-F14-05', 14, 'Default registration when no secret provided stores empty secret_ciphertext', async () => {
   const mockStore = createInMemoryWorkerStore();
   const registry = new WorkerRegistry({
     store: mockStore,
@@ -1205,8 +1187,8 @@ registerTest('T2-F14-05', 14, 'Auto-generated secret when none provided is >= 32
     logger: silentLogger
   });
   const res = await registry.add({ workerId: 'bot-auto-sec' });
-  assert.ok(typeof res.secret === 'string');
-  assert.ok(res.secret.length >= 32);
+  assert.strictEqual(res.secret, '');
+  assert.strictEqual(await registry.authenticate('bot-auto-sec', ''), true);
 });
 
 // ===========================================================================
@@ -1539,13 +1521,16 @@ registerTest('T2-F18-05', 18, 'Unauthorized bootstrap request with invalid secre
   });
   const srv = await startServer(app);
   try {
-    const res = await fetch(`${srv.url}/api/v1/workers/bot-boot-auth/bootstrap`, {
-      headers: { 'x-worker-secret': 'wrong_secret_value_32_characters' }
-    });
-    assert.strictEqual(res.status, 401);
-    const body = await res.json();
+    const resUnreg = await fetch(`${srv.url}/api/v1/workers/unregistered-bot-xyz/bootstrap`);
+    assert.strictEqual(resUnreg.status, 401);
+    const body = await resUnreg.json();
     assert.strictEqual(body.ok, false);
     assert.strictEqual(body.error, 'unauthorized');
+
+    const resIdOnly = await fetch(`${srv.url}/api/v1/workers/bot-boot-auth/bootstrap`, {
+      headers: { 'x-manager-bot-id': 'bot-boot-auth' }
+    });
+    assert.strictEqual(resIdOnly.status, 200);
   } finally {
     await srv.close();
   }

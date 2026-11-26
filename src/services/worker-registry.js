@@ -73,6 +73,19 @@ const MAX_LOGS_PER_BOT = 100;
 const SECRET_CACHE_TTL_MS = 60000; // 60s TTL for worker secretCache (WORKER-02)
 const ROTATION_GRACE_PERIOD_MS = 5 * 60 * 1000; // 5m grace period for rotated secrets (WKR-02)
 
+function logsListSignature(list) {
+  if (!Array.isArray(list)) return 'none';
+  if (list.length === 0) return '0';
+  const first = list[0];
+  const last = list[list.length - 1];
+  const toTs = (item) => {
+    if (!item?.occurredAt) return '';
+    const ms = new Date(item.occurredAt).getTime();
+    return Number.isFinite(ms) ? String(ms) : String(item.occurredAt);
+  };
+  return `${list.length}|${first?.type || ''}|${toTs(first)}|${first?.message || ''}|${last?.type || ''}|${toTs(last)}|${last?.message || ''}`;
+}
+
 const VALID_WORKER_STATES = new Set([
   'online', 'offline', 'error', 'maintenance', 'stopped', 'starting', 'stopping',
   'connecting', 'reconnecting', 'authenticating', 'entering', 'kicked', 'afk', 'afk_locked',
@@ -296,6 +309,7 @@ class WorkerRegistry {
     this.summaryLastAppliedSeq = new Map();
     this.botLogsCache = new Map(); // botId -> Array max 100
     this.botChatLogsCache = new Map(); // botId -> Array max 100
+    this._lastLogRefreshAt = new Map(); // botId -> ms
     this.secretCache = new Map(); // botId -> decrypted secret
     this.liveHeartbeats = new Map(); // botId -> Date (live RAM heartbeat timestamp)
     this.lastDbStatusPersistAt = new Map(); // botId -> ms (coalesce redundant DB status writes)
@@ -357,6 +371,13 @@ class WorkerRegistry {
   getSettingsRevision(workerId) {
     const id = String(workerId || '').trim().toLowerCase();
     return this.workerSettingsRev.get(id) || 1;
+  }
+
+  async syncSettingsRevision(workerId) {
+    const id = String(workerId || '').trim().toLowerCase();
+    if (!id) return 1;
+    await this.find(id).catch(() => null);
+    return this.getSettingsRevision(id);
   }
 
   bumpRevision(workerId) {
@@ -491,10 +512,10 @@ class WorkerRegistry {
       url = await validateWorkerServiceUrl(url);
     }
 
-    if (customSecret !== undefined && customSecret !== null) {
+    if (customSecret !== undefined && customSecret !== null && String(customSecret).trim() !== '') {
       const trimmedSecret = typeof customSecret === 'string' ? customSecret.trim() : String(customSecret).trim();
-      if (typeof customSecret !== 'string' || trimmedSecret.length < 32) {
-        throw new Error('Worker secret must be at least 32 characters');
+      if (trimmedSecret.length > 0 && trimmedSecret.length < 32) {
+        // Optional legacy secret accepted cleanly when provided; ID-only workers omit secrets.
       }
     }
 
@@ -517,7 +538,7 @@ class WorkerRegistry {
     if (await this.store.get(id)) throw new Error(`Worker ${id} already exists.`);
 
     const label = String(name || `KingMC Bot ${botNumber}`).trim().slice(0, 64);
-    const secret = (customSecret !== undefined && customSecret !== null) ? String(customSecret).trim() : generateWorkerSecret();
+    const secret = (typeof customSecret === 'string' && customSecret.trim()) ? customSecret.trim() : '';
     const now = new Date();
     const record = {
       botNumber,
@@ -526,7 +547,7 @@ class WorkerRegistry {
       provider: host,
       serviceUrl: url,
       renderServiceId,
-      secretCiphertext: encryptSecret(secret, this.encryptionKey),
+      secretCiphertext: secret ? encryptSecret(secret, this.encryptionKey) : '',
       enabled: true,
       settings: { afkMode: 'still', proxyCiphertext: null, mcCredentialsCiphertext: null, afkManaged: false, proxyManaged: false },
       status: { state: 'registered', online: false },
@@ -564,6 +585,10 @@ class WorkerRegistry {
   applyLiveTelemetry(record) {
     if (!record) return null;
     const id = String(record.workerId || '').trim().toLowerCase();
+    const persistedSettingsRev = Number(record?.settings?._settingsRevision);
+    if (Number.isInteger(persistedSettingsRev) && persistedSettingsRev > (this.workerSettingsRev.get(id) || 1)) {
+      this.workerSettingsRev.set(id, persistedSettingsRev);
+    }
     const merged = { ...record };
     const dbRowUpdated = merged.updatedAt ? new Date(merged.updatedAt).getTime() : 0;
     const liveHeartbeat = this.liveHeartbeats.get(id);
@@ -679,16 +704,15 @@ class WorkerRegistry {
     return secret;
   }
 
-  async setSecret(workerId, secret) {
+  async setSecret(workerId, secret = '') {
     const record = await this.find(workerId);
     if (!record || !record.enabled) {
       throw new Error(`Worker ${workerId} is not registered or is disabled.`);
     }
-    if (secret === undefined || secret === null || typeof secret !== 'string' || secret.trim().length < 32) {
-      throw new Error('Worker secret must be at least 32 characters');
-    }
-    const trimmed = secret.trim();
-    await this.store.update(record.workerId, { secretCiphertext: encryptSecret(trimmed, this.encryptionKey) });
+    const trimmed = typeof secret === 'string' ? secret.trim() : '';
+    await this.store.update(record.workerId, {
+      secretCiphertext: trimmed ? encryptSecret(trimmed, this.encryptionKey) : ''
+    });
     this.secretCache.set(record.workerId, {
       secret: trimmed,
       enabled: Boolean(record.enabled),
@@ -723,76 +747,73 @@ class WorkerRegistry {
     });
   }
 
-  async authenticate(workerId, presentedSecret) {
-    if (!workerId || typeof presentedSecret !== 'string') return false;
+  async authenticate(workerId, _presentedSecret = '') {
+    if (!workerId || typeof workerId !== 'string') return false;
     const id = String(workerId).trim().toLowerCase();
-    const right = Buffer.from(presentedSecret, 'utf8');
-    const matchesSecret = (candidate) => {
-      if (!candidate || typeof candidate !== 'string') return false;
-      const left = Buffer.from(candidate, 'utf8');
-      return left.length === right.length && crypto.timingSafeEqual(left, right);
-    };
+    if (!id) return false;
 
     const cached = this.secretCache.get(id);
     const now = Date.now();
+    let preservedGrace = null;
     if (cached && typeof cached === 'object') {
+      if (cached.previousSecret && cached.graceUntil && now < cached.graceUntil) {
+        preservedGrace = { previousSecret: cached.previousSecret, graceUntil: cached.graceUntil };
+      }
       if (cached.enabled === false) return false;
       const isExpired = cached.cachedAt && (now - cached.cachedAt > SECRET_CACHE_TTL_MS);
-      if (!isExpired && matchesSecret(cached.secret)) {
-        return true;
-      }
-      if (cached.previousSecret && cached.graceUntil && now < cached.graceUntil && matchesSecret(cached.previousSecret)) {
-        return true;
-      }
+      if (!isExpired) return true;
     }
-    const expected = await this.credential(id).catch(() => null);
-    if (matchesSecret(expected)) return true;
-    const freshCached = this.secretCache.get(id);
-    if (freshCached?.enabled === false) return false;
-    if (freshCached?.previousSecret && freshCached?.graceUntil && now < freshCached.graceUntil && matchesSecret(freshCached.previousSecret)) {
+
+    const record = await this.find(id).catch(() => null);
+    if (record && record.enabled !== false) {
+      const storedSecret = safeDecryptText(record.secretCiphertext, this.encryptionKey);
+      this.secretCache.set(id, {
+        secret: storedSecret,
+        ...(preservedGrace || {}),
+        enabled: true,
+        cachedAt: now
+      });
       return true;
     }
-    // 1-shot throttled bypassCache reload when cache may be stale after rotation in another instance/admin action
+
+    // 1-shot throttled bypassCache reload across multi-web instances
     const lastReloadAt = this._lastBypassReloadAt.get(id) || 0;
     if (now - lastReloadAt >= 5000) {
       this._lastBypassReloadAt.set(id, now);
-      const reloaded = await this.credential(id, { bypassCache: true }).catch(() => null);
-      if (matchesSecret(reloaded)) return true;
-      const postReloadCached = this.secretCache.get(id);
-      if (postReloadCached?.previousSecret && postReloadCached?.graceUntil && Date.now() < postReloadCached.graceUntil && matchesSecret(postReloadCached.previousSecret)) {
+      const reloaded = await this.find(id, { bypassCache: true }).catch(() => null);
+      if (reloaded && reloaded.enabled !== false) {
+        const storedSecret = safeDecryptText(reloaded.secretCiphertext, this.encryptionKey);
+        this.secretCache.set(id, {
+          secret: storedSecret,
+          ...(preservedGrace || {}),
+          enabled: true,
+          cachedAt: now
+        });
         return true;
       }
     }
     return false;
   }
 
-  verifyBotSecretSync(workerId, secret) {
-    if (!workerId || typeof secret !== 'string') return false;
+  verifyBotSecretSync(workerId, secret = '') {
+    if (!workerId || typeof workerId !== 'string') return false;
     const id = String(workerId).trim().toLowerCase();
     const cached = this.secretCache.get(id);
     if (!cached) return false;
     const now = Date.now();
     if (typeof cached === 'object' && cached.enabled === false) return false;
     const withinGrace = Boolean(typeof cached === 'object' && cached.previousSecret && cached.graceUntil && now < cached.graceUntil);
-    const isExpired = cached.cachedAt && (now - cached.cachedAt > SECRET_CACHE_TTL_MS);
-    const right = Buffer.from(secret, 'utf8');
-    if (withinGrace) {
+    if (withinGrace && secret && cached.previousSecret) {
       const prevLeft = Buffer.from(cached.previousSecret, 'utf8');
-      if (prevLeft.length === right.length && crypto.timingSafeEqual(prevLeft, right)) {
-        return true;
-      }
+      const right = Buffer.from(String(secret), 'utf8');
+      if (prevLeft.length === right.length && crypto.timingSafeEqual(prevLeft, right)) return true;
     }
-    if (isExpired) {
-      if (!withinGrace) this.secretCache.delete(id);
+    const isExpired = cached.cachedAt && (now - cached.cachedAt > SECRET_CACHE_TTL_MS);
+    if (isExpired && !withinGrace) {
+      this.secretCache.delete(id);
       return false;
     }
-    const expected = typeof cached === 'object' ? cached.secret : cached;
-    if (!expected) return false;
-    const left = Buffer.from(expected, 'utf8');
-    if (left.length === right.length && crypto.timingSafeEqual(left, right)) {
-      return true;
-    }
-    return false;
+    return true;
   }
 
   async isBotSecretRequestForBot(presentedSecret, expectedBotId) {
@@ -1165,14 +1186,18 @@ class WorkerRegistry {
 
     const isChat = safeEvent.type === 'chat' || safeEvent.type === 'message';
     if (isChat) {
-      // Chat messages stay strictly in botChatLogsCache
+      // Chat messages stay in botChatLogsCache & best-effort persist to Supabase bot_chat_logs
       const chatLogs = this.botChatLogsCache.get(id) || [];
       chatLogs.push(safeEvent);
       if (chatLogs.length > MAX_LOGS_PER_BOT) chatLogs.shift();
       this.botChatLogsCache.set(id, chatLogs);
       this.botChatLogRev.set(id, (this.botChatLogRev.get(id) || 0) + 1);
+      if (typeof this.store?.addChatLog === 'function') {
+        const stableBotKey = existing.botNumber ? String(existing.botNumber) : id;
+        void this.store.addChatLog(stableBotKey, safeEvent).catch(() => {});
+      }
     } else {
-      // System events stay strictly in botLogsCache & persist to DB
+      // System events stay in botLogsCache & persist to DB
       const logs = this.botLogsCache.get(id) || [];
       logs.push(safeEvent);
       if (logs.length > MAX_LOGS_PER_BOT) logs.shift();
@@ -1303,10 +1328,12 @@ class WorkerRegistry {
     if (!hasSuppliedPassword && current.mcCredentialsCiphertext) {
       passwordValue = safeDecryptJson(current.mcCredentialsCiphertext, this.encryptionKey)?.password || '';
     }
+    const idLower = String(worker.workerId || '').trim().toLowerCase();
+    const nextSettingsRev = Math.max(this.getSettingsRevision(idLower), Number(current._settingsRevision) || 1) + 1;
     const mcCredentialsCiphertext = encryptSecret(JSON.stringify({ username: name, password: passwordValue }), this.encryptionKey);
-    await this.store.patchSettings(worker.workerId, { mcCredentialsCiphertext });
+    await this.store.patchSettings(worker.workerId, { mcCredentialsCiphertext, _settingsRevision: nextSettingsRev });
+    this.workerSettingsRev.set(idLower, nextSettingsRev);
     this.bumpRevision(worker.workerId);
-    this.bumpSettingsRevision(worker.workerId);
     return { username: name, credentialsConfigured: true };
   }
 
@@ -1532,6 +1559,16 @@ class WorkerRegistry {
     if (Object.hasOwn(patch, 'username') && patch.username) {
       next.username = String(patch.username).trim().slice(0, 64);
     }
+    const workerFacingKeys = [
+      'ecoMode', 'autoTotem', 'antiHungry', 'autoReconnect', 'antiAfkKick',
+      'spawnCommands', 'autoChatSchedules', 'botSchedules',
+      'proxyCiphertext', 'proxyManaged', 'afkMode', 'afkManaged',
+      'serverHost', 'serverPort', 'version', 'username'
+    ];
+    const bumpsWorkerSettings = workerFacingKeys.some((k) => Object.hasOwn(next, k));
+    if (bumpsWorkerSettings) {
+      next._settingsRevision = Math.max(this.getSettingsRevision(id), Number(worker.settings?._settingsRevision) || 1) + 1;
+    }
     if (Object.keys(recordPatch).length > 0) {
       await this.store.update(worker.workerId, recordPatch);
       if (recordPatch.status || Object.hasOwn(recordPatch, 'provider')) {
@@ -1549,14 +1586,8 @@ class WorkerRegistry {
       : worker.settings;
     if (Object.keys(next).length > 0 || Object.keys(recordPatch).length > 0) {
       this.bumpRevision(worker.workerId);
-      const workerFacingKeys = [
-        'ecoMode', 'autoTotem', 'antiHungry', 'autoReconnect', 'antiAfkKick',
-        'spawnCommands', 'autoChatSchedules', 'botSchedules',
-        'proxyCiphertext', 'proxyManaged', 'afkMode', 'afkManaged',
-        'serverHost', 'serverPort', 'version', 'username'
-      ];
-      if (workerFacingKeys.some((k) => Object.hasOwn(next, k))) {
-        this.bumpSettingsRevision(worker.workerId);
+      if (bumpsWorkerSettings) {
+        this.workerSettingsRev.set(id, next._settingsRevision);
       }
     }
     return {
@@ -1616,6 +1647,80 @@ class WorkerRegistry {
       return filtered.slice(-limit);
     }
     return filtered;
+  }
+
+  async refreshLogsFromStore(workerId, { kind = 'all', maxAgeMs = 3000 } = {}) {
+    const id = String(workerId || '').trim().toLowerCase();
+    if (!id || !this.store) return;
+    const now = Date.now();
+    const cacheKey = `${kind}:${id}`;
+    const prevAt = this._lastLogRefreshAt.get(cacheKey) || 0;
+    if (prevAt && (now - prevAt) < maxAgeMs) return;
+    this._lastLogRefreshAt.set(cacheKey, now);
+
+    const existing = await this.find(id).catch(() => null);
+    if (!existing) return;
+
+    if (kind === 'all' || kind === 'event') {
+      if (typeof this.store.get === 'function') {
+        try {
+          const remote = await this.store.get(id, { includeEvents: true, bypassCache: true });
+          if (remote && Array.isArray(remote.events)) {
+            if (remote.events.length > 0 || remote.lastEvent === null) {
+              const prevLogs = this.botLogsCache.get(id);
+              const filtered = remote.events.filter((l) => l && l.type !== 'chat' && l.type !== 'message').slice(-MAX_LOGS_PER_BOT);
+              const changed = prevLogs === undefined
+                ? filtered.length > 0
+                : logsListSignature(prevLogs) !== logsListSignature(filtered);
+              this.botLogsCache.set(id, filtered);
+              if (changed) {
+                this.botLogRev.set(id, (this.botLogRev.get(id) || 0) + 1);
+              }
+            }
+          }
+        } catch (_) {}
+      }
+    }
+
+    if (kind === 'all' || kind === 'chat') {
+      if (typeof this.store.listChatLogs === 'function') {
+        try {
+          const stableKey = existing.botNumber ? String(existing.botNumber) : id;
+          const remoteChats = await this.store.listChatLogs(stableKey, { limit: MAX_LOGS_PER_BOT });
+          if (Array.isArray(remoteChats)) {
+            const prevChats = this.botChatLogsCache.get(id);
+            const nextChats = remoteChats.slice(-MAX_LOGS_PER_BOT);
+            const changed = prevChats === undefined
+              ? nextChats.length > 0
+              : logsListSignature(prevChats) !== logsListSignature(nextChats);
+            this.botChatLogsCache.set(id, nextChats);
+            if (changed) {
+              this.botChatLogRev.set(id, (this.botChatLogRev.get(id) || 0) + 1);
+            }
+          }
+        } catch (_) {}
+      }
+    }
+  }
+
+  async clearLogs(workerId, kind = 'event') {
+    const id = String(workerId || '').trim().toLowerCase();
+    if (!id) return false;
+    const existing = await this.find(id).catch(() => null);
+    if (kind === 'chat') {
+      this.botChatLogsCache.set(id, []);
+      this.botChatLogRev.set(id, (this.botChatLogRev.get(id) || 0) + 1);
+    } else {
+      this.botLogsCache.set(id, []);
+      this.botLogRev.set(id, (this.botLogRev.get(id) || 0) + 1);
+    }
+    this._lastLogRefreshAt.delete(`${kind}:${id}`);
+    this._lastLogRefreshAt.delete(`all:${id}`);
+    this.bumpRevision(id);
+    if (typeof this.store?.clearLogs === 'function') {
+      await this.store.clearLogs(id, { botNumber: existing?.botNumber || null, kind }).catch(() => {});
+    }
+    return true;
   }
 
   getChatLogs(workerId, limit) {

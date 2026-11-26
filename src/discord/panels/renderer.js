@@ -1,7 +1,14 @@
 'use strict';
 
 const {
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, TextInputStyle, ModalBuilder, TextInputBuilder
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  EmbedBuilder,
+  TextInputStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  StringSelectMenuBuilder
 } = require('discord.js');
 const { escapeMarkdown } = require('discord.js');
 const { redactStringSecrets } = require('../../utils/logger');
@@ -81,6 +88,25 @@ function getWorkerState(worker) {
   return { rawState, isOnline, isBusy, label, emoji, color };
 }
 
+function formatAccountPlanBadge(user) {
+  if (!user) return '';
+  if (String(user.role || '').toLowerCase() === 'admin') {
+    return '🛡️ `Admin`';
+  }
+  const status = String(user.status || 'active').toLowerCase();
+  if (status === 'disabled') return '⛔ `Đã khóa`';
+  if (user.isPermanent) return '♾️ `Vĩnh viễn`';
+  const rawExp = user.expiresAt || user.expiresAtRental;
+  if (!rawExp) return '';
+  const expMs = Date.parse(rawExp);
+  if (!Number.isFinite(expMs)) return '';
+  const diffMs = expMs - Date.now();
+  if (diffMs <= 0) return '⚠️ `Hết hạn`';
+  const days = Math.floor(diffMs / 86400000);
+  const hours = Math.max(1, Math.floor((diffMs % 86400000) / 3600000));
+  return days > 0 ? `⏳ \`Còn ${days}d ${hours}h\`` : `⏳ \`Còn ${hours}h\``;
+}
+
 // ----------------------------------------------------------------------------
 // 1. MAIN BOTS LIST PANEL (/bots)
 // ----------------------------------------------------------------------------
@@ -93,14 +119,16 @@ function renderBotsList({ user, workers = [], page = 0, pageSize = 5, notice = '
   const startIndex = currentPage * pageSize;
   const currentWorkers = workers.slice(startIndex, startIndex + pageSize);
 
-  let desc = `👤 **Tài khoản:** \`${plainCode(user?.username || 'Khách')}\`  ·  🤖 **Bot:** **${totalBots}** (🟢 **${onlineCount}** / 🔴 **${offlineCount}**)`;
+  const planBadge = formatAccountPlanBadge(user);
+  const badgeSegment = planBadge ? `  ·  ${planBadge}` : '';
+  let desc = `👤 **Tài khoản:** \`${plainCode(user?.username || 'Khách')}\`${badgeSegment}  ·  🤖 **Bot:** **${totalBots}** (🟢 **${onlineCount}** / 🔴 **${offlineCount}**)`;
   if (notice) {
     desc += `\n\n${notice}`;
   }
   desc += '\n\n';
 
   if (totalBots === 0) {
-    desc += 'ℹ️ *Bạn chưa sở hữu bot nào. Vui lòng liên hệ Admin hoặc truy cập Web Manager để đăng ký bot.*';
+    desc += 'ℹ️ *Tài khoản của bạn hiện chưa được cấp bot nào. Hãy nạp mã kích hoạt trên Web Manager hoặc liên hệ Admin để nhận bot.*';
   } else {
     for (const worker of currentWorkers) {
       const state = getWorkerState(worker);
@@ -109,14 +137,23 @@ function renderBotsList({ user, workers = [], page = 0, pageSize = 5, notice = '
       const fullBotId = plainCode(worker.workerId);
       const rawMcUsername = worker.status?.username || worker.settings?.account?.username || '';
       const mcUsername = rawMcUsername ? plainCode(rawMcUsername) : 'Chưa đặt';
-      desc += `${state.emoji} **${botLabel}** — \`${state.label}\`\n` +
+      const pingVal = Number(worker.status?.pingMs);
+      const liveExtras = [];
+      if (state.isOnline && Number.isFinite(pingVal) && pingVal >= 0) {
+        liveExtras.push(`⚡ \`${Math.round(pingVal)}ms\``);
+      }
+      if (state.isOnline && Number.isFinite(Number(worker.status?.health))) {
+        liveExtras.push(`❤️ \`${Math.round(Number(worker.status.health))}/20\``);
+      }
+      const extraSuffix = liveExtras.length > 0 ? ` · ${liveExtras.join(' · ')}` : '';
+      desc += `${state.emoji} **${botLabel}** — \`${state.label}\`${extraSuffix}\n` +
               `> • Bot ID: \`${fullBotId}\` · Nhân vật: \`${mcUsername}\`\n\n`;
     }
   }
 
   const hasOnline = onlineCount > 0;
   const mainEmbed = embed('🎮 KINGMC CLOUD 24/7 — DANH SÁCH BOT', desc.trimEnd(), hasOnline ? COLOR_ONLINE : COLOR_BRAND)
-    .setFooter({ text: `Trang ${currentPage + 1}/${totalPages} • Chọn nút bên dưới để điều khiển bot` });
+    .setFooter({ text: `Trang ${currentPage + 1}/${totalPages} • Bấm vào tên bot bên dưới để Bật / Tắt / Xem chi tiết` });
 
   // Components
   const components = [];
@@ -226,12 +263,26 @@ function renderBotDetail({ user, worker, notice = '', isExecuting = false }) {
   }
   const location = [coordinates, placeName].filter(Boolean).join(' · ') || 'Chưa có dữ liệu vị trí';
 
+  const healthVal = Number(worker.status?.health);
+  const foodVal = Number(worker.status?.food);
+  const totemVal = Number(worker.status?.totemCount ?? worker.status?.inventory?.totemCount);
+  const vitalsParts = [];
+  if (state.isOnline && Number.isFinite(healthVal)) vitalsParts.push(`❤️ \`${Math.round(healthVal)}/20\``);
+  if (state.isOnline && Number.isFinite(foodVal)) vitalsParts.push(`🍖 \`${Math.round(foodVal)}/20\``);
+  if (state.isOnline && Number.isFinite(totemVal)) vitalsParts.push(`🛡️ Totem: \`${Math.max(0, Math.floor(totemVal))}\``);
+  const vitalsLine = vitalsParts.length > 0 ? `\n• **Sinh tồn:** ${vitalsParts.join(' · ')}` : '';
+
+  const rawReason = String(worker.status?.lastKickReason || worker.status?.lastError || '').trim();
+  const reasonLine = (!state.isOnline && rawReason)
+    ? `\n• **Ghi chú dừng:** *${safe(redactStringSecrets(rawReason), 140)}*`
+    : '';
+
   let descText = notice ? `${notice}\n\n` : '';
   descText +=
     `━━ **THÔNG TIN BOT** ━━\n` +
     `• **Bot ID:** \`${fullBotId}\`\n` +
     `• **Nhân vật:** \`${mcUsername}\` · **Server:** \`${server}\`\n` +
-    `• **Trạng thái:** ${state.emoji} **${state.label}**\n\n` +
+    `• **Trạng thái:** ${state.emoji} **${state.label}**${vitalsLine}${reasonLine}\n\n` +
     `━━ **HIỆU NĂNG & VỊ TRÍ** ━━\n` +
     `• **Ping:** \`${ping}\` · **TPS:** \`${tps}\`\n` +
     `• **Uptime:** \`${uptime}\` · **Reconnects:** \`${reconnects}\`\n` +
@@ -241,7 +292,7 @@ function renderBotDetail({ user, worker, notice = '', isExecuting = false }) {
     `${state.emoji} ${botName.toUpperCase()} — CHI TIẾT BOT`,
     descText,
     state.color
-  ).setFooter({ text: 'KBOT Cloud 24/7 • Sử dụng các nút bên dưới để điều khiển' });
+  ).setFooter({ text: 'KBOT Cloud 24/7 • Đổi nick Minecraft / Proxy / Lịch treo trên Web Manager' });
 
   if (user?.role === 'admin') {
     detailEmbed.addFields({ name: '🖥️ Nền tảng lưu trữ', value: '`' + provider + '`', inline: true });
@@ -267,6 +318,7 @@ function renderBotDetail({ user, worker, notice = '', isExecuting = false }) {
 
   const navRow = new ActionRowBuilder().addComponents(
     button('Làm mới', `bot:refresh:${rawWorkerId}`, ButtonStyle.Secondary, isExecuting, '🔄'),
+    button('Nhật ký', `logs:view:${rawWorkerId}`, ButtonStyle.Secondary, isExecuting, '📜'),
     button('Quay lại danh sách', 'bots:list', ButtonStyle.Secondary, false, '◀')
   );
 
@@ -390,22 +442,22 @@ function renderAdminBots({ workers = [], page = 0, pageSize = 5, notice = '' }) 
 function buildLoginModal() {
   const modal = new ModalBuilder()
     .setCustomId('login_modal')
-    .setTitle('Đăng nhập tài khoản Web Manager');
+    .setTitle('Đăng nhập KBot Web Manager');
 
   const usernameInput = new TextInputBuilder()
     .setCustomId('login_username')
-    .setLabel('Tên đăng nhập (Username)')
+    .setLabel('Tên đăng nhập (Username trên Web)')
     .setStyle(TextInputStyle.Short)
-    .setPlaceholder('Nhập username tài khoản Web của bạn')
+    .setPlaceholder('Ví dụ: kietmc123')
     .setRequired(true)
     .setMinLength(3)
     .setMaxLength(32);
 
   const passwordInput = new TextInputBuilder()
     .setCustomId('login_password')
-    .setLabel('Mật khẩu (Password)')
+    .setLabel('Mật khẩu (Password trên Web)')
     .setStyle(TextInputStyle.Short)
-    .setPlaceholder('Mật khẩu tài khoản Web')
+    .setPlaceholder('Nhập mật khẩu tài khoản Web của bạn')
     .setRequired(true)
     .setMinLength(6)
     .setMaxLength(256);
@@ -416,6 +468,161 @@ function buildLoginModal() {
   );
 
   return modal;
+}
+
+function renderUnauthenticatedPanel({ discordUserId = '', title = '⚠️ BẠN CHƯA ĐĂNG NHẬP', reason = '', publicBaseUrl = '' } = {}) {
+  const uid = String(discordUserId || '').trim();
+  const body = reason || (
+    'Tài khoản Discord của bạn hiện **chưa liên kết** với tài khoản Web Manager.\n\n' +
+    '👉 Bấm nút **Đăng nhập ngay** bên dưới (hoặc gõ `/login`) để nhập Username & Mật khẩu tài khoản Web và nhận Role tự động.'
+  );
+  const warnEmbed = embed(title, body, COLOR_WARN);
+  const components = [];
+  if (uid) {
+    const row = new ActionRowBuilder().addComponents(
+      button('Đăng nhập ngay', `login:prompt:${uid}`, ButtonStyle.Primary, false, '🔐')
+    );
+    if (publicBaseUrl && typeof publicBaseUrl === 'string' && publicBaseUrl.startsWith('http')) {
+      row.addComponents(
+        new ButtonBuilder()
+          .setLabel('Mở trang Web')
+          .setStyle(ButtonStyle.Link)
+          .setURL(publicBaseUrl)
+          .setEmoji('🌐')
+      );
+    }
+    components.push(row);
+  }
+  return { embeds: [warnEmbed], components };
+}
+
+function renderEntitlementBlockedPanel({ user, discordUserId = '', publicBaseUrl = '' } = {}) {
+  const uid = String(discordUserId || '').trim();
+  const uname = plainCode(user?.username || 'unknown', 64);
+  const isLocked = String(user?.status || 'active').toLowerCase() === 'disabled';
+  const title = isLocked ? '⛔ TÀI KHOẢN BỊ KHÓA' : '⛔ TÀI KHOẢN HẾT HẠN HOẶC BỊ KHÓA';
+  const rawExp = user?.expiresAt || user?.expiresAtRental;
+  const expText = rawExp && Number.isFinite(Date.parse(rawExp))
+    ? ` (hết hạn ngày **${new Date(rawExp).toLocaleDateString('vi-VN')}**)`
+    : '';
+  const desc = isLocked
+    ? `Tài khoản Web **\`${uname}\`** của bạn đã bị vô hiệu hóa bởi Quản trị viên.${user?.lockReason ? `\n• **Lý do:** *${safe(user.lockReason, 160)}*` : ''}\n\nNếu muốn chuyển sang tài khoản Web khác, bấm nút **Đăng xuất** bên dưới.`
+    : `Tài khoản Web **\`${uname}\`** của bạn hiện đã hết hạn thuê bot${expText}.\n\n👉 Vui lòng gia hạn trên **Web Manager** để tiếp tục điều khiển bot, hoặc bấm **Đăng xuất** nếu bạn muốn đổi sang tài khoản khác.`;
+
+  const row = new ActionRowBuilder();
+  if (publicBaseUrl && typeof publicBaseUrl === 'string' && publicBaseUrl.startsWith('http')) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setLabel('Gia hạn trên Web')
+        .setStyle(ButtonStyle.Link)
+        .setURL(publicBaseUrl)
+        .setEmoji('🌐')
+    );
+  }
+  if (uid) {
+    row.addComponents(
+      button('Đổi tài khoản (Đăng xuất)', `login:logout:${uid}`, ButtonStyle.Danger, false, '🚪')
+    );
+  }
+
+  return {
+    embeds: [embed(title, desc, COLOR_OFFLINE)],
+    components: row.components.length > 0 ? [row] : []
+  };
+}
+
+function renderAlreadyLoggedInPanel({ user, discordUserId, roleSyncNote = '', publicBaseUrl = '' }) {
+  const uid = String(discordUserId || '').trim();
+  const uname = plainCode(user?.username || 'unknown', 64);
+  const isAdmin = String(user?.role || '').toLowerCase() === 'admin';
+  const rawStatus = String(user?.status || 'active').toLowerCase();
+  const rawExp = user?.expiresAt || user?.expiresAtRental;
+  const expiryMs = rawExp ? Date.parse(rawExp) : NaN;
+  const isExpired = !isAdmin && !user?.isPermanent && (rawStatus === 'expired' || (Number.isFinite(expiryMs) && expiryMs <= Date.now()) || (!rawExp && rawStatus !== 'active'));
+  const isDisabled = rawStatus === 'disabled';
+  const canOpenBots = isAdmin || (!isDisabled && (user?.isPermanent === true || (Number.isFinite(expiryMs) && expiryMs > Date.now())));
+
+  let statusLine = '';
+  if (isAdmin) {
+    statusLine = `• **Phân quyền:** \`Enterprise Administrator\``;
+  } else {
+    const planText = safe(user?.planName || 'Gói tiêu chuẩn', 64);
+    let expiryText = '—';
+    if (isDisabled) {
+      expiryText = '⛔ Đã bị khóa';
+    } else if (user?.isPermanent) {
+      expiryText = '♾️ Vĩnh viễn';
+    } else if (Number.isFinite(expiryMs)) {
+      const dateStr = new Date(expiryMs).toLocaleDateString('vi-VN');
+      const remDays = Math.floor((expiryMs - Date.now()) / 86400000);
+      expiryText = expiryMs <= Date.now()
+        ? `${dateStr} *(Đã hết hạn)*`
+        : (remDays > 0 ? `Còn **${remDays} ngày** *(đến ${dateStr})*` : `Đến **${dateStr}** *(dưới 24h)*`);
+    }
+    statusLine = `• **Gói dịch vụ:** ${planText}\n• **Hạn sử dụng:** ${expiryText}`;
+  }
+
+  const syncLine = roleSyncNote ? `\n${roleSyncNote}` : '';
+  const color = isDisabled ? COLOR_OFFLINE : (isExpired ? COLOR_WARN : COLOR_BRAND);
+  const infoEmbed = embed(
+    'ℹ️ BẠN ĐÃ ĐĂNG NHẬP',
+    `Tài khoản Discord <@${uid}> hiện **đã được đăng nhập** với hệ thống Web Manager.\n\n` +
+    `• **Tài khoản Web:** \`${uname}\`\n` +
+    `${statusLine}${syncLine}\n\n` +
+    `👉 Bấm **Mở danh sách Bot** để điều khiển nhanh, hoặc bấm nút **Đăng xuất** nếu bạn muốn hủy liên kết / đổi sang tài khoản khác.`,
+    color
+  );
+
+  const row = new ActionRowBuilder();
+  if (canOpenBots) {
+    row.addComponents(
+      button('Mở danh sách Bot', 'bots:list', ButtonStyle.Primary, false, '🤖')
+    );
+  }
+  if (publicBaseUrl && typeof publicBaseUrl === 'string' && publicBaseUrl.startsWith('http')) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setLabel('Web Dashboard')
+        .setStyle(ButtonStyle.Link)
+        .setURL(publicBaseUrl)
+        .setEmoji('🌐')
+    );
+  }
+  row.addComponents(
+    button('Đăng xuất', `login:logout:${uid}`, ButtonStyle.Danger, false, '🚪')
+  );
+
+  return { embeds: [infoEmbed], components: [row] };
+}
+
+function renderLoggedOutPanel({ discordUserId, unlinkedUsername = '', removedRoles = [], includeReloginButton = false }) {
+  const uid = String(discordUserId || '').trim();
+  const accountText = unlinkedUsername
+    ? ` khỏi tài khoản Web **\`${plainCode(unlinkedUsername, 64)}\`**`
+    : ' khỏi Web Manager';
+  const roleNote = Array.isArray(removedRoles) && removedRoles.length > 0
+    ? `\n\n🛡️ Đã thu hồi Role: ${removedRoles.join(', ')}`
+    : '';
+  const nextHint = includeReloginButton
+    ? 'Bạn có thể bấm nút **Đăng nhập lại** bên dưới để kết nối tài khoản khác, hoặc dùng `/login` bất kỳ lúc nào.'
+    : 'Bạn có thể sử dụng lại lệnh `/login` bất kỳ lúc nào để đăng nhập lại và nhận lại Role.';
+
+  const outEmbed = embed(
+    '🚪 ĐÃ ĐĂNG XUẤT',
+    `Tài khoản Discord của bạn đã được hủy liên kết${accountText} thành công.${roleNote}\n\n${nextHint}`,
+    COLOR_BRAND
+  );
+
+  const components = [];
+  if (includeReloginButton && uid) {
+    components.push(
+      new ActionRowBuilder().addComponents(
+        button('Đăng nhập lại', `login:prompt:${uid}`, ButtonStyle.Primary, false, '🔐')
+      )
+    );
+  }
+
+  return { embeds: [outEmbed], components };
 }
 
 function buildAdminPasswordModal() {
@@ -451,11 +658,12 @@ async function botDashboard(services, userId, role, notice = '') {
   return renderBotsList({ user, workers, notice });
 }
 
-function renderBotLogs({ user, worker, logs = [] }) {
+function renderBotLogs({ user, worker, logs = [], workers = [] }) {
   const safeLogs = Array.isArray(logs) ? logs : [];
   const rawWorkerId = String(worker?.workerId || worker?.id || '');
   const fullBotId = plainCode(rawWorkerId || 'Toàn hệ thống');
   const botName = safe(worker?.name || (worker?.botNumber ? `BOT ${padId(worker.botNumber)}` : fullBotId));
+  const state = worker ? getWorkerState(worker) : null;
 
   const sanitize = (text) => {
     if (!text || typeof text !== 'string') return '';
@@ -466,7 +674,20 @@ function renderBotLogs({ user, worker, logs = [] }) {
   const formattedLogs = safeLogs.map((l) => {
     if (!l) return '';
     if (typeof l === 'string') return sanitize(l);
-    const timeStr = l.time ? `[${String(l.time).slice(11, 19)}] ` : '';
+    const rawTime = l.time || l.occurredAt || l.timestamp || '';
+    let timeStr = '';
+    if (rawTime) {
+      const parsedMs = Date.parse(rawTime);
+      if (Number.isFinite(parsedMs)) {
+        const vn = new Date(parsedMs + 7 * 3600 * 1000);
+        const hh = padId(vn.getUTCHours());
+        const mm = padId(vn.getUTCMinutes());
+        const ss = padId(vn.getUTCSeconds());
+        timeStr = `[${hh}:${mm}:${ss}] `;
+      } else {
+        timeStr = `[${String(rawTime).slice(11, 19)}] `;
+      }
+    }
     const levelStr = (l.type || l.level) ? `[${String(l.type || l.level).toUpperCase()}] ` : '';
     const msg = l.message || l.text || JSON.stringify(l);
     return sanitize(`${timeStr}${levelStr}${msg}`);
@@ -474,15 +695,42 @@ function renderBotLogs({ user, worker, logs = [] }) {
 
   const logContent = formattedLogs.length > 0
     ? formattedLogs.join('\n')
-    : 'Không có nhật ký nào được ghi nhận.';
+    : 'Chưa có nhật ký hoạt động nào gần đây.';
 
+  const stateHint = state ? `  ·  Trạng thái: ${state.emoji} \`${state.label}\`` : '';
   const logEmbed = embed(
     `📜 NHẬT KÝ HOẠT ĐỘNG: ${String(botName).toUpperCase()}`,
-    `Bot ID: \`${fullBotId}\`\n\`\`\`text\n${logContent.slice(-3500)}\n\`\`\``,
-    COLOR_BRAND
-  );
+    `• **Bot ID:** \`${fullBotId}\`${stateHint}\n\`\`\`text\n${logContent.slice(-3500)}\n\`\`\``,
+    state ? state.color : COLOR_BRAND
+  ).setFooter({ text: `Hiển thị ${formattedLogs.length} dòng gần nhất (giờ VN)` });
 
   const components = [];
+  if (Array.isArray(workers) && workers.length > 1) {
+    const options = workers.slice(0, 25).map((w) => {
+      const wid = String(w.workerId || w.id || '');
+      const st = getWorkerState(w);
+      const label = (w.name || `BOT ${padId(w.botNumber || 1)}`).slice(0, 80);
+      const mcName = w.status?.username || w.settings?.account?.username || 'Chưa đặt';
+      return {
+        label: `${label} (${wid})`.slice(0, 100),
+        value: wid.slice(0, 100),
+        description: `${st.label} • Nhân vật: ${String(mcName).slice(0, 50)}`.slice(0, 100),
+        emoji: st.emoji,
+        default: wid === rawWorkerId
+      };
+    });
+    if (options.length > 1) {
+      components.push(
+        new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId('logs:select')
+            .setPlaceholder('📋 Chuyển nhanh sang xem nhật ký bot khác...')
+            .addOptions(options)
+        )
+      );
+    }
+  }
+
   if (rawWorkerId) {
     components.push(
       new ActionRowBuilder().addComponents(
@@ -762,6 +1010,10 @@ module.exports = {
   renderStatusMonitorPanel,
   renderProgressBar,
   buildLoginModal,
+  renderUnauthenticatedPanel,
+  renderEntitlementBlockedPanel,
+  renderAlreadyLoggedInPanel,
+  renderLoggedOutPanel,
   buildAdminPasswordModal,
   getWorkerState,
   uptimeText,

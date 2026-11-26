@@ -1,15 +1,27 @@
 ﻿'use strict';
 
-const { SlashCommandBuilder } = require('discord.js');
-const { renderBotLogs, embed } = require('../panels/renderer');
-const { resolveLinkedUser, getUserBots } = require('../handlers/panel-handler');
+const { SlashCommandBuilder, ActionRowBuilder, ButtonStyle } = require('discord.js');
+const {
+  renderBotLogs,
+  renderUnauthenticatedPanel,
+  renderEntitlementBlockedPanel,
+  embed,
+  button,
+  plainCode
+} = require('../panels/renderer');
+const {
+  resolveLinkedUser,
+  getUserBots,
+  isUserAccountEntitled,
+  resolvePublicBaseUrl
+} = require('../handlers/panel-handler');
 
 const definition = new SlashCommandBuilder()
   .setName('logs')
   .setDescription('Xem nhật ký hoạt động của bot')
   .addStringOption(option =>
     option.setName('bot_id')
-      .setDescription('ID của bot cần xem logs (bỏ trống để xem bot đầu tiên)')
+      .setDescription('ID, số thứ tự (#01, 1) hoặc tên bot cần xem logs (bỏ trống để xem bot đầu tiên)')
       .setRequired(false)
   )
   .addIntegerOption(option =>
@@ -19,33 +31,21 @@ const definition = new SlashCommandBuilder()
   );
 
 async function execute(interaction, services) {
+  const discordUserId = interaction?.user?.id;
+  const publicBaseUrl = resolvePublicBaseUrl(services);
   const user = await resolveLinkedUser(interaction, services);
   if (!user) {
-    return {
-      embeds: [
-        embed(
-          '⚠️ CHƯA ĐĂNG NHẬP',
-          'Bạn chưa liên kết tài khoản Discord với Web Manager.\n\nVui lòng sử dụng lệnh /login để nhập Username và Password tài khoản Web.',
-          0xf59e0b
-        )
-      ]
-    };
+    return renderUnauthenticatedPanel({ discordUserId, publicBaseUrl });
   }
 
   if (user.role !== 'admin') {
-    const isEntitled = services?.accessControl?.isEntitled
-      ? services.accessControl.isEntitled(user)
-      : (String(user.status || 'active').toLowerCase() !== 'disabled' && (user.isPermanent === true || (user.expiresAt && new Date(user.expiresAt).getTime() > Date.now())));
-
-    if (!isEntitled) {
-      const isLocked = String(user.status || 'active').toLowerCase() === 'disabled';
-      const title = isLocked ? '⛔ TÀI KHOẢN BỊ KHÓA' : '⛔ TÀI KHOẢN HẾT HẠN HOẶC BỊ KHÓA';
-      const desc = isLocked
-        ? 'Tài khoản của bạn đã bị vô hiệu hóa bởi Quản trị viên.'
-        : 'Tài khoản của bạn đã hết hạn thuê bot hoặc bị vô hiệu hóa. Vui lòng gia hạn trên Web Manager để tiếp tục sử dụng bot.';
-      return {
-        embeds: [embed(title, desc, 0xef4444)]
-      };
+    const normalizedUser = { ...user, expiresAt: user.expiresAt || user.expiresAtRental || null };
+    if (!isUserAccountEntitled(normalizedUser, services)) {
+      return renderEntitlementBlockedPanel({
+        user: normalizedUser,
+        discordUserId,
+        publicBaseUrl
+      });
     }
   }
 
@@ -56,23 +56,39 @@ async function execute(interaction, services) {
   let targetWorker = null;
   if (botIdOption) {
     const cleanOpt = String(botIdOption).trim().toLowerCase();
+    const cleanNoHash = cleanOpt.replace(/^(bot\s*#?|#)/i, '').trim();
+    const numericOpt = /^\d+$/.test(cleanNoHash) ? Number(cleanNoHash) : NaN;
+
     targetWorker = userBots.find((w) => {
       const wid = String(w.workerId || w.id || '').trim().toLowerCase();
-      const bNum = w.botNumber !== undefined && w.botNumber !== null ? String(w.botNumber).trim().toLowerCase() : '';
-      return wid === cleanOpt || (bNum && bNum === cleanOpt);
+      const bNum = w.botNumber !== undefined && w.botNumber !== null ? Number(w.botNumber) : NaN;
+      const wName = String(w.name || '').trim().toLowerCase();
+      const mcName = String(w.status?.username || w.settings?.account?.username || '').trim().toLowerCase();
+      if (wid === cleanOpt || (cleanNoHash && wid === cleanNoHash)) return true;
+      if (Number.isFinite(numericOpt) && Number.isFinite(bNum) && numericOpt === bNum) return true;
+      if (wName && wName === cleanOpt) return true;
+      if (mcName && mcName === cleanOpt) return true;
+      return false;
     });
     if (!targetWorker && user.role === 'admin') {
       targetWorker = { workerId: botIdOption };
     }
     if (!targetWorker) {
+      const availableHint = userBots.length > 0
+        ? `\n\n**Bot hiện có của bạn:**\n${userBots.slice(0, 8).map((w) => `• \`${plainCode(w.workerId || w.id, 40)}\` (${plainCode(w.name || `BOT ${w.botNumber || 1}`, 40)})`).join('\n')}`
+        : '';
+      const components = userBots.length > 0
+        ? [new ActionRowBuilder().addComponents(button('Mở danh sách Bot', 'bots:list', ButtonStyle.Primary, false, '🤖'))]
+        : [];
       return {
         embeds: [
           embed(
             '❌ KHÔNG TÌM THẤY BOT',
-            'Không tìm thấy bot có ID ' + botIdOption + ' trong danh sách bot được cấp của bạn.',
+            `Không tìm thấy bot \`${plainCode(botIdOption, 64)}\` trong danh sách bot được cấp của bạn.${availableHint}`,
             0xef4444
           )
-        ]
+        ],
+        components
       };
     }
   } else {
@@ -84,7 +100,7 @@ async function execute(interaction, services) {
       embeds: [
         embed(
           '⚠️ KHÔNG CÓ BOT',
-          'Bạn chưa sở hữu bot nào để xem nhật ký hoạt động.',
+          'Bạn chưa sở hữu bot nào để xem nhật ký hoạt động. Hãy kiểm tra lại gói dịch vụ bằng `/bots` hoặc trên Web Manager.',
           0xf59e0b
         )
       ]
@@ -92,21 +108,25 @@ async function execute(interaction, services) {
   }
 
   const fullBotId = targetWorker.workerId || targetWorker.id;
+  const storeRef = services?.store || services?.registry?.store;
   let logs = [];
   try {
+    if (typeof services?.registry?.refreshLogsFromStore === 'function') {
+      await services.registry.refreshLogsFromStore(fullBotId, { kind: 'all', maxAgeMs: 3000 }).catch(() => {});
+    }
     if (services?.workerClient?.getBotLogs) {
       logs = await services.workerClient.getBotLogs(fullBotId, linesOption);
     } else if (services?.registry?.getLogs) {
       logs = await services.registry.getLogs(fullBotId, linesOption);
     }
-    if ((!Array.isArray(logs) || logs.length === 0) && services?.store?.get) {
-      const fullRecord = await services.store.get(fullBotId, { includeEvents: true }).catch(() => null);
+    if ((!Array.isArray(logs) || logs.length === 0) && storeRef?.get) {
+      const fullRecord = await storeRef.get(fullBotId, { includeEvents: true }).catch(() => null);
       if (Array.isArray(fullRecord?.events) && fullRecord.events.length > 0) {
         logs = fullRecord.events;
       }
     }
-    if ((!Array.isArray(logs) || logs.length === 0) && services?.store?.getAuditLogs) {
-      logs = await services.store.getAuditLogs({ botId: fullBotId, limit: linesOption });
+    if ((!Array.isArray(logs) || logs.length === 0) && storeRef?.getAuditLogs) {
+      logs = await storeRef.getAuditLogs({ botId: fullBotId, limit: linesOption });
     }
   } catch (err) {
     logs = [{ time: new Date().toISOString(), type: 'error', message: 'Không thể tải logs: ' + err.message }];
@@ -115,7 +135,8 @@ async function execute(interaction, services) {
   return renderBotLogs({
     user,
     worker: targetWorker,
-    logs: Array.isArray(logs) ? logs.slice(-linesOption) : []
+    logs: Array.isArray(logs) ? logs.slice(-linesOption) : [],
+    workers: userBots
   });
 }
 

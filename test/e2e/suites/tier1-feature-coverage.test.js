@@ -1105,7 +1105,7 @@ async function runTier1Suite() {
     assert.strictEqual(res.secret, validSecret);
   });
 
-  await test('T1-F14-02', 'Worker Secret Validation: reject secret < 32 chars in setSecret', async () => {
+  await test('T1-F14-02', 'Worker ID-Only Auth: setSecret accepts empty secret without throwing', async () => {
     const mockClient = createMockSupabaseClient();
     await mockClient.from('manager_workers').insert({
       worker_id: 'w-val-02',
@@ -1120,10 +1120,8 @@ async function runTier1Suite() {
       config: {},
       logger: noopLogger
     });
-    await assert.rejects(
-      async () => registry.setSecret('w-val-02', 'short_secret'),
-      /at least 32 characters/i
-    );
+    assert.strictEqual(await registry.setSecret('w-val-02', ''), '');
+    assert.strictEqual(await registry.authenticate('w-val-02', ''), true);
   });
 
   await test('T1-F14-03', 'Worker Secret Validation: reject placeholder secret', async () => {
@@ -1131,13 +1129,20 @@ async function runTier1Suite() {
     assert.ok(/replace-with|example|changeme/i.test(placeholderSecret));
   });
 
-  await test('T1-F14-04', 'Worker Secret Validation: auto-generate on empty', async () => {
-    const secret = generateWorkerSecret();
-    assert.strictEqual(typeof secret, 'string');
-    assert.ok(secret.length >= 32);
+  await test('T1-F14-04', 'Worker ID-Only Registration: defaults secret to empty string', async () => {
+    const mockClient = createMockSupabaseClient();
+    const store = new SupabaseWorkerStore(mockClient, { encryptionKey: Buffer.alloc(32, 2), logger: noopLogger });
+    const registry = new WorkerRegistry({
+      store,
+      encryptionKey: Buffer.alloc(32, 2),
+      config: {},
+      logger: noopLogger
+    });
+    const created = await registry.add({ workerId: 'w-val-auto' });
+    assert.strictEqual(created.secret, '');
   });
 
-  await test('T1-F14-05', 'Worker Secret Validation: registry setSecret guard enforces >=32 chars', async () => {
+  await test('T1-F14-05', 'Worker ID-Only Auth: unregistered worker ID is rejected by authenticate()', async () => {
     const mockClient = createMockSupabaseClient();
     await mockClient.from('manager_workers').insert({
       worker_id: 'w-val-03',
@@ -1152,10 +1157,8 @@ async function runTier1Suite() {
       config: {},
       logger: noopLogger
     });
-    await assert.rejects(
-      async () => registry.setSecret('w-val-03', '1234567890123456789012345678901'),
-      /at least 32 characters/i
-    );
+    assert.strictEqual(await registry.authenticate('w-val-03', ''), true);
+    assert.strictEqual(await registry.authenticate('w-unregistered', ''), false);
   });
 
   // ===========================================================================

@@ -330,14 +330,14 @@ function switchLoginGateTab(tab) {
   if (regForm) regForm.style.display = 'none';
   if (btnLogin) {
     btnLogin.setAttribute('aria-selected', 'true');
-    btnLogin.style.background = 'rgba(56,189,248,0.2)';
-    btnLogin.style.color = '#38bdf8';
-    btnLogin.style.borderColor = 'rgba(56,189,248,0.4)';
+    btnLogin.style.background = 'var(--accent-soft)';
+    btnLogin.style.color = 'var(--accent-text)';
+    btnLogin.style.borderColor = 'var(--border-strong)';
   }
   if (btnReg) {
     btnReg.setAttribute('aria-selected', 'false');
     btnReg.style.background = 'transparent';
-    btnReg.style.color = '#94a3b8';
+    btnReg.style.color = 'var(--text-muted)';
     btnReg.style.borderColor = 'transparent';
   }
 }

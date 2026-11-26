@@ -170,6 +170,7 @@ class AdminNotifier {
     this.rateLimitNoticeEmitted = false;
     this.throttleTimer = null;
     this.sentAlerts = [];
+    this._lastWebhookSyncAt = 0;
   }
 
   setAdminUserId(id) {
@@ -251,6 +252,7 @@ class AdminNotifier {
         ? { offlineThresholdMinutes: Math.max(1, Math.min(1440, Math.round(Number(webhookCfg.offlineThresholdMinutes)))) }
         : {})
     };
+    this._lastWebhookSyncAt = Date.now();
   }
 
   shouldNotifyEvent(event) {
@@ -480,11 +482,29 @@ class AdminNotifier {
     return this.processQueue();
   }
 
+  async _refreshSettingsFromStoreIfStale(maxAgeMs = 15000) {
+    if (!this.store || typeof this.store.getSetting !== 'function') return;
+    const now = Date.now();
+    if (this._lastWebhookSyncAt && (now - this._lastWebhookSyncAt) < maxAgeMs) return;
+    this._lastWebhookSyncAt = now;
+    try {
+      const savedWebhook = await Promise.resolve(this.store.getSetting('webhook_settings')).catch(() => null);
+      if (savedWebhook && typeof savedWebhook === 'object') {
+        this.configureWebhook(savedWebhook);
+      }
+      const savedAccess = await Promise.resolve(this.store.getSetting('discord_access')).catch(() => null);
+      if (savedAccess?.adminUserId) {
+        this.setAdminUserId(savedAccess.adminUserId);
+      }
+    } catch (_) {}
+  }
+
   async processQueue() {
     if (this.isSending || this.queue.length === 0) return;
     this.isSending = true;
 
     try {
+      await this._refreshSettingsFromStoreIfStale();
       while (this.queue.length > 0) {
         const queueEntry = this.queue.shift();
         const item = queueEntry.item || queueEntry;

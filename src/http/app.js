@@ -125,6 +125,7 @@ const { createUserApi } = require('./routes/user-api');
 const { createAdminApi } = require('./routes/admin-api');
 const { createWorkerApi } = require('./routes/worker-api');
 const { timingSafeStringEquals } = require('../utils/secrets');
+const { resolveRequestOrigin, isPublicHttpsUrl } = require('../config/host-runtime');
 
 function createApp({
   store,
@@ -215,12 +216,15 @@ function createApp({
                           path.startsWith('/api/auth/verify-bot-access');
 
     const globalSecret = String(config.botSecretKey || '').trim();
+    if (!isWorkerRoute) {
+      if (globalSecret && timingSafeStringEquals(incoming, globalSecret)) {
+        const clientIp = req.clientIp || resolveClientIp(req);
+        logger?.warn?.('GLOBAL_BOT_SECRET_BLOCKED', { path, ip: clientIp });
+      }
+      return false;
+    }
     if (globalSecret && timingSafeStringEquals(incoming, globalSecret)) {
       const clientIp = req.clientIp || resolveClientIp(req);
-      if (!isWorkerRoute) {
-        logger?.warn?.('GLOBAL_BOT_SECRET_BLOCKED', { path, ip: clientIp });
-        return false;
-      }
       logger?.warn?.('GLOBAL_BOT_SECRET_USED', { path, ip: clientIp });
       return true;
     }
@@ -408,13 +412,20 @@ function createApp({
         if (cfVisitor.includes('"https"')) scheme = 'https';
       }
     }
-    if (scheme === 'http' && config?.publicBaseUrl) {
-      try {
-        const pub = new URL(config.publicBaseUrl);
-        if (pub.protocol === 'https:' && pub.host.toLowerCase() === rawHost.toLowerCase()) {
-          scheme = 'https';
-        }
-      } catch (_) {}
+    if (scheme === 'http') {
+      const candidates = [
+        config?.publicBaseUrl,
+        ...(typeof managerRuntimeSettings?.getActiveManagerUrls === 'function' ? managerRuntimeSettings.getActiveManagerUrls() : [])
+      ].filter(Boolean);
+      for (const candidateUrl of candidates) {
+        try {
+          const pub = new URL(candidateUrl);
+          if (pub.protocol === 'https:' && pub.host.toLowerCase() === rawHost.toLowerCase()) {
+            scheme = 'https';
+            break;
+          }
+        } catch (_) {}
+      }
     }
     try {
       const u = new URL(`${scheme}://${rawHost}`);
@@ -492,7 +503,8 @@ function createApp({
       if (!hasSessionCookie && (req.path.startsWith('/api/worker/') || req.path.startsWith('/api/v1/workers/'))) {
         const authHeader = String(req.headers['authorization'] || '');
         const hasBearer = /^Bearer\s+\S+/i.test(authHeader);
-        if (isBotSecretRequest(req) || hasBearer) {
+        const hasWorkerId = Boolean(safeScalar(req.headers['x-manager-bot-id'] || req.body?.workerId || req.body?.botId || req.query?.botId).trim());
+        if (isBotSecretRequest(req) || hasBearer || hasWorkerId) {
           return next();
         }
       }
@@ -709,6 +721,16 @@ function createApp({
 
     if (session) {
       req.managerAuthSession = session;
+      if (
+        managerRuntimeSettings &&
+        typeof managerRuntimeSettings.recordActiveManagerUrl === 'function' &&
+        (req.headers?.['x-forwarded-host'] || req.headers?.host)
+      ) {
+        const reqOrigin = resolveRequestOrigin(req, null);
+        if (isPublicHttpsUrl(reqOrigin)) {
+          void managerRuntimeSettings.recordActiveManagerUrl(reqOrigin);
+        }
+      }
     }
     next();
     })()).catch(next);
@@ -807,10 +829,13 @@ function createApp({
 
     let discordStatus = 'not_configured';
     let discordOk = true;
-    if (config?.discordToken) {
+    if (config?.discordToken && config?.discordEnabled !== false) {
       const isDiscordReady = Boolean(discordClient && typeof discordClient.isReady === 'function' && discordClient.isReady());
-      discordStatus = isDiscordReady ? 'ready' : 'connecting';
-      discordOk = isDiscordReady;
+      const isStandby = Boolean(discordClient && discordClient._standbyMode === true);
+      discordStatus = isDiscordReady ? 'ready' : (isStandby ? 'standby' : 'connecting');
+      discordOk = isDiscordReady || isStandby;
+    } else if (config?.discordEnabled === false) {
+      discordStatus = 'disabled_on_instance';
     }
 
     const { link4mHealth, commandSyncHealth, warnings, degraded } = getDegradedChecks();
@@ -852,6 +877,7 @@ function createApp({
     store,
     entitlementService,
     link4mService,
+    managerRuntimeSettings,
     registry,
     broker,
     fleetOperations,
@@ -898,6 +924,7 @@ function createApp({
     registry,
     broker,
     workerStore,
+    managerRuntimeSettings,
     adminNotifier,
     config,
     logger

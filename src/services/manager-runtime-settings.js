@@ -1,9 +1,13 @@
 'use strict';
 
 const { encryptSecret, decryptSecret } = require('../utils/secrets');
-const { normalizePublicUrl } = require('../config/host-runtime');
+const { DEFAULT_PUBLIC_MANAGER_URL, normalizePublicUrl, isPublicHttpsUrl } = require('../config/host-runtime');
 
 const SETTING_KEY = 'manager_runtime';
+const ACTIVE_URLS_SETTING_KEY = 'active_manager_urls';
+const ACTIVE_URL_HEARTBEAT_MS = 10 * 60 * 1000;
+const ACTIVE_URL_STALE_MS = 30 * 24 * 60 * 60 * 1000;
+const MAX_ACTIVE_URLS = 8;
 
 class ManagerRuntimeSettings {
   constructor({ store, encryptionKey, previousEncryptionKey = null, initial = {} }) {
@@ -13,6 +17,11 @@ class ManagerRuntimeSettings {
     this.initial = initial;
     this.secretsDecryptionFailed = false;
     this.rawSecretsCiphertext = null;
+    this.activeManagerUrls = [];
+    this._activeUrlLastSeen = new Map();
+    this._lastUrlRecordAt = new Map();
+    this._lastUrlsFetchAt = 0;
+    this._urlSyncChain = null;
     this.values = { publicBaseUrl: '', renderApiKey: '', link4mApiToken: '', link4mSecretKey: '', link4mMode: 'api', link4mUrl: '' };
   }
 
@@ -96,7 +105,118 @@ class ManagerRuntimeSettings {
     ) {
       await this.persist();
     }
+
+    try {
+      const urlsStored = await Promise.resolve(this.store.getSetting(ACTIVE_URLS_SETTING_KEY, { bypassCache: true })).catch(() => null);
+      this._hydrateActiveUrlsRecord(urlsStored);
+      this._lastUrlsFetchAt = Date.now();
+    } catch (_) {}
+
+    if (isPublicHttpsUrl(this.initial?.publicBaseUrl)) {
+      void this.recordActiveManagerUrl(this.initial.publicBaseUrl).catch(() => {});
+    }
+
     return this.snapshot();
+  }
+
+  _hydrateActiveUrlsRecord(record) {
+    if (!record || typeof record !== 'object') return;
+    const now = Date.now();
+    const nextMap = new Map(this._activeUrlLastSeen);
+    const items = Array.isArray(record.entries) ? record.entries : (Array.isArray(record.urls) ? record.urls.map((u) => ({ url: u })) : []);
+    for (const entry of items) {
+      const url = typeof entry === 'string' ? entry : entry?.url;
+      if (!isPublicHttpsUrl(url)) continue;
+      const norm = normalizePublicUrl(url);
+      const seenMs = entry?.lastSeenAt ? Date.parse(entry.lastSeenAt) : now;
+      if (Number.isFinite(seenMs) && (now - seenMs) > ACTIVE_URL_STALE_MS) continue;
+      const prev = nextMap.get(norm) || 0;
+      nextMap.set(norm, Math.max(prev, Number.isFinite(seenMs) ? seenMs : now));
+    }
+    this._activeUrlLastSeen = nextMap;
+    this.activeManagerUrls = [...nextMap.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, MAX_ACTIVE_URLS)
+      .map(([u]) => u);
+  }
+
+  async refreshActiveManagerUrls({ maxAgeMs = 15000 } = {}) {
+    if (!this.store || typeof this.store.getSetting !== 'function') return this.getActiveManagerUrls();
+    const now = Date.now();
+    if (this._lastUrlsFetchAt && (now - this._lastUrlsFetchAt) < maxAgeMs) {
+      return this.getActiveManagerUrls();
+    }
+    this._lastUrlsFetchAt = now;
+    try {
+      const record = await this.store.getSetting(ACTIVE_URLS_SETTING_KEY, { bypassCache: true });
+      this._hydrateActiveUrlsRecord(record);
+    } catch (_) {}
+    return this.getActiveManagerUrls();
+  }
+
+  getActiveManagerUrls(preferredUrl = '') {
+    const urls = [];
+    const pushIfValid = (candidate, allowLocal = false) => {
+      const norm = normalizePublicUrl(candidate);
+      if (!norm) return;
+      if (!allowLocal && !isPublicHttpsUrl(norm)) return;
+      if (!urls.includes(norm)) urls.push(norm);
+    };
+    pushIfValid(preferredUrl, true);
+    pushIfValid(this.values.publicBaseUrl, false);
+    for (const u of this.activeManagerUrls) pushIfValid(u, false);
+    pushIfValid(DEFAULT_PUBLIC_MANAGER_URL, false);
+    return urls.slice(0, MAX_ACTIVE_URLS);
+  }
+
+  recordActiveManagerUrl(candidateUrl) {
+    if (!isPublicHttpsUrl(candidateUrl)) return Promise.resolve(false);
+    const norm = normalizePublicUrl(candidateUrl);
+    if (!norm) return Promise.resolve(false);
+    const now = Date.now();
+    const lastRecorded = this._lastUrlRecordAt.get(norm) || 0;
+    if (lastRecorded && (now - lastRecorded) < ACTIVE_URL_HEARTBEAT_MS) {
+      return Promise.resolve(false);
+    }
+    this._lastUrlRecordAt.set(norm, now);
+    this._activeUrlLastSeen.set(norm, now);
+    if (!this.activeManagerUrls.includes(norm)) {
+      this.activeManagerUrls = [norm, ...this.activeManagerUrls].slice(0, MAX_ACTIVE_URLS);
+    }
+    if (!this.store || typeof this.store.getSetting !== 'function' || typeof this.store.setSetting !== 'function') {
+      return Promise.resolve(false);
+    }
+    const task = async () => {
+      try {
+        const existing = await Promise.resolve(this.store.getSetting(ACTIVE_URLS_SETTING_KEY, { bypassCache: true })).catch(() => null);
+        this._hydrateActiveUrlsRecord(existing);
+        const nowIso = new Date().toISOString();
+        const mergedMap = new Map(this._activeUrlLastSeen);
+        mergedMap.set(norm, Date.now());
+        if (isPublicHttpsUrl(DEFAULT_PUBLIC_MANAGER_URL) && !mergedMap.has(DEFAULT_PUBLIC_MANAGER_URL)) {
+          mergedMap.set(DEFAULT_PUBLIC_MANAGER_URL, Date.now() - 1000);
+        }
+        const sorted = [...mergedMap.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, MAX_ACTIVE_URLS);
+        const entries = sorted.map(([url, ts]) => ({ url, lastSeenAt: new Date(ts).toISOString() }));
+        const urls = sorted.map(([url]) => url);
+        this._activeUrlLastSeen = new Map(sorted);
+        this.activeManagerUrls = urls;
+        await this.store.setSetting(ACTIVE_URLS_SETTING_KEY, {
+          urls,
+          entries,
+          updatedAt: nowIso
+        });
+        return true;
+      } catch (_) {
+        return false;
+      }
+    };
+    const prev = this._urlSyncChain || Promise.resolve();
+    const cur = prev.then(task, task);
+    this._urlSyncChain = cur.catch(() => {});
+    return cur;
   }
 
   snapshot() { return { ...this.values }; }

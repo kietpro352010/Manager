@@ -20,10 +20,9 @@ function extractWorkerSecret(req) {
 function createWorkerAuth(registry) {
   return async function workerAuth(req, res, next) {
     try {
-      const rawWorkerId = String(req.params?.workerId || '').trim();
+      const rawWorkerId = String(req.params?.workerId || req.get?.('x-manager-bot-id') || '').trim();
       if (!rawWorkerId) return res.status(400).json({ ok: false, error: 'missing_worker_id' });
       const secret = extractWorkerSecret(req);
-      if (!secret) return res.status(401).json({ ok: false, error: 'unauthorized' });
       const accepted = await registry.authenticate(rawWorkerId, secret);
       if (!accepted) return res.status(401).json({ ok: false, error: 'unauthorized' });
       req.workerId = rawWorkerId.toLowerCase();

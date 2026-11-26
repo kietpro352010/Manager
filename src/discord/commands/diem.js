@@ -17,7 +17,7 @@ const definition = new SlashCommandBuilder()
 async function execute(interaction, services) {
   const callerLinked = await resolveLoggedInPointsUser(interaction.user?.id, services);
   if (!callerLinked) {
-    return renderLoginRequiredNotice();
+    return renderLoginRequiredNotice(interaction.user?.id);
   }
 
   const pointsService = services?.discordPoints;
@@ -56,7 +56,7 @@ async function execute(interaction, services) {
     username: targetName
   });
 
-  return renderUserPointsProfile({ targetUser, profile });
+  return renderUserPointsProfile({ targetUser, profile, viewerId: interaction.user?.id });
 }
 
 module.exports = {

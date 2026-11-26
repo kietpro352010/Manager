@@ -135,40 +135,38 @@ async function runWorkerRegistryAuditTests() {
     const base = `http://127.0.0.1:${port}`;
 
     try {
-      // 1.1 Invalid secret must be rejected with 401 unauthorized_worker_secret
+      // 1.1 Unregistered botId must be rejected with 401 unauthorized_worker_secret
       const invalidRes = await fetch(`${base}/api/auth/verify-bot-access`, {
         method: 'POST',
         headers: {
-          'content-type': 'application/json',
-          'x-bot-secret': 'completely-wrong-secret'
+          'content-type': 'application/json'
         },
-        body: JSON.stringify({ botId: '1' })
+        body: JSON.stringify({ botId: 'unregistered_bot_999' })
       });
-      assert.strictEqual(invalidRes.status, 401, 'Invalid secret must return 401');
+      assert.strictEqual(invalidRes.status, 401, 'Unregistered botId must return 401');
       const invalidJson = await invalidRes.json();
       assert.strictEqual(invalidJson.ok, false);
       assert.strictEqual(invalidJson.error, 'unauthorized_worker_secret');
 
-      // 1.2 Empty secret must also return 401
+      // 1.2 Empty botId must also return 401
       const blankRes = await fetch(`${base}/api/auth/verify-bot-access`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({})
+      });
+      assert.strictEqual(blankRes.status, 401, 'Missing botId must return 401');
+
+      // 1.3 Registered & enabled botId succeeds ID-only with 200 and returns assignedUser
+      const validRes = await fetch(`${base}/api/auth/verify-bot-access`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json'
         },
         body: JSON.stringify({ botId: '1' })
       });
-      assert.strictEqual(blankRes.status, 401, 'Blank secret must return 401');
-
-      // 1.3 Valid secret must succeed with 200 and return assignedUser
-      const validRes = await fetch(`${base}/api/auth/verify-bot-access`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-bot-secret': botSecret
-        },
-        body: JSON.stringify({ botId: '1' })
-      });
-      assert.strictEqual(validRes.status, 200, 'Valid secret must return 200');
+      assert.strictEqual(validRes.status, 200, 'Registered enabled botId must return 200');
       const validJson = await validRes.json();
       assert.strictEqual(validJson.ok, true);
       assert.strictEqual(validJson.assignedUser, 'testowner');
@@ -209,9 +207,9 @@ async function runWorkerRegistryAuditTests() {
     assert.strictEqual(cached1.secret, initialSecret);
     assert.ok(Number.isInteger(cached1.cachedAt), 'Cache entry must have cachedAt timestamp');
 
-    // verifyBotSecretSync works with cached secret
-    assert.strictEqual(registry.verifyBotSecretSync('bot01', initialSecret), true);
-    assert.strictEqual(registry.verifyBotSecretSync('bot01', 'wrong-pass'), false);
+    // verifyBotSecretSync works with cached enabled entry in ID-only mode
+    assert.strictEqual(registry.verifyBotSecretSync('bot01', ''), true);
+    assert.strictEqual(registry.verifyBotSecretSync('nonexistent_bot', ''), false);
 
     // 2.2 Simulate DB secret update while cache is still fresh (< 60s)
     const updatedDbSecret = 'secret-round-two-updated';
@@ -716,15 +714,16 @@ async function runWorkerRegistryAuditTests() {
     assert.strictEqual(await registry.authenticate('grace_bot', oldSecret), true, 'Old secret must be accepted during grace period');
     assert.strictEqual(registry.verifyBotSecretSync('grace_bot', oldSecret), true, 'verifyBotSecretSync must accept old secret during grace period');
 
-    // 9.3 When grace period expires (graceUntil in the past), old secret is rejected
-    const cacheEntry = registry.secretCache.get('grace_bot');
-    cacheEntry.graceUntil = Date.now() - 1000; // expired grace period
+    // 9.3 ID-only auth stays valid after secret rotation, while setEnabled(false) revokes immediately
+    assert.strictEqual(await registry.authenticate('grace_bot', ''), true, 'ID-only auth stays active for enabled worker');
+    assert.strictEqual(registry.verifyBotSecretSync('grace_bot', ''), true, 'verifyBotSecretSync stays true for enabled worker within TTL');
 
-    assert.strictEqual(await registry.authenticate('grace_bot', oldSecret), false, 'Old secret rejected after grace period expires');
-    assert.strictEqual(registry.verifyBotSecretSync('grace_bot', oldSecret), false, 'verifyBotSecretSync rejects old secret after grace period expires');
+    await registry.setEnabled('grace_bot', false);
+    assert.strictEqual(await registry.authenticate('grace_bot', newSecret), false, 'Disabled worker must be rejected');
+    assert.strictEqual(registry.verifyBotSecretSync('grace_bot', newSecret), false, 'verifyBotSecretSync must reject disabled worker');
 
-    // New secret still works after grace expires
-    assert.strictEqual(await registry.authenticate('grace_bot', newSecret), true);
+    await registry.setEnabled('grace_bot', true);
+    assert.strictEqual(await registry.authenticate('grace_bot', ''), true);
   }
   console.log('✅ WKR-02: Secret rotation grace period verified.');
 

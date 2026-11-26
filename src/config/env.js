@@ -120,6 +120,7 @@ function loadConfig(env = process.env) {
   }
 
   const discordToken = required(env, 'DISCORD_TOKEN');
+  const discordEnabled = bool(env.DISCORD_ENABLED, true);
 
   let discordClientId = String(env.DISCORD_CLIENT_ID || '').trim();
   if (!discordClientId && discordToken) {
@@ -160,6 +161,7 @@ function loadConfig(env = process.env) {
     platform: hostRuntime.platform,
     portSource: hostRuntime.portSource,
     discordToken,
+    discordEnabled,
     discordClientId,
     discordGuildId,
     adminRoleId,

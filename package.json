@@ -2,7 +2,7 @@
   "name": "kingmc-worker-manager",
   "version": "12.1.1",
   "private": true,
-  "description": "Discord-only control plane for KingMC AFK workers.",
+  "description": "Unified Web SPA & Discord control plane for KingMC AFK workers with multi-instance Supabase sync.",
   "main": "src/index.js",
   "scripts": {
     "start": "node --max-old-space-size=384 src/index.js",

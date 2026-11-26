@@ -810,7 +810,18 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       // A. Check Admin Login
       const adminUsername = String(config.adminUsername || 'admin').trim();
       if (cleanUsername.toLowerCase() === adminUsername.toLowerCase()) {
-        const cachedAdminPass = registry.getAdminPassword();
+        let cachedAdminPass = registry.getAdminPassword();
+        if (typeof store?.getSetting === 'function') {
+          try {
+            const remoteCreds = await store.getSetting('admin_credentials', { bypassCache: true });
+            if (remoteCreds?.passwordHash && typeof remoteCreds.passwordHash === 'string') {
+              cachedAdminPass = remoteCreds.passwordHash;
+              if (typeof registry.setAdminPassword === 'function') {
+                registry.setAdminPassword(cachedAdminPass);
+              }
+            }
+          } catch (_) {}
+        }
         let isMatch = false;
         let matchedFromEnv = false;
 
@@ -1196,7 +1207,18 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       }
 
       if (session.role === 'admin') {
-        const cachedAdminPass = registry.getAdminPassword();
+        let cachedAdminPass = registry.getAdminPassword();
+        if (typeof store?.getSetting === 'function') {
+          try {
+            const remoteCreds = await store.getSetting('admin_credentials', { bypassCache: true });
+            if (remoteCreds?.passwordHash && typeof remoteCreds.passwordHash === 'string') {
+              cachedAdminPass = remoteCreds.passwordHash;
+              if (typeof registry.setAdminPassword === 'function') {
+                registry.setAdminPassword(cachedAdminPass);
+              }
+            }
+          } catch (_) {}
+        }
         const isMatch = cachedAdminPass
           ? await verifyAdminPasswordAsync(currentPassword, cachedAdminPass)
           : Boolean(config.adminPassword && await verifyAdminPasswordAsync(currentPassword, config.adminPassword));
@@ -1258,33 +1280,34 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
 
       const isGlobalAuthed = Boolean(globalSecret && timingSafeStringEquals(incomingSecret, globalSecret));
       let isAuthed = isGlobalAuthed;
+      const resolvedBotId = String(botId || req.headers['x-manager-bot-id'] || '').trim().toLowerCase();
 
       if (isGlobalAuthed) {
         logger?.warn('GLOBAL_BOT_SECRET_USED', {
           action: 'verify-bot-access',
-          botId,
+          botId: resolvedBotId,
           ip: clientIp
         });
         if (typeof store.addAudit === 'function') {
           await store.addAudit({
             action: 'GLOBAL_BOT_SECRET_USED',
-            targetId: String(botId || 'unknown'),
+            targetId: String(resolvedBotId || 'unknown'),
             actorId: 'system:global_secret',
             details: { ip: clientIp, endpoint: '/verify-bot-access' }
           }).catch(() => null);
         }
       } else {
-        isAuthed = Boolean(await registry.verifyBotSecret(botId, incomingSecret));
+        isAuthed = Boolean(resolvedBotId && await registry.verifyBotSecret(resolvedBotId, incomingSecret));
       }
 
       if (!isAuthed) {
         return res.status(401).json({ ok: false, error: 'unauthorized_worker_secret' });
       }
 
-      const assigned = await store.assignedUser(String(botId));
+      const assigned = await store.assignedUser(String(resolvedBotId));
       return res.json({
         ok: true,
-        botId,
+        botId: resolvedBotId,
         assignedUser: assigned || null
       });
     } catch (error) {

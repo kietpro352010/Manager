@@ -663,3 +663,37 @@ test('DISCORD /bots PAGINATION: Renders First/Prev/Counter/Next/Last + Refresh w
   assert.ok(firstView.embeds[0].data.footer.text.includes('Trang 1/3'));
   assert.ok(firstView.embeds[0].data.description.includes('BOT 01'));
 });
+
+test('WEB UI UNSLOP + ANIMATE UI: Enforces motion tokens, fine-pointer hover gates, reduced-motion, and zero AI-slop CSS', () => {
+  const dash = require('../src/http/views/dashboard');
+  const { PUBLIC_LOGIN_HTML } = require('../src/http/views/login-html');
+  const rawTokensCss = fs.readFileSync(
+    path.join(__dirname, '../src/http/views/dashboard/styles/01-tokens-and-base.css'),
+    'utf8'
+  );
+
+  for (const [label, css] of [['DASHBOARD_STYLES', dash.STYLES], ['PUBLIC_LOGIN_HTML', PUBLIC_LOGIN_HTML]]) {
+    assert.match(css, /--ease-out:\s*cubic-bezier\(0\.23,\s*1,\s*0\.32,\s*1\)/, `${label} must define Animate UI --ease-out`);
+    assert.match(css, /--ease-away:\s*cubic-bezier\(0\.33,\s*0\.17,\s*0\.67,\s*0\.5\)/, `${label} must define Animate UI --ease-away`);
+    assert.match(css, /--scale-press:\s*0\.97\b/, `${label} must define --scale-press: 0.97`);
+    assert.match(css, /--scale-choice:\s*0\.985\b/, `${label} must define --scale-choice: 0.985`);
+    assert.match(css, /@media\s*\(hover:\s*hover\)\s*and\s*\(pointer:\s*fine\)/, `${label} must gate hover to fine pointers`);
+    assert.doesNotMatch(css, /@media\s*\(\s*hover\s*:\s*hover\s*\)\s*\{/, `${label} must not use bare @media (hover: hover)`);
+    assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/, `${label} must handle prefers-reduced-motion: reduce`);
+    assert.doesNotMatch(css, /-webkit-background-clip\s*:\s*text/i, `${label} must not contain gradient-text slop`);
+    assert.doesNotMatch(css, /\b(barShimmer|textShine|bellFloat)\b/, `${label} must not contain infinite decorative shimmer/float loops`);
+  }
+
+  for (const [label, bundle] of [
+    ['DASHBOARD_STYLES', dash.STYLES],
+    ['DASHBOARD_BODY', dash.BODY],
+    ['DASHBOARD_SCRIPTS', dash.SCRIPTS],
+    ['PUBLIC_LOGIN_HTML', PUBLIC_LOGIN_HTML]
+  ]) {
+    assert.doesNotMatch(bundle, /transition\s*:\s*all\b/i, `${label} must never use transition: all`);
+  }
+
+  assert.doesNotMatch(dash.SCRIPTS, /onmouseenter=/i, 'Dashboard JS must not inject inline hover scale handlers');
+  assert.match(rawTokensCss, /unslop/i, '01-tokens-and-base.css must retain unslop attribution');
+  assert.match(PUBLIC_LOGIN_HTML, /unslop/i, 'login-html.js must retain unslop attribution');
+});

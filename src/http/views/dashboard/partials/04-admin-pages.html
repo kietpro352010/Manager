@@ -4,22 +4,22 @@
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
         <button type="button" class="small" onclick="navigateTo('dashboard')">← Về Dashboard</button>
         <div>
-          <h2 class="full-page-title">👥 Quản Lý Người Dùng &amp; Key Gia Hạn</h2>
-          <div class="full-page-subtitle">Quản lý tài khoản khách thuê, phân quyền 1-Bot-1-User, gia hạn linh hoạt, xem mật khẩu và quản lý Key bản quyền.</div>
+          <h2 class="full-page-title">Quản lý người dùng &amp; Key gia hạn</h2>
+          <div class="full-page-subtitle">Quản lý tài khoản khách thuê, gán bot độc quyền, gia hạn thời gian và phát hành mã bản quyền</div>
         </div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-        <button type="button" class="primary" onclick="openCreateUserModal()">＋ Thêm Người Dùng Mới</button>
-        <button type="button" class="secondary" onclick="switchUserMgmtSubTab('keys')">🎟️ Quản Lý Key</button>
+        <button type="button" class="primary" onclick="openCreateUserModal()">＋ Thêm người dùng</button>
+        <button type="button" class="secondary" onclick="switchUserMgmtSubTab('keys')">Quản lý Key</button>
         <button type="button" class="small" onclick="refreshUserManagementPage()">↻ Làm mới</button>
       </div>
     </div>
 
-    <!-- CỤM ĐIỀU KHIỂN DỊCH VỤ ADMIN (CĂN THẲNG HÀNG 3 CỘT PC / 1 CỘT MOBILE) -->
+    <!-- CỤM ĐIỀU KHIỂN DỊCH VỤ ADMIN -->
     <div class="admin-controls-strip admin-only">
       <div class="admin-control-card">
-        <button type="button" id="trialGiftToggleBtn" class="small" onclick="toggleTrialGiftSetting()" title="Bật/Tắt chế độ tặng dùng thử kèm bot trống cho người mới" style="background:transparent !important;border:none !important;color:var(--accent-text) !important;font-weight:700;padding:2px 4px;cursor:pointer;">
-          <span id="trialGiftBtnLabel">🎁 Tặng Dùng Thử:</span> <span id="trialGiftStatusBadge">BẬT</span>
+        <button type="button" id="trialGiftToggleBtn" class="small" onclick="toggleTrialGiftSetting()" title="Bật/Tắt chế độ tặng dùng thử kèm bot trống cho người mới" style="background:transparent !important;border:none !important;color:var(--accent-text) !important;font-weight:600;padding:2px 4px;cursor:pointer;box-shadow:none !important;">
+          <span id="trialGiftBtnLabel">Tặng dùng thử:</span> <span id="trialGiftStatusBadge">BẬT</span>
         </button>
         <label for="trialDaysInput" class="admin-control-card-right" style="font-size:12px;color:var(--muted);margin:0;">
           <span>Số ngày:</span>
@@ -28,73 +28,69 @@
         </label>
       </div>
 
-      <!-- CỤM CẤU HÌNH VƯỢT LINK +12H (ADMIN) -->
       <div class="admin-control-card yellow">
-        <button type="button" id="link4mToggleBtn" class="small" onclick="toggleLink4mSetting()" title="Bật/Tắt tính năng vượt link Link4M nhận +12h" style="background:transparent !important;border:none !important;color:var(--yellow) !important;font-weight:700;padding:2px 4px;cursor:pointer;">
-          <span id="link4mBtnLabel">⚡ Vượt Link +12h:</span> <span id="link4mStatusBadge">TẮT</span>
+        <button type="button" id="link4mToggleBtn" class="small" onclick="toggleLink4mSetting()" title="Bật/Tắt tính năng vượt link Link4M nhận +12h" style="background:transparent !important;border:none !important;color:var(--yellow) !important;font-weight:600;padding:2px 4px;cursor:pointer;box-shadow:none !important;">
+          <span id="link4mBtnLabel">Vượt link +12h:</span> <span id="link4mStatusBadge">TẮT</span>
         </button>
         <div class="admin-control-card-right">
           <button type="button" class="small warning-btn" onclick="openLink4mConfigModal()" title="Cấu hình Link rút gọn hoặc API Token Link4M" style="padding:4px 10px;border-radius:6px;cursor:pointer;font-weight:600;">
-            ⚙ Cấu hình Link
+            Cấu hình Link
           </button>
         </div>
       </div>
 
-      <!-- CỤM BẢO TRÌ HỆ THỐNG (KHÓA / MỞ WORKER CHO USER - ADMIN) -->
       <div id="maintenanceControlGroup" class="admin-control-card amber">
-        <button type="button" id="maintenanceToggleBtn" class="small" onclick="toggleMaintenanceSetting()" title="Bật/Tắt chế độ bảo trì — tạm khóa toàn bộ thao tác worker của người dùng" style="background:transparent !important;border:none !important;color:#fbbf24 !important;font-weight:700;padding:2px 4px;cursor:pointer;">
-          <span id="maintenanceBtnLabel">🛠️ Bảo Trì Worker:</span> <span id="maintenanceStatusBadge" style="color:#94a3b8;">TẮT</span>
+        <button type="button" id="maintenanceToggleBtn" class="small" onclick="toggleMaintenanceSetting()" title="Bật/Tắt chế độ bảo trì — tạm khóa toàn bộ thao tác worker của người dùng" style="background:transparent !important;border:none !important;color:var(--yellow) !important;font-weight:600;padding:2px 4px;cursor:pointer;box-shadow:none !important;">
+          <span id="maintenanceBtnLabel">Bảo trì Worker:</span> <span id="maintenanceStatusBadge" style="color:#94a3b8;">TẮT</span>
         </button>
         <div class="admin-control-card-right">
           <button type="button" id="maintenanceConfigBtn" class="small warning-btn" onclick="openMaintenanceConfigModal()" title="Soạn thông báo bảo trì và bật/tắt khóa worker" style="padding:4px 10px;border-radius:6px;cursor:pointer;font-weight:600;">
-            ⚙ Thông báo
+            Thông báo
           </button>
         </div>
       </div>
     </div>
 
-    <!-- SUB TABS: USER LIST vs KEY LIST -->
+    <!-- SUB TABS -->
     <div class="sub-tab-bar" role="tablist" aria-label="Phân mục quản lý tài khoản và key">
       <button type="button" role="tab" aria-selected="true" aria-controls="subPanelUsers" class="sub-tab-btn active" id="subTabUsers" onclick="switchUserMgmtSubTab('users')">
-        👥 Danh Sách Người Dùng (<span id="userMgmtTotalCount">0</span>)
+        Danh sách người dùng (<span id="userMgmtTotalCount">0</span>)
       </button>
       <button type="button" role="tab" aria-selected="false" aria-controls="subPanelKeys" class="sub-tab-btn" id="subTabKeys" onclick="switchUserMgmtSubTab('keys')">
-        🎟️ Quản Lý Key Gia Hạn (<span id="keyMgmtTotalCount">0</span>)
+        Quản lý Key gia hạn (<span id="keyMgmtTotalCount">0</span>)
       </button>
       <button type="button" role="tab" aria-selected="false" aria-controls="subPanelWhitelist" class="sub-tab-btn" id="subTabWhitelist" onclick="switchUserMgmtSubTab('whitelist')">
-        🛡️ Whitelist IP (<span id="whitelistTotalCount">0</span>)
+        Whitelist IP (<span id="whitelistTotalCount">0</span>)
       </button>
     </div>
 
     <!-- SUB-PANEL 1: DANH SÁCH USER -->
     <div id="subPanelUsers" class="sub-panel" role="tabpanel" aria-labelledby="subTabUsers">
-      <!-- FILTERS & STATS -->
       <div class="mgmt-filter-bar mgmt-filter-bar-inline">
         <div class="mgmt-search-wrap">
-          <input type="search" id="userFilterSearch" aria-label="Tìm theo username, tên Discord, ID bot, ghi chú, gói" placeholder="🔍 Tìm user, tên Discord, ID bot, gói..." class="search-box mgmt-search-input" oninput="debounceUserFilter()">
+          <input type="search" id="userFilterSearch" aria-label="Tìm theo username, tên Discord, ID bot, ghi chú, gói" placeholder="Tìm user, Discord, ID bot, gói" class="search-box mgmt-search-input" oninput="debounceUserFilter()">
         </div>
         <div class="mgmt-filter-chips" role="group" aria-label="Lọc trạng thái và liên kết Discord">
           <button type="button" class="filter-chip active" id="userFilterAll" aria-pressed="true" onclick="setUserStatusFilter('all')">Tất cả (<span id="statUserAll">0</span>)</button>
-          <button type="button" class="filter-chip" id="userFilterActive" aria-pressed="false" onclick="setUserStatusFilter('active')">🟢 Hoạt động (<span id="statUserActive">0</span>)</button>
-          <button type="button" class="filter-chip" id="userFilterDisabled" aria-pressed="false" onclick="setUserStatusFilter('disabled')">🔒 Tạm khóa (<span id="statUserDisabled">0</span>)</button>
-          <button type="button" class="filter-chip" id="userFilterExpired" aria-pressed="false" onclick="setUserStatusFilter('expired')">⏳ Hết hạn (<span id="statUserExpired">0</span>)</button>
-          <button type="button" class="filter-chip" id="userFilterLifetime" aria-pressed="false" onclick="setUserStatusFilter('lifetime')">👑 Vĩnh viễn (<span id="statUserLifetime">0</span>)</button>
-          <button type="button" class="filter-chip filter-chip-discord" id="userFilterDiscordLinked" aria-pressed="false" onclick="setUserStatusFilter('discord_linked')">💬 Đã LK Discord (<span id="statUserDiscordLinked">0</span>)</button>
+          <button type="button" class="filter-chip" id="userFilterActive" aria-pressed="false" onclick="setUserStatusFilter('active')">Hoạt động (<span id="statUserActive">0</span>)</button>
+          <button type="button" class="filter-chip" id="userFilterDisabled" aria-pressed="false" onclick="setUserStatusFilter('disabled')">Tạm khóa (<span id="statUserDisabled">0</span>)</button>
+          <button type="button" class="filter-chip" id="userFilterExpired" aria-pressed="false" onclick="setUserStatusFilter('expired')">Hết hạn (<span id="statUserExpired">0</span>)</button>
+          <button type="button" class="filter-chip" id="userFilterLifetime" aria-pressed="false" onclick="setUserStatusFilter('lifetime')">Vĩnh viễn (<span id="statUserLifetime">0</span>)</button>
+          <button type="button" class="filter-chip filter-chip-discord" id="userFilterDiscordLinked" aria-pressed="false" onclick="setUserStatusFilter('discord_linked')">Đã LK Discord (<span id="statUserDiscordLinked">0</span>)</button>
           <button type="button" class="filter-chip filter-chip-discord" id="userFilterDiscordUnlinked" aria-pressed="false" onclick="setUserStatusFilter('discord_unlinked')">Chưa LK Discord (<span id="statUserDiscordUnlinked">0</span>)</button>
         </div>
       </div>
 
-      <!-- USER TABLE -->
       <div class="user-table-wrap" tabindex="0" role="region" aria-label="Bảng danh sách người dùng">
         <table class="user-table">
           <thead>
             <tr>
-              <th style="min-width:140px;">NGƯỜI DÙNG</th>
-              <th style="min-width:140px;">MẬT KHẨU</th>
-              <th style="min-width:280px;">HẠN THUÊ &amp; GIA HẠN NHANH</th>
-              <th style="min-width:110px;">TRẠNG THÁI</th>
-              <th style="min-width:180px;">BOT ĐƯỢC CẤP (1-USER-1-BOT)</th>
-              <th style="min-width:140px;text-align:right;">THAO TÁC</th>
+              <th style="min-width:140px;">Người dùng</th>
+              <th style="min-width:140px;">Mật khẩu</th>
+              <th style="min-width:280px;">Hạn thuê &amp; gia hạn nhanh</th>
+              <th style="min-width:110px;">Trạng thái</th>
+              <th style="min-width:180px;">Bot được cấp</th>
+              <th style="min-width:140px;text-align:right;">Thao tác</th>
             </tr>
           </thead>
           <tbody id="userFullTableBody">
@@ -107,39 +103,39 @@
     <!-- SUB-PANEL 2: QUẢN LÝ KEY GIA HẠN -->
     <div id="subPanelKeys" class="sub-panel hidden" role="tabpanel" aria-labelledby="subTabKeys">
       <div class="create-key-card">
-        <h4 style="margin:0 0 10px 0;font-size:14.5px;color:#38bdf8;font-weight:750;">🎟️ Tạo Mã Key & Giftcode Sự Kiện</h4>
+        <h4 style="margin:0 0 12px 0;font-size:14px;color:var(--text-primary);font-weight:600;">Tạo mã Key &amp; Giftcode</h4>
         <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
           <div>
-            <label for="mgmtKeyDays" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">GÓI THUÊ:</label>
+            <label for="mgmtKeyDays" style="font-size:11.5px;color:var(--text-secondary);display:block;margin-bottom:4px;font-weight:500;">Gói thuê</label>
             <div style="display:flex;gap:4px;align-items:center;">
-              <select id="mgmtKeyDays" onchange="onKeyDaysSelectChange('mgmt')" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;">
+              <select id="mgmtKeyDays" onchange="onKeyDaysSelectChange('mgmt')" style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:8px;font-size:13px;">
                 <option value="1">1 Ngày (Dùng thử)</option>
                 <option value="3">3 Ngày</option>
                 <option value="7" selected>7 Ngày (1 Tuần)</option>
                 <option value="15">15 Ngày (Nửa Tháng)</option>
                 <option value="30">30 Ngày (1 Tháng)</option>
                 <option value="90">90 Ngày (3 Tháng)</option>
-                <option value="lifetime">👑 Vĩnh Viễn</option>
-                <option value="custom">✏️ Tùy chỉnh ngày...</option>
+                <option value="lifetime">Vĩnh viễn</option>
+                <option value="custom">Tùy chỉnh ngày...</option>
               </select>
-              <input type="number" id="mgmtKeyCustomDays" aria-label="Số ngày gói thuê tùy chỉnh" min="1" max="3650" placeholder="Số ngày" style="display:none;width:75px;background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px;border-radius:8px;font-size:13px;" />
+              <input type="number" id="mgmtKeyCustomDays" aria-label="Số ngày gói thuê tùy chỉnh" min="1" max="3650" placeholder="Số ngày" style="display:none;width:75px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:8px;font-size:13px;" />
             </div>
           </div>
           <div>
-            <label for="mgmtKeyPlan" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">TÊN GÓI:</label>
-            <input type="text" id="mgmtKeyPlan" placeholder="VD: Gói Tuần VIP" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:130px;" />
+            <label for="mgmtKeyPlan" style="font-size:11.5px;color:var(--text-secondary);display:block;margin-bottom:4px;font-weight:500;">Tên gói</label>
+            <input type="text" id="mgmtKeyPlan" placeholder="VD: Gói Tuần VIP" style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:8px;font-size:13px;width:136px;" />
           </div>
           <div>
-            <label for="mgmtKeyCustomKey" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">MÃ TÙY CHỌN (GIFTCODE):</label>
-            <input type="text" id="mgmtKeyCustomKey" placeholder="Để trống = sinh ngẫu nhiên" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:160px;text-transform:uppercase;" />
+            <label for="mgmtKeyCustomKey" style="font-size:11.5px;color:var(--text-secondary);display:block;margin-bottom:4px;font-weight:500;">Mã tùy chọn (Giftcode)</label>
+            <input type="text" id="mgmtKeyCustomKey" placeholder="Trống = tự sinh" style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:8px;font-size:13px;width:160px;text-transform:uppercase;" />
           </div>
           <div>
-            <label for="mgmtKeyMaxUses" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;" title="Số lượt dùng tối đa trên toàn server. Mỗi user chỉ được dùng 1 lần!">LƯỢT DÙNG:</label>
-            <input type="number" id="mgmtKeyMaxUses" value="1" min="0" max="10000" title="1 = Key cá nhân, n = Giftcode nhiều người nhập, 0 = Không giới hạn" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:75px;" />
+            <label for="mgmtKeyMaxUses" style="font-size:11.5px;color:var(--text-secondary);display:block;margin-bottom:4px;font-weight:500;" title="Số lượt dùng tối đa trên toàn server. Mỗi user chỉ được dùng 1 lần">Lượt dùng</label>
+            <input type="number" id="mgmtKeyMaxUses" value="1" min="0" max="10000" title="1 = Key cá nhân, n = Giftcode nhiều người nhập, 0 = Không giới hạn" style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:8px;font-size:13px;width:75px;" />
           </div>
           <div>
-            <label for="mgmtKeyValidDays" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">HẠN ÁP DỤNG:</label>
-            <select id="mgmtKeyValidDays" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;">
+            <label for="mgmtKeyValidDays" style="font-size:11.5px;color:var(--text-secondary);display:block;margin-bottom:4px;font-weight:500;">Hạn áp dụng</label>
+            <select id="mgmtKeyValidDays" style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:8px;font-size:13px;">
               <option value="0" selected>Vô thời hạn</option>
               <option value="1">Trong 1 Ngày</option>
               <option value="3">Trong 3 Ngày</option>
@@ -148,14 +144,14 @@
             </select>
           </div>
           <div>
-            <label for="mgmtKeyBotCount" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;" title="Số lượng bot tối đa cấp độc quyền cho tài khoản sử dụng key này (mặc định 1 bot)">SỐ BOT:</label>
-            <input type="number" id="mgmtKeyBotCount" value="1" min="1" max="50" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:60px;" />
+            <label for="mgmtKeyBotCount" style="font-size:11.5px;color:var(--text-secondary);display:block;margin-bottom:4px;font-weight:500;" title="Số lượng bot tối đa cấp độc quyền cho tài khoản sử dụng key này">Số bot</label>
+            <input type="number" id="mgmtKeyBotCount" value="1" min="1" max="50" style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:8px;font-size:13px;width:64px;" />
           </div>
           <div>
-            <label for="mgmtKeyCount" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">SỐ KEY:</label>
-            <input type="number" id="mgmtKeyCount" value="1" min="1" max="50" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:60px;" />
+            <label for="mgmtKeyCount" style="font-size:11.5px;color:var(--text-secondary);display:block;margin-bottom:4px;font-weight:500;">Số lượng</label>
+            <input type="number" id="mgmtKeyCount" value="1" min="1" max="50" style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:8px;font-size:13px;width:64px;" />
           </div>
-          <button type="button" class="primary" onclick="submitCreateKeysFromMgmt()" style="padding:9px 18px;font-weight:750;">+ Phát Hành Mã</button>
+          <button type="button" class="primary" onclick="submitCreateKeysFromMgmt()" style="padding:9px 18px;font-weight:600;">＋ Phát hành mã</button>
         </div>
       </div>
 
@@ -163,12 +159,12 @@
         <table class="user-table">
           <thead>
             <tr>
-              <th>MÃ KEY / GIFTCODE</th>
-              <th>GÓI THUÊ</th>
-              <th>TRẠNG THÁI &amp; LƯỢT DÙNG</th>
-              <th>NGƯỜI KÍCH HOẠT</th>
-              <th>HẠN ÁP DỤNG</th>
-              <th style="text-align:right;">THAO TÁC</th>
+              <th>Mã Key / Giftcode</th>
+              <th>Gói thuê</th>
+              <th>Trạng thái &amp; lượt dùng</th>
+              <th>Người kích hoạt</th>
+              <th>Hạn áp dụng</th>
+              <th style="text-align:right;">Thao tác</th>
             </tr>
           </thead>
           <tbody id="keysFullTableBody">
@@ -178,22 +174,22 @@
       </div>
     </div>
 
-    <!-- SUB-PANEL 3: WHITELIST IP (Anti-Bot Multi-Account Exemption) -->
+    <!-- SUB-PANEL 3: WHITELIST IP -->
     <div id="subPanelWhitelist" class="sub-panel hidden" role="tabpanel" aria-labelledby="subTabWhitelist">
-      <div class="mgmt-filter-bar" style="background:rgba(15,23,42,0.6);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:16px;">
-        <div style="font-size:12.5px;color:var(--text);margin-bottom:10px;">
-          🛡️ <strong>Danh sách IP Ngoại lệ (Whitelist):</strong> Các địa chỉ IP trong danh sách này được phép đăng ký không giới hạn số lượng tài khoản (bỏ qua giới hạn tối đa 2 acc/IP). Thích hợp cho phòng máy Net, bạn bè, máy chủ nội bộ hoặc dịch vụ KBot.
+      <div class="mgmt-filter-bar" style="padding:14px;margin-bottom:16px;">
+        <div style="font-size:12.5px;color:var(--text-secondary);margin-bottom:10px;width:100%;">
+          <strong style="color:var(--text-primary);">Danh sách IP ngoại lệ (Whitelist):</strong> Các địa chỉ IP tại đây được đăng ký không giới hạn số lượng tài khoản (bỏ qua giới hạn 2 tài khoản/IP).
         </div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;width:100%;">
           <div style="flex:1;min-width:180px;">
-            <label for="newWhitelistIp" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">ĐỊA CHỈ IP:</label>
-            <input type="text" id="newWhitelistIp" placeholder="VD: 103.21.244.2 hoặc 192.168.1.1" style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:100%;box-sizing:border-box;" />
+            <label for="newWhitelistIp" style="font-size:11.5px;color:var(--text-secondary);display:block;margin-bottom:4px;font-weight:500;">Địa chỉ IP</label>
+            <input type="text" id="newWhitelistIp" placeholder="VD: 103.21.244.2 hoặc 192.168.1.1" style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:8px;font-size:13px;width:100%;box-sizing:border-box;" />
           </div>
           <div style="flex:2;min-width:220px;">
-            <label for="newWhitelistReason" style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;font-weight:700;">LÝ DO / GHI CHÚ:</label>
-            <input type="text" id="newWhitelistReason" placeholder="VD: KBot Service Host, VIP Net Cafe..." style="background:var(--bg);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;width:100%;box-sizing:border-box;" />
+            <label for="newWhitelistReason" style="font-size:11.5px;color:var(--text-secondary);display:block;margin-bottom:4px;font-weight:500;">Lý do / Ghi chú</label>
+            <input type="text" id="newWhitelistReason" placeholder="VD: KBot Service Host, Phòng máy..." style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:8px;font-size:13px;width:100%;box-sizing:border-box;" />
           </div>
-          <button type="button" class="primary" onclick="submitAddIpWhitelist()" style="padding:9px 18px;font-weight:750;">+ Thêm Vào Whitelist</button>
+          <button type="button" class="primary" onclick="submitAddIpWhitelist()" style="padding:9px 18px;font-weight:600;">＋ Thêm vào Whitelist</button>
         </div>
       </div>
 
@@ -201,11 +197,11 @@
         <table class="user-table">
           <thead>
             <tr>
-              <th style="min-width:160px;">ĐỊA CHỈ IP</th>
-              <th style="min-width:240px;">LÝ DO / GHI CHÚ</th>
-              <th style="min-width:120px;">NGƯỜI THÊM</th>
-              <th style="min-width:160px;">THỜI GIAN TẠO</th>
-              <th style="min-width:100px;text-align:right;">THAO TÁC</th>
+              <th style="min-width:160px;">Địa chỉ IP</th>
+              <th style="min-width:240px;">Lý do / Ghi chú</th>
+              <th style="min-width:120px;">Người thêm</th>
+              <th style="min-width:160px;">Thời gian tạo</th>
+              <th style="min-width:100px;text-align:right;">Thao tác</th>
             </tr>
           </thead>
           <tbody id="whitelistFullTableBody">
@@ -222,19 +218,18 @@
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
         <button type="button" class="small" onclick="navigateTo('dashboard')">← Về Dashboard</button>
         <div>
-          <h2 class="full-page-title">📋 Nhật Ký Hoạt Động</h2>
-          <div class="full-page-subtitle">Theo dõi thao tác người dùng, thay đổi cấu hình hệ thống, tài khoản và vận hành bot theo thời gian thực.</div>
+          <h2 class="full-page-title">Nhật ký hoạt động (Audit)</h2>
+          <div class="full-page-subtitle">Theo dõi thao tác người dùng, thay đổi cấu hình hệ thống, tài khoản và vận hành bot theo thời gian thực</div>
         </div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-        <button type="button" class="small" onclick="exportAuditLogs('csv')">📥 Xuất CSV</button>
-        <button type="button" class="small" onclick="exportAuditLogs('jsonl')">📥 Xuất JSONL</button>
-        <button type="button" class="small danger" onclick="clearAllAuditLogs()">🗑 Xóa nhật ký</button>
+        <button type="button" class="small" onclick="exportAuditLogs('csv')">Xuất CSV</button>
+        <button type="button" class="small" onclick="exportAuditLogs('jsonl')">Xuất JSONL</button>
+        <button type="button" class="small danger" onclick="clearAllAuditLogs()">Xóa nhật ký</button>
         <button type="button" class="small" onclick="refreshAuditLogs(1)">↻ Làm mới</button>
       </div>
     </div>
 
-    <!-- TABS PHÂN LOẠI NHẬT KÝ -->
     <div class="audit-type-tabs" role="tablist" aria-label="Phân loại nhật ký hoạt động">
       <button type="button" role="tab" aria-selected="true" id="auditTabSystem" class="audit-tab-btn active" onclick="switchAuditLogType('SYSTEM')">
         Hệ thống &amp; Tài khoản
@@ -247,10 +242,9 @@
       </button>
     </div>
 
-    <!-- FILTER TOOLBAR -->
     <div class="audit-toolbar">
       <div class="audit-search-wrap">
-        <input type="search" id="auditLogSearchInput" aria-label="Tìm nhật ký theo từ khóa, chi tiết, IP, user" placeholder="Tìm theo hành động, user, IP hoặc chi tiết..." class="search-box audit-search-input" oninput="debounceAuditFilter()">
+        <input type="search" id="auditLogSearchInput" aria-label="Tìm nhật ký theo từ khóa, chi tiết, IP, user" placeholder="Tìm theo hành động, user, IP hoặc chi tiết" class="search-box audit-search-input" oninput="debounceAuditFilter()">
       </div>
       <div class="audit-select-wrap">
         <select id="auditLogCategoryFilter" aria-label="Lọc theo danh mục nhật ký" class="audit-select" onchange="refreshAuditLogs(1)">
@@ -285,7 +279,6 @@
       </div>
     </div>
 
-    <!-- TABLE WRAP -->
     <div class="user-table-wrap audit-table-wrap" tabindex="0" role="region" aria-label="Bảng nhật ký hoạt động Audit">
       <table class="user-table audit-table">
         <thead>
@@ -304,7 +297,6 @@
       </table>
     </div>
 
-    <!-- PAGINATION FOOTER -->
     <div class="modal-actions audit-pagination">
       <div id="auditLogPaginationInfo" class="audit-pagination-info">Tổng cộng: 0 bản ghi</div>
       <div style="display:flex;align-items:center;gap:6px;">
@@ -321,28 +313,28 @@
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
         <button type="button" class="small" onclick="navigateTo('dashboard')">← Về Dashboard</button>
         <div>
-          <h2 class="full-page-title">💾 Quản Lý Bản Sao Lưu Supabase</h2>
-          <div class="full-page-subtitle">Snapshot lưu trong Supabase, giữ tối đa 30 bản gần nhất; tạo định kỳ và trước các thao tác quan trọng.</div>
+          <h2 class="full-page-title">Quản lý bản sao lưu Supabase</h2>
+          <div class="full-page-subtitle">Snapshot lưu trên Supabase, giữ tối đa 30 bản gần nhất và tự tạo trước các thao tác quan trọng</div>
         </div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-        <button type="button" class="primary small" onclick="triggerCreateBackup()">⚡ Tạo Sao Lưu Ngay</button>
+        <button type="button" class="primary small" onclick="triggerCreateBackup()">Tạo sao lưu ngay</button>
         <button type="button" class="small" onclick="refreshBackupList()">↻ Làm mới</button>
       </div>
     </div>
 
-    <div style="background:rgba(56,189,248,0.08);border:1px solid rgba(56,189,248,0.25);border-radius:10px;padding:12px 16px;margin-bottom:16px;font-size:12.5px;color:var(--cyan);line-height:1.5;">
-      ☁️ <strong>Nguồn dữ liệu chính thức là Supabase.</strong> Khôi phục sẽ tạo backup dự phòng trước, thay thế Users, Keys, Registry và Bot Settings theo snapshot. Audit Logs và Sessions không nằm trong backup nên được giữ nguyên.
+    <div style="background:var(--accent-soft);border:1px solid var(--border-strong);border-radius:10px;padding:12px 16px;margin-bottom:16px;font-size:12.5px;color:var(--text-secondary);line-height:1.5;">
+      <strong style="color:var(--text-primary);">Nguồn dữ liệu chính thức là Supabase.</strong> Khi khôi phục, hệ thống tự tạo một bản sao lưu dự phòng trước khi áp dụng Users, Keys, Registry và Bot Settings từ snapshot. Audit Logs và Sessions được giữ nguyên.
     </div>
 
     <div class="user-table-wrap" style="overflow-y:auto;max-height:60vh;">
       <table class="user-table" style="font-size:12px;">
         <thead>
           <tr>
-            <th>TÊN BẢN SAO LƯU</th>
-            <th>THỜI GIAN TẠO</th>
-            <th>DUNG LƯỢNG</th>
-            <th style="text-align:right;">THAO TÁC / TÌNH TRẠNG</th>
+            <th>Tên bản sao lưu</th>
+            <th>Thời gian tạo</th>
+            <th>Dung lượng</th>
+            <th style="text-align:right;">Thao tác / Tình trạng</th>
           </tr>
         </thead>
         <tbody id="backupTableBody">
@@ -351,7 +343,7 @@
       </table>
     </div>
 
-    <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.06);display:flex;justify-content:space-between;align-items:center;">
+    <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border-subtle);display:flex;justify-content:space-between;align-items:center;">
       <div id="backupTotalCount" style="color:var(--muted);font-size:12px;">Tổng cộng: 0 bản sao lưu (Tối đa 30)</div>
     </div>
   </section>
@@ -361,18 +353,17 @@
     <div class="footer-recent-wrap">
       <div class="footer-recent-left">
         <span class="footer-recent-tag">🚀 KBOT V12.1.1 COMMERCIAL ENTERPRISE</span>
-        <span class="footer-recent-desc">Nền Tảng Cho Thuê Bot AFK KingMC Thương Mại Số 1 • Pure Render Native • Zero Bandwidth Waste • 99.9% Uptime.</span>
+        <span class="footer-recent-desc">Nền tảng vận hành Bot AFK KingMC đám mây • Eco 1Hz Watchdog • Đồng bộ Discord thời gian thực</span>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
         <a href="https://discord.gg/SymBz2rs9j" target="_blank" rel="noopener noreferrer" class="footer-discord-btn" title="Tham gia máy chủ Discord hỗ trợ KingMC">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994.021-.041.001-.09-.041-.106a13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.929 1.793 8.18 1.793 12.061 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.894.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.028zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
           Discord
         </a>
-        <button class="footer-changelog-btn" onclick="openChangelogModal()">📜 Xem Lịch Sử Cập Nhật (V1.0 - V12.1.1)</button>
+        <button class="footer-changelog-btn" onclick="openChangelogModal()">Lịch sử cập nhật (V1.0 – V12.1.1)</button>
       </div>
     </div>
-    <div class="footer-copy">© 2026 KBOT — Hệ Thống Cho Thuê Bot AFK KingMC Thương Mại Cao Cấp. All rights reserved.</div>
+    <div class="footer-copy">© 2026 KBOT Manager — Hệ thống quản lý Bot Minecraft KingMC</div>
   </div>
   </div><!-- /.app-main-column -->
 </div>
-

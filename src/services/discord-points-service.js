@@ -110,6 +110,9 @@ class DiscordPointsService {
     this.revision = 0;
     this.flushTimer = null;
     this.loaded = false;
+    this._localDirtyKeys = new Set();
+    this._lastSyncMs = 0;
+    this._lastRemoteUpdatedAt = null;
   }
 
   _getGuildMap(guildId, create = false) {
@@ -139,6 +142,7 @@ class DiscordPointsService {
   _hydrateSnapshot(payload) {
     this.guilds.clear();
     if (!payload || typeof payload !== 'object') return;
+    if (payload.updatedAt) this._lastRemoteUpdatedAt = String(payload.updatedAt);
     const rawGuilds = payload.guilds && typeof payload.guilds === 'object' ? payload.guilds : {};
     for (const [gId, users] of Object.entries(rawGuilds)) {
       if (!users || typeof users !== 'object') continue;
@@ -150,6 +154,71 @@ class DiscordPointsService {
       if (guildMap.size > 0) {
         this.guilds.set(String(gId), guildMap);
       }
+    }
+  }
+
+  _mergeRemoteSnapshot(payload) {
+    if (!payload || typeof payload !== 'object') return;
+    const rawGuilds = payload.guilds && typeof payload.guilds === 'object' ? payload.guilds : {};
+    for (const [gId, users] of Object.entries(rawGuilds)) {
+      if (!users || typeof users !== 'object') continue;
+      const guildMap = this._getGuildMap(gId, true);
+      for (const [uId, rawRec] of Object.entries(users)) {
+        if (!uId || !rawRec || typeof rawRec !== 'object') continue;
+        const cleanUserId = String(uId);
+        const compositeKey = `${gId}:${cleanUserId}`;
+        const remoteRec = normalizeRecord(cleanUserId, rawRec);
+        const localRec = guildMap.get(cleanUserId);
+        if (!localRec) {
+          if (!this._localDirtyKeys.has(compositeKey)) {
+            guildMap.set(cleanUserId, remoteRec);
+          }
+          continue;
+        }
+        if (this._localDirtyKeys.has(compositeKey)) {
+          const localTs = localRec.updatedAt ? Date.parse(localRec.updatedAt) : 0;
+          const remoteTs = remoteRec.updatedAt ? Date.parse(remoteRec.updatedAt) : 0;
+          if (remoteTs > localTs && (!this._lastRemoteUpdatedAt || remoteRec.updatedAt > this._lastRemoteUpdatedAt)) {
+            guildMap.set(cleanUserId, remoteRec);
+          }
+          continue;
+        }
+        const localTs = localRec.updatedAt ? Date.parse(localRec.updatedAt) : 0;
+        const remoteTs = remoteRec.updatedAt ? Date.parse(remoteRec.updatedAt) : 0;
+        if (remoteTs >= localTs) {
+          guildMap.set(cleanUserId, remoteRec);
+        }
+      }
+    }
+    if (payload.updatedAt) this._lastRemoteUpdatedAt = String(payload.updatedAt);
+    this._lastSyncMs = this.nowFn();
+  }
+
+  async _refreshIfStale({ force = false } = {}) {
+    if (!this.store || typeof this.store.getSetting !== 'function') return false;
+    const nowMs = this.nowFn();
+    if (!force && (this.dirty || (nowMs - this._lastSyncMs) < 5000)) return false;
+    try {
+      const remote = await this.store.getSetting(SETTING_KEY, { bypassCache: true });
+      if (remote && typeof remote === 'object') {
+        this._mergeRemoteSnapshot(remote);
+      } else {
+        this._lastSyncMs = nowMs;
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  _markDirty({ immediate = false, guildId = null, userId = null } = {}) {
+    this.dirty = true;
+    this.revision += 1;
+    if (guildId && userId) {
+      this._localDirtyKeys.add(`${guildId}:${userId}`);
+    }
+    if (!immediate) {
+      this.scheduleFlush();
     }
   }
 
@@ -188,18 +257,12 @@ class DiscordPointsService {
       if (raw) {
         this._hydrateSnapshot(raw);
       }
+      this._localDirtyKeys.clear();
+      this._lastSyncMs = this.nowFn();
       this.loaded = true;
       this.dirty = false;
       return true;
     });
-  }
-
-  _markDirty({ immediate = false } = {}) {
-    this.dirty = true;
-    this.revision += 1;
-    if (!immediate) {
-      this.scheduleFlush();
-    }
   }
 
   scheduleFlush() {
@@ -218,8 +281,14 @@ class DiscordPointsService {
     return this.lock.run('__persist__', async () => {
       if (!this.dirty && !force) return false;
       const targetRev = this.revision;
-      const snapshot = this._serializeSnapshot();
       try {
+        if (this.store && typeof this.store.getSetting === 'function') {
+          const remote = await Promise.resolve(this.store.getSetting(SETTING_KEY, { bypassCache: true })).catch(() => null);
+          if (remote && typeof remote === 'object') {
+            this._mergeRemoteSnapshot(remote);
+          }
+        }
+        const snapshot = this._serializeSnapshot();
         if (this.store && typeof this.store.setSetting === 'function') {
           await this.store.setSetting(SETTING_KEY, snapshot);
         } else if (this.localFilePath) {
@@ -228,8 +297,11 @@ class DiscordPointsService {
           await fs.promises.writeFile(tmpPath, JSON.stringify(snapshot, null, 2), 'utf8');
           await fs.promises.rename(tmpPath, this.localFilePath);
         }
+        this._lastSyncMs = this.nowFn();
+        this._lastRemoteUpdatedAt = snapshot.updatedAt;
         if (this.revision === targetRev) {
           this.dirty = false;
+          this._localDirtyKeys.clear();
         } else {
           this.scheduleFlush();
         }
@@ -249,6 +321,7 @@ class DiscordPointsService {
   }
 
   async checkin({ guildId, userId, username = '', declineRestore = false }) {
+    await this._refreshIfStale();
     return this.lock.run(`guild:${guildId}`, async () => {
       const guildMap = this._getGuildMap(guildId, true);
       const record = this._getOrCreateRecord(guildMap, userId, username);
@@ -308,7 +381,7 @@ class DiscordPointsService {
       record.lastCheckinDate = todayKey;
       record.updatedAt = new Date(nowMs).toISOString();
 
-      this._markDirty({ immediate: true });
+      this._markDirty({ immediate: true, guildId, userId });
       await this.flush();
 
       return {
@@ -329,6 +402,7 @@ class DiscordPointsService {
   }
 
   async restoreCheckin({ guildId, userId, username = '' }) {
+    await this._refreshIfStale();
     return this.lock.run(`guild:${guildId}`, async () => {
       const guildMap = this._getGuildMap(guildId, true);
       const record = this._getOrCreateRecord(guildMap, userId, username);
@@ -382,7 +456,7 @@ class DiscordPointsService {
       record.lastCheckinDate = todayKey;
       record.updatedAt = new Date(nowMs).toISOString();
 
-      this._markDirty({ immediate: true });
+      this._markDirty({ immediate: true, guildId, userId });
       await this.flush();
 
       return {
@@ -400,13 +474,14 @@ class DiscordPointsService {
   }
 
   async recordMessage({ guildId, userId, username = '' }) {
+    await this._refreshIfStale();
     return this.lock.run(`guild:${guildId}`, async () => {
       const guildMap = this._getGuildMap(guildId, true);
       const record = this._getOrCreateRecord(guildMap, userId, username);
       record.points = toNonNegInt(record.points, 0) + MESSAGE_POINTS;
       record.totalMessages += 1;
       record.updatedAt = new Date(this.nowFn()).toISOString();
-      this._markDirty({ immediate: false });
+      this._markDirty({ immediate: false, guildId, userId });
       return {
         ok: true,
         points: record.points,
@@ -451,6 +526,7 @@ class DiscordPointsService {
   }
 
   async getProfile({ guildId, userId, username = '' }) {
+    await this._refreshIfStale();
     const gMap = this._getGuildMap(guildId, false);
     const todayKey = getVietnamDateKey(this.nowFn());
     const base = gMap?.get(String(userId)) || normalizeRecord(userId, { username });
@@ -497,6 +573,7 @@ class DiscordPointsService {
   }
 
   async getLeaderboard({ guildId, type = 'diem', limit = 10, viewerUserId = null }) {
+    await this._refreshIfStale();
     const safeType = ['diem', 'chuoi', 'tinnhan'].includes(type) ? type : 'diem';
     const safeLimit = Math.max(1, Math.min(25, toNonNegInt(limit, 10) || 10));
     const gMap = this._getGuildMap(guildId, false);
@@ -556,6 +633,7 @@ class DiscordPointsService {
   }
 
   async adminAdjustPoints({ guildId, userId, username = '', mode = 'add', amount = 0 }) {
+    await this._refreshIfStale({ force: true });
     return this.lock.run(`guild:${guildId}`, async () => {
       const guildMap = this._getGuildMap(guildId, true);
       const record = this._getOrCreateRecord(guildMap, userId, username);
@@ -573,7 +651,7 @@ class DiscordPointsService {
       }
 
       record.updatedAt = new Date(this.nowFn()).toISOString();
-      this._markDirty({ immediate: true });
+      this._markDirty({ immediate: true, guildId, userId });
       await this.flush();
 
       return {
@@ -589,6 +667,7 @@ class DiscordPointsService {
   }
 
   async adminResetUser({ guildId, userId, username = '', scope = 'diem' }) {
+    await this._refreshIfStale({ force: true });
     return this.lock.run(`guild:${guildId}`, async () => {
       const guildMap = this._getGuildMap(guildId, true);
       const record = this._getOrCreateRecord(guildMap, userId, username);
@@ -604,7 +683,7 @@ class DiscordPointsService {
         record.lastCheckinDate = null;
       }
       record.updatedAt = new Date(this.nowFn()).toISOString();
-      this._markDirty({ immediate: true });
+      this._markDirty({ immediate: true, guildId, userId });
       await this.flush();
 
       return {

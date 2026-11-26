@@ -1,6 +1,6 @@
 'use strict';
 
-const { MessageFlags } = require('discord.js');
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
 const AsyncKeyLock = require('../../services/async-key-lock');
 const {
   renderBotsList,
@@ -10,8 +10,14 @@ const {
   renderAdminBots,
   renderWispbyteList,
   renderWispbyteCheckResult,
+  renderUnauthenticatedPanel,
+  renderEntitlementBlockedPanel,
+  renderAlreadyLoggedInPanel,
+  renderLoggedOutPanel,
+  buildLoginModal,
   getWorkerState,
-  embed
+  embed,
+  button
 } = require('../panels/renderer');
 const {
   verifyUserPassword,
@@ -274,6 +280,14 @@ async function removeMemberRole(interaction, roleId) {
       member = await interaction.guild.members.fetch(interaction.user?.id).catch(() => null);
     }
     if (member?.roles?.remove) {
+      const inspectableRoles = Array.isArray(member?.roles)
+        ? member.roles.map(String)
+        : (member?.roles?.cache
+          ? [...member.roles.cache.keys()].map(String)
+          : (Array.isArray(member?._roles) ? member._roles.map(String) : null));
+      if (inspectableRoles && !inspectableRoles.includes(String(roleId))) {
+        return false;
+      }
       await member.roles.remove(roleId);
       return true;
     }
@@ -378,6 +392,180 @@ async function resolveLinkedUser(interaction, services) {
   return resolved;
 }
 
+function resolvePublicBaseUrl(services) {
+  const { DEFAULT_PUBLIC_MANAGER_URL } = require('../../config/host-runtime');
+  const raw = String(
+    services?.config?.publicBaseUrl ||
+    services?.managerRuntimeSettings?.snapshot?.()?.publicBaseUrl ||
+    services?.managerRuntimeSettings?.getActiveManagerUrls?.()?.[0] ||
+    DEFAULT_PUBLIC_MANAGER_URL
+  ).trim();
+  return raw.startsWith('http') ? raw : '';
+}
+
+function isUserAccountEntitled(user, services) {
+  if (!user) return false;
+  if (String(user.role || '').toLowerCase() === 'admin') return true;
+  const normalizedUser = { ...user, expiresAt: user.expiresAt || user.expiresAtRental || null };
+  if (services?.accessControl?.isEntitled) {
+    return Boolean(services.accessControl.isEntitled(normalizedUser));
+  }
+  const statusStr = String(normalizedUser.status || 'active').toLowerCase();
+  if (statusStr === 'disabled' || statusStr === 'expired') return false;
+  if (normalizedUser.isPermanent === true) return true;
+  const expiryMs = normalizedUser.expiresAt ? Date.parse(normalizedUser.expiresAt) : NaN;
+  return Number.isFinite(expiryMs) && expiryMs > Date.now();
+}
+
+async function syncDiscordMemberRolesForUser(interaction, user, services) {
+  if (!interaction?.guild || !user || !services) return '';
+  const { adminRoleId, userRoleId } = await getEffectiveRoleIds(services, interaction);
+  if (!adminRoleId && !userRoleId) return '';
+
+  const memberRoles = Array.isArray(interaction?.member?.roles)
+    ? interaction.member.roles.map(String)
+    : interaction?.member?.roles?.cache
+      ? [...interaction.member.roles.cache.keys()].map(String)
+      : (Array.isArray(interaction?.member?._roles) ? interaction.member._roles.map(String) : []);
+
+  const isAdmin = String(user.role || '').toLowerCase() === 'admin';
+  if (isAdmin) {
+    const configuredAdminUserId = String(services?.config?.adminUserId || services?.accessControl?.adminUserId || '').trim();
+    const isCfgAdmin = Boolean(configuredAdminUserId && configuredAdminUserId === String(interaction.user?.id || ''));
+    if (adminRoleId && (!configuredAdminUserId || isCfgAdmin) && !memberRoles.includes(String(adminRoleId))) {
+      const added = await addMemberRole(interaction, adminRoleId);
+      if (userRoleId && !memberRoles.includes(String(userRoleId))) {
+        await addMemberRole(interaction, userRoleId).catch(() => null);
+      }
+      if (added) return `• **Role Discord:** <@&${adminRoleId}> *(Đã tự động đồng bộ lại)*`;
+    }
+    return adminRoleId && memberRoles.includes(String(adminRoleId))
+      ? `• **Role Discord:** <@&${adminRoleId}>`
+      : '';
+  }
+
+  if (!userRoleId) return '';
+  const entitled = isUserAccountEntitled(user, services);
+  const hasUserRole = memberRoles.includes(String(userRoleId));
+
+  if (entitled && !hasUserRole) {
+    const added = await addMemberRole(interaction, userRoleId);
+    return added
+      ? `• **Role Discord:** <@&${userRoleId}> *(Đã tự động cấp lại)*`
+      : `• **Role Discord:** <@&${userRoleId}> *(Bot chưa đủ quyền gán role)*`;
+  }
+  if (!entitled && hasUserRole) {
+    const removed = await removeMemberRole(interaction, userRoleId);
+    if (removed) {
+      return `• **Role Discord:** *(Đã thu hồi <@&${userRoleId}> do gói hết hạn hoặc bị khóa)*`;
+    }
+  }
+  if (entitled && hasUserRole) {
+    return `• **Role Discord:** <@&${userRoleId}>`;
+  }
+  return '';
+}
+
+async function resolveActiveDiscordAccountLink(discordUserId, services) {
+  const uid = String(discordUserId || '').trim();
+  if (!uid || !services?.accessStore) return null;
+
+  if (typeof services.accessStore.getUserByDiscordId === 'function') {
+    const linkedUser = await services.accessStore.getUserByDiscordId(uid, { bypassCache: true });
+    if (linkedUser && linkedUser.username) {
+      return linkedUser;
+    }
+  }
+
+  if (typeof services.accessStore.getDiscordLink === 'function') {
+    const rawLink = await services.accessStore.getDiscordLink(uid);
+    if (rawLink && rawLink.username) {
+      const uname = String(rawLink.username).trim();
+      if (uname.toLowerCase() === 'admin') {
+        return {
+          id: 'admin',
+          userId: 'admin',
+          username: 'admin',
+          role: 'admin',
+          status: 'active',
+          isPermanent: true,
+          discordUserId: uid
+        };
+      }
+      if (typeof services.accessStore.getUser === 'function') {
+        const user = await services.accessStore.getUser(uname, { bypassCache: true });
+        if (user) return user;
+        // Orphaned link row whose Web user was deleted -> clean up automatically so /login is not blocked
+        if (typeof services.accessStore.unlinkDiscord === 'function') {
+          await services.accessStore.unlinkDiscord(uid).catch(() => null);
+        }
+        return null;
+      }
+      return {
+        userId: rawLink.manager_user_id || uname,
+        username: uname,
+        role: 'user',
+        status: 'active',
+        discordUserId: uid
+      };
+    }
+  }
+
+  return null;
+}
+
+async function performDiscordLogout(interaction, services) {
+  const discordUserId = String(interaction?.user?.id || '').trim();
+  if (interaction && typeof interaction === 'object') {
+    resolvedUserCache.delete(interaction);
+  }
+  const store = services?.accessStore;
+  const checkedExisting = Boolean(
+    store && (typeof store.getUserByDiscordId === 'function' || typeof store.getDiscordLink === 'function')
+  );
+  let existingUser = null;
+  if (checkedExisting && discordUserId) {
+    existingUser = await resolveActiveDiscordAccountLink(discordUserId, services).catch(() => null);
+  }
+
+  const wasLoggedIn = Boolean(existingUser);
+  const unlinkedUsername = existingUser?.username ? String(existingUser.username) : '';
+
+  if (discordUserId && typeof store?.unlinkDiscord === 'function' && (!checkedExisting || wasLoggedIn)) {
+    await store.unlinkDiscord(discordUserId);
+  }
+  if (discordUserId) {
+    try { require('./points-message-handler').clearMessagePointsLoginCache(discordUserId); } catch (_) {}
+  }
+
+  const removedRoles = [];
+  if (services && interaction) {
+    const { adminRoleId, userRoleId } = await getEffectiveRoleIds(services, interaction);
+    if (userRoleId) {
+      const ok = await removeMemberRole(interaction, userRoleId);
+      if (ok) removedRoles.push(`<@&${userRoleId}>`);
+    }
+    if (adminRoleId) {
+      const ok = await removeMemberRole(interaction, adminRoleId);
+      if (ok) removedRoles.push(`<@&${adminRoleId}>`);
+    }
+  }
+
+  if (!checkedExisting || wasLoggedIn || removedRoles.length > 0) {
+    await store?.addAudit?.({
+      action: 'DISCORD_LOGOUT',
+      actorId: discordUserId,
+      targetId: existingUser?.userId || existingUser?.id || discordUserId,
+      details: {
+        guildId: interaction?.guildId || null,
+        ...(unlinkedUsername ? { username: unlinkedUsername } : {})
+      }
+    }).catch(() => null);
+  }
+
+  return { checkedExisting, wasLoggedIn, unlinkedUsername, removedRoles };
+}
+
 // Strict ownership check (Backend Authorization Guard)
 function checkBotOwnership(user, workerId, worker = null, allWorkers = null) {
   if (!user || !workerId) return false;
@@ -406,7 +594,7 @@ function checkBotOwnership(user, workerId, worker = null, allWorkers = null) {
 
 // Get user's accessible bots
 async function getUserBots(user, services) {
-  if (!user) return [];
+  if (!user || typeof services?.registry?.list !== 'function') return [];
   const allWorkers = await services.registry.list();
   if (user.role === 'admin') return allWorkers;
 
@@ -448,6 +636,17 @@ async function handlePanelInteraction(interaction, services) {
     if (interaction.deferred || interaction.replied) return;
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
+    const alreadyLinked = await resolveActiveDiscordAccountLink(discordUserId, services).catch(() => null);
+    if (alreadyLinked) {
+      const roleSyncNote = await syncDiscordMemberRolesForUser(interaction, alreadyLinked, services).catch(() => '');
+      return safeReply(interaction, renderAlreadyLoggedInPanel({
+        user: alreadyLinked,
+        discordUserId,
+        roleSyncNote,
+        publicBaseUrl: resolvePublicBaseUrl(services)
+      }));
+    }
+
     const rate = checkLoginRateLimit(discordUserId);
     if (!rate.allowed) {
       await services?.accessStore?.addAudit?.({
@@ -486,11 +685,37 @@ async function handlePanelInteraction(interaction, services) {
     // 1. Check Admin Login
     const adminUsername = String(services.config.adminUsername || 'admin').trim();
     if (cleanUsername.toLowerCase() === adminUsername.toLowerCase()) {
-      const storedAdminPass = services.registry.getAdminPassword() || services.config.adminPassword;
+      let storedAdminPass = services.registry?.getAdminPassword?.() || '';
+      if (typeof services?.accessStore?.getSetting === 'function') {
+        try {
+          const remoteCreds = await services.accessStore.getSetting('admin_credentials', { bypassCache: true });
+          if (remoteCreds?.passwordHash && typeof remoteCreds.passwordHash === 'string') {
+            storedAdminPass = remoteCreds.passwordHash;
+            if (typeof services.registry?.setAdminPassword === 'function') {
+              services.registry.setAdminPassword(storedAdminPass);
+            }
+          }
+        } catch (_) {}
+      }
+      if (!storedAdminPass) {
+        storedAdminPass = services.config.adminPassword;
+      }
       if (storedAdminPass && await verifyAdminPasswordAsync(cleanPassword, storedAdminPass)) {
         resetLoginRateLimit(discordUserId);
         resetUsernameRateLimit(cleanUsername);
-        await services.accessStore.linkDiscord(discordUserId, 'admin', 'admin');
+        try {
+          await services.accessStore.linkDiscord(discordUserId, 'admin', 'admin');
+        } catch (linkErr) {
+          return safeReply(interaction, {
+            embeds: [
+              embed(
+                '⚠️ KHÔNG THỂ LIÊN KẾT TÀI KHOẢN',
+                linkErr?.message || 'Tài khoản Quản trị viên này hiện đã được liên kết với một tài khoản Discord khác.',
+                0xf59e0b
+              )
+            ]
+          });
+        }
         try { require('./points-message-handler').clearMessagePointsLoginCache(discordUserId); } catch (_) {}
         await services.accessStore?.addAudit?.({
           action: 'DISCORD_LOGIN_SUCCESS',
@@ -509,6 +734,24 @@ async function handlePanelInteraction(interaction, services) {
             : `\n• **Role Discord:** <@&${adminRoleId}> *(Bot chưa đủ quyền gán role)*`;
         }
 
+        const publicBaseUrl = resolvePublicBaseUrl(services);
+        const adminQuickRow = new ActionRowBuilder().addComponents(
+          button('Mở danh sách Bot', 'bots:list', ButtonStyle.Primary, false, '🤖'),
+          button('Tổng quan Admin', 'admin:status', ButtonStyle.Secondary, false, '🛡️')
+        );
+        if (publicBaseUrl) {
+          adminQuickRow.addComponents(
+            new ButtonBuilder()
+              .setLabel('Web Dashboard')
+              .setStyle(ButtonStyle.Link)
+              .setURL(publicBaseUrl)
+              .setEmoji('🌐')
+          );
+        }
+        adminQuickRow.addComponents(
+          button('Đăng xuất', `login:logout:${discordUserId}`, ButtonStyle.Danger, false, '🚪')
+        );
+
         return safeReply(interaction, {
           embeds: [
             embed(
@@ -516,10 +759,11 @@ async function handlePanelInteraction(interaction, services) {
               `Đã liên kết Discord với tài khoản **Quản trị viên (ADMIN)**.\n\n` +
               `• **Tài khoản:** \`${cleanUsername}\`\n` +
               `• **Phân quyền:** \`Enterprise Administrator\`${roleInfo}\n\n` +
-              `Dùng lệnh \`/bots\` để quản lý hoặc \`/check\` để xem tình trạng hệ thống.`,
+              `👉 Chọn nhanh thao tác bên dưới hoặc dùng \`/bots\`, \`/check\`.`,
               0x22c55e
             )
-          ]
+          ],
+          components: [adminQuickRow]
         });
       }
       recordUsernameFailedAttempt(cleanUsername);
@@ -591,7 +835,19 @@ async function handlePanelInteraction(interaction, services) {
     resetLoginRateLimit(discordUserId);
     resetUsernameRateLimit(cleanUsername);
     const canonicalUserId = user.id || user.userId || user.username;
-    await services.accessStore.linkDiscord(discordUserId, user.username, canonicalUserId);
+    try {
+      await services.accessStore.linkDiscord(discordUserId, user.username, canonicalUserId);
+    } catch (linkErr) {
+      return safeReply(interaction, {
+        embeds: [
+          embed(
+            '⚠️ KHÔNG THỂ LIÊN KẾT TÀI KHOẢN',
+            linkErr?.message || 'Tài khoản Web này đã được liên kết với một tài khoản Discord khác. Vui lòng dùng `/logout` trên tài khoản Discord cũ hoặc liên hệ Admin hỗ trợ.',
+            0xf59e0b
+          )
+        ]
+      });
+    }
     try { require('./points-message-handler').clearMessagePointsLoginCache(discordUserId); } catch (_) {}
     await services.accessStore?.recordUserLogin?.(canonicalUserId, null).catch(() => null);
     await services.accessStore?.addAudit?.({
@@ -603,11 +859,7 @@ async function handlePanelInteraction(interaction, services) {
 
     // Never grant userRoleId to expired/unentitled users (DISCORD-03)
     const normalizedUser = { ...user, expiresAt: user.expiresAt || user.expiresAtRental || null };
-    const isUserEntitled = user.role === 'admin' || (
-      services?.accessControl?.isEntitled
-        ? services.accessControl.isEntitled(normalizedUser)
-        : (String(normalizedUser.status || 'active').toLowerCase() !== 'disabled' && (normalizedUser.isPermanent === true || (normalizedUser.expiresAt && new Date(normalizedUser.expiresAt).getTime() > Date.now())))
-    );
+    const isUserEntitled = isUserAccountEntitled(normalizedUser, services);
 
     const { adminRoleId, userRoleId } = await getEffectiveRoleIds(services);
     const targetRoleId = user.role === 'admin' ? (adminRoleId || userRoleId) : userRoleId;
@@ -621,6 +873,36 @@ async function handlePanelInteraction(interaction, services) {
       roleInfo = '\n• **Role Discord:** *(Không cấp — gói dịch vụ đã hết hạn hoặc chưa kích hoạt)*';
     }
 
+    const publicBaseUrl = resolvePublicBaseUrl(services);
+    const userQuickRow = new ActionRowBuilder();
+    if (isUserEntitled) {
+      userQuickRow.addComponents(
+        button('Mở danh sách Bot', 'bots:list', ButtonStyle.Primary, false, '🤖')
+      );
+    }
+    if (services?.discordPoints) {
+      userQuickRow.addComponents(
+        button('Điểm danh (+10đ)', `points:quick_checkin:${discordUserId}`, ButtonStyle.Success, false, '📅')
+      );
+    }
+    if (publicBaseUrl) {
+      userQuickRow.addComponents(
+        new ButtonBuilder()
+          .setLabel(isUserEntitled ? 'Web Dashboard' : 'Gia hạn trên Web')
+          .setStyle(ButtonStyle.Link)
+          .setURL(publicBaseUrl)
+          .setEmoji('🌐')
+      );
+    }
+    userQuickRow.addComponents(
+      button('Đăng xuất', `login:logout:${discordUserId}`, ButtonStyle.Danger, false, '🚪')
+    );
+
+    const rawExpiry = normalizedUser.expiresAt;
+    const expiryLabel = normalizedUser.isPermanent
+      ? 'Vĩnh viễn'
+      : (rawExpiry ? new Date(rawExpiry).toLocaleDateString('vi-VN') : '—');
+
     return safeReply(interaction, {
       embeds: [
         embed(
@@ -628,11 +910,14 @@ async function handlePanelInteraction(interaction, services) {
           `Đã liên kết tài khoản Discord <@${discordUserId}> với Web Manager.\n\n` +
           `• **Tài khoản Web:** **${user.username}**\n` +
           `• **Gói dịch vụ:** ${user.planName || 'Gói tiêu chuẩn'}\n` +
-          `• **Hạn sử dụng:** ${user.isPermanent ? 'Vĩnh viễn' : (user.expiresAt ? new Date(user.expiresAt).toLocaleDateString('vi-VN') : '—')}${roleInfo}\n\n` +
-          `👉 Sử dụng lệnh \`/bots\` để mở bảng điều khiển và theo dõi bot của bạn.`,
+          `• **Hạn sử dụng:** ${expiryLabel}${roleInfo}\n\n` +
+          (isUserEntitled
+            ? `👉 Bấm **Mở danh sách Bot** bên dưới (hoặc gõ \`/bots\`) để theo dõi và điều khiển bot ngay.`
+            : `👉 Gói bot hiện chưa còn hạn — bạn vẫn có thể tích điểm cộng đồng (\`/diemdanh\`, \`/bxh\`) hoặc gia hạn trên Web Manager.`),
           0x22c55e
         )
-      ]
+      ],
+      components: [userQuickRow]
     });
   }
 
@@ -789,7 +1074,7 @@ async function handlePanelInteraction(interaction, services) {
     const loggedInUser = await resolveLoggedInPointsUser(discordUserId, services);
     if (!loggedInUser) {
       return safeReply(interaction, {
-        ...renderLoginRequiredNotice(),
+        ...renderLoginRequiredNotice(discordUserId),
         flags: MessageFlags.Ephemeral
       });
     }
@@ -842,7 +1127,7 @@ async function handlePanelInteraction(interaction, services) {
     const loggedInUser = await resolveLoggedInPointsUser(discordUserId, services);
     if (!loggedInUser) {
       return safeReply(interaction, {
-        ...renderLoginRequiredNotice(),
+        ...renderLoginRequiredNotice(discordUserId),
         flags: MessageFlags.Ephemeral
       });
     }
@@ -906,11 +1191,146 @@ async function handlePanelInteraction(interaction, services) {
     return safeUpdate(interaction, renderCheckinResult({ user: interaction.user, result: res }));
   }
 
+  // 0D2. Discord Points 1-Click Quick Check-in Button (points:quick_checkin:<userId>)
+  if (customId.startsWith('points:quick_checkin:')) {
+    const ownerUserId = customId.split(':')[2] || '';
+    if (ownerUserId && String(discordUserId) !== String(ownerUserId)) {
+      return safeReply(interaction, {
+        content: '⛔ Chỉ chính bạn mới có thể sử dụng nút điểm danh nhanh này.',
+        flags: MessageFlags.Ephemeral
+      });
+    }
+    const { resolveLoggedInPointsUser } = require('../../services/discord-points-service');
+    const { renderLoginRequiredNotice, renderCheckinResult } = require('../panels/points-renderer');
+    const loggedInUser = await resolveLoggedInPointsUser(discordUserId, services);
+    if (!loggedInUser) {
+      return safeReply(interaction, {
+        ...renderLoginRequiredNotice(discordUserId),
+        flags: MessageFlags.Ephemeral
+      });
+    }
+    if (!services?.discordPoints) {
+      return safeReply(interaction, {
+        content: '❌ Hệ thống điểm tích lũy chưa được khởi tạo.',
+        flags: MessageFlags.Ephemeral
+      });
+    }
+    if (!checkCooldown(discordUserId, 800)) {
+      return safeDeferUpdate(interaction);
+    }
+    const displayName =
+      interaction.member?.displayName ||
+      interaction.user?.globalName ||
+      interaction.user?.username ||
+      loggedInUser.username ||
+      '';
+    const result = await services.discordPoints.checkin({
+      guildId: interaction.guildId,
+      userId: discordUserId,
+      username: displayName
+    });
+    return safeReply(interaction, {
+      ...renderCheckinResult({ user: interaction.user, result }),
+      flags: MessageFlags.Ephemeral
+    });
+  }
+
+  // 0E. Discord /login Logout & Re-login Buttons (Accessible to any linked user, even if expired/unroled)
+  if (customId.startsWith('login:logout:') || customId === 'login:logout') {
+    const ownerUserId = customId.includes(':') ? customId.split(':')[2] : '';
+    if (ownerUserId && String(discordUserId) !== String(ownerUserId)) {
+      return safeReply(interaction, {
+        content: '⛔ Chỉ chính bạn mới có thể bấm nút đăng xuất này.',
+        flags: MessageFlags.Ephemeral
+      });
+    }
+    if (!checkCooldown(discordUserId, 800)) {
+      return safeDeferUpdate(interaction);
+    }
+    await safeDeferUpdate(interaction);
+    const res = await performDiscordLogout(interaction, services);
+    if (res.checkedExisting && !res.wasLoggedIn && res.removedRoles.length === 0) {
+      return safeUpdate(interaction, {
+        embeds: [
+          embed(
+            'ℹ️ BẠN ĐÃ ĐĂNG XUẤT TRƯỚC ĐÓ',
+            'Tài khoản Discord của bạn hiện không còn liên kết với tài khoản Web Manager nào.\n\nBấm **Đăng nhập lại** bên dưới nếu bạn muốn liên kết tài khoản.',
+            0x0ea5e9
+          )
+        ],
+        components: renderLoggedOutPanel({
+          discordUserId,
+          includeReloginButton: true
+        }).components
+      });
+    }
+    return safeUpdate(
+      interaction,
+      renderLoggedOutPanel({
+        discordUserId,
+        unlinkedUsername: res.unlinkedUsername,
+        removedRoles: res.removedRoles,
+        includeReloginButton: true
+      })
+    );
+  }
+
+  if (customId.startsWith('login:prompt:') || customId === 'login:prompt') {
+    const ownerUserId = customId.includes(':') ? customId.split(':')[2] : '';
+    if (ownerUserId && String(discordUserId) !== String(ownerUserId)) {
+      return safeReply(interaction, {
+        content: '⛔ Chỉ chính bạn mới có thể sử dụng nút đăng nhập này.',
+        flags: MessageFlags.Ephemeral
+      });
+    }
+    let lookupTimer = null;
+    try {
+      const existingUser = await Promise.race([
+        resolveActiveDiscordAccountLink(discordUserId, services),
+        new Promise((resolve) => {
+          lookupTimer = setTimeout(() => resolve(null), 1500);
+          lookupTimer.unref?.();
+        })
+      ]);
+      if (existingUser) {
+        let syncTimer = null;
+        const roleSyncNote = await Promise.race([
+          syncDiscordMemberRolesForUser(interaction, existingUser, services).catch(() => ''),
+          new Promise((resolve) => {
+            syncTimer = setTimeout(() => resolve(''), 800);
+            syncTimer.unref?.();
+          })
+        ]).finally(() => {
+          if (syncTimer) clearTimeout(syncTimer);
+        });
+        return safeReply(interaction, {
+          ...renderAlreadyLoggedInPanel({
+            user: existingUser,
+            discordUserId,
+            roleSyncNote,
+            publicBaseUrl: resolvePublicBaseUrl(services)
+          }),
+          flags: MessageFlags.Ephemeral
+        });
+      }
+    } catch (_) {
+      // Proceed to modal
+    } finally {
+      if (lookupTimer) clearTimeout(lookupTimer);
+    }
+    return interaction.showModal(buildLoginModal());
+  }
+
   // Verify Discord role / authorization before interacting with panel controls (DISCORD-03)
   const authorizedRole = await hasAuthorizedRole(interaction, services);
   if (!authorizedRole) {
     return safeReply(interaction, {
-      embeds: [embed('⛔ KHÔNG CÓ QUYỀN', 'Bạn chưa có Role hoặc quyền truy cập bảng điều khiển. Vui lòng sử dụng `/login`.', 0xef4444)],
+      ...renderUnauthenticatedPanel({
+        discordUserId,
+        title: '⛔ KHÔNG CÓ QUYỀN TRUY CẬP',
+        reason: 'Bạn chưa có Role thành viên hoặc gói thuê bot chưa kích hoạt.\n\n👉 Bấm **Đăng nhập ngay** bên dưới (hoặc gõ `/login`) để kiểm tra tài khoản và nhận Role tự động.',
+        publicBaseUrl: resolvePublicBaseUrl(services)
+      }),
       flags: MessageFlags.Ephemeral
     });
   }
@@ -925,31 +1345,26 @@ async function handlePanelInteraction(interaction, services) {
   // Authenticate user
   const user = await resolveLinkedUser(interaction, services);
   if (!user) {
-    const errorEmbed = embed(
-      '⚠️ CHƯA ĐĂNG NHẬP',
-      'Bạn chưa liên kết tài khoản Discord với Web Manager.\n\nVui lòng sử dụng lệnh `/login` để đăng nhập bằng Username và Password.',
-      0xf59e0b
+    return safeUpdate(
+      interaction,
+      renderUnauthenticatedPanel({
+        discordUserId,
+        publicBaseUrl: resolvePublicBaseUrl(services)
+      })
     );
-    return safeUpdate(interaction, { embeds: [errorEmbed], components: [] });
   }
-
 
   if (user.role !== 'admin') {
     const normalizedUser = { ...user, expiresAt: user.expiresAt || user.expiresAtRental || null };
-    const isEntitled = services?.accessControl?.isEntitled
-      ? services.accessControl.isEntitled(normalizedUser)
-      : (String(normalizedUser.status || 'active').toLowerCase() !== 'disabled' && (normalizedUser.isPermanent === true || (normalizedUser.expiresAt && new Date(normalizedUser.expiresAt).getTime() > Date.now())));
-
-    if (!isEntitled) {
-      const isLocked = String(normalizedUser.status || 'active').toLowerCase() === 'disabled';
-      const title = isLocked ? '⛔ TÀI KHOẢN BỊ KHÓA' : '⛔ TÀI KHOẢN HẾT HẠN HOẶC BỊ KHÓA';
-      const desc = isLocked
-        ? 'Tài khoản của bạn đã bị vô hiệu hóa bởi Quản trị viên.'
-        : 'Tài khoản của bạn đã hết hạn thuê bot hoặc bị vô hiệu hóa. Vui lòng gia hạn trên Web Manager để tiếp tục sử dụng bot.';
-      return safeUpdate(interaction, {
-        embeds: [embed(title, desc, 0xef4444)],
-        components: []
-      });
+    if (!isUserAccountEntitled(normalizedUser, services)) {
+      return safeUpdate(
+        interaction,
+        renderEntitlementBlockedPanel({
+          user: normalizedUser,
+          discordUserId,
+          publicBaseUrl: resolvePublicBaseUrl(services)
+        })
+      );
     }
   }
 
@@ -1027,20 +1442,15 @@ async function handlePanelInteraction(interaction, services) {
       }
 
       const normalizedUser = { ...user, expiresAt: user.expiresAt || user.expiresAtRental || null };
-      const statusStr = String(normalizedUser.status || 'active').toLowerCase();
-      const expiryMs = normalizedUser.expiresAt ? Date.parse(normalizedUser.expiresAt) : NaN;
-      const isEntitled = services.accessControl?.isEntitled
-        ? services.accessControl.isEntitled(normalizedUser)
-        : (statusStr === 'active' && (normalizedUser.isPermanent === true || (Number.isFinite(expiryMs) && expiryMs > Date.now())));
-
-      if (!isEntitled) {
-        return safeUpdate(interaction, {
-          embeds: [embed(
-            '⛔ TÀI KHOẢN HẾT HẠN HOẶC BỊ KHÓA',
-            'Tài khoản của bạn đã hết hạn thuê bot hoặc bị vô hiệu hóa. Vui lòng gia hạn trên Web Manager để tiếp tục điều khiển bot.',
-            0xef4444
-          )]
-        });
+      if (!isUserAccountEntitled(normalizedUser, services)) {
+        return safeUpdate(
+          interaction,
+          renderEntitlementBlockedPanel({
+            user: normalizedUser,
+            discordUserId,
+            publicBaseUrl: resolvePublicBaseUrl(services)
+          })
+        );
       }
     }
 
@@ -1100,6 +1510,9 @@ async function handlePanelInteraction(interaction, services) {
     const storeRef = services?.store || services?.registry?.store;
     let logs = [];
     try {
+      if (typeof services?.registry?.refreshLogsFromStore === 'function') {
+        await services.registry.refreshLogsFromStore(fullBotId, { kind: 'all', maxAgeMs: 3000 }).catch(() => {});
+      }
       if (services?.workerClient?.getBotLogs) {
         logs = await services.workerClient.getBotLogs(fullBotId, 25);
       } else if (services?.registry?.getLogs) {
@@ -1118,10 +1531,12 @@ async function handlePanelInteraction(interaction, services) {
       logs = [{ time: new Date().toISOString(), type: 'error', message: 'Không thể tải logs: ' + err.message }];
     }
 
+    const userBots = await getUserBots(user, services);
     return safeUpdate(interaction, renderBotLogs({
       user,
       worker,
-      logs: Array.isArray(logs) ? logs.slice(-25) : []
+      logs: Array.isArray(logs) ? logs.slice(-25) : [],
+      workers: userBots
     }));
   }
 
@@ -1213,6 +1628,11 @@ async function handlePanelInteraction(interaction, services) {
 module.exports = {
   handlePanelInteraction,
   resolveLinkedUser,
+  resolveActiveDiscordAccountLink,
+  syncDiscordMemberRolesForUser,
+  isUserAccountEntitled,
+  resolvePublicBaseUrl,
+  performDiscordLogout,
   checkBotOwnership,
   getUserBots,
   safeDeferUpdate,

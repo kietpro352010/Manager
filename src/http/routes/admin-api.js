@@ -12,6 +12,7 @@ const {
 const { validateSafeBotUrl } = require('../../services/proxy-validation');
 const { isWispbyteControlPanelUrl } = require('../../utils/http');
 const { resolveClientIp } = require('../../services/captcha');
+const { resolveRequestOrigin, DEFAULT_PUBLIC_MANAGER_URL } = require('../../config/host-runtime');
 const { getMaintenanceState, setMaintenanceState } = require('../../utils/maintenance');
 const rawSchema = require('../../storage/schema-sql');
 const SCHEMA_SQL = typeof rawSchema === 'string' ? rawSchema : (rawSchema?.SCHEMA_SQL || '');
@@ -835,19 +836,8 @@ function createAdminApi({
       const explicitWorkerId = body.workerId ? String(body.workerId).trim().toLowerCase() : undefined;
       const explicitProvider = body.provider ? String(body.provider).trim().toLowerCase() : undefined;
       const rawSecret = body.secret !== undefined ? body.secret : body.secretKey;
-      let explicitSecret = undefined;
-      if (rawSecret !== undefined && rawSecret !== null) {
-        if (typeof rawSecret !== 'string' || rawSecret.trim().length < 32) {
-          return res.status(400).json({
-            ok: false,
-            success: false,
-            error: 'Worker secret must be at least 32 characters'
-          });
-        }
-        explicitSecret = rawSecret.trim();
-      }
+      const explicitSecret = typeof rawSecret === 'string' && rawSecret.trim() ? rawSecret.trim() : undefined;
 
-      const managerBaseUrl = String(config.publicBaseUrl || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
       const actorIp = resolveClientIp(req) || '127.0.0.1';
 
       // Case 1: No URLs provided (manual / wispbyte worker -> 1 or 2 slots)
@@ -893,10 +883,12 @@ function createAdminApi({
             const header = serverCount > 1 ? `# Server Wispbyte #${srvIdx + 1}\n` : '';
             const transportLine = `WORKER_TRANSPORT=${provider === 'render' ? 'render-http' : 'wispbyte-poll'}\n`;
             const countLine = slots > 1 ? `WORKER_BOT_COUNT=${slots}\n` : '';
-            let chunk = `${header}MANAGER_URL=${managerBaseUrl}\n${transportLine}${countLine}`;
+            const nodeOptsLine = provider === 'wispbyte' ? 'NODE_OPTIONS=--max-old-space-size=400\n' : '';
+            let chunk = `${header}${transportLine}${countLine}`;
             clusterBots.forEach((cb) => {
-              chunk += `WORKER_ID_${cb.slot}=${cb.worker.workerId}\nWORKER_SECRET_${cb.slot}=${cb.secret}\n`;
+              chunk += `WORKER_ID_${cb.slot}=${cb.worker.workerId}\n`;
             });
+            chunk += nodeOptsLine;
             envConfigs.push(chunk.trim());
           }
         }
@@ -1042,10 +1034,12 @@ function createAdminApi({
             : `# Cấu hình Worker: ${rawUrl}`;
           const transportLine = `WORKER_TRANSPORT=${provider === 'render' ? 'render-http' : 'wispbyte-poll'}\n`;
           const countLine = slots > 1 ? `WORKER_BOT_COUNT=${slots}\n` : '';
-          let envChunk = `${header}\nMANAGER_URL=${managerBaseUrl}\n${transportLine}${countLine}`;
+          const nodeOptsLine = provider !== 'render' ? 'NODE_OPTIONS=--max-old-space-size=400\n' : '';
+          let envChunk = `${header}\n${transportLine}${countLine}`;
           clusterBots.forEach((cb) => {
-            envChunk += `WORKER_ID_${cb.slot}=${cb.worker.workerId}\nWORKER_SECRET_${cb.slot}=${cb.secret}\n`;
+            envChunk += `WORKER_ID_${cb.slot}=${cb.worker.workerId}\n`;
           });
+          envChunk += nodeOptsLine;
           envConfigs.push(envChunk.trim());
         }
       }
@@ -1230,9 +1224,6 @@ function createAdminApi({
 
       const rawSecret = body.secretKey ?? body.secret;
       const secret = typeof rawSecret === 'string' ? rawSecret.trim() : '';
-      if (secret && secret.length < 32) {
-        return res.status(400).json({ ok: false, error: 'Worker secret phải có ít nhất 32 ký tự.' });
-      }
       if (!Object.keys(patch).length && !secret) {
         return res.status(400).json({ ok: false, error: 'Không có thông tin nào để cập nhật.' });
       }
@@ -1290,16 +1281,10 @@ function createAdminApi({
 
       const provider = String(worker.provider || 'wispbyte').trim().toLowerCase() === 'render' ? 'render' : 'wispbyte';
       const transport = provider === 'render' ? 'render-http' : 'wispbyte-poll';
-      const managerBaseUrl = String(config.publicBaseUrl || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
-      const secret = typeof registry.credential === 'function'
-        ? await registry.credential(worker.workerId, { bypassCache: true }).catch(() => null)
-        : null;
-      const secretAvailable = typeof secret === 'string' && secret.trim().length > 0;
+      const managerBaseUrl = resolveRequestOrigin(req, config?.publicBaseUrl || DEFAULT_PUBLIC_MANAGER_URL);
       const vars = {
-        MANAGER_URL: managerBaseUrl,
         WORKER_TRANSPORT: transport,
         WORKER_ID_1: String(worker.workerId),
-        WORKER_SECRET_1: secretAvailable ? secret.trim() : '<CAN_DAT_SECRET_MOI_MIN_32_KY_TU>',
         ...(provider === 'wispbyte' ? { NODE_OPTIONS: '--max-old-space-size=400' } : {})
       };
       const envText = Object.entries(vars).map(([k, v]) => `${k}=${v}`).join('\n');
@@ -1310,7 +1295,7 @@ function createAdminApi({
         actorId: req.managerAuthSession.username,
         actorRole: 'admin',
         actorIp: resolveClientIp(req) || '127.0.0.1',
-        details: { provider, transport, secretAvailable }
+        details: { provider, transport, idOnly: true }
       }).catch(() => {});
 
       return res.json({
@@ -1320,7 +1305,7 @@ function createAdminApi({
         provider,
         transport,
         managerUrl: managerBaseUrl,
-        secretAvailable,
+        idOnly: true,
         vars,
         envText
       });

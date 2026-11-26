@@ -112,8 +112,9 @@ class SupabaseCommandStore {
     this.adapter = client?.adapter || null;
     this.coalesceLock = new AsyncKeyLock();
     this.allowUnsafeSingleInstanceFallback = Boolean(options?.allowUnsafeSingleInstanceFallback);
-    const parsedIdleMs = Number(options?.idleEmptyCacheMs);
-    this.idleEmptyCacheMs = Number.isFinite(parsedIdleMs) && parsedIdleMs >= 0 ? parsedIdleMs : 600000;
+    const envIdleMs = process.env.COMMAND_IDLE_EMPTY_CACHE_MS !== undefined ? Number(process.env.COMMAND_IDLE_EMPTY_CACHE_MS) : NaN;
+    const parsedIdleMs = options?.idleEmptyCacheMs !== undefined ? Number(options.idleEmptyCacheMs) : envIdleMs;
+    this.idleEmptyCacheMs = Number.isFinite(parsedIdleMs) && parsedIdleMs >= 0 ? parsedIdleMs : 4000;
     this._emptyQueueVerifiedUntil = new Map();
     this._noPendingSyncUntil = 0;
     this.stateSyncRpcState = {
@@ -272,6 +273,33 @@ class SupabaseCommandStore {
     const raw = String(workerId);
     this._emptyQueueVerifiedUntil.delete(raw);
     this._emptyQueueVerifiedUntil.delete(raw.toLowerCase());
+  }
+
+  async peekQueuedWorkerIds(workerIds = []) {
+    if (!Array.isArray(workerIds) || workerIds.length === 0) return [];
+    if (!this.client || typeof this.client.from !== 'function') return [];
+    const uniqueIds = [...new Set(workerIds.map((id) => String(id || '').trim()).filter(Boolean))];
+    if (uniqueIds.length === 0) return [];
+    try {
+      let query = this.client.from(TABLE).select('worker_id');
+      if (typeof query?.in !== 'function') return [];
+      query = query.in('worker_id', uniqueIds).eq('status', 'queued');
+      if (typeof query.gt === 'function') {
+        query = query.gt('expires_at', new Date().toISOString());
+      }
+      if (typeof query.limit === 'function') {
+        query = query.limit(Math.max(10, uniqueIds.length * 2));
+      }
+      const { data, error } = await query;
+      if (error || !Array.isArray(data) || data.length === 0) return [];
+      const ready = [...new Set(data.map((row) => String(row?.worker_id || '').trim()).filter(Boolean))];
+      for (const wid of ready) {
+        this.invalidateIdleGate(wid);
+      }
+      return ready;
+    } catch (_) {
+      return [];
+    }
   }
 
   _markQueueVerifiedEmpty(workerId) {

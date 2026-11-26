@@ -34,7 +34,7 @@ const definition = new SlashCommandBuilder()
 async function execute(interaction, services) {
   const loggedInUser = await resolveLoggedInPointsUser(interaction.user?.id, services);
   if (!loggedInUser) {
-    return renderLoginRequiredNotice();
+    return renderLoginRequiredNotice(interaction.user?.id);
   }
 
   const pointsService = services?.discordPoints;

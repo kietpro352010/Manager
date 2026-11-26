@@ -174,10 +174,10 @@ function updateSoundAlertButton() {
   if (!btn) return;
   if (soundAlertEnabled) {
     btn.className = 'small sound-btn active';
-    btn.innerHTML = '🔔 Cảnh báo: BẬT';
+    btn.textContent = 'Cảnh báo: BẬT';
   } else {
     btn.className = 'small sound-btn';
-    btn.innerHTML = '🔕 Cảnh báo: TẮT';
+    btn.textContent = 'Cảnh báo: TẮT';
   }
 }
 window.toggleSoundAlert = toggleSoundAlert;
@@ -444,27 +444,27 @@ function updateTagPills() {
 
   // 1. Nút Tất cả
   const isAllAct = !activeTagFilter;
-  html += '<button type="button" class="tab-btn ' + (isAllAct ? 'active' : '') + '" onclick="filterByTag(\'\')" style="padding:4px 10px;font-size:11px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;" title="Xem toàn bộ bot">';
-  html += '<span>🌐 Tất cả</span> <span style="opacity:0.75;font-size:11px;">(' + totalCount + ')</span>';
+  html += '<button type="button" class="tab-btn ' + (isAllAct ? 'active' : '') + '" onclick="filterByTag(\'\')" style="padding:4px 10px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:5px;" title="Xem toàn bộ bot">';
+  html += '<span>Tất cả</span> <span style="opacity:0.75;font-size:11px;font-variant-numeric:tabular-nums;">(' + totalCount + ')</span>';
   html += '</button>';
 
   // 2. Nhóm trạng thái thuê:
   // Cho thuê
   const isRentableAct = activeTagFilter === 'sys:rentable' || activeTagFilter === 'rentable' || activeTagFilter === 'cho-thue';
-  html += '<button type="button" class="tab-btn ' + (isRentableAct ? 'active' : '') + '" onclick="filterByTag(\'sys:rentable\')" style="padding:4px 10px;font-size:11px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;' + (isRentableAct ? 'border-color:#38bdf8;' : '') + '" title="Lọc bot sẵn sàng cho thuê (chưa ai thuê)">';
-  html += '<span>✨ Cho thuê</span> <span style="opacity:0.85;font-size:11px;color:' + (isRentableAct ? '#7dd3fc' : 'var(--green)') + ';">(' + countRentable + ')</span>';
+  html += '<button type="button" class="tab-btn ' + (isRentableAct ? 'active' : '') + '" onclick="filterByTag(\'sys:rentable\')" style="padding:4px 10px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:5px;' + (isRentableAct ? 'border-color:var(--green);' : '') + '" title="Lọc bot sẵn sàng cho thuê (chưa ai thuê)">';
+  html += '<span class="pulse-status-dot green" aria-hidden="true"></span><span>Cho thuê</span> <span style="opacity:0.85;font-size:11px;font-variant-numeric:tabular-nums;color:var(--green);">(' + countRentable + ')</span>';
   html += '</button>';
 
   // Đang được thuê
   const isRentedAct = activeTagFilter === 'sys:rented' || activeTagFilter === 'rented' || activeTagFilter === 'dang-thue';
-  html += '<button type="button" class="tab-btn ' + (isRentedAct ? 'active' : '') + '" onclick="filterByTag(\'sys:rented\')" style="padding:4px 10px;font-size:11px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;' + (isRentedAct ? 'border-color:#a855f7;' : '') + '" title="Lọc bot hiện đang được khách thuê">';
-  html += '<span>👤 Đang thuê</span> <span style="opacity:0.85;font-size:11px;color:' + (isRentedAct ? '#d8b4fe' : '#c084fc') + ';">(' + countRented + ')</span>';
+  html += '<button type="button" class="tab-btn ' + (isRentedAct ? 'active' : '') + '" onclick="filterByTag(\'sys:rented\')" style="padding:4px 10px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:5px;' + (isRentedAct ? 'border-color:var(--accent);' : '') + '" title="Lọc bot hiện đang được khách thuê">';
+  html += '<span class="pulse-status-dot blue" aria-hidden="true"></span><span>Đang thuê</span> <span style="opacity:0.85;font-size:11px;font-variant-numeric:tabular-nums;color:var(--accent-text);">(' + countRented + ')</span>';
   html += '</button>';
 
   // Không cho thuê
   const isNotRentableAct = activeTagFilter === 'sys:not-rentable' || activeTagFilter === 'not-rentable' || activeTagFilter === 'khong-cho-thue';
-  html += '<button type="button" class="tab-btn ' + (isNotRentableAct ? 'active' : '') + '" onclick="filterByTag(\'sys:not-rentable\')" style="padding:4px 10px;font-size:11px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;' + (isNotRentableAct ? 'border-color:#f59e0b;' : '') + '" title="Lọc bot không cho thuê (dùng riêng / nội bộ)">';
-  html += '<span>🚫 Không cho thuê</span> <span style="opacity:0.85;font-size:11px;color:' + (isNotRentableAct ? '#fde047' : 'var(--muted)') + ';">(' + countNotRentable + ')</span>';
+  html += '<button type="button" class="tab-btn ' + (isNotRentableAct ? 'active' : '') + '" onclick="filterByTag(\'sys:not-rentable\')" style="padding:4px 10px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:5px;' + (isNotRentableAct ? 'border-color:var(--yellow);' : '') + '" title="Lọc bot không cho thuê (dùng riêng / nội bộ)">';
+  html += '<span class="pulse-status-dot yellow" aria-hidden="true"></span><span>Không cho thuê</span> <span style="opacity:0.85;font-size:11px;font-variant-numeric:tabular-nums;color:var(--muted);">(' + countNotRentable + ')</span>';
   html += '</button>';
 
   // Vạch phân cách nếu có tag riêng tự tạo
@@ -607,12 +607,14 @@ function filterBots() {
   }
 
   if(!filtered.length){
-    const emptyHtml = '<div class="panel empty-filter-state" style="grid-column:1/-1;text-align:center;padding:42px 20px;background:rgba(15,23,42,0.65);border:1px dashed rgba(255,255,255,0.12);border-radius:16px;">' +
-      '<div style="font-size:36px;margin-bottom:10px;opacity:0.85;">🔍</div>' +
-      '<div style="font-size:15px;font-weight:750;color:var(--text);margin-bottom:6px;">Không tìm thấy bot nào</div>' +
-      '<div style="font-size:13px;color:var(--muted);max-width:380px;margin:0 auto 16px auto;line-height:1.5;">Không có bot nào khớp với tiêu chí tìm kiếm hoặc bộ lọc hiện tại.</div>' +
-      '<button type="button" class="btn btn-secondary" onclick="resetBotFilters()" style="padding:7px 16px;font-size:12px;font-weight:700;border-radius:8px;background:rgba(56,189,248,0.12);border:1px solid rgba(56,189,248,0.3);color:#38bdf8;cursor:pointer;">' +
-      '🔄 Xóa bộ lọc &amp; Hiện tất cả' +
+    const emptyHtml = '<div class="panel empty-filter-state" style="grid-column:1/-1;text-align:center;padding:40px 20px;background:var(--bg-panel);border:1px dashed var(--border-strong);border-radius:12px;">' +
+      '<div style="display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;border-radius:10px;background:var(--accent-soft);color:var(--accent-text);margin-bottom:12px;">' +
+      '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>' +
+      '</div>' +
+      '<div style="font-size:15px;font-weight:600;color:var(--text-primary);margin-bottom:6px;">Không tìm thấy bot nào</div>' +
+      '<div style="font-size:13px;color:var(--text-muted);max-width:380px;margin:0 auto 16px auto;line-height:1.5;">Không có bot nào khớp với tiêu chí tìm kiếm hoặc bộ lọc hiện tại.</div>' +
+      '<button type="button" class="btn btn-secondary" onclick="resetBotFilters()" style="padding:8px 16px;font-size:12.5px;font-weight:500;border-radius:8px;background:var(--accent-soft);border:1px solid var(--border-strong);color:var(--accent-text);cursor:pointer;">' +
+      'Xóa bộ lọc &amp; Hiện tất cả' +
       '</button>' +
       '</div>';
     if(grid.innerHTML!==emptyHtml) grid.innerHTML=emptyHtml;

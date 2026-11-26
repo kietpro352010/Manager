@@ -1262,15 +1262,15 @@ test('14. Offline Wispbyte worker can be marked stopped (with manuallyStopped bo
     assert.equal(envJson.ok, true);
     assert.equal(envJson.provider, 'wispbyte');
     assert.equal(envJson.transport, 'wispbyte-poll');
-    assert.equal(envJson.secretAvailable, true);
+    assert.equal(envJson.idOnly, true);
     assert.deepEqual(envJson.vars, {
-      MANAGER_URL: 'https://manager.example.com',
       WORKER_TRANSPORT: 'wispbyte-poll',
       WORKER_ID_1: '23',
-      WORKER_SECRET_1: secret23,
       NODE_OPTIONS: '--max-old-space-size=400'
     });
-    assert.ok(envJson.envText.includes(`WORKER_SECRET_1=${secret23}`));
+    assert.ok(!envJson.envText.includes('MANAGER_URL='));
+    assert.ok(!envJson.envText.includes('WORKER_SECRET_1='));
+    assert.ok(envJson.envText.includes('WORKER_ID_1=23'));
     assert.ok(envJson.envText.includes('WORKER_TRANSPORT=wispbyte-poll'));
   } finally {
     await env.close();

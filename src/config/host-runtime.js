@@ -1,5 +1,8 @@
 'use strict';
 
+const net = require('node:net');
+const { isTrustedProxyRequest } = require('../services/captcha');
+
 function validPort(value) {
   const text = String(value || '').trim();
   if (!/^\d{1,5}$/.test(text)) return null;
@@ -20,6 +23,8 @@ function cliPort(args = process.argv.slice(2)) {
   return args.map(validPort).find(Boolean) || null;
 }
 
+const DEFAULT_PUBLIC_MANAGER_URL = 'https://kbotmanager.onrender.com';
+
 function normalizePublicUrl(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -31,6 +36,62 @@ function normalizePublicUrl(value) {
   } catch {
     return '';
   }
+}
+
+function isPublicHttpsUrl(value) {
+  const normalized = normalizePublicUrl(value);
+  if (!normalized || !normalized.startsWith('https://')) return false;
+  try {
+    const { hostname } = new URL(normalized);
+    const lower = String(hostname || '').toLowerCase();
+    const bareIp = lower.replace(/^\[|\]$/g, '');
+    if (
+      !lower ||
+      !lower.includes('.') ||
+      lower === 'localhost' ||
+      lower.endsWith('.local') ||
+      lower.endsWith('.localhost') ||
+      lower.endsWith('.internal')
+    ) {
+      return false;
+    }
+    if (net.isIP(bareIp) !== 0) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function firstForwardedValue(headerValue) {
+  if (Array.isArray(headerValue)) headerValue = headerValue[0];
+  return String(headerValue || '').split(',')[0].trim();
+}
+
+function resolveRequestOrigin(req, fallbackUrl = DEFAULT_PUBLIC_MANAGER_URL) {
+  const fallback = fallbackUrl === null ? '' : (normalizePublicUrl(fallbackUrl) || DEFAULT_PUBLIC_MANAGER_URL);
+  if (!req || typeof req !== 'object') return fallback;
+  const readHeader = (name) => {
+    if (typeof req.get === 'function') return req.get(name);
+    if (req.headers && typeof req.headers === 'object') {
+      return req.headers[name] ?? req.headers[name.toLowerCase()];
+    }
+    return '';
+  };
+  const trustForwarded = !req?.socket?.remoteAddress || isTrustedProxyRequest(req);
+  const forwardedHost = trustForwarded ? firstForwardedValue(readHeader('x-forwarded-host')) : '';
+  const directHost = firstForwardedValue(readHeader('host'));
+  const rawHost = (forwardedHost || directHost).replace(/[\s/\\@]/g, '');
+  if (rawHost && !rawHost.includes('..')) {
+    const rawProto = trustForwarded ? firstForwardedValue(readHeader('x-forwarded-proto')).toLowerCase() : '';
+    const reqProto = String(req.protocol || '').trim().toLowerCase();
+    const isLoopback = /^(?:localhost|127\.0\.0\.1|\[::1\]|::1)(?::\d+)?$/i.test(rawHost);
+    const proto = (rawProto === 'https' || rawProto === 'http')
+      ? rawProto
+      : (reqProto === 'http' && isLoopback ? 'http' : (reqProto === 'https' || !isLoopback ? 'https' : 'http'));
+    const candidate = normalizePublicUrl(`${proto}://${rawHost}`);
+    if (candidate) return candidate;
+  }
+  return fallback;
 }
 
 function detectHostRuntime(env = process.env) {
@@ -140,9 +201,12 @@ async function listenHttpServer(server, portOrOptions, maybeHost, maybeOptions) 
 }
 
 module.exports = {
+  DEFAULT_PUBLIC_MANAGER_URL,
   detectHostRuntime,
   detectHostPlatformAndPort: detectHostRuntime,
   normalizePublicUrl,
+  isPublicHttpsUrl,
+  resolveRequestOrigin,
   validPort,
   cliPort,
   listenHttpServer

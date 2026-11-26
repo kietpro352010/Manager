@@ -1,40 +1,45 @@
 # KingMC Worker Manager (V12.1.1)
 
-**KingMC Worker Manager** là control plane tập trung cho hệ thống bot AFK Minecraft ([BotWorker](https://github.com/kietpro352010/BotWorker)), kết hợp **Web Dashboard SPA**, **Discord Bot (Slash Commands + Interactive Panels)** và **Supabase (PostgreSQL + Atomic RPC)** để quản lý đội Worker, tài khoản Minecraft mã hóa, người thuê bot, lịch trình và cảnh báo đa kênh.
+**KingMC Worker Manager** là control plane tập trung cho hệ thống bot AFK Minecraft ([BotWorker](https://github.com/kietpro352010/BotWorker)), kết hợp **Web Dashboard SPA** *(Glassmorphism + Animate UI)*, **Discord Bot (14 Slash Commands + Interactive Panels)** và **Supabase (PostgreSQL + Atomic RPC)** để quản lý đội Worker, tài khoản Minecraft mã hóa, người thuê bot, điểm thưởng và cảnh báo đa kênh.
+
+Hỗ trợ chạy **song song nhiều Web Manager (Multi-Web Active/Standby trên Render Free)** dùng chung 1 Supabase — tự đồng bộ dữ liệu, tự failover Discord Leader và tự đưa user Link4M quay về đúng nền tảng web ban đầu.
 
 ---
 
-## Kiến trúc tổng thể
+## Kiến trúc tổng thể & Đồng bộ Multi-Web
 
 ```mermaid
 flowchart LR
-    U["Người dùng / Admin"] <-->|Web SPA + Session Cookie| M["KingMC Manager (Express + Discord.js)"]
-    D["Discord Server"] <-->|Slash Commands & DM Alerts| M
-    S[("Supabase PostgreSQL + RPC")] <--> M
-    M <-->|"Render HTTP Push: POST /api/v1/bots/:id/command"| WR["Worker (Render: render-http)"]
-    WW["Worker (Wispbyte / Pterodactyl: wispbyte-poll)"] <-->|"Outbound Long-Poll: /bootstrap, /poll, /result"| M
+    U["Người dùng / Admin"] <-->|"Web SPA + Link4M Return theo Origin"| LB["Web 1 (kbotmanager.onrender.com) / Web 2"]
+    LB <-->|"Sessions, Workers, Logs, Commands, Points, Link4M, Settings"| S[("Supabase PostgreSQL + Atomic RPC")]
+    LB -.->|"Single-Leader Lock (15s failover + Standby REST DM)"| D["Discord Server & DM Alerts"]
+    LB <-->|"Render HTTP Push (POST /api/v1/bots/:id/command + x-manager-urls)"| WR["Worker (Render: render-http)"]
+    WW["Worker (Wispbyte / Pterodactyl: wispbyte-poll)"] <-->|"Outbound Long-Poll: /bootstrap, /poll, /result, /heartbeat, /events"| LB
     WR --> MC["KingMC Server"]
     WW --> MC
 ```
 
-### Hai cơ chế giao tiếp với Worker
+### Điểm nổi bật của kiến trúc V12.1.1
 
-1. **Wispbyte / Pterodactyl (`provider: wispbyte`, transport `wispbyte-poll`)**:
-   - Phù hợp cho host không mở HTTP port công khai hoặc đi qua proxy panel.
-   - Worker chủ động kết nối ra ngoài tới Manager qua `/api/v1/workers/:workerId/bootstrap`, `/poll`, `/result`, `/heartbeat`, `/events`.
-   - **Quan trọng:** Trong Manager, để **trống Web URL** (`serviceUrl = ""`) cho Worker Wispbyte. Tuyệt đối không dùng link trang quản trị panel (`https://wispbyte.com/client/servers/...`) làm URL điều khiển HTTP Push vì panel sẽ trả về HTTP `405 Method Not Allowed`.
-2. **Render (`provider: render`, transport `render-http`)**:
-   - Manager gửi lệnh trực tiếp qua HTTPS tới `POST <serviceUrl>/api/v1/bots/:workerId/command` (xác thực `x-worker-secret` / `x-manager-bot-id`).
-   - Worker vẫn báo trạng thái/sự kiện về Manager qua `/bootstrap`, `/heartbeat`, `/events`.
-
-> Manager V12.1.1 tự động nhận diện link panel `wispbyte.com/client/servers/...` để chuyển sang chế độ `wispbyte` Pull an toàn và tự động đồng bộ lại `provider` khi Worker kết nối qua `/poll`.
+1. **Đồng bộ 100% qua Supabase (hỗ trợ 2+ Web Render Free chạy song song):**
+   - Toàn bộ phiên đăng nhập (`manager_sessions`), tài khoản/quyền (`manager_users`), danh sách & cài đặt Worker + `settingsRevision`, mật khẩu Admin (`admin_credentials`), thông báo (`system_announcement`), bảo trì (`system_maintenance`), webhook (`webhook_settings`), tài khoản Wispbyte (`wispbyte_accounts`), lịch sử log/chat (`bot_chat_logs`), điểm Discord (`discord_points`), lượt Link4M & URL quay về (`link4m_attempt_origins`), và hàng đợi/kết quả lệnh (`manager_commands`) đều lưu tập trung trên Supabase.
+   - Khi khách ra lệnh trên Web #2 trong lúc Worker Wispbyte đang long-poll ở Web #1, watcher đa web tự đánh thức poller trong ~2s và đồng bộ kết quả lệnh ngược lại Web #2.
+2. **Discord Single-Leader Election & Standby An Toàn:**
+   - Web nào giành được lock `discord_gateway_leader` (lease 90s, kiểm tra lại mỗi 15s) sẽ kết nối Discord Gateway xử lý Slash Command và chạy background sweep/maintenance. Web còn lại ở trạng thái Standby (trả `HTTP 200` tại `/ready` để Render giữ xanh) nhưng vẫn cấu hình `client.rest` để gửi DM cảnh báo khi cần.
+3. **Link4M Trả Về Đúng Origin Ban Đầu:**
+   - Khi user bấm vượt Link4M từ domain nào (Web #1 `https://kbotmanager.onrender.com` hay Web #2), Manager ghi nhận origin thực tế của phiên vượt link (cảnh giác chống giả mạo `X-Forwarded-Host` qua proxy tin cậy) và callback `/api/rewards/link4m/return` trả đúng về web đó. Fallback mặc định: `https://kbotmanager.onrender.com`.
+4. **Worker ID-Only & Tự Động Khám Phá Nhiều Manager URL:**
+   - Worker không cần khai báo `WORKER_SECRET` hay `MANAGER_URL` cố định; chỉ cần `WORKER_ID_1` (và `WORKER_ID_2` cho Dual-Slot). Manager gửi danh sách `active_manager_urls` qua header `x-manager-urls` sau khi xác thực Worker, giúp Worker tự học và chuyển sang Web dự phòng nếu Web chính hết hạn Free.
+5. **Hai cơ chế giao tiếp với Worker:**
+   - **`wispbyte-poll` (`provider: wispbyte`):** Phù hợp host không mở port HTTP công khai (Wispbyte / Pterodactyl). Để **trống Web URL** (`serviceUrl = ""`) trên Manager.
+   - **`render-http` (`provider: render`):** Manager gọi trực tiếp `POST <serviceUrl>/api/v1/bots/:workerId/command` (gửi `x-manager-bot-id`, tùy chọn `x-worker-secret` nếu Worker có cài).
 
 ---
 
 ## Yêu cầu hệ thống
 
-- **Node.js**: `>= 22.0.0 < 25.0.0` (theo `engines.node` trong `package.json`).
-- **Supabase Project**: có URL HTTPS và server-only secret key (`SUPABASE_SECRET_KEY` / `service_role`).
+- **Node.js**: `>= 22.0.0 < 25.0.0` (theo `engines.node` trong [`package.json`](package.json)).
+- **Supabase Project**: URL HTTPS và server-only secret key (`SUPABASE_SECRET_KEY` / `service_role`).
 - **Discord Application / Bot**: token bot hợp lệ và Server Discord quản trị.
 - **Repository Worker**: [kietpro352010/BotWorker](https://github.com/kietpro352010/BotWorker).
 
@@ -48,67 +53,56 @@ flowchart LR
 |---|---|
 | `DISCORD_TOKEN` | Token bot từ Discord Developer Portal. Giữ bí mật tuyệt đối. |
 | `SUPABASE_URL` | URL project Supabase dạng `https://<project-ref>.supabase.co`. |
-| `SUPABASE_SECRET_KEY` | Server-only Supabase Secret / `service_role` key (`sb_secret_...` hoặc JWT `service_role`). Hỗ trợ tên cũ `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_KEY`. Không dùng anon/publishable key trong production. |
+| `SUPABASE_SECRET_KEY` | Server-only Supabase Secret / `service_role` key (`sb_secret_...` hoặc JWT `service_role`). Hỗ trợ tên cũ `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_KEY`. |
 
 ### 2. Mã hóa, xác thực Web & bảo mật Discord (`DISCORD-01`)
 
 | Biến | Mức độ | Mặc định / Ghi chú |
 |---|---|---|
-| `MANAGER_MASTER_KEY` | **Rất nên đặt** | Khóa AES mã hóa thông tin Minecraft, secret worker, SOCKS5 proxy, token tích hợp (`MANAGER_ENCRYPTION_KEY` là alias). Chấp nhận hex 64 ký tự, base64 32 byte, hoặc chuỗi bất kỳ. Nếu bỏ trống sẽ dẫn xuất tạm từ `SUPABASE_SECRET_KEY` (sẽ không giải mã được dữ liệu cũ nếu đổi key Supabase). |
+| `MANAGER_MASTER_KEY` | **Rất nên đặt (giống nhau trên mọi Web)** | Khóa AES mã hóa thông tin Minecraft, SOCKS5 proxy, Wispbyte cookie, Link4M/Webhook token (`MANAGER_ENCRYPTION_KEY` là alias). Chấp nhận hex 64 ký tự, base64 32 byte hoặc chuỗi bất kỳ. Bắt buộc đồng nhất giữa Web #1 và Web #2. |
 | `MANAGER_MASTER_KEY_PREVIOUS` | Tùy chọn | Khóa cũ dùng khi luân chuyển (rotate) `MANAGER_MASTER_KEY`. |
-| `DISCORD_GUILD_ID` | **Khuyến nghị đặt sớm** | ID Discord Server (17–20 chữ số) nơi bot được phép hoạt động. Bắt buộc nếu chưa lưu qua `/admin setup`. |
-| `ADMIN_DISCORD_USER_ID` | **Khuyến nghị đặt sớm** | Discord User ID của SuperAdmin (`ADMIN_USER_ID` là alias). Cho phép người này chạy `/admin setup` lần đầu khi chưa cấu hình `DISCORD_GUILD_ID` (`DISCORD-01` fail-closed gate). |
+| `DISCORD_GUILD_ID` | **Khuyến nghị đặt sớm** | ID Discord Server (17–20 chữ số) nơi bot được phép hoạt động. |
+| `ADMIN_DISCORD_USER_ID` | **Khuyến nghị đặt sớm** | Discord User ID của SuperAdmin (`ADMIN_USER_ID` là alias), cho phép chạy `/admin setup` lần đầu. |
 | `DISCORD_CLIENT_ID` | Tùy chọn | Application ID; tự trích xuất từ `DISCORD_TOKEN` nếu bỏ trống. |
 | `ADMIN_ROLE_ID`, `USER_ROLE_ID` | Tùy chọn | ID 2 Role khác nhau (17–20 số). Có thể bỏ trống và cấu hình bằng `/admin setup` trên Discord. |
 | `ADMIN_USERNAME` | Tùy chọn | Tên đăng nhập Admin Web mặc định: `admin`. |
-| `ADMIN_PASSWORD` | Tùy chọn | Mật khẩu đăng nhập Admin Web ban đầu (6–256 ký tự). Có thể thiết lập/đổi sau qua `/admin password`. |
-| `MANAGER_SESSION_SECRET` | Tùy chọn | Khóa ký session Web (>= 16 ký tự). Mặc định dẫn xuất từ `encryptionKey`. |
-| `CAPTCHA_REQUIRED` | Tùy chọn | Mặc định `true` trong `production`, `false` ở dev/test. |
-| `CAPTCHA_SECRET` | Tùy chọn | Khóa ký challenge CAPTCHA (>= 16 ký tự). |
-
-> **Lưu ý lỗi `/admin setup`:** Nếu gặp thông báo *"This manager has not configured an allowed Discord server yet. Only the configured Admin can run /admin setup."*, hãy kiểm tra lại bạn đã thêm `DISCORD_GUILD_ID` và `ADMIN_DISCORD_USER_ID` vào biến môi trường của host rồi khởi động lại Manager trước khi chạy `/admin setup`.
+| `ADMIN_PASSWORD` | Tùy chọn | Mật khẩu Admin Web ban đầu (6–256 ký tự). Có thể thiết lập/đổi sau qua `/admin password`. |
+| `MANAGER_SESSION_SECRET` | Tùy chọn | Khóa ký session Web (>= 16 ký tự). |
+| `CAPTCHA_REQUIRED`, `CAPTCHA_SECRET` | Tùy chọn | Bật CAPTCHA khi đăng ký (mặc định `true` ở `production`). |
 
 ### 3. URL công khai, Tích hợp & Vận hành (Tùy chọn)
 
 | Biến | Mặc định | Mô tả |
 |---|---|---|
-| `PUBLIC_BASE_URL` | Tự nhận diện | URL HTTPS công khai của Manager (trên Render tự đọc `RENDER_EXTERNAL_URL`). Dùng cho callback Link4M và sinh `.env` mẫu cho Worker. |
-| `RENDER_API_KEY` | Trống | Render API Key nếu quản lý/probe/restart Render Services. |
-| `LINK4M_REWARD_ENABLED` | `false` | Bật/tắt vượt link nhận giờ thưởng. |
-| `LINK4M_API_KEY` | Trống | API Token của Link4M (`LINK4M_API_TOKEN` là alias). |
-| `LINK4M_SECRET_KEY` | Trống | Secret xác thực Webhook Postback Link4M. |
-| `LINK4M_REWARD_HOURS` | `12` | Số giờ cộng thêm mỗi lượt hợp lệ (1–48). |
-| `LINK4M_DAILY_LIMIT` | `2` | Giới hạn lượt vượt link/ngày (1–10). |
-| `WISPBYTE_COOKIE` | Trống | Cookie `https://wispbyte.com/client` để tự động giữ phiên tài khoản Wispbyte 14 ngày (có thể thêm nhiều tài khoản qua `/wispbyte add` hoặc `WISPBYTE_ACCOUNTS`). |
-| `WISPBYTE_PANEL_URL` | `https://wispbyte.com/client` | URL Client Panel Wispbyte. |
-| `WISPBYTE_KEEPALIVE_INTERVAL_MS` | `86400000` (24h) | Chu kỳ ping giữ phiên Wispbyte (60000–604800000 ms). |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Trống | Kênh nhận cảnh báo sự cố hệ thống qua Telegram. |
-| `DISCORD_WEBHOOK_URL` | Trống | Webhook Discord nhận cảnh báo hệ thống (cũng cấu hình được trong Web Dashboard). |
-| `BOT_EXPIRATION_GRACE_HOURS` | `6` | Số giờ ân hạn sau khi hết hạn gói thuê trước khi hệ thống tự dừng bot an toàn. |
-| `WEB_SESSION_TTL_HOURS` | `24` | Thời hạn cookie phiên đăng nhập Web (1–720 giờ). |
-| `WORKER_POLL_WAIT_MS` | `25000` | Thời gian giữ kết nối long-poll tối đa từ Worker (1000–30000 ms). |
-| `COMMAND_RESULT_TIMEOUT_MS` | `35000` | Timeout chờ Worker trả kết quả lệnh (5000–120000 ms). |
-| `OUTBOX_POLL_INTERVAL_MS` | `30000` | Chu kỳ quét outbox / state sync bất đồng bộ. |
-| `RAM_WARNING_MB`, `RAM_WATCHDOG_LIMIT_MB` | `280` / `450` | Ngưỡng dọn bộ nhớ Adaptive GC cho Render 512MB. |
-| `LOG_LEVEL` | `info` | Mức log (`debug`, `info`, `warn`, `error`). |
+| `PUBLIC_BASE_URL` | Tự nhận diện theo request (`https://kbotmanager.onrender.com`) | URL HTTPS công khai của từng Web Manager (Render tự đọc `RENDER_EXTERNAL_URL`). |
+| `RENDER_API_KEY` | Trống | Render API Key (tùy chọn) để probe/restart Render Services. |
+| `LINK4M_REWARD_ENABLED` | `false` | Bật/tắt vượt link nhận giờ thưởng (cũng chỉnh được trực tiếp trên Web Dashboard). |
+| `LINK4M_API_KEY`, `LINK4M_SECRET_KEY` | Trống | API Token & Webhook Postback Secret của Link4M. |
+| `LINK4M_REWARD_HOURS`, `LINK4M_DAILY_LIMIT` | `12` / `2` | Số giờ cộng mỗi lượt (1–48) và giới hạn lượt/ngày (1–10). |
+| `WISPBYTE_COOKIE`, `WISPBYTE_ACCOUNTS` | Trống | Cookie `https://wispbyte.com/client` hoặc JSON đa tài khoản để giữ phiên 14 ngày (khuyên quản lý qua `/wispbyte add` lưu mã hóa trên Supabase). |
+| `WISPBYTE_PANEL_URL`, `WISPBYTE_KEEPALIVE_INTERVAL_MS` | `https://wispbyte.com/client` / `86400000` (24h) | URL Panel Wispbyte và chu kỳ ping (tự bỏ qua tài khoản vừa được Web ngang hàng ping `ok` trong 75% chu kỳ). |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `DISCORD_WEBHOOK_URL` | Trống | Kênh cảnh báo sự cố qua Telegram / Discord Webhook. |
+| `BOT_EXPIRATION_GRACE_HOURS` | `6` | Số giờ ân hạn sau khi hết hạn gói thuê trước khi tự dừng bot. |
+| `WEB_SESSION_TTL_HOURS` | `24` | Thời hạn cookie phiên Web (1–720 giờ). |
+| `WORKER_POLL_WAIT_MS`, `COMMAND_RESULT_TIMEOUT_MS` | `45000` / `35000` | Thời gian giữ long-poll Worker và timeout chờ kết quả lệnh. |
+| `COMMAND_IDLE_EMPTY_CACHE_MS`, `OUTBOX_POLL_INTERVAL_MS` | `4000` / `30000` | Cache hàng đợi rỗng (4s an toàn đa web) và chu kỳ quét outbox. |
+| `RAM_WARNING_MB`, `RAM_WATCHDOG_LIMIT_MB`, `LOG_LEVEL` | `280` / `450` / `info` | Ngưỡng dọn bộ nhớ Render 512MB và mức log. |
 
 ---
 
 ## Khởi tạo cơ sở dữ liệu Supabase
 
 1. Tạo project mới trên [Supabase Dashboard](https://supabase.com/dashboard).
-2. Mở **SQL Editor** và chạy toàn bộ nội dung file [`supabase/setup.sql`](supabase/setup.sql). Script này thiết kế **idempotent & không phá hủy dữ liệu** để tạo/cập nhật bảng (`manager_users`, `manager_workers`, `manager_keys`, `manager_commands`, `manager_settings`, `audit_logs`, `manager_backups`, `link4m_attempts`, v.v.) và các **Atomic RPC** cần thiết cho phân bổ bot, Link4M, và two-phase reset sync.
-3. Lấy `Project URL` (`SUPABASE_URL`) và `service_role` / `Secret key` (`SUPABASE_SECRET_KEY`) dán vào biến môi trường của Manager.
+2. Mở **SQL Editor** và chạy toàn bộ file [`supabase/setup.sql`](supabase/setup.sql) (idempotent, an toàn không mất dữ liệu) để tạo các bảng và **Atomic RPC** (`acquire_manager_lock`, `renew_manager_lock`, `release_manager_lock`, phân bổ bot, Link4M, two-phase reset sync).
+3. Lấy `SUPABASE_URL` và `SUPABASE_SECRET_KEY` dán vào biến môi trường của Manager.
 
-> **Cảnh báo:** [`supabase/reset_and_setup.sql`](supabase/reset_and_setup.sql) sẽ **XÓA SẠCH toàn bộ bảng, view và function** của Manager trước khi cài lại từ đầu. Tuyệt đối không dùng để nâng cấp hoặc sửa lỗi hệ thống đang có dữ liệu khi chưa sao lưu.
+> **Cảnh báo:** [`supabase/reset_and_setup.sql`](supabase/reset_and_setup.sql) sẽ **XÓA SẠCH** toàn bộ bảng và function trước khi cài lại. Chỉ dùng khi cần làm mới hoàn toàn sau khi đã sao lưu.
 
 ---
 
-## Cài đặt & Triển khai
+## Cài đặt & Triển khai Multi-Web Render
 
 ### Chạy cục bộ (Local Development)
-
-Tạo file `.env` tại thư mục gốc Manager:
 
 ```dotenv
 DISCORD_TOKEN=<discord-bot-token>
@@ -116,80 +110,68 @@ DISCORD_GUILD_ID=<discord-server-id>
 ADMIN_DISCORD_USER_ID=<your-discord-user-id>
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_SECRET_KEY=<supabase-service-role-or-secret-key>
-MANAGER_MASTER_KEY=<chuoi-ma-hoa-on-dinh-sao-luu-ky>
+MANAGER_MASTER_KEY=<chuoi-ma-hoa-on-dinh>
 ADMIN_PASSWORD=<mat-khau-admin-6-den-256-ky-tu>
 PUBLIC_BASE_URL=http://localhost:3000
 NODE_ENV=development
 ```
-
-Cài đặt và khởi chạy:
 
 ```bash
 npm ci
 npm start
 ```
 
-Mặc định chạy tại `http://localhost:3000` (hoặc theo `PORT`).
+### Triển khai 2 Web song song trên Render Free (Project chính + Project dự phòng)
 
-### Triển khai trên Render (Production)
-
-1. Tạo **Web Service** mới trỏ tới repository Manager (`main`).
-2. Chọn **Node.js 22+**, cấu hình:
+1. Tạo Web Service #1 (ví dụ `https://kbotmanager.onrender.com`) và Web Service #2 trên 2 tài khoản Render, cùng trỏ tới repo Manager (`main`):
+   - **Node.js:** `22` (hoặc `24`)
    - **Build Command:** `npm ci --omit=dev`
    - **Start Command:** `npm start` *(chạy `node --max-old-space-size=384 src/index.js`)*
-   - **Health Check Path:** `/health`
-3. Thêm các biến môi trường ở mục **Environment** (`DISCORD_TOKEN`, `DISCORD_GUILD_ID`, `ADMIN_DISCORD_USER_ID`, `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `MANAGER_MASTER_KEY`, và tùy chọn `ADMIN_PASSWORD`, `LINK4M_*`, `TELEGRAM_*`...).
-4. Sau khi Deploy, kiểm tra:
-   - `GET /health` -> liveness & cảnh báo degraded (Link4M / Atomic RPC).
-   - `GET /ready` (hoặc `/api/ready`) -> kiểm tra kết nối Supabase + Discord Gateway.
+   - **Health Check Path:** `/ready` (trả `200` cả ở Web Leader lẫn Web Standby)
+2. Đặt **giống hệt nhau** các biến `DISCORD_TOKEN`, `DISCORD_GUILD_ID`, `ADMIN_DISCORD_USER_ID`, `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `MANAGER_MASTER_KEY` trên cả 2 Web Service. Không bắt buộc đặt `PUBLIC_BASE_URL` (Render tự cấp `RENDER_EXTERNAL_URL` riêng cho mỗi web).
+3. Kiểm tra sau deploy:
+   - `GET /health` -> liveness, RAM và cảnh báo degraded (nếu thiếu RPC hoặc Link4M lỗi).
+   - `GET /ready` -> trạng thái Database + Discord (`ready` trên Leader, `standby` trên Web dự phòng).
 
 ---
 
-## Thiết lập ban đầu & Thêm Worker
+## Thiết lập ban đầu & Thêm Worker (ID-Only)
 
-### Bước 1: Thiết lập Discord & Mật khẩu Admin
-1. Chạy lệnh `/admin setup admin_role:@Admin user_role:@Member` trong Discord server đã khai báo `DISCORD_GUILD_ID` (bởi `ADMIN_DISCORD_USER_ID` hoặc chủ server).
-2. Nếu chưa đặt `ADMIN_PASSWORD` trong env, chạy `/admin password` trên Discord để đặt mật khẩu tài khoản Web `admin`.
-3. Đăng nhập Web Dashboard bằng tài khoản `admin`.
-
-### Bước 2: Đăng ký Worker trong Web Dashboard
-Mở modal **➕ Thêm Bot** trên Web Dashboard:
-- **Nếu Worker chạy trên Render:** dán URL công khai của Worker (ví dụ `https://kbot-worker-01.onrender.com`). Hệ thống tự sinh ID + Secret cho 2 slot (`WORKER_ID_1`, `WORKER_SECRET_1`, `WORKER_ID_2`, `WORKER_SECRET_2`) và trả đoạn `.env` mẫu.
-- **Nếu Worker chạy trên Wispbyte / Pterodactyl:**
-  - Có thể gọi API `POST /api/manager/bots` với `{ "provider": "wispbyte", "slots": 2 }` hoặc dán link server Wispbyte — Manager sẽ lưu Worker ở chế độ `wispbyte` Pull (`serviceUrl: ""`), tự sinh cặp `WORKER_ID_1/2` + `WORKER_SECRET_1/2` và tạo sẵn block `.env` gồm `MANAGER_URL`, `WORKER_TRANSPORT=wispbyte-poll`, `WORKER_BOT_COUNT=2`.
-  - Dán các biến đó vào `/home/container/.env` trên Wispbyte (xem hướng dẫn chi tiết ở README của BotWorker).
-  - Tuyệt đối không đặt link `wispbyte.com/client/servers/...` vào ô URL của Worker trong màn hình **⚙ Sửa Bot**; nếu bot cũ từng gắn nhầm URL này, chỉ cần mở **⚙ Sửa Bot**, xóa trống ô URL rồi bấm Lưu (hoặc để Worker poll một nhịp để Manager tự động sửa `provider` sang `wispbyte`).
-
-### Bước 3: Gán tài khoản Minecraft & Khởi động
-1. Vào chi tiết từng Bot trên Web Dashboard để nhập **Username / Password Minecraft**, cấu hình **Spawn Commands**, **Eco Mode**, **Auto-Totem**, **SOCKS5 Proxy** (nếu cần), **Lịch Auto-Chat / Hẹn giờ Bật-Tắt**.
-2. Bật Worker: Worker tải cấu hình đã mã hóa qua `/api/v1/workers/:workerId/bootstrap` và sẵn sàng nhận lệnh.
+1. Chạy `/admin setup admin_role:@Admin user_role:@Member` trên Discord server, sau đó dùng `/admin password` nếu chưa đặt `ADMIN_PASSWORD`.
+2. Đăng nhập Web Dashboard -> mở modal **➕ Thêm Bot Con**:
+   - **Wispbyte (2-in-1 / Pull Mode):** Bỏ trống ô URL -> bấm **Thêm Cụm Wispbyte (2 Bot)**.
+   - **Render (Web Service):** Dán HTTPS URL của Render Worker -> tự tạo tối đa 2 slot độc lập.
+3. Manager cấp `WORKER_ID_1` (và `WORKER_ID_2`), **không còn yêu cầu `WORKER_SECRET` hay `MANAGER_URL`**:
+   ```dotenv
+   WORKER_TRANSPORT=wispbyte-poll
+   WORKER_BOT_COUNT=2
+   WORKER_ID_1=01
+   WORKER_ID_2=02
+   NODE_OPTIONS=--max-old-space-size=400
+   ```
+4. Vào chi tiết từng Bot trên Web Dashboard để nhập **Username / Password Minecraft**, **Spawn Commands**, **Eco Mode**, **Auto-Totem**, **SOCKS5 Proxy**, **Lịch Auto-Chat / Bật-Tắt**.
 
 ---
 
-## Tính năng chính trên Web Dashboard V12.1.1
-
-- **Quản lý đội Bot & Thuê Bot độc quyền (1-Bot-1-User):** Tạo User, gán bot, đặt giới hạn quyền đổi tài khoản (`allowAccountChange`), tạm khóa kèm lý do, tùy chỉnh hạn thuê / VIP vĩnh viễn, nguyên tắc 1 bot chỉ thuộc 1 user tại một thời điểm.
-- **Gia hạn Giftcode & Ân hạn 6 giờ:** Tạo key số ngày hoặc vĩnh viễn, giới hạn số lượt/bot; khi user hết hạn có 6 giờ ân hạn trước khi background sweep gửi lệnh `stop` êm ái và khóa quyền điều khiển.
-- **Vượt link Link4M (+12h) & Bảo trì hệ thống:** Tích hợp Link4M API/Postback Webhook và chế độ **🛠️ Bảo trì hệ thống** (khóa thao tác Worker của khách trên cả Web và Discord nhưng vẫn cho gia hạn/xem trạng thái).
-- **Remote Window GUI & Inventory 54 ô:** Xem túi đồ, trang bị giáp/offhand, và click trực tiếp menu chest/GUI trong game theo thời gian thực.
-- **Cảnh báo & Sao lưu:** Gửi cảnh báo đa kênh (Discord DM, Discord Webhook, Telegram), ghi Audit Logs xuất CSV/JSON, và Backup/Restore toàn bộ registry/users/keys/settings trên Supabase.
-
----
-
-## Lệnh Discord (Slash Commands)
+## Lệnh Discord (14 Slash Commands)
 
 | Lệnh | Quyền | Công dụng |
 |---|---|---|
-| `/admin setup` | SuperAdmin / Chủ server | Thiết lập `admin_role`, `user_role`, tùy chọn `admin_user` và đồng bộ slash commands cho Discord server. |
-| `/admin password` | SuperAdmin / Chủ server | Thiết lập hoặc đổi mật khẩu Web cho tài khoản `admin` qua modal bảo mật. |
-| `/wispbyte list\|check\|add\|remove` | Admin | Quản lý nhiều tài khoản Wispbyte (mã hóa Cookie trong DB) và ping giữ hạn 14 ngày mỗi 24h. |
-| `/check` | Admin | Gửi và tự động cập nhật (mỗi 15 phút) bảng theo dõi trạng thái hệ thống All-in-One. |
-| `/kbot` | Admin | Liệt kê tất cả máy chủ Discord mà bot đang tham gia. |
-| `/login` | Mọi thành viên | Liên kết tài khoản Web Manager với Discord và tự động cấp Role tương ứng. |
-| `/logout` | Mọi thành viên | Hủy liên kết tài khoản Web/Discord và thu hồi Role. |
-| `/bots` | Thành viên đã `/login` | Mở bảng điều khiển nhanh danh sách bot được cấp (Bật / Tắt / Khởi động lại / Làm mới). |
-| `/logs` | Thành viên đã `/login` | Xem nhật ký sự kiện gần nhất của bot (`bot_id`, `lines`). |
-| `/help` | Mọi thành viên | Hiển thị hướng dẫn sử dụng các lệnh Discord. |
+| `/admin setup` | SuperAdmin / Admin | Thiết lập `admin_role`, `user_role`, tùy chọn `admin_user` và đồng bộ slash commands cho server. |
+| `/admin password` | SuperAdmin / Admin | Thiết lập hoặc đổi mật khẩu Web cho tài khoản `admin` qua modal bảo mật. |
+| `/wispbyte list\|check\|add\|remove` | Admin | Quản lý đa tài khoản Wispbyte (mã hóa Cookie trên Supabase) và ping giữ hạn 14 ngày mỗi 24h. |
+| `/check` | Admin | Gửi và tự cập nhật (15 phút/lần) bảng trạng thái toàn hệ thống. |
+| `/kbot` | Admin | Liệt kê các máy chủ Discord bot đang tham gia. |
+| `/diemadmin cong\|tru\|dat\|reset` | Admin | Cộng, trừ, đặt mức hoặc reset điểm tích lũy / chuỗi điểm danh / tin nhắn thành viên. |
+| `/login` | Mọi thành viên | Liên kết tài khoản Web với Discord và tự đồng bộ Role; nếu đã đăng nhập sẽ báo rõ trạng thái kèm nút **Đăng xuất** 1 chạm. |
+| `/logout` | Mọi thành viên | Hủy liên kết tài khoản Web/Discord và thu hồi Role tương ứng. |
+| `/bots` | Thành viên đã `/login` | Mở bảng điều khiển nhanh danh sách bot (Bật / Tắt / Khởi động lại / Làm mới). |
+| `/logs [bot_id] [lines]` | Thành viên đã `/login` | Xem nhật ký sự kiện/chat mới nhất (tự đồng bộ từ Supabase giữa các Web). |
+| `/diemdanh` | Thành viên đã `/login` | Điểm danh hằng ngày nhận +10 điểm (mốc mỗi 7 ngày thưởng thêm +30 điểm). |
+| `/diem [nguoidung]` | Thành viên đã `/login` | Xem hồ sơ điểm tích lũy, chuỗi điểm danh và tổng tin nhắn. |
+| `/tinnhan [nguoidung]` | Thành viên đã `/login` | Xem thống kê tổng tin nhắn đã gửi. |
+| `/bxh [loai] [soluong]` | Thành viên đã `/login` | Xem bảng xếp hạng Điểm tích lũy, Chuỗi điểm danh và Tổng tin nhắn. |
+| `/help` | Mọi thành viên | Hướng dẫn sử dụng lệnh và bảng điều khiển tương tác nhanh. |
 
 ---
 
@@ -209,9 +191,9 @@ npm run test:e2e -- --all
 
 | Triệu chứng | Nguyên nhân & Cách khắc phục |
 |---|---|
-| `Remote server returned invalid JSON (405)` / `INVALID_WORKER_URL` khi Bật/Tắt bot | Bot bị gắn nhầm `provider: render` với URL panel web (ví dụ `https://wispbyte.com/client/servers/...`) không phải API BotWorker. **Khắc phục:** Mở **⚙ Sửa Bot** -> xóa trống ô URL để chuyển về `wispbyte` Pull mode; nếu Worker Wispbyte đang chạy `/poll`, Manager V12.1.1 cũng tự động sửa lại sang `wispbyte`. |
-| `This manager has not configured an allowed Discord server yet. Only the configured Admin can run /admin setup.` | Thiếu `DISCORD_GUILD_ID` hoặc `ADMIN_DISCORD_USER_ID` trong biến môi trường khi chưa có cấu hình `discord_access` trong DB (`DISCORD-01`). Thêm cả 2 biến vào host, restart Manager rồi chạy `/admin setup`. |
-| Worker báo `401` hoặc `Lệch Secret Key (409)` | `WORKER_ID_n` hoặc `WORKER_SECRET_n` trên Worker không khớp Manager, hoặc bot đã bị vô hiệu hóa (`enabled = false`). Kiểm tra lại ID/Secret hoặc cập nhật Secret mới trên cả Manager và Worker. |
-| Manager báo `ATOMIC_STATE_SYNC_RPC_REQUIRED` / `degraded` ở `/health` | DB Supabase chưa chạy [`supabase/setup.sql`](supabase/setup.sql) bản mới nhất. Chạy lại `supabase/setup.sql` trong Supabase SQL Editor (an toàn, không mất dữ liệu). |
-| Không giải mã được tài khoản Minecraft sau khi đổi key | Thiếu hoặc thay đổi `MANAGER_MASTER_KEY`. Khôi phục key cũ hoặc đặt key cũ vào `MANAGER_MASTER_KEY_PREVIOUS` để giải mã chuyển tiếp. |
-| `Service Unavailable (503)` với bot Render | Render Free tier đang cold start (~30–50s) hoặc Worker tạm mất kết nối. Chờ 15–30s rồi thử lại. |
+| `Remote server returned invalid JSON (405)` / `INVALID_WORKER_URL` | Bot gắn nhầm `provider: render` với link panel Wispbyte (`wispbyte.com/client/servers/...`). **Khắc phục:** Mở **⚙ Sửa Bot** -> xóa trống ô URL để chuyển về `wispbyte` Pull mode. |
+| `This manager has not configured an allowed Discord server yet.` | Thiếu `DISCORD_GUILD_ID` hoặc `ADMIN_DISCORD_USER_ID` trong env khi chưa có `discord_access` trên DB. Thêm cả 2 biến, restart rồi chạy `/admin setup`. |
+| Worker báo `401` hoặc `404` | `WORKER_ID_n` chưa đăng ký trên Manager, bot đang bị tắt (`enabled = false`), hoặc Worker có cấu hình `WORKER_SECRET_n` nhưng không khớp secret đã lưu trên Manager. |
+| `ATOMIC_STATE_SYNC_RPC_REQUIRED` / `degraded` ở `/health` | Supabase chưa chạy [`supabase/setup.sql`](supabase/setup.sql) mới nhất. Chạy lại toàn bộ file SQL này trong SQL Editor. |
+| Không giải mã được tài khoản MC/Proxy khi chạy Web thứ 2 | `MANAGER_MASTER_KEY` khác nhau giữa Web #1 và Web #2. Đặt cùng 1 giá trị `MANAGER_MASTER_KEY` ở cả 2 Web Service. |
+| `Service Unavailable (503)` với Render Service | Render Free đang cold start (~30–50s) hoặc vừa hết hạn; chờ 15–30s hoặc Worker sẽ tự chuyển sang Web còn lại qua pool `active_manager_urls`. |

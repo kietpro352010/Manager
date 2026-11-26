@@ -1,15 +1,17 @@
 'use strict';
 
+/* unslop craft principles adapted from Damir Sokolovsky (@heydamir), CC BY 4.0 */
+
 const PUBLIC_LOGIN_HTML = `<!doctype html>
 <html lang="vi" data-theme="deep-galaxy">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<title>KBOT Manager — Đăng Nhập Hệ Thống Quản Lý Bot Minecraft</title>
+<title>KBOT Manager — Cổng Điều Khiển Bot Minecraft KingMC</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script data-kbot-theme-boot>
 (function(){
   try {
@@ -38,165 +40,167 @@ const PUBLIC_LOGIN_HTML = `<!doctype html>
 })();
 </script>
 <style>
+/* unslop craft principles adapted from Damir Sokolovsky (@heydamir), CC BY 4.0 */
 :root,
 :root[data-theme="deep-galaxy"] {
   color-scheme: dark;
-  --bg-base: #06080e;
-  --bg-elevated: #0a0b12;
-  --bg-glow-1: rgba(79, 70, 229, 0.12);
-  --bg-glow-2: rgba(59, 130, 246, 0.08);
-  --bg-glow-3: rgba(148, 163, 184, 0.06);
-  --surface-card: rgba(14, 15, 22, 0.94);
-  --surface-panel: rgba(18, 19, 28, 0.90);
-  --surface-soft: rgba(26, 28, 42, 0.72);
-  --surface-input: rgba(9, 10, 16, 0.94);
-  --border-subtle: rgba(148, 163, 184, 0.20);
-  --border-strong: rgba(167, 139, 250, 0.35);
-  --text-primary: #f5f3ff;
-  --text-secondary: #cbc4e6;
-  --text-muted: #9b92bf;
-  --accent: #8b5cf6;
-  --accent-hover: #7c3aed;
-  --accent-active: #6d28d9;
-  --accent-soft: rgba(139, 92, 246, 0.16);
+  /* Animate UI Motion Tokens (Subtle Level) */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-soft: cubic-bezier(0.215, 0.61, 0.355, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-away: cubic-bezier(0.33, 0.17, 0.67, 0.5);
+  --ease-color: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --ease-enter: cubic-bezier(0.25, 0.1, 0.35, 1);
+  --scale-press: 0.97;
+  --scale-choice: 0.985;
+  --blur-icon: 2px;
+  --blur-surface: 4px;
+
+  /* Deep Galaxy — Low-saturation Ink/Obsidian Neutral Ramp */
+  --bg-base: #08090f;
+  --bg-elevated: #0f111a;
+  --bg-glow-1: rgba(124, 92, 246, 0.08);
+  --bg-glow-2: rgba(56, 189, 248, 0.04);
+  --surface-card: #11131d;
+  --surface-panel: #151824;
+  --surface-soft: #1b1f2e;
+  --surface-input: #0b0d15;
+  --border-subtle: rgba(238, 240, 246, 0.09);
+  --border-strong: rgba(238, 240, 246, 0.18);
+  --text-primary: #eef0f6;
+  --text-secondary: #a8afc2;
+  --text-muted: #788097;
+  --accent: #7c5cf6;
+  --accent-hover: #6d4be8;
+  --accent-active: #5e3dd6;
+  --accent-soft: rgba(124, 92, 246, 0.14);
   --accent-text: #c4b5fd;
   --accent-on: #ffffff;
-  --success: #22c55e;
-  --success-soft: rgba(34, 197, 94, 0.14);
-  --success-text: #86efac;
-  --danger: #ef4444;
-  --danger-soft: rgba(239, 68, 68, 0.14);
+  --success: #34b37e;
+  --success-soft: rgba(52, 179, 126, 0.12);
+  --success-text: #7ee2b8;
+  --danger: #e5484d;
+  --danger-soft: rgba(229, 72, 77, 0.12);
   --danger-text: #fca5a5;
-  --warning: #f59e0b;
-  --warning-soft: rgba(245, 158, 11, 0.14);
+  --warning: #e59934;
+  --warning-soft: rgba(229, 153, 52, 0.12);
   --warning-text: #fcd34d;
-  --neutral-soft: rgba(148, 163, 184, 0.14);
+  --neutral-soft: rgba(148, 163, 184, 0.12);
   --neutral-text: #cbd5e1;
-  --shadow-card: 0 24px 60px rgba(4, 2, 12, 0.62);
-  --diorama-sky-top: #0b0618;
-  --diorama-sky-bot: #1f1142;
-  --cloud-color: rgba(196, 181, 253, 0.12);
+  --shadow-card: 0 20px 48px rgba(2, 4, 12, 0.55);
 }
 
 :root[data-theme="ocean-abyss"] {
   color-scheme: dark;
-  --bg-base: #040d1a;
-  --bg-elevated: #08172c;
-  --bg-glow-1: rgba(14, 165, 233, 0.22);
-  --bg-glow-2: rgba(2, 132, 199, 0.18);
-  --bg-glow-3: rgba(56, 189, 248, 0.12);
-  --surface-card: rgba(8, 23, 44, 0.92);
-  --surface-panel: rgba(10, 28, 54, 0.88);
-  --surface-soft: rgba(14, 38, 70, 0.75);
-  --surface-input: rgba(5, 15, 30, 0.94);
-  --border-subtle: rgba(56, 189, 248, 0.22);
-  --border-strong: rgba(56, 189, 248, 0.44);
-  --text-primary: #f0f9ff;
-  --text-secondary: #bae6fd;
-  --text-muted: #7dd3fc;
+  --bg-base: #070d16;
+  --bg-elevated: #0c1523;
+  --bg-glow-1: rgba(14, 165, 233, 0.09);
+  --bg-glow-2: rgba(20, 184, 166, 0.05);
+  --surface-card: #0e1828;
+  --surface-panel: #121e31;
+  --surface-soft: #17273f;
+  --surface-input: #09111d;
+  --border-subtle: rgba(226, 238, 248, 0.10);
+  --border-strong: rgba(125, 211, 252, 0.24);
+  --text-primary: #ecf3fa;
+  --text-secondary: #a4b8cc;
+  --text-muted: #72889e;
   --accent: #0ea5e9;
-  --accent-hover: #38bdf8;
-  --accent-active: #0284c7;
-  --accent-soft: rgba(14, 165, 233, 0.18);
+  --accent-hover: #0284c7;
+  --accent-active: #0369a1;
+  --accent-soft: rgba(14, 165, 233, 0.14);
   --accent-text: #7dd3fc;
   --accent-on: #ffffff;
-  --success: #10b981;
-  --success-soft: rgba(16, 185, 129, 0.16);
+  --success: #2fb380;
+  --success-soft: rgba(47, 179, 128, 0.12);
   --success-text: #6ee7b7;
-  --danger: #ef4444;
-  --danger-soft: rgba(239, 68, 68, 0.16);
+  --danger: #e5484d;
+  --danger-soft: rgba(229, 72, 77, 0.12);
   --danger-text: #fca5a5;
-  --warning: #f59e0b;
-  --warning-soft: rgba(245, 158, 11, 0.16);
+  --warning: #e59934;
+  --warning-soft: rgba(229, 153, 52, 0.12);
   --warning-text: #fcd34d;
-  --neutral-soft: rgba(148, 163, 184, 0.16);
+  --neutral-soft: rgba(148, 163, 184, 0.12);
   --neutral-text: #cbd5e1;
-  --shadow-card: 0 24px 60px rgba(2, 8, 20, 0.70);
-  --diorama-sky-top: #030a14;
-  --diorama-sky-bot: #0a2544;
-  --cloud-color: rgba(125, 211, 252, 0.14);
+  --shadow-card: 0 20px 48px rgba(2, 8, 18, 0.60);
 }
 
 :root[data-theme="violet-dusk"] {
   color-scheme: dark;
-  --bg-base: #121118;
-  --bg-elevated: #191722;
-  --bg-glow-1: rgba(126, 91, 239, 0.14);
-  --bg-glow-2: rgba(94, 72, 178, 0.10);
-  --bg-glow-3: rgba(148, 163, 184, 0.05);
-  --surface-card: #1d1b27;
-  --surface-panel: #191722;
-  --surface-soft: #242131;
-  --surface-input: #13111a;
-  --border-subtle: rgba(176, 168, 206, 0.20);
-  --border-strong: rgba(176, 168, 206, 0.36);
-  --text-primary: #f2f0fa;
-  --text-secondary: #c5bfd8;
-  --text-muted: #9891b0;
+  --bg-base: #111116;
+  --bg-elevated: #17171e;
+  --bg-glow-1: rgba(139, 108, 246, 0.07);
+  --bg-glow-2: rgba(148, 163, 184, 0.04);
+  --surface-card: #191922;
+  --surface-panel: #1e1e29;
+  --surface-soft: #252533;
+  --surface-input: #13131a;
+  --border-subtle: rgba(240, 238, 248, 0.09);
+  --border-strong: rgba(240, 238, 248, 0.18);
+  --text-primary: #efedf6;
+  --text-secondary: #ada8bf;
+  --text-muted: #7f7a94;
   --accent: #7e5bef;
   --accent-hover: #6f4ce2;
   --accent-active: #5f3dc4;
-  --accent-soft: rgba(126, 91, 239, 0.16);
+  --accent-soft: rgba(126, 91, 239, 0.14);
   --accent-text: #c4b5fd;
   --accent-on: #ffffff;
-  --success: #22c55e;
-  --success-soft: rgba(34, 197, 94, 0.14);
+  --success: #34b37e;
+  --success-soft: rgba(52, 179, 126, 0.12);
   --success-text: #86efac;
-  --danger: #ef4444;
-  --danger-soft: rgba(239, 68, 68, 0.14);
+  --danger: #e5484d;
+  --danger-soft: rgba(229, 72, 77, 0.12);
   --danger-text: #fca5a5;
-  --warning: #f59e0b;
-  --warning-soft: rgba(245, 158, 11, 0.14);
+  --warning: #e59934;
+  --warning-soft: rgba(229, 153, 52, 0.12);
   --warning-text: #fcd34d;
-  --neutral-soft: rgba(148, 163, 184, 0.14);
+  --neutral-soft: rgba(148, 163, 184, 0.12);
   --neutral-text: #cbd5e1;
-  --shadow-card: 0 20px 48px rgba(5, 4, 10, 0.50);
-  --diorama-sky-top: #14121d;
-  --diorama-sky-bot: #231e36;
-  --cloud-color: rgba(196, 181, 253, 0.08);
+  --shadow-card: 0 20px 44px rgba(4, 4, 8, 0.50);
 }
 
 :root[data-theme="moonlight"] {
   color-scheme: light;
-  --bg-base: #e6eaf2;
-  --bg-elevated: #f1f5fb;
-  --bg-glow-1: rgba(99, 102, 241, 0.08);
-  --bg-glow-2: rgba(14, 165, 233, 0.06);
-  --bg-glow-3: rgba(148, 163, 184, 0.05);
+  --bg-base: #f3f5f9;
+  --bg-elevated: #ffffff;
+  --bg-glow-1: rgba(79, 70, 229, 0.05);
+  --bg-glow-2: rgba(14, 165, 233, 0.04);
   --surface-card: #ffffff;
   --surface-panel: #ffffff;
-  --surface-soft: #e2e8f0;
-  --surface-input: #ffffff;
-  --border-subtle: #cbd5e1;
-  --border-strong: #94a3b8;
-  --text-primary: #0f172a;
-  --text-secondary: #334155;
+  --surface-soft: #eef2f7;
+  --surface-input: #f8fafc;
+  --border-subtle: rgba(15, 23, 42, 0.10);
+  --border-strong: rgba(15, 23, 42, 0.20);
+  --text-primary: #111827;
+  --text-secondary: #475569;
   --text-muted: #64748b;
   --accent: #4f46e5;
   --accent-hover: #4338ca;
   --accent-active: #3730a3;
-  --accent-soft: rgba(79, 70, 229, 0.10);
-  --accent-text: #4f46e5;
+  --accent-soft: rgba(79, 70, 229, 0.09);
+  --accent-text: #4338ca;
   --accent-on: #ffffff;
   --success: #16a34a;
-  --success-soft: rgba(22, 163, 74, 0.12);
+  --success-soft: rgba(22, 163, 74, 0.10);
   --success-text: #15803d;
   --danger: #dc2626;
-  --danger-soft: rgba(220, 38, 38, 0.12);
+  --danger-soft: rgba(220, 38, 38, 0.10);
   --danger-text: #b91c1c;
   --warning: #d97706;
-  --warning-soft: rgba(217, 119, 6, 0.12);
+  --warning-soft: rgba(217, 119, 6, 0.10);
   --warning-text: #b45309;
-  --neutral-soft: rgba(100, 116, 139, 0.12);
+  --neutral-soft: rgba(100, 116, 139, 0.10);
   --neutral-text: #334155;
-  --shadow-card: 0 16px 40px rgba(15, 23, 42, 0.09), 0 1px 3px rgba(15, 23, 42, 0.06);
-  --diorama-sky-top: #e2e8f0;
-  --diorama-sky-bot: #cbd5e1;
-  --cloud-color: rgba(255, 255, 255, 0.85);
+  --shadow-card: 0 12px 32px rgba(15, 23, 42, 0.07), 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
 *, *::before, *::after {
   box-sizing: border-box;
+}
+
+html {
+  scrollbar-gutter: stable;
 }
 
 html, body {
@@ -229,7 +233,7 @@ html, body {
 }
 
 /* =========================================================
-   SEAMLESS INFINITE AMBIENT BACKGROUND
+   QUIET AMBIENT INSTRUMENT BACKDROP
    ========================================================= */
 .scene-bg {
   position: fixed;
@@ -238,124 +242,9 @@ html, body {
   pointer-events: none;
   overflow: hidden;
   background:
-    radial-gradient(ellipse 75% 58% at 18% 18%, var(--bg-glow-1), transparent 68%),
-    radial-gradient(ellipse 68% 55% at 84% 80%, var(--bg-glow-2), transparent 68%),
-    radial-gradient(ellipse 50% 45% at 52% 45%, var(--bg-glow-3), transparent 70%),
+    radial-gradient(ellipse 70% 52% at 16% 14%, var(--bg-glow-1), transparent 68%),
+    radial-gradient(ellipse 62% 50% at 84% 84%, var(--bg-glow-2), transparent 68%),
     var(--bg-base);
-}
-
-.scene-video {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  opacity: 0.18;
-  filter: saturate(0.85) hue-rotate(12deg);
-  pointer-events: none;
-}
-
-:root[data-theme="moonlight"] .scene-video,
-:root[data-theme="violet-dusk"] .scene-video {
-  opacity: 0.08;
-}
-:root[data-theme="ocean-abyss"] .scene-video {
-  opacity: 0.22;
-  filter: saturate(1.1) hue-rotate(180deg);
-}
-
-.scene-nebula {
-  position: absolute;
-  inset: -12%;
-  background:
-    radial-gradient(circle at 26% 34%, rgba(139, 92, 246, 0.16), transparent 42%),
-    radial-gradient(circle at 74% 66%, rgba(109, 40, 217, 0.14), transparent 46%);
-  opacity: 0.85;
-  will-change: transform, opacity;
-}
-
-:root[data-theme="ocean-abyss"] .scene-nebula {
-  background:
-    radial-gradient(circle at 26% 34%, rgba(14, 165, 233, 0.22), transparent 45%),
-    radial-gradient(circle at 74% 66%, rgba(2, 132, 199, 0.18), transparent 50%);
-  opacity: 0.88;
-}
-
-:root[data-theme="moonlight"] .scene-nebula {
-  opacity: 0.20;
-}
-
-:root[data-theme="violet-dusk"] .scene-nebula {
-  opacity: 0.45;
-}
-
-/* Ocean Abyss Portal Styling */
-:root[data-theme="ocean-abyss"] .portal-aura-glow {
-  fill: url(#portalGlowOcean);
-}
-:root[data-theme="ocean-abyss"] .portal-core-pulse {
-  fill: url(#portalCoreOcean);
-}
-
-/* Moonlight Light-Theme Contrast & Border Enhancements */
-:root[data-theme="moonlight"] .auth-card {
-  background: #ffffff !important;
-  border: 1px solid #cbd5e1 !important;
-  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.09), 0 1px 3px rgba(15, 23, 42, 0.05) !important;
-}
-:root[data-theme="moonlight"] .feature-card,
-:root[data-theme="moonlight"] .feature-item,
-:root[data-theme="moonlight"] .discord-support-link {
-  background: #ffffff !important;
-  border: 1px solid #cbd5e1 !important;
-  box-shadow: 0 2px 4px rgba(15, 23, 42, 0.04) !important;
-}
-:root[data-theme="moonlight"] .discord-support-link {
-  color: #334155 !important;
-}
-:root[data-theme="moonlight"] .discord-support-link:hover {
-  background: #f8fafc !important;
-  border-color: #6366f1 !important;
-  color: #0f172a !important;
-}
-:root[data-theme="moonlight"] .brand-pill {
-  background: #ffffff !important;
-  border: 1px solid #cbd5e1 !important;
-  color: #334155 !important;
-}
-:root[data-theme="moonlight"] .server-pulse-tag {
-  background: #ffffff !important;
-  border: 1px solid #cbd5e1 !important;
-}
-:root[data-theme="moonlight"] .auth-field input {
-  background: #ffffff !important;
-  border: 1px solid #cbd5e1 !important;
-  color: #0f172a !important;
-}
-:root[data-theme="moonlight"] .auth-field input:focus {
-  border-color: #6366f1 !important;
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15) !important;
-}
-:root[data-theme="moonlight"] .theme-switcher {
-  background: #e2e8f0 !important;
-  border: 1px solid #cbd5e1 !important;
-}
-:root[data-theme="moonlight"] .theme-pill-btn {
-  color: #475569 !important;
-}
-:root[data-theme="moonlight"] .theme-pill-btn.active {
-  background: #ffffff !important;
-  color: #0f172a !important;
-  border: 1px solid #cbd5e1 !important;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08) !important;
-}
-:root[data-theme="moonlight"] .auth-tab-btn {
-  color: #64748b !important;
-}
-:root[data-theme="moonlight"] .auth-tab-btn.active {
-  background: #ffffff !important;
-  color: #0f172a !important;
-  border: 1px solid #cbd5e1 !important;
 }
 
 .scene-canvas {
@@ -366,55 +255,27 @@ html, body {
   display: block;
 }
 
-.scene-clouds {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 220px;
-  overflow: hidden;
-  opacity: 0.7;
-}
-
-.cloud-track {
-  display: flex;
-  width: 200%;
-  height: 100%;
-  will-change: transform;
-}
-
-.cloud-band {
-  width: 50%;
-  height: 100%;
-  background:
-    radial-gradient(ellipse 22% 55% at 12% 85%, var(--cloud-color), transparent 72%),
-    radial-gradient(ellipse 28% 60% at 38% 92%, var(--cloud-color), transparent 72%),
-    radial-gradient(ellipse 24% 52% at 64% 86%, var(--cloud-color), transparent 72%),
-    radial-gradient(ellipse 26% 58% at 88% 90%, var(--cloud-color), transparent 72%);
-}
-
 /* =========================================================
-   LAYOUT SHELL
+   LAYOUT SHELL (4PX GRID)
    ========================================================= */
 .page-shell {
   position: relative;
   z-index: 1;
   min-height: 100dvh;
-  max-width: 1240px;
+  max-width: 1200px;
   margin: 0 auto;
-  padding: 24px 24px 36px;
+  padding: 24px 24px 32px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  gap: 20px;
-  box-sizing: border-box;
+  gap: 24px;
 }
 
 .topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
+  gap: 16px;
   flex-wrap: wrap;
 }
 
@@ -426,9 +287,9 @@ html, body {
 }
 
 .brand-emblem {
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -452,20 +313,21 @@ html, body {
 
 .brand-name {
   font-size: 16px;
-  font-weight: 800;
-  letter-spacing: -0.02em;
+  font-weight: 600;
+  letter-spacing: -0.01em;
   color: var(--text-primary);
 }
 
 .brand-version {
   font-family: 'JetBrains Mono', ui-monospace, monospace;
   font-size: 11px;
-  font-weight: 700;
-  padding: 2px 7px;
-  border-radius: 999px;
-  background: var(--accent-soft);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--surface-soft);
   border: 1px solid var(--border-subtle);
-  color: var(--accent-text);
+  color: var(--text-secondary);
 }
 
 .brand-sub {
@@ -476,75 +338,18 @@ html, body {
 .topbar-controls {
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.server-pulse-tag {
-  display: inline-flex;
-  align-items: center;
   gap: 8px;
-  padding: 7px 12px;
-  border-radius: 999px;
-  font-size: 12.5px;
-  font-weight: 600;
-  border: 1px solid var(--border-subtle);
-  background: var(--surface-card);
-  color: var(--text-secondary);
-  min-height: 36px;
-}
-
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: var(--text-muted);
-  flex-shrink: 0;
-}
-
-.server-pulse-tag.is-checking {
-  background: var(--neutral-soft);
-  color: var(--neutral-text);
-}
-.server-pulse-tag.is-checking .status-dot {
-  background: var(--neutral-text);
-}
-
-.server-pulse-tag.is-online {
-  background: var(--success-soft);
-  border-color: rgba(34, 197, 94, 0.36);
-  color: var(--success-text);
-}
-.server-pulse-tag.is-online .status-dot {
-  background: var(--success);
-}
-
-.server-pulse-tag.is-degraded {
-  background: var(--warning-soft);
-  border-color: rgba(245, 158, 11, 0.36);
-  color: var(--warning-text);
-}
-.server-pulse-tag.is-degraded .status-dot {
-  background: var(--warning);
-}
-
-.server-pulse-tag.is-offline {
-  background: var(--danger-soft);
-  border-color: rgba(239, 68, 68, 0.36);
-  color: var(--danger-text);
-}
-.server-pulse-tag.is-offline .status-dot {
-  background: var(--danger);
+  flex-wrap: wrap;
 }
 
 .theme-switcher {
   display: inline-flex;
   align-items: center;
-  padding: 3px;
+  padding: 4px;
   border-radius: 10px;
   background: var(--surface-card);
   border: 1px solid var(--border-subtle);
-  gap: 2px;
+  gap: 4px;
 }
 
 .theme-pill-btn {
@@ -554,46 +359,50 @@ html, body {
   color: var(--text-muted);
   font-family: inherit;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   padding: 6px 10px;
-  min-height: 30px;
-  border-radius: 7px;
+  min-height: 32px;
+  border-radius: 6px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  transition: background-color 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+  gap: 6px;
+  transition:
+    background-color 200ms var(--ease-color),
+    color 200ms var(--ease-color),
+    border-color 200ms var(--ease-color),
+    transform 140ms var(--ease-out);
 }
 
-.theme-pill-btn:hover {
-  color: var(--text-primary);
-  background: var(--surface-soft);
+.theme-pill-btn:active {
+  transform: scale(var(--scale-press));
 }
 
 .theme-pill-btn.active,
 .theme-pill-btn[aria-pressed="true"] {
-  background: var(--accent-soft);
-  color: var(--accent-text);
+  background: var(--surface-soft);
+  color: var(--text-primary);
   border-color: var(--border-strong);
+  font-weight: 600;
 }
 
 /* =========================================================
-   SPLIT-SCREEN MAIN WORKSPACE
+   ASYMMETRIC SPLIT WORKSPACE
    ========================================================= */
 .split-grid {
   flex: 1;
   display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(380px, 440px);
-  gap: 40px;
-  align-items: center;
-  margin: auto 0;
+  grid-template-columns: minmax(0, 1.12fr) minmax(380px, 432px);
+  gap: 48px;
+  align-items: start;
+  padding-block: clamp(12px, 3.5vh, 36px);
   width: 100%;
 }
 
 .hero-panel {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 20px;
   min-width: 0;
 }
 
@@ -602,22 +411,39 @@ html, body {
   align-items: center;
   gap: 8px;
   align-self: flex-start;
-  padding: 5px 12px;
-  border-radius: 999px;
-  background: var(--accent-soft);
-  border: 1px solid var(--border-strong);
-  color: var(--accent-text);
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
   font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+  font-weight: 500;
+}
+
+.kicker-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success);
+  position: relative;
+  flex-shrink: 0;
+}
+
+.kicker-dot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--success);
+  opacity: 0;
 }
 
 .hero-heading {
   margin: 0;
-  font-size: clamp(28px, 3.6vw, 42px);
-  font-weight: 800;
-  line-height: 1.16;
-  letter-spacing: -0.03em;
+  font-size: clamp(28px, 3.4vw, 40px);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.025em;
   color: var(--text-primary);
 }
 
@@ -630,11 +456,101 @@ html, body {
   font-size: 15px;
   line-height: 1.6;
   color: var(--text-secondary);
-  max-width: 58ch;
+  max-width: 54ch;
 }
 
 /* =========================================================
-   FEATURE CARDS (AUTHENTIC REPO CAPABILITIES)
+   SIGNATURE MOMENT: LIVE BOT TELEMETRY INSTRUMENT PREVIEW
+   ========================================================= */
+.telemetry-preview {
+  background: var(--surface-card);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--success);
+  border-radius: 14px;
+  padding: 16px;
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.telemetry-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.telemetry-id-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.telemetry-chip {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  border: 1px solid var(--border-subtle);
+  color: var(--accent-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.telemetry-bot-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.telemetry-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--success-soft);
+  border: 1px solid rgba(52, 179, 126, 0.28);
+  color: var(--success-text);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.telemetry-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.telemetry-cell {
+  background: var(--surface-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.telemetry-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.telemetry-val {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* =========================================================
+   CAPABILITY GRID (QUIET CHROME, ALIGNED 16PX ICONS)
    ========================================================= */
 .feature-grid {
   display: grid;
@@ -646,26 +562,23 @@ html, body {
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  padding: 13px 14px;
-  border-radius: 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
   background: var(--surface-panel);
   border: 1px solid var(--border-subtle);
-  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
-}
-
-.feature-card:hover {
-  transform: translateY(-2px);
-  border-color: var(--border-strong);
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.16);
+  transition:
+    transform 200ms var(--ease-out),
+    border-color 200ms var(--ease-color),
+    background-color 200ms var(--ease-color);
 }
 
 .feature-icon {
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
-  background: var(--accent-soft);
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--surface-soft);
   border: 1px solid var(--border-subtle);
-  color: var(--accent-text);
+  color: var(--text-secondary);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -674,15 +587,15 @@ html, body {
 
 .feature-title {
   margin: 0 0 2px;
-  font-size: 13.5px;
-  font-weight: 700;
+  font-size: 13px;
+  font-weight: 600;
   color: var(--text-primary);
 }
 
 .feature-desc {
   margin: 0;
-  font-size: 12.2px;
-  line-height: 1.45;
+  font-size: 12px;
+  line-height: 1.5;
   color: var(--text-muted);
 }
 
@@ -699,21 +612,23 @@ html, body {
   align-items: center;
   gap: 8px;
   padding: 8px 14px;
-  min-height: 38px;
-  border-radius: 10px;
+  min-height: 36px;
+  border-radius: 8px;
   background: var(--surface-panel);
   border: 1px solid var(--border-subtle);
   color: var(--text-secondary);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
   text-decoration: none;
-  transition: border-color 0.16s ease, color 0.16s ease, background-color 0.16s ease;
+  transition:
+    border-color 200ms var(--ease-color),
+    color 200ms var(--ease-color),
+    background-color 200ms var(--ease-color),
+    transform 140ms var(--ease-out);
 }
 
-.discord-support-link:hover {
-  border-color: var(--border-strong);
-  color: var(--text-primary);
-  background: var(--surface-soft);
+.discord-support-link:active {
+  transform: scale(var(--scale-press));
 }
 
 .hero-footnote {
@@ -734,21 +649,20 @@ html, body {
   position: relative;
   background: var(--surface-card);
   border: 1px solid var(--border-strong);
-  border-top: 2px solid var(--accent);
-  border-radius: 18px;
-  padding: 26px 24px 22px;
+  border-radius: 16px;
+  padding: 24px;
   box-shadow: var(--shadow-card);
 }
 
 .auth-card-header {
-  margin-bottom: 18px;
+  margin-bottom: 16px;
 }
 
 .auth-card-title {
   margin: 0 0 4px;
-  font-size: 20px;
-  font-weight: 800;
-  letter-spacing: -0.02em;
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
   color: var(--text-primary);
 }
 
@@ -761,12 +675,12 @@ html, body {
 .auth-tabs {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 6px;
+  gap: 4px;
   padding: 4px;
-  border-radius: 12px;
+  border-radius: 10px;
   background: var(--surface-input);
   border: 1px solid var(--border-subtle);
-  margin-bottom: 18px;
+  margin-bottom: 16px;
 }
 
 .auth-tab-btn {
@@ -775,36 +689,40 @@ html, body {
   background: transparent;
   color: var(--text-muted);
   font-family: inherit;
-  font-size: 13.5px;
-  font-weight: 700;
-  min-height: 40px;
-  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 500;
+  min-height: 36px;
+  border-radius: 6px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
-  transition: background-color 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+  gap: 6px;
+  transition:
+    background-color 200ms var(--ease-color),
+    color 200ms var(--ease-color),
+    border-color 200ms var(--ease-color),
+    transform 140ms var(--ease-out);
 }
 
-.auth-tab-btn:hover {
-  color: var(--text-primary);
+.auth-tab-btn:active {
+  transform: scale(var(--scale-press));
 }
 
 .auth-tab-btn.active,
 .auth-tab-btn[aria-selected="true"] {
-  background: var(--accent-soft);
+  background: var(--surface-soft);
   border-color: var(--border-strong);
-  color: var(--accent-text);
-  box-shadow: inset 0 -2px 0 var(--accent);
+  color: var(--text-primary);
+  font-weight: 600;
 }
 
 .login-alert {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 11px 12px;
-  border-radius: 10px;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
   font-size: 13px;
   line-height: 1.45;
   margin-bottom: 16px;
@@ -813,13 +731,13 @@ html, body {
 
 .login-alert.error {
   background: var(--danger-soft);
-  border-color: rgba(239, 68, 68, 0.35);
+  border-color: rgba(229, 72, 77, 0.30);
   color: var(--danger-text);
 }
 
 .login-alert.success {
   background: var(--success-soft);
-  border-color: rgba(34, 197, 94, 0.35);
+  border-color: rgba(52, 179, 126, 0.30);
   color: var(--success-text);
 }
 
@@ -831,33 +749,33 @@ html, body {
 
 .alert-icon-wrap {
   flex-shrink: 0;
-  margin-top: 1px;
+  margin-top: 2px;
 }
 
 .trial-callout {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 11px 12px;
-  border-radius: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
   background: var(--accent-soft);
   border: 1px solid var(--border-strong);
   color: var(--text-secondary);
   font-size: 12.5px;
-  line-height: 1.45;
+  line-height: 1.5;
   margin-bottom: 16px;
 }
 
 .trial-callout-icon {
   color: var(--accent-text);
   flex-shrink: 0;
-  margin-top: 1px;
+  margin-top: 2px;
 }
 
 .auth-form {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
 }
 
 .field-group {
@@ -871,14 +789,14 @@ html, body {
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
-  font-size: 12.5px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--text-secondary);
 }
 
 .field-hint-inline {
-  font-size: 11.5px;
-  font-weight: 500;
+  font-size: 12px;
+  font-weight: 400;
   color: var(--text-muted);
 }
 
@@ -890,23 +808,21 @@ html, body {
 
 .field-input {
   width: 100%;
-  min-height: 44px;
-  padding: 10px 12px;
-  border-radius: 10px;
+  min-height: 40px;
+  padding: 8px 12px;
+  border-radius: 8px;
   background: var(--surface-input);
   border: 1px solid var(--border-subtle);
   color: var(--text-primary);
   font-family: inherit;
   font-size: 14px;
-  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+  transition:
+    border-color 200ms var(--ease-color),
+    box-shadow 200ms var(--ease-color);
 }
 
 .field-input::placeholder {
   color: var(--text-muted);
-}
-
-.field-input:hover {
-  border-color: var(--border-strong);
 }
 
 .field-input:focus {
@@ -916,7 +832,7 @@ html, body {
 }
 
 .field-input.has-toggle {
-  padding-right: 46px;
+  padding-right: 44px;
 }
 
 .field-input.is-invalid,
@@ -926,7 +842,7 @@ html, body {
 
 .key-input {
   font-family: 'JetBrains Mono', ui-monospace, monospace;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.02em;
   font-size: 13px;
 }
 
@@ -935,28 +851,25 @@ html, body {
   right: 4px;
   top: 50%;
   transform: translateY(-50%);
-  width: 38px;
-  height: 38px;
+  width: 34px;
+  height: 34px;
   border: none;
-  border-radius: 8px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: background-color 0.15s ease, color 0.15s ease;
-}
-
-.password-toggle-btn:hover {
-  background: var(--accent-soft);
-  color: var(--text-primary);
+  transition:
+    background-color 200ms var(--ease-color),
+    color 200ms var(--ease-color);
 }
 
 .field-error {
   margin: 0;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--danger-text);
 }
 
@@ -964,66 +877,69 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   margin: 2px 0;
 }
 
 .checkbox-label {
   display: inline-flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 400;
   color: var(--text-secondary);
   cursor: pointer;
   min-height: 28px;
 }
 
 .checkbox-label input[type="checkbox"] {
-  width: 17px;
-  height: 17px;
+  width: 16px;
+  height: 16px;
   accent-color: var(--accent);
   cursor: pointer;
 }
 
 .primary-cta {
   width: 100%;
-  min-height: 46px;
-  padding: 11px 16px;
+  min-height: 44px;
+  padding: 10px 16px;
   border: 1px solid transparent;
-  border-radius: 11px;
+  border-radius: 8px;
   background: var(--accent);
   color: var(--accent-on);
   font-family: inherit;
   font-size: 14px;
-  font-weight: 700;
-  letter-spacing: 0.01em;
+  font-weight: 600;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 9px;
+  gap: 8px;
   margin-top: 4px;
-  transition: background-color 0.16s ease, transform 0.14s ease, opacity 0.16s ease;
-}
-
-.primary-cta:hover:not(:disabled) {
-  background: var(--accent-hover);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  transition:
+    background-color 200ms var(--ease-color),
+    transform 140ms var(--ease-out),
+    opacity 200ms var(--ease-out);
 }
 
 .primary-cta:active:not(:disabled) {
   background: var(--accent-active);
-  transform: translateY(1px);
+  transform: scale(var(--scale-press));
 }
 
 .primary-cta:disabled {
-  opacity: 0.72;
+  opacity: 0.65;
   cursor: not-allowed;
 }
 
 .primary-cta.is-success {
   background: var(--success);
   color: #ffffff;
+}
+
+.btn-secondary:active:not(:disabled) {
+  transform: scale(var(--scale-press));
 }
 
 .auth-footer-note {
@@ -1039,15 +955,22 @@ html, body {
 }
 
 .ui-icon {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   flex-shrink: 0;
+}
+
+/* Instantaneous focus ring (Animate UI Rule A17) */
+button, a, [role="button"] {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .auth-tab-btn:focus-visible,
 .theme-pill-btn:focus-visible,
 .password-toggle-btn:focus-visible,
 .primary-cta:focus-visible,
+.btn-secondary:focus-visible,
 .discord-support-link:focus-visible,
 .checkbox-label input:focus-visible {
   outline: 2px solid var(--accent-text);
@@ -1055,26 +978,69 @@ html, body {
 }
 
 /* =========================================================
-   ANIMATIONS (STRICT PREFERS-REDUCED-MOTION OPT-IN)
+   FINE POINTER HOVER GATE (ANIMATE UI RULE A3 & B4)
    ========================================================= */
-@keyframes kbotCloudScroll {
-  from { transform: translate3d(0, 0, 0); }
-  to { transform: translate3d(-50%, 0, 0); }
+@media (hover: hover) and (pointer: fine) {
+  .theme-pill-btn:hover:not(.active) {
+    color: var(--text-primary);
+    background: var(--surface-soft);
+  }
+  .feature-card:hover {
+    transform: translateY(-2px);
+    border-color: var(--border-strong);
+  }
+  .discord-support-link:hover {
+    border-color: var(--border-strong);
+    color: var(--text-primary);
+    background: var(--surface-soft);
+  }
+  .auth-tab-btn:hover:not(.active) {
+    color: var(--text-primary);
+  }
+  .field-input:hover:not(:focus) {
+    border-color: var(--border-strong);
+  }
+  .password-toggle-btn:hover {
+    background: var(--surface-soft);
+    color: var(--text-primary);
+  }
+  .primary-cta:hover:not(:disabled) {
+    background: var(--accent-hover);
+  }
 }
 
-@keyframes kbotIslandFloat {
-  0%, 100% { transform: translate3d(0, 0px, 0); }
-  50% { transform: translate3d(0, -6px, 0); }
+/* =========================================================
+   ANIMATIONS (ANIMATE UI TOKENS + REDUCED-MOTION OPT-IN)
+   ========================================================= */
+@keyframes kbotSonar {
+  0% { transform: scale(1); opacity: 0.75; }
+  75%, 100% { transform: scale(2.3); opacity: 0; }
 }
 
-@keyframes kbotPortalPulse {
-  0%, 100% { opacity: 0.78; transform: scale(1); }
-  50% { opacity: 1; transform: scale(1.03); }
+@keyframes kbotPanelIn {
+  from {
+    opacity: 0;
+    filter: blur(var(--blur-icon));
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    filter: none;
+    transform: none;
+  }
 }
 
-@keyframes kbotNebulaDrift {
-  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
-  50% { transform: translate3d(1.5%, -1.2%, 0) scale(1.03); }
+@keyframes kbotSurfaceIn {
+  from {
+    opacity: 0;
+    filter: blur(var(--blur-surface));
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    filter: none;
+    transform: none;
+  }
 }
 
 @keyframes kbotSpin {
@@ -1083,29 +1049,32 @@ html, body {
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .cloud-track {
-    animation: kbotCloudScroll 52s linear infinite;
+  .kicker-dot::after {
+    animation: kbotSonar 2.4s var(--ease-out) infinite;
   }
-  .scene-nebula {
-    animation: kbotNebulaDrift 26s ease-in-out infinite;
+  .auth-card {
+    animation: kbotSurfaceIn 320ms var(--ease-out);
   }
-  .island-float-group {
-    transform-origin: center;
-    animation: kbotIslandFloat 6.5s ease-in-out infinite;
-  }
-  .portal-core-pulse {
-    transform-origin: 320px 104px;
-    animation: kbotPortalPulse 4s ease-in-out infinite;
+  .auth-panel-enter {
+    animation: kbotPanelIn 220ms var(--ease-enter);
   }
   .icon-spin {
-    animation: kbotSpin 0.9s linear infinite;
+    animation: kbotSpin 0.85s linear infinite;
   }
-  :root[data-theme="violet-dusk"] .cloud-track {
-    animation-duration: 78s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-panel-enter {
+    animation: kbotPanelFadeOnly 180ms var(--ease-out);
   }
-  :root[data-theme="violet-dusk"] .scene-nebula {
-    animation: none;
+  .icon-spin {
+    animation: kbotSpin 4s linear infinite;
   }
+}
+
+@keyframes kbotPanelFadeOnly {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 /* =========================================================
@@ -1113,9 +1082,9 @@ html, body {
    ========================================================= */
 @media (forced-colors: active) {
   .auth-card,
+  .telemetry-preview,
   .feature-card,
   .theme-switcher,
-  .server-pulse-tag,
   .field-input,
   .primary-cta,
   .auth-tab-btn.active {
@@ -1128,12 +1097,12 @@ html, body {
    ========================================================= */
 @media (max-width: 960px) {
   .page-shell {
-    padding: 14px 14px max(28px, env(safe-area-inset-bottom, 28px));
-    gap: 16px;
+    padding: 16px 16px max(28px, env(safe-area-inset-bottom, 28px));
+    gap: 20px;
   }
   .split-grid {
     grid-template-columns: 1fr;
-    gap: 18px;
+    gap: 24px;
     align-items: stretch;
   }
   .auth-column {
@@ -1142,8 +1111,8 @@ html, body {
   .hero-panel {
     order: 2;
   }
-  .hero-diorama {
-    min-height: 160px;
+  .telemetry-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .feature-grid {
     grid-template-columns: 1fr;
@@ -1157,12 +1126,10 @@ html, body {
   .topbar {
     flex-direction: column;
     align-items: stretch;
-    gap: 10px;
-    padding: 12px;
+    gap: 12px;
   }
   .topbar-controls {
     width: 100%;
-    justify-content: stretch;
   }
   .theme-switcher {
     display: grid;
@@ -1171,39 +1138,27 @@ html, body {
     gap: 4px;
   }
   .theme-pill-btn {
-    padding: 7px 8px;
+    padding: 8px;
     min-height: 36px;
-    font-size: 11.5px;
-    text-align: center;
+    font-size: 12px;
     justify-content: center;
   }
   .auth-card {
-    padding: 18px 14px 16px;
-    border-radius: 16px;
+    padding: 20px 16px;
+    border-radius: 14px;
   }
   .field-label {
     flex-wrap: wrap;
     row-gap: 2px;
   }
-  .hero-panel {
-    padding: 18px 14px;
-    border-radius: 16px;
-  }
-  .hero-heading {
-    font-size: clamp(1.35rem, 6vw, 1.75rem);
-  }
-  .hero-metrics {
-    grid-template-columns: 1fr;
-    gap: 8px;
-  }
   .primary-cta,
   .field-input,
   .auth-tab-btn {
-    min-height: 46px;
+    min-height: 44px;
   }
   .password-toggle-btn {
-    width: 44px;
-    height: 44px;
+    width: 40px;
+    height: 40px;
   }
 }
 </style>
@@ -1211,22 +1166,15 @@ html, body {
 <body>
 
 <div class="scene-bg" aria-hidden="true">
-  <video id="publicGalaxyVideo" class="scene-video" autoplay muted loop playsinline preload="none" poster=""></video>
-  <div class="scene-nebula"></div>
+  <video id="publicGalaxyVideo" class="hidden" hidden muted playsinline preload="none"></video>
   <canvas id="publicStarfieldCanvas" class="scene-canvas"></canvas>
-  <div class="scene-clouds">
-    <div class="cloud-track">
-      <div class="cloud-band"></div>
-      <div class="cloud-band"></div>
-    </div>
-  </div>
 </div>
 
 <main class="page-shell">
   <header class="topbar">
     <div class="brand-lockup">
       <div class="brand-emblem" aria-hidden="true">
-        <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 2L3 7v10l9 5 9-5V7l-9-5z"/>
           <path d="M12 22V12"/>
           <path d="M21 7l-9 5-9-5"/>
@@ -1237,7 +1185,7 @@ html, body {
           <span class="brand-name">KBOT Manager</span>
           <span class="brand-version">V12.1.1</span>
         </div>
-        <span class="brand-sub">Nền Tảng Điều Khiển Minecraft Bot Thương Mại</span>
+        <span class="brand-sub">Bảng điều khiển vận hành Bot Minecraft KingMC</span>
       </div>
     </div>
 
@@ -1254,96 +1202,99 @@ html, body {
   <section class="split-grid" aria-label="Khu vực giới thiệu và đăng nhập">
     <div class="hero-panel">
       <div class="hero-kicker">
-        <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-        </svg>
-        <span>HỆ THỐNG ĐIỀU PHỐI BOT CHUYÊN NGHIỆP • KINGMC CLUSTER</span>
+        <span class="kicker-dot" aria-hidden="true"></span>
+        <span>Hạ tầng vận hành Bot AFK đám mây cho cụm máy chủ KingMC</span>
       </div>
 
       <h1 class="hero-heading">
-        KBOT MANAGER <span class="hero-heading-accent">KINGMC</span>
+        Điều phối và giám sát Bot <span class="hero-heading-accent">KingMC</span> theo thời gian thực
       </h1>
 
       <p class="hero-lead">
-        Nền tảng quản lý và vận hành bot tự động KingMC tối tân. Bảo mật tuyệt đối, hoạt động 24/7 ổn định, tiện lợi và dễ dàng quản lý mọi lúc mọi nơi.
+        Giữ nhân vật treo máy 24/7 không cần bật máy tính cá nhân. Tương tác trực tiếp menu rương ingame, quản lý túi đồ 36 ô và tự động kết nối lại khi máy chủ bảo trì.
       </p>
+
+      <div class="telemetry-preview" aria-label="Mô phỏng thông số vận hành thực tế">
+        <div class="telemetry-head">
+          <div class="telemetry-id-group">
+            <span class="telemetry-chip">BOT-01</span>
+            <span class="telemetry-bot-name">KingMC Towny AFK</span>
+          </div>
+          <span class="telemetry-status-pill">
+            <span class="kicker-dot" aria-hidden="true"></span>
+            <span>ONLINE • ECO 1HZ</span>
+          </span>
+        </div>
+        <div class="telemetry-metrics">
+          <div class="telemetry-cell">
+            <span class="telemetry-label">Sinh lực / Totem</span>
+            <span class="telemetry-val">20/20 • x6</span>
+          </div>
+          <div class="telemetry-cell">
+            <span class="telemetry-label">Độ trễ mạng</span>
+            <span class="telemetry-val">24 ms</span>
+          </div>
+          <div class="telemetry-cell">
+            <span class="telemetry-label">RAM Worker</span>
+            <span class="telemetry-val">146 / 220 MB</span>
+          </div>
+          <div class="telemetry-cell">
+            <span class="telemetry-label">Phiên kết nối</span>
+            <span class="telemetry-val">AES-256-GCM</span>
+          </div>
+        </div>
+      </div>
 
       <div class="feature-grid">
         <article class="feature-card">
           <div class="feature-icon" aria-hidden="true">
-            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-              <path d="M9 12l2 2 4-4"/>
-            </svg>
-          </div>
-          <div>
-            <h2 class="feature-title">Bảo Mật &amp; An Toàn Tuyệt Đối</h2>
-            <p class="feature-desc">Mã hóa chuẩn AES-256-GCM, bảo vệ phiên đăng nhập CSRF, Rate Limiting và cô lập dữ liệu 100%.</p>
-          </div>
-        </article>
-
-        <article class="feature-card">
-          <div class="feature-icon" aria-hidden="true">
-            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
-            </svg>
-          </div>
-          <div>
-            <h2 class="feature-title">Hoạt Động Online 24/7</h2>
-            <p class="feature-desc">Hạ tầng Cluster tự động khôi phục kết nối, bot duy trì cắm chuột bền bỉ, Uptime đạt 99.9%.</p>
-          </div>
-        </article>
-
-        <article class="feature-card">
-          <div class="feature-icon" aria-hidden="true">
-            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="2" y="3" width="20" height="14" rx="2"/>
-              <line x1="8" y1="21" x2="16" y2="21"/>
-              <line x1="12" y1="17" x2="12" y2="21"/>
-            </svg>
-          </div>
-          <div>
-            <h2 class="feature-title">Tiện Lợi Mọi Lúc Mọi Nơi</h2>
-            <p class="feature-desc">Giao diện web trực quan thời gian thực, điều khiển toàn diện trên cả điện thoại, máy tính bảng và PC.</p>
-          </div>
-        </article>
-
-        <article class="feature-card">
-          <div class="feature-icon" aria-hidden="true">
-            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
               <rect x="3" y="3" width="18" height="18" rx="2"/>
               <path d="M3 9h18M9 21V9"/>
             </svg>
           </div>
           <div>
-            <h2 class="feature-title">Remote GUI &amp; Hòm Đồ</h2>
-            <p class="feature-desc">Click trực tiếp slot rương /menu ingame, kéo thả 36 ô đồ và trang bị Totem tay phụ tức thì.</p>
+            <h2 class="feature-title">Cửa sổ GUI và túi đồ trực tiếp</h2>
+            <p class="feature-desc">Bấm chọn ô trong /menu, rương ingame, kéo thả trang bị và lắp Totem tay phụ trên trình duyệt</p>
           </div>
         </article>
 
         <article class="feature-card">
           <div class="feature-icon" aria-hidden="true">
-            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="9"/>
-              <path d="M12 7v5l3 2"/>
-            </svg>
-          </div>
-          <div>
-            <h2 class="feature-title">Lên Lịch &amp; Auto Chat</h2>
-            <p class="feature-desc">Thiết lập lịch bật/tắt theo khung giờ linh hoạt, chuỗi lệnh Spawn Commands và vòng lặp tự động.</p>
-          </div>
-        </article>
-
-        <article class="feature-card">
-          <div class="feature-icon" aria-hidden="true">
-            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
               <path d="M23 4v6h-6M1 20v-6h6"/>
               <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
             </svg>
           </div>
           <div>
-            <h2 class="feature-title">Tự Động Khôi Phục Kết Nối</h2>
-            <p class="feature-desc">Watchdog thông minh tự phát hiện sự cố, reconnect và duy trì phiên bot bền bỉ không ngắt quãng.</p>
+            <h2 class="feature-title">Tự động vào lại và chạy lệnh</h2>
+            <p class="feature-desc">Tự đăng nhập /login, mở /menu vào sảnh và chạy chuỗi lệnh Spawn với độ trễ ngẫu nhiên an toàn</p>
+          </div>
+        </article>
+
+        <article class="feature-card">
+          <div class="feature-icon" aria-hidden="true">
+            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <circle cx="12" cy="12" r="9"/>
+              <path d="M12 7v5l3 2"/>
+            </svg>
+          </div>
+          <div>
+            <h2 class="feature-title">Hẹn giờ và Auto Chat định kỳ</h2>
+            <p class="feature-desc">Đặt lịch bật tắt theo khung giờ cố định hoặc chu kỳ lặp kèm tin nhắn rao shop tự động</p>
+          </div>
+        </article>
+
+        <article class="feature-card">
+          <div class="feature-icon" aria-hidden="true">
+            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              <path d="M9 12l2 2 4-4"/>
+            </svg>
+          </div>
+          <div>
+            <h2 class="feature-title">Đồng bộ cảnh báo qua Discord</h2>
+            <p class="feature-desc">Liên kết tài khoản qua lệnh /login trên Discord để điều khiển bot và nhận tin nhắn DM khi bị kick</p>
           </div>
         </article>
       </div>
@@ -1353,17 +1304,17 @@ html, body {
           <svg class="ui-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
             <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994.021-.041.001-.09-.041-.106a13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.929 1.793 8.18 1.793 12.061 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.894.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.028z"/>
           </svg>
-          <span>Hỗ Trợ Discord KingMC</span>
+          <span>Cộng đồng Discord KingMC</span>
         </a>
-        <span class="hero-footnote">Đã hỗ trợ liên kết tài khoản Discord qua lệnh /login</span>
+        <span class="hero-footnote">Hỗ trợ điều khiển nhanh trên Discord qua /bots và /login</span>
       </div>
     </div>
 
     <div class="auth-column">
       <div class="auth-card">
         <div class="auth-card-header">
-          <h2 class="auth-card-title">Truy Cập Bảng Điều Khiển</h2>
-          <p class="auth-card-subtitle">Đăng nhập tài khoản vận hành hoặc tạo tài khoản mới bằng mã Key</p>
+          <h2 class="auth-card-title">Truy cập bảng điều khiển</h2>
+          <p class="auth-card-subtitle">Đăng nhập tài khoản hiện có hoặc đăng ký tài khoản mới</p>
         </div>
 
         <div class="auth-tabs" role="tablist" aria-label="Chế độ xác thực">
@@ -1375,7 +1326,7 @@ html, body {
             aria-selected="true"
             aria-controls="publicLoginForm"
             tabindex="0"
-            data-auth-tab="login">Đăng Nhập</button>
+            data-auth-tab="login">Đăng nhập</button>
           <button
             id="tabPublicRegisterBtn"
             type="button"
@@ -1384,7 +1335,7 @@ html, body {
             aria-selected="false"
             aria-controls="publicRegisterForm"
             tabindex="-1"
-            data-auth-tab="register">Đăng Ký</button>
+            data-auth-tab="register">Đăng ký</button>
         </div>
 
         <div id="publicFieldAnnouncer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
@@ -1394,10 +1345,10 @@ html, body {
           <div class="field-group">
             <label class="field-label" for="publicUsername">
               <span>Tên đăng nhập</span>
-              <span class="field-hint-inline">Tài khoản User hoặc Admin</span>
+              <span class="field-hint-inline">User hoặc Admin</span>
             </label>
             <div class="input-wrap">
-              <input id="publicUsername" class="field-input" type="text" autocomplete="username" placeholder="Nhập tên đăng nhập..." aria-describedby="publicUsernameErr">
+              <input id="publicUsername" class="field-input" type="text" autocomplete="username" placeholder="Nhập tên đăng nhập" aria-describedby="publicUsernameErr">
             </div>
             <p id="publicUsernameErr" class="field-error" hidden></p>
           </div>
@@ -1407,13 +1358,13 @@ html, body {
               <span>Mật khẩu</span>
             </label>
             <div class="input-wrap">
-              <input id="publicPassword" class="field-input has-toggle" type="password" autocomplete="current-password" placeholder="Nhập mật khẩu..." aria-describedby="publicPasswordErr">
+              <input id="publicPassword" class="field-input has-toggle" type="password" autocomplete="current-password" placeholder="Nhập mật khẩu" aria-describedby="publicPasswordErr">
               <button type="button" class="password-toggle-btn" data-toggle-target="publicPassword" aria-label="Hiện mật khẩu" aria-pressed="false">
-                <svg class="ui-icon icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <svg class="ui-icon icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
                   <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
                   <circle cx="12" cy="12" r="3"/>
                 </svg>
-                <svg class="ui-icon icon-eye-off hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <svg class="ui-icon icon-eye-off hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
                   <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
                   <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
                   <line x1="1" y1="1" x2="23" y2="23"/>
@@ -1432,13 +1383,13 @@ html, body {
 
           <button id="publicSubmitBtn" type="submit" class="primary-cta">
             <span class="btn-icon" aria-hidden="true">
-              <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
                 <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
                 <polyline points="10 17 15 12 10 7"/>
                 <line x1="15" y1="12" x2="3" y2="12"/>
               </svg>
             </span>
-            <span class="btn-label">ĐĂNG NHẬP VÀO HỆ THỐNG</span>
+            <span class="btn-label">Đăng nhập vào hệ thống</span>
           </button>
         </form>
 
@@ -1446,14 +1397,14 @@ html, body {
           <div class="auth-form">
             <div id="publicTrialCalloutBadge" class="trial-callout">
               <span class="trial-callout-icon" aria-hidden="true">
-                <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
                   <polyline points="20 12 20 22 4 22 4 12"/>
                   <rect x="2" y="7" width="20" height="5"/>
                   <line x1="12" y1="22" x2="12" y2="7"/>
                 </svg>
               </span>
               <div id="publicTrialCalloutText">
-                <strong>ĐẶC QUYỀN MỚI:</strong> Nhận ngay <strong>1 NGÀY DÙNG THỬ MIỄN PHÍ</strong> sau khi tạo tài khoản thành công!
+                <strong>Ưu đãi tài khoản mới:</strong> Tặng <strong>1 NGÀY DÙNG THỬ MIỄN PHÍ</strong> ngay khi hoàn tất đăng ký
               </div>
             </div>
 
@@ -1463,7 +1414,7 @@ html, body {
                 <span class="field-hint-inline">3–32 ký tự a-z, 0-9, _</span>
               </label>
               <div class="input-wrap">
-                <input id="regUsername" class="field-input" type="text" autocomplete="username" placeholder="Ví dụ: player_vip01" aria-describedby="regUsernameErr">
+                <input id="regUsername" class="field-input" type="text" autocomplete="username" placeholder="Ví dụ: player_kingmc" aria-describedby="regUsernameErr">
               </div>
               <p id="regUsernameErr" class="field-error" hidden></p>
             </div>
@@ -1474,13 +1425,13 @@ html, body {
                 <span class="field-hint-inline">Tối thiểu 6 ký tự</span>
               </label>
               <div class="input-wrap">
-                <input id="regPassword" class="field-input has-toggle" type="password" autocomplete="new-password" placeholder="Tạo mật khẩu an toàn..." aria-describedby="regPasswordErr">
+                <input id="regPassword" class="field-input has-toggle" type="password" autocomplete="new-password" placeholder="Tạo mật khẩu đăng nhập" aria-describedby="regPasswordErr">
                 <button type="button" class="password-toggle-btn" data-toggle-target="regPassword" aria-label="Hiện mật khẩu" aria-pressed="false">
-                  <svg class="ui-icon icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <svg class="ui-icon icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
                     <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
                     <circle cx="12" cy="12" r="3"/>
                   </svg>
-                  <svg class="ui-icon icon-eye-off hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <svg class="ui-icon icon-eye-off hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
                     <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
                     <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
                     <line x1="1" y1="1" x2="23" y2="23"/>
@@ -1495,13 +1446,13 @@ html, body {
                 <span>Xác nhận mật khẩu</span>
               </label>
               <div class="input-wrap">
-                <input id="regPasswordConfirm" class="field-input has-toggle" type="password" autocomplete="new-password" placeholder="Nhập lại mật khẩu vừa tạo..." aria-describedby="regPasswordConfirmErr">
+                <input id="regPasswordConfirm" class="field-input has-toggle" type="password" autocomplete="new-password" placeholder="Nhập lại mật khẩu vừa tạo" aria-describedby="regPasswordConfirmErr">
                 <button type="button" class="password-toggle-btn" data-toggle-target="regPasswordConfirm" aria-label="Hiện mật khẩu" aria-pressed="false">
-                  <svg class="ui-icon icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <svg class="ui-icon icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
                     <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
                     <circle cx="12" cy="12" r="3"/>
                   </svg>
-                  <svg class="ui-icon icon-eye-off hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <svg class="ui-icon icon-eye-off hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
                     <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
                     <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
                     <line x1="1" y1="1" x2="23" y2="23"/>
@@ -1523,19 +1474,19 @@ html, body {
 
             <div id="regCaptchaGroup" class="field-group">
               <label class="field-label" for="regCaptchaAnswer">
-                <span>Mã xác thực chống Bot (Captcha)</span>
+                <span>Mã xác thực Captcha</span>
                 <span class="field-hint-inline">Bắt buộc</span>
               </label>
-              <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
-                <div id="regCaptchaImgContainer" style="background:var(--surface-input);border:1px solid var(--border-subtle);border-radius:8px;padding:4px 8px;min-width:136px;min-height:46px;flex:1 1 140px;display:flex;align-items:center;justify-content:center;cursor:pointer;" title="Nhấn để đổi mã khác">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+                <div id="regCaptchaImgContainer" style="background:var(--surface-input);border:1px solid var(--border-subtle);border-radius:8px;padding:4px 8px;min-width:136px;min-height:44px;flex:1 1 140px;display:flex;align-items:center;justify-content:center;cursor:pointer;" title="Nhấn để đổi mã khác">
                   <span style="font-size:12px;color:var(--text-muted);">Đang tải Captcha...</span>
                 </div>
-                <button type="button" id="regCaptchaRefreshBtn" class="btn-secondary" style="padding:10px 14px;min-height:46px;font-size:12px;font-weight:600;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;gap:4px;cursor:pointer;background:var(--surface-input);border:1px solid var(--border-subtle);color:var(--text-primary);flex:0 0 auto;" title="Đổi mã xác thực khác">
+                <button type="button" id="regCaptchaRefreshBtn" class="btn-secondary" style="padding:8px 12px;min-height:44px;font-size:12px;font-weight:500;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;gap:4px;cursor:pointer;background:var(--surface-input);border:1px solid var(--border-subtle);color:var(--text-primary);flex:0 0 auto;" title="Đổi mã xác thực khác">
                   Đổi mã
                 </button>
               </div>
               <div class="input-wrap">
-                <input id="regCaptchaAnswer" class="field-input" type="text" autocomplete="off" placeholder="Nhập kết quả phép tính hoặc ký tự trên..." aria-describedby="regCaptchaErr">
+                <input id="regCaptchaAnswer" class="field-input" type="text" autocomplete="off" placeholder="Nhập kết quả phép tính hoặc ký tự trên" aria-describedby="regCaptchaErr">
                 <input type="hidden" id="regCaptchaToken" value="">
               </div>
               <p id="regCaptchaErr" class="field-error" hidden></p>
@@ -1543,24 +1494,24 @@ html, body {
 
             <button id="publicRegSubmitBtn" type="submit" class="primary-cta">
               <span class="btn-icon" aria-hidden="true">
-                <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
                   <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
                   <circle cx="8.5" cy="7" r="4"/>
                   <line x1="20" y1="8" x2="20" y2="14"/>
                   <line x1="23" y1="11" x2="17" y2="11"/>
                 </svg>
               </span>
-              <span class="btn-label">HOÀN TẤT ĐĂNG KÝ VÀ BẮT ĐẦU</span>
+              <span class="btn-label">Hoàn tất đăng ký</span>
             </button>
           </div>
         </form>
 
         <div class="auth-footer-note">
-          <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
             <rect x="3" y="11" width="18" height="11" rx="2"/>
             <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
           </svg>
-          <span>Kết nối được bảo vệ bằng cookie phiên bảo mật và kiểm tra nguồn gốc CSRF. Cần hỗ trợ cấp lại mật khẩu hãy liên hệ Admin qua Discord.</span>
+          <span>Phiên làm việc được bảo vệ bằng cookie HttpOnly và kiểm tra CSRF. Liên hệ Admin trên Discord khi cần cấp lại mật khẩu.</span>
         </div>
       </div>
     </div>
@@ -1568,14 +1519,14 @@ html, body {
 </main>
 
 <template id="tplIconLogin">
-  <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+  <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
     <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
     <polyline points="10 17 15 12 10 7"/>
     <line x1="15" y1="12" x2="3" y2="12"/>
   </svg>
 </template>
 <template id="tplIconRegister">
-  <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+  <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
     <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
     <circle cx="8.5" cy="7" r="4"/>
     <line x1="20" y1="8" x2="20" y2="14"/>
@@ -1583,26 +1534,26 @@ html, body {
   </svg>
 </template>
 <template id="tplIconSpinner">
-  <svg class="ui-icon icon-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+  <svg class="ui-icon icon-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
     <circle cx="12" cy="12" r="9" opacity="0.25"/>
     <path d="M21 12a9 9 0 0 0-9-9"/>
   </svg>
 </template>
 <template id="tplIconWarn">
-  <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+  <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
     <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
     <line x1="12" y1="9" x2="12" y2="13"/>
     <line x1="12" y1="17" x2="12.01" y2="17"/>
   </svg>
 </template>
 <template id="tplIconLock">
-  <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+  <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
     <rect x="3" y="11" width="18" height="11" rx="2"/>
     <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
   </svg>
 </template>
 <template id="tplIconSuccess">
-  <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" aria-hidden="true">
+  <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
     <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
     <polyline points="22 4 12 14.01 9 11.01"/>
   </svg>
@@ -1735,6 +1686,12 @@ function setFieldError(inputId, errId, message) {
   }
 }
 
+function triggerAuthPanelTransition(panelEl) {
+  if (!panelEl || !panelEl.classList) return;
+  panelEl.classList.remove('auth-panel-enter');
+  panelEl.classList.add('auth-panel-enter');
+}
+
 function switchPublicAuthTab(tab) {
   const isLogin = tab !== 'register';
   const loginBtn = document.getElementById('tabPublicLoginBtn');
@@ -1755,10 +1712,12 @@ function switchPublicAuthTab(tab) {
   if (loginForm) {
     loginForm.classList.toggle('hidden', !isLogin);
     loginForm.hidden = !isLogin;
+    if (isLogin) triggerAuthPanelTransition(loginForm);
   }
   if (regForm) {
     regForm.classList.toggle('hidden', isLogin);
     regForm.hidden = isLogin;
+    if (!isLogin) triggerAuthPanelTransition(regForm);
   }
   setLoginAlert('', '');
   const announcer = document.getElementById('publicFieldAnnouncer');
@@ -1773,19 +1732,19 @@ function switchPublicAuthTab(tab) {
 function getDeviceFingerprint() {
   try {
     const parts = [
-      screen.width || 0,
-      screen.height || 0,
-      screen.colorDepth || 0,
+      typeof screen !== 'undefined' && screen.width ? screen.width : 0,
+      typeof screen !== 'undefined' && screen.height ? screen.height : 0,
+      typeof screen !== 'undefined' && screen.colorDepth ? screen.colorDepth : 0,
       navigator.hardwareConcurrency || 1,
       navigator.languages ? navigator.languages.join(',') : (navigator.language || ''),
-      Intl.DateTimeFormat().resolvedOptions().timeZone || ''
+      typeof Intl !== 'undefined' && Intl.DateTimeFormat ? (Intl.DateTimeFormat().resolvedOptions().timeZone || '') : ''
     ];
     try {
       const c = document.createElement('canvas');
       c.width = 100;
       c.height = 30;
-      const ctx = c.getContext('2d');
-      if (ctx) {
+      const ctx = c.getContext && c.getContext('2d');
+      if (ctx && typeof ctx.fillText === 'function' && typeof c.toDataURL === 'function') {
         ctx.textBaseline = 'top';
         ctx.font = '12px sans-serif';
         ctx.fillText('kbot_fp_seed', 2, 2);
@@ -1822,7 +1781,7 @@ async function refreshRegisterCaptcha() {
     const data = await res.json();
     if (data && data.token && data.svg) {
       if (tokenInput) tokenInput.value = data.token;
-      if (container) {
+      if (container && typeof DOMParser !== 'undefined') {
         const parser = new DOMParser();
         const svgDoc = parser.parseFromString(data.svg, 'image/svg+xml');
         if (svgDoc.documentElement) {
@@ -1915,10 +1874,10 @@ function validateRegisterFields() {
     setFieldError('regPasswordConfirm', 'regPasswordConfirmErr', '');
   }
 
-  if (!c) {
+  if (cEl && !c) {
     setFieldError('regCaptchaAnswer', 'regCaptchaErr', 'Vui lòng nhập kết quả mã xác thực Captcha.');
     firstInvalid = firstInvalid || cEl;
-  } else {
+  } else if (cEl) {
     setFieldError('regCaptchaAnswer', 'regCaptchaErr', '');
   }
 
@@ -1958,7 +1917,7 @@ function startPublicLoginLockoutCountdown(btn, retryAfterSeconds, errorMessage) 
     setLoginAlert('error', (errorMessage || 'Quá nhiều lần đăng nhập sai.') + ' (Mở khóa sau ' + waitText + ')', 'tplIconWarn');
     if (btn) {
       btn.disabled = true;
-      setSubmitButtonState(btn, 'idle', 'TẠM KHÓA (' + waitText + ')', 'tplIconLogin');
+      setSubmitButtonState(btn, 'idle', 'Tạm khóa (' + waitText + ')', 'tplIconLogin');
     }
   };
   renderTick();
@@ -1968,7 +1927,7 @@ function startPublicLoginLockoutCountdown(btn, retryAfterSeconds, errorMessage) 
       stopPublicLoginLockoutCountdown();
       if (btn) {
         btn.disabled = false;
-        setSubmitButtonState(btn, 'idle', 'ĐĂNG NHẬP VÀO HỆ THỐNG', 'tplIconLogin');
+        setSubmitButtonState(btn, 'idle', 'Đăng nhập vào hệ thống', 'tplIconLogin');
       }
       setLoginAlert('info', 'Đã hết thời gian tạm khóa. Bạn có thể thử đăng nhập lại.', 'tplIconWarn');
       return;
@@ -2016,13 +1975,13 @@ async function handlePublicLoginSubmit(e) {
       throw new Error(data.error || 'Tên đăng nhập hoặc mật khẩu không đúng.');
     }
     stopPublicLoginLockoutCountdown();
-    setLoginAlert('success', 'Đăng nhập thành công! Đang chuyển hướng...', 'tplIconSuccess');
-    setSubmitButtonState(btn, 'success', 'ĐĂNG NHẬP THÀNH CÔNG!', 'tplIconLogin');
+    setLoginAlert('success', 'Đăng nhập thành công. Đang chuyển hướng...', 'tplIconSuccess');
+    setSubmitButtonState(btn, 'success', 'Đăng nhập thành công', 'tplIconLogin');
     setTimeout(() => { window.location.replace('/'); }, 300);
   } catch (err) {
     setLoginAlert('error', err && err.message ? err.message : 'Đăng nhập thất bại.', 'tplIconWarn');
     btn.disabled = false;
-    setSubmitButtonState(btn, 'idle', 'ĐĂNG NHẬP VÀO HỆ THỐNG', 'tplIconLogin');
+    setSubmitButtonState(btn, 'idle', 'Đăng nhập vào hệ thống', 'tplIconLogin');
   }
 }
 
@@ -2050,7 +2009,7 @@ async function handlePublicRegisterSubmit(e) {
 
   setLoginAlert('', '');
   btn.disabled = true;
-  setSubmitButtonState(btn, 'loading', 'Đang đăng ký...', 'tplIconRegister');
+  setSubmitButtonState(btn, 'loading', 'Đang tạo tài khoản...', 'tplIconRegister');
 
   try {
     const res = await fetch('/api/auth/register', {
@@ -2072,13 +2031,13 @@ async function handlePublicRegisterSubmit(e) {
     if (!res.ok || !data.ok) {
       throw new Error(data.error || 'Không thể đăng ký tài khoản.');
     }
-    setLoginAlert('success', data.message || 'Đăng ký thành công! Đang chuyển hướng...', 'tplIconSuccess');
-    setSubmitButtonState(btn, 'success', 'ĐĂNG KÝ THÀNH CÔNG!', 'tplIconRegister');
+    setLoginAlert('success', data.message || 'Đăng ký thành công. Đang chuyển hướng...', 'tplIconSuccess');
+    setSubmitButtonState(btn, 'success', 'Đăng ký thành công', 'tplIconRegister');
     setTimeout(() => { window.location.replace('/'); }, 350);
   } catch (err) {
     setLoginAlert('error', err && err.message ? err.message : 'Không thể đăng ký tài khoản.', 'tplIconWarn');
     btn.disabled = false;
-    setSubmitButtonState(btn, 'idle', 'HOÀN TẤT ĐĂNG KÝ VÀ BẮT ĐẦU', 'tplIconRegister');
+    setSubmitButtonState(btn, 'idle', 'Hoàn tất đăng ký', 'tplIconRegister');
     refreshRegisterCaptcha();
   }
 }
@@ -2102,25 +2061,19 @@ function renderTrialCallout(trialGiftEnabled, rawTrialDays) {
   if (badge) badge.hidden = false;
   if (text) {
     const strongTitle = document.createElement('strong');
-    strongTitle.textContent = 'ĐẶC QUYỀN MỚI:';
+    strongTitle.textContent = 'Ưu đãi tài khoản mới:';
     const strongDays = document.createElement('strong');
     strongDays.textContent = days + ' NGÀY DÙNG THỬ MIỄN PHÍ';
 
     text.replaceChildren(
       strongTitle,
-      document.createTextNode(' Nhận ngay '),
+      document.createTextNode(' Tặng '),
       strongDays,
-      document.createTextNode(' sau khi tạo tài khoản thành công!')
+      document.createTextNode(' ngay sau khi hoàn tất đăng ký')
     );
   }
   if (keyHint) keyHint.textContent = '(Có thể bỏ trống)';
   if (keyInput) keyInput.placeholder = 'Nhập mã License Key (nếu có)...';
-}
-
-function parseBoundedInt(value, maxVal) {
-  const num = Number.parseInt(value, 10);
-  if (!Number.isFinite(num) || num < 0) return 0;
-  return num > maxVal ? maxVal : num;
 }
 
 async function loadPublicSystemInfo() {
@@ -2227,7 +2180,7 @@ async function loadPublicSystemInfo() {
     if (err === 'locked' || reason === 'locked') {
       setLoginAlert('error', 'Tài khoản của bạn hiện đang bị tạm khóa. Vui lòng liên hệ Quản trị viên.', 'tplIconLock');
     } else if (err === 'expired' || reason === 'expired') {
-      setLoginAlert('error', 'Gói thuê của bạn đã hết hạn. Vui lòng nhập License Key mới ở ô bên dưới để kích hoạt.', 'tplIconWarn');
+      setLoginAlert('error', 'Gói thuê của bạn đã hết hạn. Vui lòng nhập License Key mới để kích hoạt.', 'tplIconWarn');
     } else if (params.has('logged_out')) {
       setLoginAlert('success', 'Đã đăng xuất khỏi hệ thống an toàn.', 'tplIconSuccess');
     }
@@ -2247,246 +2200,27 @@ async function loadPublicSystemInfo() {
   let h = 0;
   let rafId = null;
 
-  function hideVideoFallback() {
-    if (!video) return;
-    if (typeof video.pause === 'function') video.pause();
-    if (video.style) video.style.display = 'none';
-  }
-
-  if (video && typeof video.addEventListener === 'function') {
-    video.addEventListener('error', hideVideoFallback);
-  }
-
   function resize() {
     if (!canvas) return;
-    w = canvas.width = window.innerWidth;
-    h = canvas.height = window.innerHeight;
+    w = canvas.width = window.innerWidth || 1280;
+    h = canvas.height = window.innerHeight || 800;
   }
   window.addEventListener('resize', resize, { passive: true });
   resize();
 
-  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '') || (window.innerWidth <= 768);
-  const starCount = isMobile ? 60 : 100;
-  const stars = [];
-  for (let i = 0; i < starCount; i++) {
-    stars.push({
+  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '') || (w <= 768);
+  const nodeCount = isMobile ? 36 : 64;
+  const nodes = [];
+  for (let i = 0; i < nodeCount; i++) {
+    nodes.push({
       x: Math.random() * w,
       y: Math.random() * h,
-      z: Math.random() * 1.6 + 0.4,
-      r: Math.random() * 0.85 + 0.35,
-      a: Math.random() * 0.6 + 0.3,
-      da: (Math.random() * 0.008 + 0.003) * (Math.random() < 0.5 ? 1 : -1),
-      rgb: Math.random() < 0.7 ? '248,250,252' : (Math.random() < 0.5 ? '226,232,240' : '219,234,254'),
-      seed: Math.random() * 100,
-      phase: Math.random() * Math.PI * 2,
-      trail: [],
-      isAnchor: i < 8
+      z: Math.random() * 1.2 + 0.4,
+      r: Math.random() * 0.9 + 0.5,
+      a: Math.random() * 0.45 + 0.15,
+      da: (Math.random() * 0.005 + 0.002) * (Math.random() < 0.5 ? 1 : -1),
+      seed: Math.random() * 100
     });
-  }
-  const shootingStars = [];
-
-  let _publicOceanEntities = null;
-  function getPublicOceanEntities() {
-    if (!_publicOceanEntities) {
-      const fish = [];
-      for (let f = 0; f < 6; f++) {
-        fish.push({
-          x: Math.random() * (w || 800),
-          y: Math.random() * (h || 600),
-          baseY: Math.random() * (h || 600),
-          speed: 1.5 + Math.random() * 1.5,
-          freq: 0.03 + Math.random() * 0.04,
-          amp: 10 + Math.random() * 12,
-          phase: Math.random() * Math.PI * 2,
-          size: 8 + Math.random() * 6,
-          color: f % 2 === 0 ? 'rgba(56, 189, 248, 0.85)' : 'rgba(52, 211, 153, 0.85)'
-        });
-      }
-      const jellyfish = [];
-      for (let j = 0; j < 2; j++) {
-        jellyfish.push({
-          x: Math.random() * (w || 800),
-          y: Math.random() * (h || 600),
-          scale: 1,
-          pulsePhase: Math.random() * Math.PI * 2,
-          tentacles: 5,
-          speed: 0.3 + Math.random() * 0.4
-        });
-      }
-      _publicOceanEntities = { fish, jellyfish };
-    }
-    return _publicOceanEntities;
-  }
-
-  function updatePublicFishSchool(fish, width, height, dt) {
-    if (!fish || !Array.isArray(fish)) return;
-    const delta = typeof dt === 'number' ? dt / 16.667 : 1;
-    for (let i = 0; i < fish.length; i++) {
-      const f = fish[i];
-      f.phase = (f.phase || 0) + (f.freq || 0.05) * delta;
-      f.y = (f.baseY !== undefined ? f.baseY : f.y) + Math.sin(f.phase) * (f.amp || 15);
-      f.x += (f.speed || 2) * delta;
-      if (f.x > (width || 800) + 50) {
-        f.x = -50;
-        f.baseY = Math.random() * (height || 600);
-        f.y = f.baseY;
-      }
-    }
-  }
-
-  function updatePublicJellyfish(jellyfish, width, height, dt) {
-    if (!jellyfish || !Array.isArray(jellyfish)) return;
-    const delta = typeof dt === 'number' ? dt / 16.667 : 1;
-    for (let i = 0; i < jellyfish.length; i++) {
-      const j = jellyfish[i];
-      j.pulsePhase = (j.pulsePhase || 0) + 0.04 * delta;
-      j.scale = 0.85 + Math.sin(j.pulsePhase) * 0.25;
-      j.y -= (j.speed || 0.4) * delta;
-      j.x += Math.sin(j.pulsePhase * 0.5) * 0.5 * delta;
-      if (j.y < -40) {
-        j.y = (height || 600) + 40;
-        j.x = Math.random() * (width || 800);
-      }
-    }
-  }
-
-  function drawPublicAquariumFish(cCtx, f) {
-    cCtx.save();
-    cCtx.translate(f.x, f.y);
-    const angle = Math.atan2(Math.cos(f.phase) * ((f.amp || 12) * (f.freq || 0.04)), f.speed || 1.8);
-    cCtx.rotate(angle);
-    const sz = f.size || 12;
-
-    cCtx.beginPath();
-    cCtx.ellipse(0, 0, sz, sz * 0.45, 0, 0, Math.PI * 2);
-    cCtx.fillStyle = f.color || 'rgba(56, 189, 248, 0.9)';
-    cCtx.fill();
-
-    const wag = Math.sin(f.phase * 3.2) * (sz * 0.28);
-    cCtx.beginPath();
-    cCtx.moveTo(-sz * 0.8, 0);
-    cCtx.lineTo(-sz * 1.55, -sz * 0.42 + wag);
-    cCtx.lineTo(-sz * 1.3, wag * 0.5);
-    cCtx.lineTo(-sz * 1.55, sz * 0.42 + wag);
-    cCtx.closePath();
-    cCtx.fillStyle = f.tailColor || 'rgba(14, 165, 233, 0.8)';
-    cCtx.fill();
-
-    cCtx.beginPath();
-    cCtx.arc(sz * 0.55, -sz * 0.12, Math.max(1, sz * 0.14), 0, Math.PI * 2);
-    cCtx.fillStyle = '#ffffff';
-    cCtx.fill();
-    cCtx.beginPath();
-    cCtx.arc(sz * 0.6, -sz * 0.12, Math.max(0.6, sz * 0.08), 0, Math.PI * 2);
-    cCtx.fillStyle = '#0f172a';
-    cCtx.fill();
-
-    cCtx.restore();
-  }
-
-  function drawPublicAquariumJellyfish(cCtx, jf) {
-    cCtx.save();
-    cCtx.translate(jf.x, jf.y);
-    const scale = jf.scale || 1;
-    const r = 16 * scale;
-
-    cCtx.beginPath();
-    cCtx.arc(0, 0, r, Math.PI, 0, false);
-    cCtx.quadraticCurveTo(0, r * 0.22, -r, 0);
-    cCtx.fillStyle = 'rgba(192, 132, 252, 0.45)';
-    cCtx.fill();
-    cCtx.strokeStyle = 'rgba(232, 121, 249, 0.65)';
-    cCtx.lineWidth = 1.2;
-    cCtx.stroke();
-
-    cCtx.strokeStyle = 'rgba(216, 180, 254, 0.45)';
-    cCtx.lineWidth = 1;
-    for (let k = -2; k <= 2; k++) {
-      const tx = k * (r * 0.35);
-      const wave = Math.sin(jf.pulsePhase + k * 1.1) * (r * 0.32);
-      cCtx.beginPath();
-      cCtx.moveTo(tx, r * 0.1);
-      cCtx.quadraticCurveTo(tx + wave, r * 0.85, tx - wave * 0.4, r * 1.7);
-      cCtx.stroke();
-    }
-    cCtx.restore();
-  }
-
-  function drawCartoonCrescentMoon(cCtx, width, height) {
-    if (!cCtx) return;
-    cCtx.save();
-    const mx = width * 0.82;
-    const my = Math.min(height * 0.22, 160);
-    const mr = Math.min(width, height) * 0.065;
-
-    cCtx.beginPath();
-    cCtx.arc(mx, my, mr * 1.6, 0, Math.PI * 2);
-    cCtx.fillStyle = 'rgba(254, 240, 138, 0.12)';
-    cCtx.fill();
-
-    cCtx.beginPath();
-    cCtx.arc(mx, my, mr, -0.4 * Math.PI, 0.6 * Math.PI, false);
-    cCtx.bezierCurveTo(mx + mr * 0.3, my + mr * 0.5, mx + mr * 0.3, my - mr * 0.5, mx + mr * Math.cos(-0.4 * Math.PI), my + mr * Math.sin(-0.4 * Math.PI));
-    cCtx.fillStyle = '#fef08a';
-    cCtx.fill();
-
-    const eyeX = mx - mr * 0.15;
-    const eyeY = my - mr * 0.10;
-    cCtx.strokeStyle = '#854d0e';
-    cCtx.lineWidth = 1.6;
-    cCtx.lineCap = 'round';
-    cCtx.beginPath();
-    cCtx.arc(eyeX, eyeY, 3.2, Math.PI * 0.9, Math.PI * 2.1, false);
-    cCtx.stroke();
-
-    cCtx.fillStyle = 'rgba(248, 113, 113, 0.45)';
-    cCtx.beginPath();
-    cCtx.arc(eyeX - 3, eyeY + 6, 2.5, 0, Math.PI * 2);
-    cCtx.fill();
-
-    cCtx.restore();
-  }
-
-  let _publicAnimeClouds = null;
-  function drawAnimeClouds(cCtx, width, height, dt) {
-    if (!cCtx) return;
-    if (!_publicAnimeClouds) {
-      _publicAnimeClouds = [
-        { x: (width || 800) * 0.1, y: (height || 600) * 0.15, r: 40, speed: 0.2 },
-        { x: (width || 800) * 0.55, y: (height || 600) * 0.28, r: 55, speed: 0.15 },
-        { x: (width || 800) * 0.85, y: (height || 600) * 0.12, r: 35, speed: 0.25 }
-      ];
-    }
-    const clouds = _publicAnimeClouds;
-    const delta = typeof dt === 'number' ? dt / 16.667 : 1;
-    cCtx.save();
-    for (let i = 0; i < clouds.length; i++) {
-      const c = clouds[i];
-      c.x += c.speed * delta;
-      if (c.x > (width || 800) + 120) c.x = -120;
-      cCtx.fillStyle = 'rgba(255, 255, 255, 0.18)';
-      cCtx.beginPath();
-      cCtx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
-      cCtx.arc(c.x + c.r * 0.7, c.y - c.r * 0.2, c.r * 0.8, 0, Math.PI * 2);
-      cCtx.arc(c.x - c.r * 0.7, c.y, c.r * 0.7, 0, Math.PI * 2);
-      cCtx.fill();
-    }
-    cCtx.restore();
-  }
-
-  function drawSparkleStar(cCtx, x, y, r, alpha) {
-    if (!cCtx) return;
-    cCtx.save();
-    cCtx.fillStyle = 'rgba(254, 240, 138, ' + (alpha || 0.8) + ')';
-    cCtx.beginPath();
-    cCtx.moveTo(x, y - r);
-    cCtx.quadraticCurveTo(x, y, x + r, y);
-    cCtx.quadraticCurveTo(x, y, x, y + r);
-    cCtx.quadraticCurveTo(x, y, x - r, y);
-    cCtx.quadraticCurveTo(x, y, x, y - r);
-    cCtx.closePath();
-    cCtx.fill();
-    cCtx.restore();
   }
 
   function stopMotion() {
@@ -2501,7 +2235,7 @@ async function loadPublicSystemInfo() {
   }
 
   let lastTime = 0;
-  const frameInterval = 1000 / 30;
+  const frameInterval = 1000 / 24;
 
   function frame(timestamp) {
     rafId = null;
@@ -2514,276 +2248,64 @@ async function loadPublicSystemInfo() {
       rafId = requestAnimationFrame(frame);
       return;
     }
-    const frameDelta = timestamp && lastTime ? (timestamp - lastTime) : 16.667;
     lastTime = timestamp || (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
     const theme = getActivePublicTheme();
     ctx.clearRect(0, 0, w, h);
 
+    let dotRgb = '203, 213, 225';
+    let lineRgba = 'rgba(148, 163, 184, 0.07)';
+    let alphaScale = 0.65;
     if (theme === 'ocean-abyss') {
-      // THEME 2: Ocean Abyss - Marine Life (Sinusoidal Fish & Pulsating Jellyfish)
-      const ocean = getPublicOceanEntities();
-      updatePublicFishSchool(ocean.fish, w, h, frameDelta);
-      updatePublicJellyfish(ocean.jellyfish, w, h, frameDelta);
-
-      // Draw marine life: fish school
-      for (let fIdx = 0; fIdx < ocean.fish.length; fIdx++) {
-        drawPublicAquariumFish(ctx, ocean.fish[fIdx]);
-      }
-
-      // Draw jellyfish
-      for (let jIdx = 0; jIdx < ocean.jellyfish.length; jIdx++) {
-        drawPublicAquariumJellyfish(ctx, ocean.jellyfish[jIdx]);
-      }
-
-      const tOcean = (timestamp || Date.now()) * 0.0006;
-      const rayAlpha1 = 0.045 + Math.sin(tOcean * 1.1) * 0.02;
-      const rayAlpha2 = 0.035 + Math.cos(tOcean * 0.85) * 0.015;
-
-      const gRay1 = ctx.createLinearGradient(w * 0.05, 0, w * 0.45, h * 0.9);
-      gRay1.addColorStop(0, 'rgba(56, 189, 248, ' + rayAlpha1.toFixed(3) + ')');
-      gRay1.addColorStop(0.4, 'rgba(14, 165, 233, ' + (rayAlpha1 * 0.45).toFixed(3) + ')');
-      gRay1.addColorStop(1, 'rgba(4, 13, 26, 0)');
-      ctx.fillStyle = gRay1;
-      ctx.beginPath();
-      ctx.moveTo(w * 0.05, 0);
-      ctx.lineTo(w * 0.38, 0);
-      ctx.lineTo(w * 0.68, h);
-      ctx.lineTo(w * 0.22, h);
-      ctx.closePath();
-      ctx.fill();
-
-      const gRay2 = ctx.createLinearGradient(w * 0.38, 0, w * 0.78, h * 0.9);
-      gRay2.addColorStop(0, 'rgba(56, 189, 248, ' + rayAlpha2.toFixed(3) + ')');
-      gRay2.addColorStop(0.5, 'rgba(2, 132, 199, ' + (rayAlpha2 * 0.4).toFixed(3) + ')');
-      gRay2.addColorStop(1, 'rgba(4, 13, 26, 0)');
-      ctx.fillStyle = gRay2;
-      ctx.beginPath();
-      ctx.moveTo(w * 0.35, 0);
-      ctx.lineTo(w * 0.62, 0);
-      ctx.lineTo(w * 0.96, h);
-      ctx.lineTo(w * 0.58, h);
-      ctx.closePath();
-      ctx.fill();
-
-      for (let i = 0; i < stars.length; i++) {
-        const s = stars[i];
-        s.y -= (0.42 + s.z * 0.24);
-        s.x += Math.sin(s.seed + s.y * 0.012) * 0.52;
-        s.a += s.da * 0.8;
-        if (s.a > 0.9 || s.a < 0.2) s.da = -s.da;
-
-        if (s.y < -25) {
-          s.y = h + 20;
-          s.x = Math.random() * w;
-          s.seed = Math.random() * 100;
-        }
-        if (s.x < -20) s.x = w + 10;
-        else if (s.x > w + 20) s.x = -10;
-
-        const bRad = Math.max(1.8, s.r * s.z * 1.35);
-
-        if (i % 2 === 0) {
-          ctx.beginPath();
-          ctx.arc(s.x | 0, s.y | 0, bRad, 0, Math.PI * 2);
-          ctx.strokeStyle = 'rgba(56, 189, 248, ' + (s.a * 0.85).toFixed(2) + ')';
-          ctx.lineWidth = 1.3;
-          ctx.fillStyle = 'rgba(14, 165, 233, ' + (s.a * 0.16).toFixed(2) + ')';
-          ctx.fill();
-          ctx.stroke();
-
-          ctx.beginPath();
-          ctx.arc((s.x - bRad * 0.34) | 0, (s.y - bRad * 0.34) | 0, Math.max(0.6, bRad * 0.24), 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(255, 255, 255, ' + (s.a * 0.9).toFixed(2) + ')';
-          ctx.fill();
-        } else {
-          ctx.beginPath();
-          ctx.arc(s.x | 0, s.y | 0, Math.max(1, bRad * 0.65), 0, Math.PI * 2);
-          ctx.fillStyle = (i % 4 === 1)
-            ? 'rgba(56, 189, 248, ' + (s.a * 0.8).toFixed(2) + ')'
-            : 'rgba(52, 211, 153, ' + (s.a * 0.75).toFixed(2) + ')';
-          ctx.fill();
-
-          ctx.beginPath();
-          ctx.arc(s.x | 0, s.y | 0, bRad * 1.8, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(14, 165, 233, ' + (s.a * 0.15).toFixed(2) + ')';
-          ctx.fill();
-        }
-      }
-    } else if (theme === 'moonlight') {
-      // THEME 4: Moonlight - Cartoon Anime Crescent Moon, Clouds & Sparkles
-      drawCartoonCrescentMoon(ctx, w, h);
-      drawAnimeClouds(ctx, w, h, frameDelta);
-      for (let msIdx = 0; msIdx < 6; msIdx++) {
-        const sx = (w * (0.15 + msIdx * 0.14)) % w;
-        const sy = (h * (0.12 + (msIdx % 3) * 0.08)) % h;
-        drawSparkleStar(ctx, sx, sy, 5, 0.75);
-      }
-      const tMoon = (timestamp || Date.now()) * 0.0004;
-      const ring1R = (Math.min(w, h) * 0.42) + Math.sin(tMoon) * 18;
-      const ring2R = (Math.min(w, h) * 0.65) + Math.cos(tMoon * 0.8) * 24;
-
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.arc(w * 0.5, h * 0.45, ring1R, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(99, 102, 241, 0.055)';
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.arc(w * 0.5, h * 0.45, ring2R, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(79, 70, 229, 0.038)';
-      ctx.stroke();
-
-      for (let i = 0; i < stars.length; i++) {
-        const s = stars[i];
-        s.y -= 0.08 * s.z;
-        s.x += Math.sin(s.seed + s.y * 0.006) * 0.16;
-        s.a += s.da * 0.5;
-        if (s.a > 0.8 || s.a < 0.15) s.da = -s.da;
-        if (s.y < -12) { s.y = h + 10; s.x = Math.random() * w; }
-        if (s.x < -10) s.x = w + 5;
-        if (s.x > w + 10) s.x = -5;
-
-        const mRad = Math.max(1, s.r * 0.85);
-
-        ctx.beginPath();
-        ctx.arc(s.x | 0, s.y | 0, mRad, 0, Math.PI * 2);
-        ctx.fillStyle = (i % 3 === 0)
-          ? 'rgba(79, 70, 229, ' + (s.a * 0.35).toFixed(2) + ')'
-          : 'rgba(14, 165, 233, ' + (s.a * 0.28).toFixed(2) + ')';
-        ctx.fill();
-
-        if (s.isAnchor) {
-          ctx.beginPath();
-          ctx.arc(s.x | 0, s.y | 0, mRad * 2.4, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(99, 102, 241, ' + (s.a * 0.08).toFixed(2) + ')';
-          ctx.fill();
-        }
-      }
+      dotRgb = '125, 211, 252';
+      lineRgba = 'rgba(56, 189, 248, 0.08)';
+      alphaScale = 0.7;
     } else if (theme === 'violet-dusk') {
-      // THEME 3: Violet Dusk - Floating mystic fireflies / embers meandering in twilight
-      for (let i = 0; i < stars.length; i++) {
-        const s = stars[i];
-        s.phase += 0.015;
-        s.x += Math.cos(s.seed + s.phase) * 0.45;
-        s.y += Math.sin(s.seed * 1.3 + s.phase * 0.8) * 0.35 - 0.08;
-        s.a += s.da * 0.6;
-        if (s.a > 0.85 || s.a < 0.16) s.da = -s.da;
-        if (s.y < -20) s.y = h + 15;
-        if (s.y > h + 20) s.y = -10;
-        if (s.x < -20) s.x = w + 15;
-        if (s.x > w + 20) s.x = -10;
+      dotRgb = '196, 181, 253';
+      lineRgba = 'rgba(167, 139, 250, 0.06)';
+      alphaScale = 0.55;
+    } else if (theme === 'moonlight') {
+      dotRgb = '79, 70, 229';
+      lineRgba = 'rgba(79, 70, 229, 0.05)';
+      alphaScale = 0.35;
+    }
 
-        const emberRadius = Math.max(1.2, s.r * s.z * 0.95);
-        const isWarmAmber = (i % 2 === 0);
-        const emberColor = isWarmAmber ? '251, 191, 36' : '216, 180, 254';
-
-        ctx.beginPath();
-        ctx.arc(s.x | 0, s.y | 0, emberRadius * 2.2, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(' + emberColor + ', ' + (s.a * 0.16).toFixed(2) + ')';
-        ctx.fill();
-
-        ctx.beginPath();
-        ctx.arc(s.x | 0, s.y | 0, emberRadius, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(' + emberColor + ', ' + (s.a * 0.75).toFixed(2) + ')';
-        ctx.fill();
+    const connectLimit = Math.min(nodes.length, isMobile ? 16 : 28);
+    const maxDistSq = isMobile ? 4900 : 8100;
+    ctx.lineWidth = 0.75;
+    ctx.strokeStyle = lineRgba;
+    ctx.beginPath();
+    for (let i = 0; i < connectLimit; i++) {
+      const n1 = nodes[i];
+      for (let j = i + 1; j < connectLimit; j++) {
+        const n2 = nodes[j];
+        const dx = n1.x - n2.x;
+        const dy = n1.y - n2.y;
+        if (dx * dx + dy * dy < maxDistSq) {
+          ctx.moveTo(n1.x | 0, n1.y | 0);
+          ctx.lineTo(n2.x | 0, n2.y | 0);
+        }
       }
-    } else {
-      // THEME 1: Deep Galaxy - Batched Constellation Single Path & Obsidian Micro Dust Stars
-      const maxDist = isMobile ? 65 : 95;
-      const maxDistSq = maxDist * maxDist;
-      ctx.lineWidth = 0.8;
-      ctx.strokeStyle = 'rgba(226, 232, 240, 0.10)';
+    }
+    ctx.stroke();
+
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i];
+      n.y -= 0.14 * n.z;
+      n.x += Math.sin(n.seed + n.y * 0.008) * 0.12;
+      n.a += n.da;
+      if (n.a > 0.65 || n.a < 0.12) n.da = -n.da;
+      if (n.y < -10) {
+        n.y = h + 10;
+        n.x = Math.random() * w;
+      }
+      if (n.x < -10) n.x = w + 8;
+      else if (n.x > w + 10) n.x = -8;
+
       ctx.beginPath();
-      const connectLimit = Math.min(stars.length, isMobile ? 22 : 36);
-      for (let i = 0; i < connectLimit; i++) {
-        const s1 = stars[i];
-        for (let j = i + 1; j < connectLimit; j++) {
-          const s2 = stars[j];
-          const dx = s1.x - s2.x;
-          const dy = s1.y - s2.y;
-          const distSq = dx * dx + dy * dy;
-          if (distSq < maxDistSq) {
-            ctx.moveTo(s1.x | 0, s1.y | 0);
-            ctx.lineTo(s2.x | 0, s2.y | 0);
-          }
-        }
-      }
-      ctx.stroke();
-
-      for (let i = 0; i < stars.length; i++) {
-        const s = stars[i];
-        s.y -= 0.22 * s.z;
-        s.a += s.da;
-        if (s.a > 0.95 || s.a < 0.2) s.da = -s.da;
-        if (s.y < -15) {
-          s.y = h + 15;
-          s.x = Math.random() * w;
-        }
-
-        const r = Math.max(1, s.r * s.z * 0.75);
-        ctx.beginPath();
-        ctx.arc(s.x | 0, s.y | 0, r, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(' + s.rgb + ',' + s.a.toFixed(2) + ')';
-        ctx.fill();
-
-        if (s.isAnchor && !isMobile) {
-          const spike = 5 + s.z * 2.5;
-          ctx.strokeStyle = 'rgba(237, 233, 254, ' + (s.a * 0.45).toFixed(2) + ')';
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo((s.x - spike) | 0, s.y | 0);
-          ctx.lineTo((s.x + spike) | 0, s.y | 0);
-          ctx.moveTo(s.x | 0, (s.y - spike) | 0);
-          ctx.lineTo(s.x | 0, (s.y + spike) | 0);
-          ctx.stroke();
-
-          ctx.beginPath();
-          ctx.arc(s.x | 0, s.y | 0, r * 2.6, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(167, 139, 250, ' + (s.a * 0.15).toFixed(2) + ')';
-          ctx.fill();
-        }
-      }
-
-      if (!isMobile) {
-        if (shootingStars.length < 1 && Math.random() < 0.007) {
-          shootingStars.push({
-            x: Math.random() * w * 0.7 + w * 0.15,
-            y: Math.random() * h * 0.35,
-            len: Math.random() * 120 + 80,
-            speed: Math.random() * 7 + 7,
-            a: 0.95
-          });
-        }
-        for (let j = shootingStars.length - 1; j >= 0; j--) {
-          const st = shootingStars[j];
-          st.x -= st.speed;
-          st.y += st.speed * 0.52;
-          st.a -= 0.02;
-          if (st.a <= 0) {
-            shootingStars.splice(j, 1);
-            continue;
-          }
-          const tailX = st.x + st.len;
-          const tailY = st.y - st.len * 0.52;
-          const grad = ctx.createLinearGradient(st.x, st.y, tailX, tailY);
-          grad.addColorStop(0, 'rgba(255, 255, 255, ' + st.a.toFixed(2) + ')');
-          grad.addColorStop(0.25, 'rgba(196, 181, 253, ' + (st.a * 0.85).toFixed(2) + ')');
-          grad.addColorStop(0.6, 'rgba(56, 189, 248, ' + (st.a * 0.4).toFixed(2) + ')');
-          grad.addColorStop(1, 'rgba(124, 58, 237, 0)');
-          ctx.strokeStyle = grad;
-          ctx.lineWidth = 2.2;
-          ctx.beginPath();
-          ctx.moveTo(st.x, st.y);
-          ctx.lineTo(tailX, tailY);
-          ctx.stroke();
-
-          ctx.beginPath();
-          ctx.arc(st.x, st.y, 2.5, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(255, 255, 255, ' + st.a.toFixed(2) + ')';
-          ctx.fill();
-        }
-      }
+      ctx.arc(n.x | 0, n.y | 0, Math.max(0.9, n.r * n.z * 0.75), 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(' + dotRgb + ', ' + (n.a * alphaScale).toFixed(2) + ')';
+      ctx.fill();
     }
 
     rafId = requestAnimationFrame(frame);
@@ -2793,11 +2315,6 @@ async function loadPublicSystemInfo() {
     if (document.hidden || reducedMotionQuery.matches) {
       stopMotion();
       return;
-    }
-    if (video && typeof video.play === 'function') {
-      video.playbackRate = 0.85;
-      const p = video.play();
-      if (p && typeof p.catch === 'function') p.catch(() => {});
     }
     if (rafId === null && ctx) {
       rafId = requestAnimationFrame(frame);

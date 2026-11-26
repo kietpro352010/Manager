@@ -5,6 +5,7 @@ const { createWorkerAuth, extractWorkerSecret } = require('../middleware/worker-
 const { resolveClientIp } = require('../../services/captcha');
 const { timingSafeStringEquals } = require('../../utils/secrets');
 const { isWispbyteControlPanelUrl } = require('../../utils/http');
+const { DEFAULT_PUBLIC_MANAGER_URL, resolveRequestOrigin, isPublicHttpsUrl } = require('../../config/host-runtime');
 
 const POLL_TELEMETRY_KEYS = [
   'state', 'online', 'connected', 'username', 'health', 'food', 'tps', 'pingMs',
@@ -25,7 +26,7 @@ function sendCompactWorkerJson(res, payload) {
   return res.end(raw);
 }
 
-function createWorkerApi({ registry, broker, workerStore, adminNotifier, config, logger }) {
+function createWorkerApi({ registry, broker, workerStore, managerRuntimeSettings = null, adminNotifier, config, logger }) {
   const router = express.Router({ mergeParams: true });
   for (const method of ['get', 'post', 'put', 'patch', 'delete', 'all']) {
     const orig = router[method].bind(router);
@@ -38,12 +39,34 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
   }
   const auth = createWorkerAuth(registry);
 
+  async function resolveManagerUrlsForReq(req, { refresh = false } = {}) {
+    const reqOrigin = resolveRequestOrigin(req, config?.publicBaseUrl || DEFAULT_PUBLIC_MANAGER_URL);
+    if (managerRuntimeSettings) {
+      if (typeof managerRuntimeSettings.recordActiveManagerUrl === 'function' && isPublicHttpsUrl(reqOrigin)) {
+        void managerRuntimeSettings.recordActiveManagerUrl(reqOrigin);
+      }
+      if (refresh && typeof managerRuntimeSettings.refreshActiveManagerUrls === 'function') {
+        await managerRuntimeSettings.refreshActiveManagerUrls({ maxAgeMs: 15000 }).catch(() => {});
+      }
+      if (typeof managerRuntimeSettings.getActiveManagerUrls === 'function') {
+        return managerRuntimeSettings.getActiveManagerUrls(reqOrigin);
+      }
+    }
+    const out = [reqOrigin];
+    if (DEFAULT_PUBLIC_MANAGER_URL && !out.includes(DEFAULT_PUBLIC_MANAGER_URL)) {
+      out.push(DEFAULT_PUBLIC_MANAGER_URL);
+    }
+    return out;
+  }
+
   // 1. Scoped routes: /api/v1/workers/:workerId/*
   router.get('/bootstrap', auth, async (req, res, next) => {
     try {
       const bootstrap = await registry.bootstrap(req.workerId);
       if (!bootstrap) return res.status(404).json({ ok: false, error: 'worker_not_found' });
-      return res.json({ ok: true, ...bootstrap });
+      const managerUrls = await resolveManagerUrlsForReq(req, { refresh: true });
+      if (managerUrls.length) res.setHeader('x-manager-urls', managerUrls.join(','));
+      return res.json({ ok: true, managerUrls, ...bootstrap });
     } catch (error) { return next(error); }
   });
 
@@ -54,9 +77,11 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
       const statusWithIp = { ...incomingStatus, ...(clientIp ? { clientIp } : {}) };
       const worker = await registry.updateStatus(req.workerId, statusWithIp, 'worker-heartbeat');
       if (!worker) return res.status(404).json({ ok: false, error: 'worker_not_found' });
-      const settingsRevision = typeof registry.getSettingsRevision === 'function'
-        ? registry.getSettingsRevision(req.workerId)
-        : 1;
+      const settingsRevision = typeof registry.syncSettingsRevision === 'function'
+        ? await registry.syncSettingsRevision(req.workerId)
+        : (typeof registry.getSettingsRevision === 'function' ? registry.getSettingsRevision(req.workerId) : 1);
+      const managerUrls = await resolveManagerUrlsForReq(req);
+      if (managerUrls.length) res.setHeader('x-manager-urls', managerUrls.join(','));
       return sendCompactWorkerJson(res, { ok: true, settingsRevision });
     } catch (error) { return next(error); }
   });
@@ -173,9 +198,11 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
       const command = await broker.poll(req.workerId, pollOpts);
       if (res.writableEnded || ac.signal.aborted) return undefined;
       registry.touchLiveHeartbeat?.(req.workerId);
-      const settingsRevision = typeof registry.getSettingsRevision === 'function'
-        ? registry.getSettingsRevision(req.workerId)
-        : 1;
+      const settingsRevision = typeof registry.syncSettingsRevision === 'function'
+        ? await registry.syncSettingsRevision(req.workerId)
+        : (typeof registry.getSettingsRevision === 'function' ? registry.getSettingsRevision(req.workerId) : 1);
+      const managerUrls = await resolveManagerUrlsForReq(req, { refresh: true });
+      if (managerUrls.length) res.setHeader('x-manager-urls', managerUrls.join(','));
       if (!command) {
         return sendCompactWorkerJson(res, { ok: true, command: null, settingsRevision });
       }
@@ -234,35 +261,37 @@ function createWorkerApi({ registry, broker, workerStore, adminNotifier, config,
       if (!workerId) return res.status(400).json({ ok: false, error: 'missing_worker_id' });
 
       const clientIp = resolveClientIp(req);
-      const globalSecret = config.botSecretKey || '';
-      const isGlobal = Boolean(globalSecret && timingSafeStringEquals(incomingSecret, globalSecret));
-      let isAuthed = isGlobal;
-      if (isGlobal) {
+      const globalSecret = config?.botSecretKey || '';
+      const isGlobal = Boolean(globalSecret && incomingSecret && timingSafeStringEquals(incomingSecret, globalSecret));
+      if (isGlobal && typeof workerStore?.addAudit === 'function') {
         logger?.warn?.('GLOBAL_BOT_SECRET_USED', {
           action: 'worker-report',
           workerId,
           ip: clientIp
         });
-        if (typeof workerStore?.addAudit === 'function') {
-          await workerStore.addAudit({
-            action: 'GLOBAL_BOT_SECRET_USED',
-            targetId: workerId,
-            actorId: 'system:global_secret',
-            details: { ip: clientIp, endpoint: '/report' }
-          }).catch(() => null);
-        }
-      } else {
-        isAuthed = await registry.authenticate(workerId, incomingSecret);
+        await workerStore.addAudit({
+          action: 'GLOBAL_BOT_SECRET_USED',
+          targetId: workerId,
+          actorId: 'system:global_secret',
+          details: { ip: clientIp, endpoint: '/report' }
+        }).catch(() => null);
       }
 
+      const isAuthed = isGlobal || await registry.authenticate(workerId, incomingSecret);
       if (!isAuthed) {
-        return res.status(401).json({ ok: false, error: 'unauthorized_worker_secret' });
+        const existingCheck = await registry.find(workerId).catch(() => null);
+        if (!existingCheck || existingCheck.enabled === false) {
+          return res.status(404).json({ ok: false, error: 'worker_not_found_or_disabled' });
+        }
+        return res.status(401).json({ ok: false, error: 'unauthorized' });
       }
 
       const existingWorker = await registry.find(workerId);
       if (!existingWorker || existingWorker.enabled === false) {
         return res.status(404).json({ ok: false, error: 'worker_not_found_or_disabled' });
       }
+      const managerUrls = await resolveManagerUrlsForReq(req);
+      if (managerUrls.length) res.setHeader('x-manager-urls', managerUrls.join(','));
 
       const incomingStatus = req.body?.status || req.body || {};
       const status = { ...incomingStatus, ...(clientIp ? { clientIp } : {}) };

@@ -50,7 +50,7 @@ async function execute(interaction, services) {
     if (!newPassword) {
       if (!checkSuperAdmin(interaction, services, allowedGuildId)) {
         return {
-          embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Chỉ Chủ sở hữu server hoặc SuperAdmin mới có quyền đổi mật khẩu quản trị viên.', 0xef4444)]
+          embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Chỉ Admin được gán biến môi trường hoặc có Admin Role đã thiết lập mới có quyền đổi mật khẩu quản trị viên.', 0xef4444)]
         };
       }
       if (typeof interaction.showModal === 'function' && !interaction.deferred && !interaction.replied) {

@@ -14,15 +14,25 @@ function formatNum(value) {
   return Math.max(0, Math.floor(Number(value) || 0)).toLocaleString('en-US');
 }
 
-function renderLoginRequiredNotice() {
+function renderLoginRequiredNotice(discordUserId = '') {
+  const uid = String(discordUserId || '').trim();
+  const components = [];
+  if (uid) {
+    components.push(
+      new ActionRowBuilder().addComponents(
+        button('Đăng nhập ngay', `login:prompt:${uid}`, ButtonStyle.Primary, false, '🔐')
+      )
+    );
+  }
   return {
     embeds: [
       embed(
         '⚠️ CHƯA ĐĂNG NHẬP (/LOGIN)',
-        'Chỉ thành viên **đã đăng nhập tài khoản Web Manager** bằng lệnh `/login` mới được tham gia tích điểm, điểm danh và xem bảng xếp hạng.\n\n👉 Vui lòng chạy `/login` để liên kết tài khoản rồi thử lại nhé!',
+        'Chỉ thành viên **đã đăng nhập tài khoản Web Manager** bằng lệnh `/login` mới được tham gia tích điểm, điểm danh và xem bảng xếp hạng.\n\n👉 Bấm nút **Đăng nhập ngay** bên dưới (hoặc gõ `/login`) rồi thử lại nhé!',
         0xf59e0b
       )
-    ]
+    ],
+    components
   };
 }
 
@@ -218,7 +228,7 @@ function renderCheckinResult({ user, result }) {
   return { embeds: [e], components: [] };
 }
 
-function renderUserPointsProfile({ targetUser, profile }) {
+function renderUserPointsProfile({ targetUser, profile, viewerId = '' }) {
   const displayName = safe(
     targetUser?.globalName || targetUser?.username || profile?.username || 'Thành viên',
     48
@@ -263,7 +273,19 @@ function renderUserPointsProfile({ targetUser, profile }) {
     e.setThumbnail(targetUser.displayAvatarURL({ size: 128 }));
   }
   e.setFooter({ text: 'Dùng /diemdanh mỗi ngày để nhận +10đ và giữ chuỗi nhận thêm +30đ' });
-  return { embeds: [e] };
+
+  const isSelf = Boolean(viewerId && targetUser?.id && String(viewerId) === String(targetUser.id));
+  const actionRow = new ActionRowBuilder();
+  if (isSelf && !profile?.checkedInToday) {
+    actionRow.addComponents(
+      button('Điểm danh ngay (+10đ)', `points:quick_checkin:${viewerId}`, ButtonStyle.Success, false, '📅')
+    );
+  }
+  actionRow.addComponents(
+    button('Xem Bảng xếp hạng', 'points:lb:tatca', ButtonStyle.Secondary, false, '🏆')
+  );
+
+  return { embeds: [e], components: [actionRow] };
 }
 
 function renderUserMessagesStats({ targetUser, profile }) {

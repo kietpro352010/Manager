@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const AsyncKeyLock = require('../services/async-key-lock');
 const { encryptUserPassword, isStoredCredentialCiphertext } = require('../utils/secrets');
 
@@ -63,14 +64,14 @@ function isTransientWorkerStoreError(err) {
 }
 
 class SupabaseWorkerStore {
-  constructor(client, { cacheTtlMs = 30000 } = {}) {
+  constructor(client, { cacheTtlMs = 5000 } = {}) {
     this.client = client;
     this.adapter = client.adapter || null;
     this.sequenceLock = new AsyncKeyLock();
     this._settingsLock = new AsyncKeyLock();
     this.lastAllocatedBotNumber = 0;
     const parsedTtl = Number(cacheTtlMs);
-    this.cacheTtlMs = Number.isFinite(parsedTtl) && parsedTtl >= 0 ? parsedTtl : 30000;
+    this.cacheTtlMs = Number.isFinite(parsedTtl) && parsedTtl >= 0 ? parsedTtl : 5000;
     this._cacheGen = 0;
     this._listCache = null;
     this._listInFlight = null;
@@ -519,6 +520,75 @@ class SupabaseWorkerStore {
     if (payload.password) row.password = protectCredential(payload.password, 'password bot');
     const { error } = await this.client.from(SETTINGS_TABLE).upsert(row, { onConflict: 'bot_id' });
     if (error) throw error;
+  }
+
+  async addChatLog(botNumberOrId, event) {
+    const botKey = String(botNumberOrId || '').trim();
+    if (!botKey || !this.client || typeof this.client.from !== 'function') return false;
+    const occurredIso = event?.occurredAt ? new Date(event.occurredAt).toISOString() : new Date().toISOString();
+    const row = {
+      id: `chat_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+      bot_id: botKey,
+      created_at: occurredIso,
+      sender: 'MINECRAFT',
+      event_type: String(event?.type || 'chat').slice(0, 32),
+      message: String(event?.message || '').slice(0, 500),
+      metadata: {}
+    };
+    const { error } = await this.client.from('bot_chat_logs').insert(row);
+    if (error) throw error;
+    return true;
+  }
+
+  async listChatLogs(botNumberOrId, { limit = 100 } = {}) {
+    const botKey = String(botNumberOrId || '').trim();
+    if (!botKey) return null;
+    if (this.adapter && typeof this.adapter.fetchBotLogs === 'function' && /^[1-9][0-9]{0,8}$/.test(botKey)) {
+      const res = await this.adapter.fetchBotLogs(botKey, 'chat', { limit, page: 1 });
+      if (res && Array.isArray(res.rows)) {
+        return res.rows.slice().reverse().map((r) => ({
+          type: String(r.event_type || 'chat'),
+          message: String(r.message || ''),
+          occurredAt: r.created_at || new Date().toISOString()
+        }));
+      }
+    }
+    if (!this.client || typeof this.client.from !== 'function') return null;
+    const { data, error } = await this.client
+      .from('bot_chat_logs')
+      .select('event_type,message,created_at')
+      .eq('bot_id', botKey)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (error) throw error;
+    if (!Array.isArray(data)) return [];
+    return data.slice().reverse().map((r) => ({
+      type: String(r.event_type || 'chat'),
+      message: String(r.message || ''),
+      occurredAt: r.created_at || new Date().toISOString()
+    }));
+  }
+
+  async clearLogs(workerId, { botNumber = null, kind = 'event' } = {}) {
+    const id = String(workerId || '').trim();
+    const botKey = String(botNumber || id).trim();
+    if (kind === 'chat') {
+      if (botNumber && this.adapter && typeof this.adapter.clearBotLogs === 'function') {
+        await this.adapter.clearBotLogs(String(botNumber), 'chat', new Date().toISOString()).catch(() => {});
+      }
+      if (botKey && this.client && typeof this.client.from === 'function') {
+        try {
+          await this.client.from('bot_chat_logs').delete().eq('bot_id', botKey);
+        } catch (_) {}
+      }
+      return true;
+    }
+    await this.update(id, { events: [], lastEvent: null }, { returning: false }).catch(() => {});
+    if (botNumber && this.adapter && typeof this.adapter.clearBotLogs === 'function') {
+      await this.adapter.clearBotLogs(String(botNumber), 'event', new Date().toISOString()).catch(() => {});
+    }
+    this.invalidateCache(id);
+    return true;
   }
 }
 
