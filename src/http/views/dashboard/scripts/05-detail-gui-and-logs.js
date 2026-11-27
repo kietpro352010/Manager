@@ -10,17 +10,9 @@ function recordAndRenderSessionTrail(bot) {
   const locText = (typeof humanizeBotLocationVi === 'function' ? humanizeBotLocationVi(bot.locationState || bot.locationKind, bot.dimension) : '') || 'Chưa vào thế giới';
   const stRaw = String(bot.status || 'offline').toLowerCase();
   const stLabelMap = {
-    afk: 'Đang treo AFK',
-    online: 'Đang trong game',
-    entering: 'Đang vào cụm',
-    authenticating: 'Đang đăng nhập',
-    connecting: 'Đang kết nối',
-    waking: 'Đang đánh thức',
-    stopped: 'Đã dừng',
-    offline: 'Ngoại tuyến',
-    error: 'Mất kết nối',
-    kicked: 'Vừa bị kick',
-    maintenance: 'Bảo trì'
+    afk: 'Đang treo AFK', online: 'Đang trong game', entering: 'Đang vào cụm', authenticating: 'Đang đăng nhập',
+    connecting: 'Đang kết nối', waking: 'Đang đánh thức', stopped: 'Đã dừng', offline: 'Ngoại tuyến',
+    error: 'Mất kết nối', kicked: 'Vừa bị kick', maintenance: 'Bảo trì'
   };
   const stText = stLabelMap[stRaw] || stRaw;
   const sig = stText + '|' + locText + '|' + posText;
@@ -133,70 +125,34 @@ function detailStatusHtml() {
   document.getElementById('detailServer').textContent = detailBot.server || detailBot.serverHost || 'kingmc.vn';
   const pingEl = document.getElementById('detailPing');
   const pingRaw = detailBot.ping;
-
-  const pingVal =
-      pingRaw === null ||
-      pingRaw === undefined ||
-      String(pingRaw).trim() === ''
-          ? NaN
-          : Number(pingRaw);
-
+  const pingVal = (pingRaw === null || pingRaw === undefined || String(pingRaw).trim() === '') ? NaN : Number(pingRaw);
   if (pingEl) {
-      pingEl.textContent =
-          Number.isFinite(pingVal) && pingVal >= 0
-              ? pingVal + ' ms'
-              : ((!detailBot.available || detailBot.status === 'offline') ? '-- ms (Bot đang tắt)' : '--');
+    pingEl.textContent = (Number.isFinite(pingVal) && pingVal >= 0)
+      ? (pingVal + ' ms')
+      : ((!detailBot.available || detailBot.status === 'offline') ? '-- ms (Bot đang tắt)' : '--');
   }
-
   const tpsEl = document.getElementById('detailTps');
-
   if (tpsEl) {
-      const tpsRaw = detailBot.tps ?? detailBot.serverTps;
-
-      const tpsVal =
-          tpsRaw === null ||
-          tpsRaw === undefined ||
-          String(tpsRaw).trim() === ''
-              ? NaN
-              : Number(tpsRaw);
-
-      const hasTps = Number.isFinite(tpsVal) && tpsVal >= 0;
-
-      tpsEl.textContent = hasTps
-          ? tpsVal.toFixed(1)
-          : ((!detailBot.available || detailBot.status === 'offline') ? '-- (Bot đang tắt)' : '--');
-
-      tpsEl.style.color = !hasTps
-          ? 'var(--muted)'
-          : tpsVal >= 18.5
-              ? 'var(--green)'
-              : tpsVal >= 14.0
-                  ? 'var(--yellow)'
-                  : 'var(--red)';
+    const tpsRaw = detailBot.tps ?? detailBot.serverTps;
+    const tpsVal = (tpsRaw === null || tpsRaw === undefined || String(tpsRaw).trim() === '') ? NaN : Number(tpsRaw);
+    const hasTps = Number.isFinite(tpsVal) && tpsVal >= 0;
+    tpsEl.textContent = hasTps ? tpsVal.toFixed(1) : ((!detailBot.available || detailBot.status === 'offline') ? '-- (Bot đang tắt)' : '--');
+    tpsEl.style.color = !hasTps ? 'var(--muted)' : (tpsVal >= 18.5 ? 'var(--green)' : (tpsVal >= 14.0 ? 'var(--yellow)' : 'var(--red)'));
   }
   // 1. Hiển thị tọa độ bot
   const pos = detailBot.position || detailBot.roundedLocation;
   const positionEl = document.getElementById('detailPosition');
-
   if (positionEl) {
-    const validPosition = pos &&
-      [pos.x, pos.y, pos.z].every(
-        v => v !== null && v !== '' && Number.isFinite(Number(v))
-      );
-
+    const validPosition = pos && [pos.x, pos.y, pos.z].every(v => v !== null && v !== '' && Number.isFinite(Number(v)));
     positionEl.textContent = validPosition
       ? ('X: ' + Math.round(Number(pos.x)) + ', Y: ' + Math.round(Number(pos.y)) + ', Z: ' + Math.round(Number(pos.z)))
       : '--';
   }
-
   // 2. Hiển thị Dimension và trạng thái vị trí
   const dimensionEl = document.getElementById('detailDimension');
-
   if (dimensionEl) {
     const locState = String(detailBot.locationState || detailBot.locationKind || '').trim().toLowerCase();
-    const placeName = typeof humanizeBotLocationVi === 'function'
-      ? humanizeBotLocationVi(locState, detailBot.dimension)
-      : '';
+    const placeName = typeof humanizeBotLocationVi === 'function' ? humanizeBotLocationVi(locState, detailBot.dimension) : '';
     dimensionEl.textContent = placeName || '--';
   }
   const platformPillEl = document.getElementById('detailPlatformPill');
@@ -553,14 +509,8 @@ async function submitCreateKeys() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        days,
-        permanent: isPermanent,
-        isPermanent,
-        setPermanent: isPermanent,
-        planName,
-        count,
-        botCount,
-        maxUses,
+        days, permanent: isPermanent, isPermanent, setPermanent: isPermanent,
+        planName, count, botCount, maxUses,
         customKey: customKey || undefined,
         validDays: validDays > 0 ? validDays : undefined
       })
@@ -937,142 +887,84 @@ function updateUserHeaderCountdown() {
   if (!badge && headerContainer) {
     badge = document.createElement('div');
     badge.id = 'userRentalCountdownBadge';
-    badge.style.display = 'inline-flex';
-    badge.style.alignItems = 'center';
-    badge.style.gap = '8px';
-    badge.style.fontSize = '12px';
-    badge.style.padding = '4px 10px';
-    badge.style.borderRadius = '20px';
-    badge.style.marginRight = '8px';
+    Object.assign(badge.style, { display: 'inline-flex', alignItems: 'center', gap: '8px', fontSize: '12px', padding: '4px 10px', borderRadius: '20px', marginRight: '8px' });
     const roleBadge = headerContainer.querySelector('#globalUserRoleBadge');
     headerContainer.insertBefore(badge, roleBadge || headerContainer.firstChild);
   }
   const setBadgeStyle = (bg, color, border, html) => {
     if (!badge) return;
-    badge.style.display = 'inline-flex';
-    badge.style.background = bg;
-    badge.style.color = color;
-    badge.style.border = border;
+    Object.assign(badge.style, { display: 'inline-flex', background: bg, color, border });
     badge.innerHTML = html;
   };
-
   const bannerIcon = document.getElementById('userRentalBannerIcon');
   const bannerPlan = document.getElementById('userRentalBannerPlan');
   const bannerExactTime = document.getElementById('userRentalBannerExactTime');
   const bannerCountdown = document.getElementById('userRentalBannerCountdown');
-
   if (banner) {
     banner.style.display = 'flex';
     if (bannerPlan) bannerPlan.textContent = currentUser.planName || 'Gói thường';
   }
-
   if (currentUser.isPermanent === true) {
-    setBadgeStyle(
-      'rgba(16,185,129,0.15)',
-      'var(--green)',
-      '1px solid rgba(16,185,129,0.3)',
-      '<span>👑 Hạn thuê: <b>VIP Vĩnh Viễn</b></span>'
-    );
-
+    setBadgeStyle('rgba(16,185,129,0.15)', 'var(--green)', '1px solid rgba(16,185,129,0.3)', '<span>👑 Hạn thuê: <b>VIP Vĩnh Viễn</b></span>');
     if (banner) {
       if (bannerIcon) bannerIcon.textContent = '👑';
       if (bannerExactTime) bannerExactTime.textContent = 'Vĩnh Viễn';
-      if (bannerCountdown) {
-        bannerCountdown.textContent = 'Không giới hạn thời gian';
-        bannerCountdown.style.color = 'var(--green)';
-      }
+      if (bannerCountdown) { bannerCountdown.textContent = 'Không giới hạn thời gian'; bannerCountdown.style.color = 'var(--green)'; }
       banner.style.background = 'rgba(16,185,129,0.1)';
       banner.style.borderColor = 'rgba(16,185,129,0.3)';
     }
     return;
   }
-
   if (!currentUser.expiresAt) {
-    setBadgeStyle(
-      'rgba(148,163,184,0.15)',
-      '#cbd5e1',
-      '1px solid rgba(148,163,184,0.35)',
-      '<span>⚪ <b>Chưa kích hoạt gói</b></span><button class="small primary" onclick="openRenewModal()" style="margin-left:6px;">🔑 Nhập Key kích hoạt</button>'
-    );
-
+    setBadgeStyle('rgba(148,163,184,0.15)', '#cbd5e1', '1px solid rgba(148,163,184,0.35)', '<span>⚪ <b>Chưa kích hoạt gói</b></span><button class="small primary" onclick="openRenewModal()" style="margin-left:6px;">🔑 Nhập Key kích hoạt</button>');
     if (banner) {
       if (bannerIcon) bannerIcon.textContent = '🔑';
       if (bannerExactTime) bannerExactTime.textContent = 'Chưa kích hoạt';
-      if (bannerCountdown) {
-        bannerCountdown.textContent = 'Nhập mã Key để kích hoạt gói thuê bot';
-        bannerCountdown.style.color = '#cbd5e1';
-      }
+      if (bannerCountdown) { bannerCountdown.textContent = 'Nhập mã Key để kích hoạt gói thuê bot'; bannerCountdown.style.color = '#cbd5e1'; }
       banner.style.background = 'rgba(30,41,59,0.65)';
       banner.style.borderColor = 'rgba(148,163,184,0.35)';
     }
     return;
   }
-
   const exactFormatted = formatFullDateTime(currentUser.expiresAt);
   const countdown = formatRentalCountdown(currentUser.expiresAt);
   const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : { isExpired: false };
-
   if (countdown.expired || userExp.isExpired) {
     if (userExp.inGracePeriod) {
       const remainingMin = Math.max(1, Math.round(userExp.remainingGraceMs / 60000));
       const hours = Math.floor(remainingMin / 60);
       const mins = remainingMin % 60;
       const graceText = (hours > 0 ? (hours + 'h ') : '') + mins + 'm';
-
-      setBadgeStyle(
-        'rgba(245,158,11,0.2)',
-        '#fbbf24',
-        '1px solid rgba(245,158,11,0.45)',
-        '<span>⏳ Hạn thuê: <b>ĐANG ÂN HẠN 6H (còn ' + graceText + ')</b></span><button class="small primary" onclick="openRenewModal()" style="margin-left:4px;">🎁 Gia Hạn Ngay</button>'
-      );
-
+      setBadgeStyle('rgba(245,158,11,0.2)', '#fbbf24', '1px solid rgba(245,158,11,0.45)', '<span>⏳ Hạn thuê: <b>ĐANG ÂN HẠN 6H (còn ' + graceText + ')</b></span><button class="small primary" onclick="openRenewModal()" style="margin-left:4px;">🎁 Gia Hạn Ngay</button>');
       if (banner) {
         if (bannerIcon) bannerIcon.textContent = '⏳';
         if (bannerExactTime) bannerExactTime.textContent = exactFormatted;
-        if (bannerCountdown) {
-          bannerCountdown.textContent = 'ĐANG ÂN HẠN 6H (Bot vẫn chạy, còn ' + graceText + ')';
-          bannerCountdown.style.color = '#fbbf24';
-        }
+        if (bannerCountdown) { bannerCountdown.textContent = 'ĐANG ÂN HẠN 6H (Bot vẫn chạy, còn ' + graceText + ')'; bannerCountdown.style.color = '#fbbf24'; }
         banner.style.background = 'rgba(245,158,11,0.15)';
         banner.style.borderColor = 'rgba(245,158,11,0.4)';
       }
       return;
     }
-
-    setBadgeStyle(
-      'rgba(239,68,68,0.2)',
-      'var(--red)',
-      '1px solid rgba(239,68,68,0.4)',
-      '<span>⚠️ Hạn thuê: <b>ĐÃ HẾT HẠN (' + exactFormatted + ')</b></span><button class="small primary" onclick="openRenewModal()" style="margin-left:4px;">🎁 Gia Hạn Ngay</button>'
-    );
-
+    setBadgeStyle('rgba(239,68,68,0.2)', 'var(--red)', '1px solid rgba(239,68,68,0.4)', '<span>⚠️ Hạn thuê: <b>ĐÃ HẾT HẠN (' + exactFormatted + ')</b></span><button class="small primary" onclick="openRenewModal()" style="margin-left:4px;">🎁 Gia Hạn Ngay</button>');
     if (banner) {
       if (bannerIcon) bannerIcon.textContent = '⛔';
       if (bannerExactTime) bannerExactTime.textContent = exactFormatted;
-      if (bannerCountdown) {
-        bannerCountdown.textContent = 'ĐÃ HẾT HẠN (Bot dừng an toàn sau 6h ân hạn)';
-        bannerCountdown.style.color = 'var(--red)';
-      }
+      if (bannerCountdown) { bannerCountdown.textContent = 'ĐÃ HẾT HẠN (Bot dừng an toàn sau 6h ân hạn)'; bannerCountdown.style.color = 'var(--red)'; }
       banner.style.background = 'rgba(239,68,68,0.15)';
       banner.style.borderColor = 'rgba(239,68,68,0.4)';
     }
     return;
   }
-
   setBadgeStyle(
     countdown.color === 'var(--green)' ? 'rgba(16,185,129,0.15)' : (countdown.color === 'var(--yellow)' ? 'rgba(234,179,8,0.15)' : 'rgba(239,68,68,0.2)'),
     countdown.color,
     '1px solid ' + (countdown.color === 'var(--green)' ? 'rgba(16,185,129,0.3)' : (countdown.color === 'var(--yellow)' ? 'rgba(234,179,8,0.3)' : 'rgba(239,68,68,0.4)')),
     '<span>⏳ Hạn thuê: <b>' + countdown.text + '</b> (' + exactFormatted + ')</span><button class="small" onclick="openRenewModal()" style="margin-left:4px;">🎁 Gia Hạn</button>'
   );
-
   if (banner) {
     if (bannerIcon) bannerIcon.textContent = '⏳';
     if (bannerExactTime) bannerExactTime.textContent = exactFormatted;
-    if (bannerCountdown) {
-      bannerCountdown.textContent = countdown.text;
-      bannerCountdown.style.color = countdown.color;
-    }
+    if (bannerCountdown) { bannerCountdown.textContent = countdown.text; bannerCountdown.style.color = countdown.color; }
     banner.style.background = 'rgba(30,41,59,0.7)';
     banner.style.borderColor = 'rgba(59,130,246,0.35)';
   }
@@ -1205,14 +1097,9 @@ async function refreshDetail(force=false) {
         goHome();
         return;
       }
-      if(
-        err &&
-        err.status===503 &&
-        err.data &&
-        err.data.label
-      ) {
-        detailBot=err.data;
-        uptimeSyncAt=Date.now();
+      if (err && err.status === 503 && err.data && err.data.label) {
+        detailBot = err.data;
+        uptimeSyncAt = Date.now();
         detailStatusHtml();
       }
     } finally {
@@ -1376,34 +1263,13 @@ function classifyEventEntry(entry) {
   }
 
   const tagLabelMap = {
-    connecting: 'KẾT NỐI',
-    spawn: 'VÀO SẢNH',
-    online: 'VÀO GAME',
-    kicked: 'NGẮT KẾT NỐI',
-    stopped: 'ĐÃ DỪNG',
-    host_switch: 'ĐỔI MÁY CHỦ',
-    window_open: 'MỞ MENU',
-    window_close: 'ĐÓNG MENU',
-    window_click: 'CHỌN MENU',
-    respawn: 'HỒI SINH',
-    totem_popped: 'DÙNG TOTEM',
-    connection_error: 'LỖI KẾT NỐI',
-    credentials_missing: 'THIẾU TÀI KHOẢN',
-    reconnect_exhausted: 'DỪNG THỬ LẠI',
-    afk_kicked: 'VĂNG AFK',
-    afk_recovered: 'VÀO LẠI AFK',
-    maintenance_window: 'BẢO TRÌ',
-    maintenance: 'BẢO TRÌ',
-    bot_death: 'HẠ GỤC',
-    auth_failed: 'ĐĂNG NHẬP',
-    invalid_proxy: 'PROXY',
-    ip_limited: 'GIỚI HẠN IP',
-    banned: 'BỊ KHÓA',
-    info: 'THÔNG TIN',
-    warn: 'CẢNH BÁO',
-    warning: 'CẢNH BÁO',
-    error: 'LỖI',
-    worker_event: 'HỆ THỐNG'
+    connecting: 'KẾT NỐI', spawn: 'VÀO SẢNH', online: 'VÀO GAME', kicked: 'NGẮT KẾT NỐI', stopped: 'ĐÃ DỪNG',
+    host_switch: 'ĐỔI MÁY CHỦ', window_open: 'MỞ MENU', window_close: 'ĐÓNG MENU', window_click: 'CHỌN MENU',
+    respawn: 'HỒI SINH', totem_popped: 'DÙNG TOTEM', connection_error: 'LỖI KẾT NỐI', credentials_missing: 'THIẾU TÀI KHOẢN',
+    reconnect_exhausted: 'DỪNG THỬ LẠI', afk_kicked: 'VĂNG AFK', afk_recovered: 'VÀO LẠI AFK',
+    maintenance_window: 'BẢO TRÌ', maintenance: 'BẢO TRÌ', bot_death: 'HẠ GỤC', auth_failed: 'ĐĂNG NHẬP',
+    invalid_proxy: 'PROXY', ip_limited: 'GIỚI HẠN IP', banned: 'BỊ KHÓA',
+    info: 'THÔNG TIN', warn: 'CẢNH BÁO', warning: 'CẢNH BÁO', error: 'LỖI', worker_event: 'HỆ THỐNG'
   };
   const lowerTag = rawTag.toLowerCase();
   const mappedPill = tagLabelMap[lowerTag] || '';
