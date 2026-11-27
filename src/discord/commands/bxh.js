@@ -3,15 +3,14 @@
 const { SlashCommandBuilder } = require('discord.js');
 const { embed } = require('../panels/renderer');
 const {
-  renderPointsLeaderboard,
-  renderCombinedPointsLeaderboard,
   renderLoginRequiredNotice
 } = require('../panels/points-renderer');
+const { buildBxhPanel, BXH_MONITOR_SETTING_KEY } = require('../bxh-monitor');
 const { resolveLoggedInPointsUser } = require('../../services/discord-points-service');
 
 const definition = new SlashCommandBuilder()
   .setName('bxh')
-  .setDescription('Xem Top 10 Điểm tích lũy, Chuỗi điểm danh và Tổng tin nhắn')
+  .setDescription('Xem Top 10 Điểm tích lũy, Chuỗi điểm danh và Tổng tin nhắn (tự cập nhật mỗi 15 phút)')
   .addStringOption((opt) =>
     opt.setName('loai')
       .setDescription('Chế độ hiển thị (mặc định: Tổng hợp cả 3 Top 10)')
@@ -46,30 +45,50 @@ async function execute(interaction, services) {
 
   const type = interaction.options?.getString?.('loai') || 'tatca';
   const limit = interaction.options?.getInteger?.('soluong') || 10;
+  const intervalMs = services?.bxhMonitor?.intervalMs || 15 * 60 * 1000;
+  const guildName = interaction.guild?.name || 'Server';
 
-  if (type === 'tatca') {
-    const combined = await pointsService.getCombinedLeaderboards({
-      guildId: interaction.guildId,
-      limit,
-      viewerUserId: interaction.user?.id
-    });
-    return renderCombinedPointsLeaderboard({
-      guildName: interaction.guild?.name || 'Server',
-      combined
-    });
-  }
-
-  const leaderboard = await pointsService.getLeaderboard({
+  const rendered = await buildBxhPanel(services, {
     guildId: interaction.guildId,
+    guildName,
     type,
     limit,
-    viewerUserId: interaction.user?.id
+    viewerUserId: interaction.user?.id,
+    updatedAtMs: Date.now(),
+    intervalMs,
+    hasViewer: true
   });
+  const panel = { embeds: rendered.embeds, components: rendered.components };
 
-  return renderPointsLeaderboard({
-    guildName: interaction.guild?.name || 'Server',
-    leaderboard
-  });
+  if (interaction.deferred) {
+    const msg = await interaction.editReply({ ...panel, allowedMentions: { parse: [] } });
+    const messageId = msg?.id || (await interaction.fetchReply?.().catch(() => null))?.id;
+    const channelId = interaction.channelId;
+    const guildId = interaction.guildId;
+
+    if (channelId && messageId) {
+      const entry = {
+        guildId: guildId || null,
+        guildName,
+        channelId,
+        messageId,
+        type: rendered.type,
+        limit: rendered.limit,
+        updatedAt: new Date(rendered.updatedAtMs).toISOString()
+      };
+      if (services?.bxhMonitor?.trackMessage) {
+        await services.bxhMonitor.trackMessage(entry).catch(() => null);
+      } else if (services?.accessStore?.setSetting) {
+        await services.accessStore.setSetting(BXH_MONITOR_SETTING_KEY, {
+          entries: [entry],
+          updatedAt: entry.updatedAt
+        }).catch(() => null);
+      }
+    }
+    return null;
+  }
+
+  return panel;
 }
 
 module.exports = {

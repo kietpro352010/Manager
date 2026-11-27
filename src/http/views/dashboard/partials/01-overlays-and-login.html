@@ -80,7 +80,7 @@
       <div class="kbot-steps-row">
         <div class="kbot-step-item">
           <div class="kbot-step-num">1. Kích hoạt</div>
-          <div>Đăng nhập hoặc nhập mã Key gia hạn</div>
+          <div>Đăng ký hoặc đăng nhập tài khoản Web</div>
         </div>
         <div class="kbot-step-arrow">→</div>
         <div class="kbot-step-item">
@@ -149,13 +149,6 @@
               <button type="button" class="password-toggle-btn" aria-label="Hiện mật khẩu" aria-pressed="false" onclick="togglePasswordVisibility('loginPassword', this)">Hiện</button>
             </div>
           </div>
-          <div class="form-row" style="margin-bottom:0;">
-            <label for="loginLicenseKey" style="display:flex;justify-content:space-between;align-items:center;">
-              <span style="color:var(--accent-text);">Mã Key gia hạn (nếu có)</span>
-              <span style="font-size:11px;color:var(--muted);font-weight:normal;">Không bắt buộc</span>
-            </label>
-            <input id="loginLicenseKey" type="text" placeholder="Nhập mã Key để kích hoạt hoặc gia hạn" style="text-transform:uppercase;">
-          </div>
           <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;margin:2px 0 4px;">
             <label class="check-row" style="margin:0;font-size:12px;cursor:pointer;">
               <input id="loginRememberMe" type="checkbox" checked> <span>Ghi nhớ phiên đăng nhập (30 ngày)</span>
@@ -186,13 +179,6 @@
               <button type="button" class="password-toggle-btn" aria-label="Hiện mật khẩu" aria-pressed="false" onclick="togglePasswordVisibility('regConfirmPassword', this)">Hiện</button>
             </div>
           </div>
-          <div class="form-row" style="margin-bottom:0;">
-            <label for="regLicenseKey" style="display:flex;justify-content:space-between;align-items:center;">
-              <span style="color:var(--accent-text);">Mã Key gia hạn (nếu có)</span>
-              <span style="font-size:11px;color:var(--muted);font-weight:normal;">Tùy chọn</span>
-            </label>
-            <input id="regLicenseKey" type="text" placeholder="Nhập mã Key để kích hoạt gói ngay" style="text-transform:uppercase;">
-          </div>
           <div id="inAppRegCaptchaWrap" class="form-row" style="margin-bottom:0;display:none;">
             <label for="inAppRegCaptchaAnswer" style="display:flex;justify-content:space-between;align-items:center;">
               <span>Mã xác thực Captcha</span>
@@ -211,7 +197,7 @@
 
         <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border-subtle);font-size:12px;color:var(--muted);line-height:1.5;">
           • Quản trị viên: đăng nhập bằng tài khoản <code>admin</code>.<br/>
-          • Tài khoản hết hạn: đăng nhập để nhập mã Key hoặc vượt link nhận +12h.
+          • Nhập mã Key bên trong Web (yêu cầu liên kết Discord); vượt link +12h không cần liên kết Discord.
         </div>
       </div>
     </div>
@@ -248,7 +234,7 @@
       <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="var(--yellow)" stroke-width="1.75"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
     </div>
     <h2 id="expiredOverlayTitle" class="restriction-title">Gói thuê bot đã hết hạn</h2>
-    <div class="restriction-subtitle">Thời hạn sử dụng dịch vụ của bạn đã kết thúc. Nhập mã Key bên dưới để gia hạn hoặc liên hệ Discord.</div>
+    <div class="restriction-subtitle">Thời hạn sử dụng dịch vụ đã kết thúc. Liên kết Discord để nhập mã Key gia hạn, hoặc vượt link +12h bên dưới (không cần liên kết Discord).</div>
     <div class="expired-redeem-box">
       <label for="expiredKeyInput" style="font-size:12px;font-weight:600;color:var(--text-secondary);">Kích hoạt và gia hạn bằng mã Key</label>
       <div style="display:flex;gap:8px;margin-top:6px;">
@@ -256,6 +242,10 @@
         <button type="button" id="expiredRedeemBtn" class="primary" onclick="redeemKeyFromExpiredOverlay()">Kích hoạt</button>
       </div>
       <div id="expiredKeyAlert" class="login-alert hidden" role="alert" aria-atomic="true" style="margin-top:8px;"></div>
+      <div id="expiredDiscordGateBox" style="margin-top:8px;font-size:12px;color:var(--text-secondary);display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+        <span>Nhập mã Key yêu cầu liên kết Discord (gõ <code>/login</code> trên Discord).</span>
+        <button type="button" class="small" onclick="openDiscordLinkModal()">Liên kết Discord</button>
+      </div>
     </div>
 
     <div style="margin:12px 0 14px;padding:14px;background:var(--card2);border:1px solid var(--border);border-radius:10px;text-align:center;">

@@ -1449,6 +1449,10 @@ async function quickRedeemKeyOnCard(btnOrInput, botId) {
         await refreshDetail(true);
       }
     } else {
+      if (res.data?.requiresDiscordLink || res.data?.code === 'DISCORD_LINK_REQUIRED') {
+        if (typeof currentDiscordLinkState === 'object') { currentDiscordLinkState.linked = false; currentDiscordLinkState.loaded = true; }
+        if (typeof syncRenewModalDiscordGate === 'function') syncRenewModalDiscordGate();
+      }
       if (msgEl) {
         msgEl.style.color = 'var(--red)';
         msgEl.textContent = res.data?.error || 'Kích hoạt thất bại.';
@@ -1848,10 +1852,12 @@ function buildEmptyFleetFilterHtml(totalCount) {
       '<button type="button" class="small primary empty-filter-reset-btn" onclick="if(typeof resetFleetFilters===\'function\'){resetFleetFilters();}else if(typeof resetBotFilters===\'function\'){resetBotFilters();}">Xóa bộ lọc (' + n + ' bot)</button>' +
       '</div>';
   }
+  const isGuestOrUser = !currentUser || currentUser.role !== 'admin';
+  const emptyActions = isGuestOrUser ? ('<div style="display:flex;justify-content:center;gap:8px;flex-wrap:wrap;margin-top:14px;"><button type="button" class="small primary" onclick="if(typeof openRenewModal===\'function\')openRenewModal();">Nhập mã Key</button><button type="button" class="small" onclick="if(typeof openDiscordLinkModal===\'function\')openDiscordLinkModal();">Liên kết Discord</button></div>') : '';
   return '<div class="panel empty-filter-state" style="grid-column:1/-1;text-align:center;padding:36px 20px;background:var(--card);border:1px dashed var(--border);border-radius:12px;">' +
     '<div style="font-size:14.5px;font-weight:600;color:var(--text-primary);margin-bottom:6px;">Chưa có bot nào trong danh sách</div>' +
-    '<div style="font-size:12.5px;color:var(--text-muted);max-width:400px;margin:0 auto;line-height:1.5;">Tài khoản hiện chưa được gán bot hoặc chưa khởi tạo worker nào trên hệ thống.</div>' +
-    '</div>';
+    '<div style="font-size:12.5px;color:var(--text-muted);max-width:420px;margin:0 auto;line-height:1.5;">Tài khoản hiện chưa được gán bot. Hãy liên kết Discord (<code>/login</code>) và nhập mã Key bên trong Web để kích hoạt gói.</div>' +
+    emptyActions + '</div>';
 }
 window.buildEmptyFleetFilterHtml = buildEmptyFleetFilterHtml;
 

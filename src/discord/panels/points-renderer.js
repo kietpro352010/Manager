@@ -36,6 +36,43 @@ function renderLoginRequiredNotice(discordUserId = '') {
   };
 }
 
+function formatVnTime(ms) {
+  const d = new Date(Number.isFinite(Number(ms)) ? Number(ms) : Date.now());
+  try {
+    return new Intl.DateTimeFormat('vi-VN', {
+      timeZone: 'Asia/Ho_Chi_Minh',
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric'
+    }).format(d);
+  } catch (_) {
+    return d.toISOString();
+  }
+}
+
+function buildLeaderboardScheduleInfo(updatedAtMs = Date.now(), intervalMs = 15 * 60 * 1000) {
+  const safeUpdatedAtMs = Number.isFinite(Number(updatedAtMs)) ? Number(updatedAtMs) : Date.now();
+  const updatedAtUnix = Math.floor(safeUpdatedAtMs / 1000);
+  const intervalSec = Math.max(60, Math.round((Number(intervalMs) || (15 * 60 * 1000)) / 1000));
+  const nextUpdateAtUnix = updatedAtUnix + intervalSec;
+  const intervalMinutes = Math.max(1, Math.round(intervalSec / 60));
+  const timeText = formatVnTime(safeUpdatedAtMs);
+  const block =
+    `🕒 **Cập nhật lúc:** \`${timeText}\` (<t:${updatedAtUnix}:R>)\n` +
+    `⏱️ **Tự động cập nhật tiếp theo:** <t:${nextUpdateAtUnix}:R> (mỗi **${intervalMinutes} phút**)`;
+  return {
+    updatedAtMs: safeUpdatedAtMs,
+    updatedAtUnix,
+    nextUpdateAtUnix,
+    intervalMinutes,
+    block
+  };
+}
+
 function buildLeaderboardTabRow(activeType = 'tatca') {
   return new ActionRowBuilder().addComponents(
     button(
@@ -66,6 +103,12 @@ function buildLeaderboardTabRow(activeType = 'tatca') {
       activeType === 'tinnhan',
       '💬'
     )
+  );
+}
+
+function buildLeaderboardControlRow() {
+  return new ActionRowBuilder().addComponents(
+    button('Làm mới', 'points:lb:refresh', ButtonStyle.Success, false, '🔄')
   );
 }
 
@@ -335,15 +378,23 @@ function formatBoardSection(entries, type) {
   return lines.join('\n').slice(0, 1020);
 }
 
-function renderCombinedPointsLeaderboard({ guildName = 'Server', combined }) {
+function renderCombinedPointsLeaderboard({
+  guildName = 'Server',
+  combined,
+  updatedAtMs = Date.now(),
+  intervalMs = 15 * 60 * 1000,
+  hasViewer = true
+}) {
   const limit = Number(combined?.limit || 10);
   const diem = combined?.diem || {};
   const chuoi = combined?.chuoi || {};
   const tinnhan = combined?.tinnhan || {};
+  const sched = buildLeaderboardScheduleInfo(updatedAtMs, intervalMs);
 
   const e = embed(
     `📊 BẢNG XẾP HẠNG TOP ${limit} — ${safe(guildName, 36)}`,
-    'Bảng xếp hạng thành viên đã đăng nhập (`/login`) theo **Điểm tích lũy**, **Chuỗi điểm danh** và **Tổng tin nhắn**.',
+    'Bảng xếp hạng thành viên đã đăng nhập (`/login`) theo **Điểm tích lũy**, **Chuỗi điểm danh** và **Tổng tin nhắn**.\n' +
+    sched.block,
     0xeab308
   ).addFields(
     {
@@ -366,17 +417,27 @@ function renderCombinedPointsLeaderboard({ guildName = 'Server', combined }) {
   const pRank = diem.viewerRank ? `#${diem.viewerRank} (${formatNum(diem.viewerMetric)}đ)` : 'Chưa có';
   const sRank = chuoi.viewerRank ? `#${chuoi.viewerRank} (${formatNum(chuoi.viewerMetric)}d)` : 'Chưa có';
   const mRank = tinnhan.viewerRank ? `#${tinnhan.viewerRank} (${formatNum(tinnhan.viewerMetric)} tin)` : 'Chưa có';
-  e.setFooter({ text: `Hạng của bạn — Điểm: ${pRank} • Chuỗi: ${sRank} • Tin nhắn: ${mRank}` });
+  const footerText = hasViewer
+    ? `Hạng của bạn — Điểm: ${pRank} • Chuỗi: ${sRank} • Tin nhắn: ${mRank} • Tự động cập nhật mỗi ${sched.intervalMinutes} phút`
+    : `Tự động cập nhật mỗi ${sched.intervalMinutes} phút • Dùng /diemdanh và chat để tích điểm`;
+  e.setFooter({ text: footerText.slice(0, 2048) }).setTimestamp(new Date(sched.updatedAtMs));
 
   return {
     embeds: [e],
-    components: [buildLeaderboardTabRow('tatca')]
+    components: [buildLeaderboardTabRow('tatca'), buildLeaderboardControlRow()]
   };
 }
 
-function renderPointsLeaderboard({ guildName = 'Server', leaderboard }) {
+function renderPointsLeaderboard({
+  guildName = 'Server',
+  leaderboard,
+  updatedAtMs = Date.now(),
+  intervalMs = 15 * 60 * 1000,
+  hasViewer = true
+}) {
   const type = leaderboard?.type || 'diem';
   const entries = Array.isArray(leaderboard?.entries) ? leaderboard.entries : [];
+  const sched = buildLeaderboardScheduleInfo(updatedAtMs, intervalMs);
 
   const titleByType = {
     diem: `🏆 BẢNG XẾP HẠNG ĐIỂM — ${safe(guildName, 40)}`,
@@ -384,9 +445,9 @@ function renderPointsLeaderboard({ guildName = 'Server', leaderboard }) {
     tinnhan: `💬 BẢNG XẾP HẠNG TIN NHẮN — ${safe(guildName, 40)}`
   };
 
-  let description = '';
+  let body = '';
   if (entries.length === 0) {
-    description = 'Chưa có thành viên đã `/login` nào có dữ liệu trên bảng xếp hạng này.\nHãy chat trong server hoặc dùng `/diemdanh` để lên bảng xếp hạng!';
+    body = 'Chưa có thành viên đã `/login` nào có dữ liệu trên bảng xếp hạng này.\nHãy chat trong server hoặc dùng `/diemdanh` để lên bảng xếp hạng!';
   } else {
     const lines = entries.map((entry) => {
       const medal = medalForRank(entry.rank);
@@ -398,8 +459,10 @@ function renderPointsLeaderboard({ guildName = 'Server', leaderboard }) {
       }
       return `${medal} <@${entry.userId}> — **${formatNum(entry.points)} đ** *(Chuỗi: ${formatNum(entry.effectiveStreak)}d • ${formatNum(entry.totalMessages)} msg)*`;
     });
-    description = lines.join('\n');
+    body = lines.join('\n');
   }
+
+  const description = `${sched.block}\n\n${body}`.slice(0, 4096);
 
   const colorByType = {
     diem: 0xeab308,
@@ -414,17 +477,20 @@ function renderPointsLeaderboard({ guildName = 'Server', leaderboard }) {
   );
 
   let viewerFooter = `Tổng thành viên đã xếp hạng: ${formatNum(leaderboard?.totalRanked || 0)}`;
-  if (leaderboard?.viewerRank) {
-    const unit = type === 'chuoi' ? 'ngày' : (type === 'tinnhan' ? 'tin nhắn' : 'đ');
-    viewerFooter = `Vị trí của bạn: #${leaderboard.viewerRank} (${formatNum(leaderboard.viewerMetric)} ${unit}) • ${viewerFooter}`;
-  } else {
-    viewerFooter = `Bạn chưa có hạng ở mục này • ${viewerFooter}`;
+  if (hasViewer) {
+    if (leaderboard?.viewerRank) {
+      const unit = type === 'chuoi' ? 'ngày' : (type === 'tinnhan' ? 'tin nhắn' : 'đ');
+      viewerFooter = `Vị trí của bạn: #${leaderboard.viewerRank} (${formatNum(leaderboard.viewerMetric)} ${unit}) • ${viewerFooter}`;
+    } else {
+      viewerFooter = `Bạn chưa có hạng ở mục này • ${viewerFooter}`;
+    }
   }
-  e.setFooter({ text: viewerFooter });
+  viewerFooter = `${viewerFooter} • Tự động cập nhật mỗi ${sched.intervalMinutes} phút`;
+  e.setFooter({ text: viewerFooter.slice(0, 2048) }).setTimestamp(new Date(sched.updatedAtMs));
 
   return {
     embeds: [e],
-    components: [buildLeaderboardTabRow(type)]
+    components: [buildLeaderboardTabRow(type), buildLeaderboardControlRow()]
   };
 }
 

@@ -691,3 +691,142 @@ test('6. /tinnhan shows all-time message count & rank for self/others and enforc
   pointsService.stop();
   clearMessagePointsLoginCache();
 });
+
+test('7. /bxh persists channel message, auto-updates every 15m via BxhMonitorService, supports Làm mới button, and cleans up deleted targets', async () => {
+  clearMessagePointsLoginCache();
+  const bxhCmd = require('../src/discord/commands/bxh');
+  const { BxhMonitorService, BXH_MONITOR_SETTING_KEY } = require('../src/discord/bxh-monitor');
+  const { handlePanelInteraction } = require('../src/discord/handlers/panel-handler');
+
+  const store = makeMemoryStore([
+    { discordUserId: 'u-1', id: 'usr_1', username: 'user1', role: 'user', status: 'active' },
+    { discordUserId: 'u-2', id: 'usr_2', username: 'user2', role: 'user', status: 'active' }
+  ]);
+  const pointsService = new DiscordPointsService({ store });
+  await pointsService.initialize();
+  await pointsService.checkin({ guildId: 'g1', userId: 'u-1', username: 'User1' });
+
+  const editedPayloads = [];
+  let simulateMissingMsg = false;
+  const mockChannel = {
+    id: 'chan-bxh-1',
+    guild: { id: 'g1', name: 'KingMC Live' },
+    messages: {
+      edit: async (messageId, payload) => {
+        if (simulateMissingMsg) {
+          const err = new Error('Unknown Message');
+          err.code = 10008;
+          throw err;
+        }
+        editedPayloads.push({ messageId, payload });
+        return payload;
+      }
+    }
+  };
+
+  const services = {
+    config: { discordGuildId: 'g1' },
+    accessStore: store,
+    discordPoints: pointsService,
+    discordClient: {
+      isReady: () => true,
+      channels: {
+        fetch: async (cid) => (cid === 'chan-bxh-1' ? mockChannel : null)
+      }
+    }
+  };
+  const bxhMonitor = new BxhMonitorService({ services, intervalMs: 15 * 60 * 1000 });
+  services.bxhMonitor = bxhMonitor;
+
+  // 7a. Deferred /bxh execution posts publicly with 15m schedule + Làm mới button & persists setting
+  let initialEdit = null;
+  const deferInteraction = {
+    deferred: true,
+    channelId: 'chan-bxh-1',
+    guildId: 'g1',
+    guild: { id: 'g1', name: 'KingMC Live' },
+    user: { id: 'u-1', username: 'User1' },
+    options: {
+      getString: () => 'tatca',
+      getInteger: () => 10
+    },
+    editReply: async (payload) => {
+      initialEdit = payload;
+      return { id: 'msg-bxh-100', ...payload };
+    }
+  };
+  const execRet = await bxhCmd.execute(deferInteraction, services);
+  assert.strictEqual(execRet, null, 'Deferred /bxh must handle editReply itself like /check');
+  assert.strictEqual(bxhCmd.ephemeral, false, '/bxh must defer publicly');
+  assert.deepEqual(initialEdit.allowedMentions, { parse: [] });
+  assert.ok(initialEdit.embeds[0].data.description.includes('mỗi **15 phút**'), 'Embed must show 15m schedule');
+  assert.strictEqual(initialEdit.components[1].components[0].data.custom_id, 'points:lb:refresh', 'Row 2 must expose Làm mới button');
+
+  const stored = await store.getSetting(BXH_MONITOR_SETTING_KEY);
+  assert.strictEqual(stored?.entries?.length, 1);
+  assert.strictEqual(stored.entries[0].messageId, 'msg-bxh-100');
+  assert.strictEqual(stored.entries[0].type, 'tatca');
+
+  // 7b. Switch tab to points:lb:diem, then click points:lb:refresh -> preserves diem tab & updates tracker
+  let panelUpdatePayload = null;
+  await handlePanelInteraction({
+    guildId: 'g1',
+    channelId: 'chan-bxh-1',
+    message: { id: 'msg-bxh-100', components: initialEdit.components },
+    guild: { id: 'g1', name: 'KingMC Live' },
+    user: { id: 'u-1', username: 'User1' },
+    customId: 'points:lb:diem',
+    deferred: false,
+    replied: false,
+    isButton: () => true,
+    isStringSelectMenu: () => false,
+    isModalSubmit: () => false,
+    deferUpdate: async function () { this.deferred = true; },
+    editReply: async (p) => { panelUpdatePayload = p; },
+    update: async (p) => { panelUpdatePayload = p; }
+  }, services);
+  assert.ok(panelUpdatePayload.embeds[0].data.title.includes('BẢNG XẾP HẠNG ĐIỂM'));
+  assert.strictEqual(bxhMonitor.getTrackedMessage('chan-bxh-1')?.type, 'diem');
+
+  let refreshUpdatePayload = null;
+  await handlePanelInteraction({
+    guildId: 'g1',
+    channelId: 'chan-bxh-1',
+    message: { id: 'msg-bxh-100', components: panelUpdatePayload.components },
+    guild: { id: 'g1', name: 'KingMC Live' },
+    user: { id: 'u-2', username: 'User2' },
+    customId: 'points:lb:refresh',
+    deferred: false,
+    replied: false,
+    isButton: () => true,
+    isStringSelectMenu: () => false,
+    isModalSubmit: () => false,
+    deferUpdate: async function () { this.deferred = true; },
+    editReply: async (p) => { refreshUpdatePayload = p; },
+    update: async (p) => { refreshUpdatePayload = p; }
+  }, services);
+  assert.ok(refreshUpdatePayload.embeds[0].data.title.includes('BẢNG XẾP HẠNG ĐIỂM'), 'Refresh must keep active diem tab');
+
+  // 7c. Earn new points and trigger BxhMonitorService auto-update (15m tick) -> edits tracked message
+  await pointsService.adminAdjustPoints({ guildId: 'g1', userId: 'u-2', username: 'User2', mode: 'add', amount: 95 });
+  await bxhMonitor.updateAllMessages();
+  assert.strictEqual(editedPayloads.length, 1);
+  assert.strictEqual(editedPayloads[0].messageId, 'msg-bxh-100');
+  assert.deepEqual(editedPayloads[0].payload.allowedMentions, { parse: [] });
+  assert.ok(editedPayloads[0].payload.embeds[0].data.description.includes('<@u-2>') && editedPayloads[0].payload.embeds[0].data.description.includes('95 đ'));
+
+  // 7d. Timer start + Unknown Message 10008 cleanup
+  const fastMonitor = new BxhMonitorService({ services, intervalMs: 30 });
+  await fastMonitor.start();
+  await new Promise((r) => setTimeout(r, 75));
+  fastMonitor.stop();
+  assert.ok(editedPayloads.length >= 2, 'Periodic interval must refresh tracked /bxh messages');
+
+  simulateMissingMsg = true;
+  await bxhMonitor.updateAllMessages();
+  assert.strictEqual(bxhMonitor.getTrackedMessages().length, 0, '10008 Unknown Message must clear deleted /bxh entry');
+
+  bxhMonitor.stop();
+  pointsService.stop();
+  clearMessagePointsLoginCache();
+});

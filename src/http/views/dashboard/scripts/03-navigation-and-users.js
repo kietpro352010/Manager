@@ -393,7 +393,6 @@ async function handleInAppRegisterSubmit(event) {
   const username = String(document.getElementById('regUsername')?.value || '').trim();
   const password = String(document.getElementById('regPassword')?.value || '');
   const confirmPassword = String(document.getElementById('regConfirmPassword')?.value || '');
-  const licenseKey = String(document.getElementById('regLicenseKey')?.value || '').trim().toUpperCase();
   const captchaToken = String(document.getElementById('inAppRegCaptchaToken')?.value || '');
   const captchaAnswer = String(document.getElementById('inAppRegCaptchaAnswer')?.value || '').trim();
 
@@ -422,8 +421,6 @@ async function handleInAppRegisterSubmit(event) {
         username,
         password,
         confirmPassword,
-        key: licenseKey,
-        licenseKey,
         deviceFingerprint: getInAppDeviceFingerprint(),
         ...(captchaToken ? { captchaToken, captchaAnswer } : {})
       })
@@ -464,6 +461,67 @@ async function handleInAppRegisterSubmit(event) {
 }
 window.handleInAppRegisterSubmit = handleInAppRegisterSubmit;
 
+function syncRenewModalDiscordGate() {
+  const isAdmin = currentUser?.role === 'admin';
+  const loaded = isAdmin || Boolean(typeof currentDiscordLinkState === 'object' && currentDiscordLinkState.loaded);
+  const linked = isAdmin || Boolean(typeof currentDiscordLinkState === 'object' && currentDiscordLinkState.linked);
+  const mustLink = loaded && !linked;
+
+  const gateBox = document.getElementById('renewDiscordGateBox');
+  const keyInput = document.getElementById('renewKeyInput');
+  const submitBtn = document.getElementById('renewSubmitBtn');
+  if (keyInput) keyInput.disabled = mustLink;
+  if (submitBtn) submitBtn.disabled = mustLink;
+
+  if (gateBox) {
+    if (!loaded) {
+      gateBox.style.borderColor = 'var(--border)';
+      gateBox.style.background = 'var(--card2)';
+      gateBox.textContent = 'Đang kiểm tra trạng thái liên kết Discord...';
+    } else if (linked) {
+      gateBox.style.borderColor = 'rgba(16,185,129,0.45)';
+      gateBox.style.background = 'rgba(16,185,129,0.12)';
+      gateBox.innerHTML = '<div style="color:var(--green);font-weight:600;">Đã liên kết Discord — có thể nhập mã Key ngay.</div>';
+    } else {
+      gateBox.style.borderColor = 'rgba(245,158,11,0.5)';
+      gateBox.style.background = 'rgba(245,158,11,0.12)';
+      gateBox.innerHTML =
+        '<div style="color:var(--yellow);font-weight:600;margin-bottom:6px;">Bắt buộc liên kết Discord trước khi nhập mã Key</div>' +
+        '<div style="color:var(--text-secondary);margin-bottom:8px;">Vào Discord gõ <code>/login</code> để liên kết tài khoản Web. (Vượt link +12h không cần liên kết.)</div>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
+        '<button type="button" class="small primary" onclick="closeRenewModal(); openDiscordLinkModal();">Liên kết Discord ngay</button>' +
+        '<button type="button" class="small" onclick="refreshRenewDiscordGate()">Kiểm tra lại</button>' +
+        '</div>';
+    }
+  }
+
+  const expGateBox = document.getElementById('expiredDiscordGateBox');
+  const expInput = document.getElementById('expiredKeyInput');
+  const expBtn = document.getElementById('expiredRedeemBtn');
+  if (expInput) expInput.disabled = mustLink;
+  if (expBtn) expBtn.disabled = mustLink;
+  if (expGateBox) {
+    if (!loaded) {
+      expGateBox.innerHTML = '<span>Đang kiểm tra liên kết Discord...</span><button type="button" class="small" onclick="openDiscordLinkModal()">Liên kết Discord</button>';
+    } else if (linked) {
+      expGateBox.innerHTML = '<span style="color:var(--green);">Đã liên kết Discord — sẵn sàng nhập mã Key.</span>';
+    } else {
+      expGateBox.innerHTML =
+        '<span style="color:var(--yellow);">Cần liên kết Discord (<code>/login</code>) để nhập Key. Vượt link +12h không cần.</span>' +
+        '<span style="display:inline-flex;gap:6px;"><button type="button" class="small primary" onclick="openDiscordLinkModal()">Liên kết Discord</button><button type="button" class="small" onclick="refreshRenewDiscordGate()">Kiểm tra</button></span>';
+    }
+  }
+}
+window.syncRenewModalDiscordGate = syncRenewModalDiscordGate;
+
+async function refreshRenewDiscordGate() {
+  if (typeof loadDiscordLinkStatus === 'function') {
+    await loadDiscordLinkStatus({ silent: true });
+  }
+  syncRenewModalDiscordGate();
+}
+window.refreshRenewDiscordGate = refreshRenewDiscordGate;
+
 // Kích hoạt mã Key từ màn hình thông báo Hết hạn (Blur Overlay)
 async function redeemKeyFromExpiredOverlay() {
   const keyInput = document.getElementById('expiredKeyInput');
@@ -472,6 +530,15 @@ async function redeemKeyFromExpiredOverlay() {
   const key = String(keyInput?.value || '').trim().toUpperCase();
 
   if (alertEl) { alertEl.classList.add('hidden'); alertEl.textContent = ''; }
+
+  if (currentUser?.role !== 'admin' && typeof currentDiscordLinkState === 'object' && currentDiscordLinkState.loaded && !currentDiscordLinkState.linked) {
+    if (alertEl) {
+      alertEl.className = 'login-alert error';
+      alertEl.textContent = 'Bắt buộc liên kết Discord trước khi nhập mã Key. Hãy gõ /login trên Discord rồi bấm Kiểm tra.';
+      alertEl.classList.remove('hidden');
+    }
+    return;
+  }
 
   if (!key) {
     if (alertEl) { alertEl.className = 'login-alert error'; alertEl.textContent = 'Vui lòng nhập mã Key gia hạn.'; alertEl.classList.remove('hidden'); }
@@ -483,9 +550,16 @@ async function redeemKeyFromExpiredOverlay() {
     const res = await requestJson('/api/manager/renew', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key, licenseKey: key })
+      body: JSON.stringify({ key })
     });
     if (!res.ok) {
+      if (res.data?.requiresDiscordLink || res.data?.code === 'DISCORD_LINK_REQUIRED') {
+        if (typeof currentDiscordLinkState === 'object') {
+          currentDiscordLinkState.linked = false;
+          currentDiscordLinkState.loaded = true;
+        }
+        syncRenewModalDiscordGate();
+      }
       throw new Error(res.data?.error || 'Mã Key không hợp lệ hoặc đã qua sử dụng.');
     }
     showToast((res.data?.partial ? '⚠️ ' : '🎉 ') + (res.data?.warning || 'Kích hoạt Key thành công! Đang tải lại phiên làm việc...'));

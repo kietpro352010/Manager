@@ -2467,9 +2467,16 @@ test('AUDIT-R4-05/06/07/08: Restricted user blocked on /auto-chat, /bot-schedule
   };
   const userApp = express();
   userApp.use(express.json());
+  let isUserR4DiscordLinked = false;
   userApp.use((req, _res, next) => { req.managerAuthSession = sess; next(); });
   userApp.use('/api', createUserApi({
-    store: { addAudit: async (e) => { audits.push(e); }, getSetting: async () => null },
+    store: {
+      addAudit: async (e) => { audits.push(e); },
+      getSetting: async () => null,
+      getDiscordLink: async () => (isUserR4DiscordLinked
+        ? { manager_user_id: 'usr_r4', username: 'r4user', discord_user_id: '123456789012345678', status: 'active' }
+        : null)
+    },
     registry: {
       list: async () => [worker],
       find: async () => worker,
@@ -2537,9 +2544,19 @@ test('AUDIT-R4-05/06/07/08: Restricted user blocked on /auto-chat, /bot-schedule
     const lastInv = dispatched[dispatched.length - 1];
     assert.strictEqual(lastInv.payload.action, 'list', 'URL invAction must override req.body.action');
 
-    // /renew syncs session.allowAccountChange
+    // /renew requires Discord link first, then syncs session.allowAccountChange
     sess.role = 'user';
     sess.allowAccountChange = true;
+    isUserR4DiscordLinked = false;
+    const unlinkedRenewRes = await fetch(`${srvUser.baseUrl}/api/renew`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ key: 'KM-TEST-1234' })
+    });
+    assert.strictEqual(unlinkedRenewRes.status, 403, 'Unlinked user must receive 403 DISCORD_LINK_REQUIRED on /renew');
+    const unlinkedJson = await unlinkedRenewRes.json();
+    assert.strictEqual(unlinkedJson.code, 'DISCORD_LINK_REQUIRED');
+
+    isUserR4DiscordLinked = true;
     const renewRes = await fetch(`${srvUser.baseUrl}/api/renew`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ key: 'KM-TEST-1234' })

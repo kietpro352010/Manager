@@ -307,18 +307,31 @@ async function detailGet(path) {
 // ----------------------------------------------------------------------------
 
 function openRenewModal() {
-  document.getElementById('renewKeyInput').value = '';
-  document.getElementById('renewResultBox').style.display = 'none';
-  document.getElementById('renewModal').classList.remove('hidden');
+  const inputEl = document.getElementById('renewKeyInput');
+  const box = document.getElementById('renewResultBox');
+  if (inputEl) inputEl.value = '';
+  if (box) box.style.display = 'none';
+  if (typeof syncRenewModalDiscordGate === 'function') syncRenewModalDiscordGate();
+  document.getElementById('renewModal')?.classList.remove('hidden');
+  if (typeof loadDiscordLinkStatus === 'function') void loadDiscordLinkStatus({ silent: true });
 }
 
 function closeRenewModal() {
-  document.getElementById('renewModal').classList.add('hidden');
+  document.getElementById('renewModal')?.classList.add('hidden');
 }
 
 async function submitRenewKey() {
-  const key = document.getElementById('renewKeyInput').value.trim().toUpperCase();
+  const key = String(document.getElementById('renewKeyInput')?.value || '').trim().toUpperCase();
   const box = document.getElementById('renewResultBox');
+  if (currentUser?.role !== 'admin' && typeof currentDiscordLinkState === 'object' && currentDiscordLinkState.loaded && !currentDiscordLinkState.linked) {
+    if (box) {
+      box.style.display = 'block';
+      box.style.background = 'rgba(245,158,11,0.18)';
+      box.style.color = 'var(--yellow)';
+      box.textContent = 'Bắt buộc liên kết tài khoản Discord (/login trên Discord) trước khi nhập mã Key.';
+    }
+    return;
+  }
   if (!key) {
     box.style.display = 'block';
     box.style.background = 'rgba(239,68,68,0.2)';
@@ -358,6 +371,13 @@ async function submitRenewKey() {
       }
       setTimeout(closeRenewModal, partial ? 2600 : 1800);
     } else {
+      if (res.data?.requiresDiscordLink || res.data?.code === 'DISCORD_LINK_REQUIRED') {
+        if (typeof currentDiscordLinkState === 'object') {
+          currentDiscordLinkState.linked = false;
+          currentDiscordLinkState.loaded = true;
+        }
+        if (typeof syncRenewModalDiscordGate === 'function') syncRenewModalDiscordGate();
+      }
       box.style.background = 'rgba(239,68,68,0.2)';
       box.style.color = 'var(--red)';
       box.textContent = res.data?.error || 'Kích hoạt thất bại.';

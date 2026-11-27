@@ -61,30 +61,29 @@ async function runTests() {
   console.log('=== RUNNING GATE 5 UI/UX & WORKER TESTS ===\n');
 
   // --------------------------------------------------------------------------
-  // TEST 1: G5-01 Public Login License Key Field Hint & Placeholder
+  // TEST 1: G5-01 Public Login Register Key Input Removal & Trial Callout
   // --------------------------------------------------------------------------
-  console.log('--- TEST 1: G5-01 Public Login License Key Field Hint & Placeholder ---');
-  
-  // HTML checks
-  assert.ok(PUBLIC_LOGIN_HTML.includes('id="regLicenseKeyHint"'), 'regLicenseKeyHint span must exist in login HTML');
-  assert.ok(PUBLIC_LOGIN_HTML.includes('id="regLicenseKey"'), 'regLicenseKey input must exist in login HTML');
-  assert.ok(PUBLIC_LOGIN_HTML.includes('(Có thể bỏ trống)'), 'Default hint "(Có thể bỏ trống)" must be present');
-  assert.ok(PUBLIC_LOGIN_HTML.includes('placeholder="Nhập mã License Key (nếu có)..."'), 'Default placeholder must be "Nhập mã License Key (nếu có)..."');
-  
+  console.log('--- TEST 1: G5-01 Public Login Register Key Input Removal & Trial Callout ---');
+  const { HTML: DASHBOARD_HTML } = require('../src/http/views/dashboard-html');
+
+  // HTML checks: key redemption happens strictly inside Web after Discord linking
+  assert.strictEqual(PUBLIC_LOGIN_HTML.includes('id="regLicenseKey"'), false, 'regLicenseKey input must be removed from public login/register HTML');
+  assert.strictEqual(PUBLIC_LOGIN_HTML.includes('id="regLicenseKeyHint"'), false, 'regLicenseKeyHint must be removed from public login/register HTML');
+  assert.strictEqual(DASHBOARD_HTML.includes('id="regLicenseKey"'), false, 'regLicenseKey input must be removed from in-app register HTML');
+  assert.strictEqual(DASHBOARD_HTML.includes('id="loginLicenseKey"'), false, 'loginLicenseKey input must be removed from in-app login HTML');
+  assert.ok(DASHBOARD_HTML.includes('id="sidebarRedeemKeyBtn"'), 'In-web sidebar redeem key button must exist');
+  assert.ok(DASHBOARD_HTML.includes('id="renewDiscordGateBox"'), 'In-web redeem modal must render Discord link gate box');
+
   // Script / function checks
   assert.ok(PUBLIC_LOGIN_HTML.includes('function renderTrialCallout'), 'renderTrialCallout function must exist');
-  assert.ok(PUBLIC_LOGIN_HTML.includes('(Bắt buộc nếu tắt dùng thử)'), 'Script must handle disabled trial hint');
-  assert.ok(PUBLIC_LOGIN_HTML.includes('Nhập mã License Key để kích hoạt tài khoản...'), 'Script must handle disabled trial placeholder');
   assert.ok(PUBLIC_LOGIN_HTML.includes('/api/auth/login-config'), 'Script must fetch /api/auth/login-config');
 
   // Behavioral test of renderTrialCallout
   {
-    // Minimal DOM mock
+    let lastChildren = [];
     const fakeElements = {
       publicTrialCalloutBadge: { hidden: false },
-      publicTrialCalloutText: { replaceChildren: () => {} },
-      regLicenseKeyHint: { textContent: '' },
-      regLicenseKey: { placeholder: '' }
+      publicTrialCalloutText: { replaceChildren: (...nodes) => { lastChildren = nodes; } }
     };
     const fakeDoc = {
       getElementById: (id) => fakeElements[id] || null,
@@ -92,25 +91,19 @@ async function runTests() {
       createElement: () => ({ textContent: '' })
     };
 
-    // Evaluate renderTrialCallout with mocked DOM
     const renderTrialCalloutFn = new Function('document', `
       ${PUBLIC_LOGIN_HTML.match(/function renderTrialCallout[\s\S]*?^}/m)[0]}
       return renderTrialCallout;
     `)(fakeDoc);
 
-    // Test trial disabled:
     renderTrialCalloutFn(false);
     assert.strictEqual(fakeElements.publicTrialCalloutBadge.hidden, true, 'Badge should be hidden when trial disabled');
-    assert.strictEqual(fakeElements.regLicenseKeyHint.textContent, '(Bắt buộc nếu tắt dùng thử)', 'Hint must be "(Bắt buộc nếu tắt dùng thử)"');
-    assert.strictEqual(fakeElements.regLicenseKey.placeholder, 'Nhập mã License Key để kích hoạt tài khoản...', 'Placeholder must be activation prompt');
 
-    // Test trial enabled:
     renderTrialCalloutFn(true, 7);
     assert.strictEqual(fakeElements.publicTrialCalloutBadge.hidden, false, 'Badge should be visible when trial enabled');
-    assert.strictEqual(fakeElements.regLicenseKeyHint.textContent, '(Có thể bỏ trống)', 'Hint must be "(Có thể bỏ trống)"');
-    assert.strictEqual(fakeElements.regLicenseKey.placeholder, 'Nhập mã License Key (nếu có)...', 'Placeholder must be optional prompt');
+    assert.ok(lastChildren.some((n) => String(n.textContent || n.text || '').includes('7 NGÀY DÙNG THỬ MIỄN PHÍ')), 'Callout must reflect trialDays');
   }
-  console.log('✅ G5-01 PASSED: Login license key hint and placeholder logic verified.');
+  console.log('✅ G5-01 PASSED: Register key removal & trial callout verified.');
 
   // --------------------------------------------------------------------------
   // TEST 2: G5-02 Modal Focus Trapping, Escape Listener, and Focus Restoration

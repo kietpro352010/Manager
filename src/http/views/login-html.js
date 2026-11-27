@@ -1462,16 +1462,6 @@ button, a, [role="button"] {
               <p id="regPasswordConfirmErr" class="field-error" hidden></p>
             </div>
 
-            <div class="field-group">
-              <label class="field-label" for="regLicenseKey">
-                <span>Mã License Key</span>
-                <span id="regLicenseKeyHint" class="field-hint-inline">(Có thể bỏ trống)</span>
-              </label>
-              <div class="input-wrap">
-                <input id="regLicenseKey" class="field-input key-input" type="text" autocomplete="off" placeholder="Nhập mã License Key (nếu có)...">
-              </div>
-            </div>
-
             <div id="regCaptchaGroup" class="field-group">
               <label class="field-label" for="regCaptchaAnswer">
                 <span>Mã xác thực Captcha</span>
@@ -2002,7 +1992,6 @@ async function handlePublicRegisterSubmit(e) {
   const u = document.getElementById('regUsername').value.trim();
   const p = document.getElementById('regPassword').value;
   const p2 = document.getElementById('regPasswordConfirm').value;
-  const k = document.getElementById('regLicenseKey').value.trim();
   const cToken = (document.getElementById('regCaptchaToken') ? document.getElementById('regCaptchaToken').value : '') || '';
   const cAnswer = (document.getElementById('regCaptchaAnswer') ? document.getElementById('regCaptchaAnswer').value.trim() : '') || '';
   const btn = document.getElementById('publicRegSubmitBtn');
@@ -2020,8 +2009,6 @@ async function handlePublicRegisterSubmit(e) {
         username: u,
         password: p,
         confirmPassword: p2,
-        key: k,
-        licenseKey: k,
         captchaToken: cToken,
         captchaAnswer: cAnswer,
         deviceFingerprint: getDeviceFingerprint()
@@ -2045,13 +2032,9 @@ async function handlePublicRegisterSubmit(e) {
 function renderTrialCallout(trialGiftEnabled, rawTrialDays) {
   const badge = document.getElementById('publicTrialCalloutBadge');
   const text = document.getElementById('publicTrialCalloutText');
-  const keyHint = document.getElementById('regLicenseKeyHint');
-  const keyInput = document.getElementById('regLicenseKey');
 
   if (trialGiftEnabled === false) {
     if (badge) badge.hidden = true;
-    if (keyHint) keyHint.textContent = '(Bắt buộc nếu tắt dùng thử)';
-    if (keyInput) keyInput.placeholder = 'Nhập mã License Key để kích hoạt tài khoản...';
     return;
   }
 
@@ -2069,11 +2052,9 @@ function renderTrialCallout(trialGiftEnabled, rawTrialDays) {
       strongTitle,
       document.createTextNode(' Tặng '),
       strongDays,
-      document.createTextNode(' ngay sau khi hoàn tất đăng ký')
+      document.createTextNode(' ngay sau khi hoàn tất đăng ký (nhập mã Key bên trong Web sau khi liên kết Discord)')
     );
   }
-  if (keyHint) keyHint.textContent = '(Có thể bỏ trống)';
-  if (keyInput) keyInput.placeholder = 'Nhập mã License Key (nếu có)...';
 }
 
 async function loadPublicSystemInfo() {
@@ -2180,7 +2161,7 @@ async function loadPublicSystemInfo() {
     if (err === 'locked' || reason === 'locked') {
       setLoginAlert('error', 'Tài khoản của bạn hiện đang bị tạm khóa. Vui lòng liên hệ Quản trị viên.', 'tplIconLock');
     } else if (err === 'expired' || reason === 'expired') {
-      setLoginAlert('error', 'Gói thuê của bạn đã hết hạn. Vui lòng nhập License Key mới để kích hoạt.', 'tplIconWarn');
+      setLoginAlert('error', 'Gói thuê của bạn đã hết hạn. Vui lòng đăng nhập vào Web để nhập mã gia hạn hoặc vượt link +12h.', 'tplIconWarn');
     } else if (params.has('logged_out')) {
       setLoginAlert('success', 'Đã đăng xuất khỏi hệ thống an toàn.', 'tplIconSuccess');
     }

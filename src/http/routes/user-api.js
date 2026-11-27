@@ -2165,14 +2165,76 @@ function createUserApi({
     }
   });
 
-  // 17. GIFTCODE / RENTAL RENEWAL
+  // 17. GIFTCODE / RENTAL RENEWAL (Web-only, requires active Discord link for non-admin users)
+  async function resolveSessionDiscordLink(user) {
+    if (!user || !store) return null;
+    const primaryId = String(user.userId || user.username || '').trim();
+    const ownUserIdLower = primaryId.toLowerCase();
+    const ownUsernameLower = String(user.username || '').trim().toLowerCase();
+
+    let link = null;
+    if (typeof store.getDiscordLink === 'function') {
+      if (primaryId && !/^\d{17,20}$/.test(primaryId)) {
+        link = await store.getDiscordLink(primaryId).catch(() => null);
+      }
+      if (!link && ownUsernameLower && ownUsernameLower !== ownUserIdLower && !/^\d{17,20}$/.test(ownUsernameLower)) {
+        const candidate = await store.getDiscordLink(user.username).catch(() => null);
+        if (candidate) {
+          const linkOwnerId = String(candidate.manager_user_id || candidate.managerUserId || '').trim().toLowerCase();
+          const linkUsername = String(candidate.username || '').trim().toLowerCase();
+          if (
+            (!linkOwnerId && !linkUsername) ||
+            linkOwnerId === ownUserIdLower ||
+            linkUsername === ownUsernameLower
+          ) {
+            link = candidate;
+          }
+        }
+      }
+    }
+
+    if (!link && typeof store.getAccess === 'function' && primaryId) {
+      const acc = await store.getAccess(primaryId, { bypassCache: true }).catch(() => null);
+      const rawDiscordId = String(acc?.discordUserId || acc?.discord_user_id || '').trim();
+      const accStatus = String(acc?.discordLinkStatus || 'active').trim().toLowerCase();
+      if (rawDiscordId && accStatus !== 'revoked') {
+        link = {
+          discord_user_id: rawDiscordId,
+          manager_user_id: acc?.id || acc?.userId || primaryId,
+          username: acc?.username || user.username,
+          linked_at: acc?.discordLinkedAt || acc?.updatedAt || null,
+          status: 'active'
+        };
+      }
+    }
+
+    if (!link || String(link.status || 'active').toLowerCase() === 'revoked') {
+      return null;
+    }
+    const discordUserId = String(link.discord_user_id || link.discordUserId || '').trim();
+    if (!discordUserId) return null;
+    return link;
+  }
+
   const handleKeyRedemption = async (req, res) => {
     const session = req.managerAuthSession;
     if (!session) return res.status(401).json({ ok: false, error: 'Chưa đăng nhập.' });
 
-    const rawKey = req.body?.key || req.body?.code;
+    const rawKey = req.body?.key || req.body?.code || req.body?.licenseKey;
     const key = String(rawKey || '').trim();
     if (!key) return res.status(400).json({ ok: false, error: 'Vui lòng nhập mã Giftcode / Khóa kích hoạt.' });
+
+    if (session.role !== 'admin') {
+      const activeDiscordLink = await resolveSessionDiscordLink(session);
+      if (!activeDiscordLink) {
+        return res.status(403).json({
+          ok: false,
+          code: 'DISCORD_LINK_REQUIRED',
+          requiresDiscordLink: true,
+          error: 'Bắt buộc liên kết tài khoản Discord trước khi nhập mã kích hoạt / gia hạn. Vui lòng vào mục Liên kết Discord (dùng lệnh /login trên Discord) rồi thử lại.'
+        });
+      }
+    }
 
     try {
       const result = await entitlementService.redeem(session.userId, key, session.role);
@@ -2189,6 +2251,9 @@ function createUserApi({
       session.inGracePeriod = false;
       session.rawExpiresAtRental = rawRentalExpiresAt;
       session.expiresAtRental = effectiveExpiresAt;
+      if (result.planName) {
+        session.planName = result.planName;
+      }
       if (result.allowAccountChange !== undefined) {
         session.allowAccountChange = result.allowAccountChange !== false;
       }
@@ -2206,17 +2271,19 @@ function createUserApi({
         ok: true,
         message: 'Kích hoạt / Gia hạn Giftcode thành công!',
         isPermanent: result.isPermanent,
+        planName: result.planName || session.planName || null,
         expiresAt: effectiveExpiresAt,
         rawExpiresAt: rawRentalExpiresAt,
-        assignedBotIds: session.assignedBotIds
+        assignedBotIds: session.assignedBotIds,
+        ...(result.partial ? { partial: true } : {}),
+        ...(result.warning ? { warning: result.warning } : {})
       });
     } catch (error) {
       return res.status(400).json({ ok: false, error: error.message });
     }
   };
 
-  router.post('/renew', requireSession, handleKeyRedemption);
-  router.post('/rental/redeem-key', requireSession, handleKeyRedemption);
+  router.post(['/renew', '/redeem', '/keys/redeem', '/rental/redeem-key'], requireSession, handleKeyRedemption);
 
   // 18. LINK4M REWARDS
   router.get(['/rewards/link4m/status', '/status'], requireSession, async (req, res) => {
@@ -2379,28 +2446,9 @@ function createUserApi({
   router.get(['/user/discord-link', '/discord-link'], requireSession, async (req, res) => {
     try {
       const user = req.managerAuthSession;
-      const primaryId = String(user.userId || user.username || '').trim();
-      const ownUserIdLower = primaryId.toLowerCase();
-      const ownUsernameLower = String(user.username || '').trim().toLowerCase();
-      let link = !/^\d{17,20}$/.test(primaryId)
-        ? await store.getDiscordLink(primaryId)
-        : null;
-      if (!link && ownUsernameLower && ownUsernameLower !== ownUserIdLower && !/^\d{17,20}$/.test(ownUsernameLower)) {
-        const candidate = await store.getDiscordLink(user.username);
-        if (candidate) {
-          const linkOwnerId = String(candidate.manager_user_id || candidate.managerUserId || '').trim().toLowerCase();
-          const linkUsername = String(candidate.username || '').trim().toLowerCase();
-          if (
-            (!linkOwnerId && !linkUsername) ||
-            linkOwnerId === ownUserIdLower ||
-            linkUsername === ownUsernameLower
-          ) {
-            link = candidate;
-          }
-        }
-      }
+      const link = await resolveSessionDiscordLink(user);
       const discordNotifyEnabled = await readUserDiscordNotifyEnabled(user);
-      if (!link || String(link.status || 'active').toLowerCase() === 'revoked') {
+      if (!link) {
         return res.json({ ok: true, linked: false, discordNotifyEnabled });
       }
       return res.json({

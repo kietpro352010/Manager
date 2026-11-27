@@ -849,20 +849,17 @@ async function runTests() {
   console.log('✅ AUTH-06: Bounded Map rate limiter verified.');
 
   // =========================================================================
-  // AUTH-07: Explicit keyRedeemed and keyError in /register
+  // AUTH-07: Reject pre-auth key redemption on /register and /login (Web-only)
   // =========================================================================
-  console.log('7. Testing AUTH-07: Explicit keyRedeemed and keyError in /register...');
+  console.log('7. Testing AUTH-07: Reject pre-auth key redemption on /register and /login...');
   {
     const store = createInMemoryStore();
     const logger = createMockLogger();
-    let shouldRedeemSucceed = true;
-    let redeemErrorMessage = 'Key đã hết lượt kích hoạt';
+    let redeemCallCount = 0;
 
     const entitlementService = {
-      redeem: async (userId, key, role) => {
-        if (!shouldRedeemSucceed) {
-          throw new Error(redeemErrorMessage);
-        }
+      redeem: async () => {
+        redeemCallCount += 1;
         return { ok: true, planName: 'VIP PLAN' };
       }
     };
@@ -881,48 +878,25 @@ async function runTests() {
     const base = `http://127.0.0.1:${port}`;
 
     try {
-      // 7.1 Register with VALID key -> keyRedeemed: true, keyError not present
-      shouldRedeemSucceed = true;
-      const validKeyRes = await fetch(`${base}/api/auth/register`, {
+      // 7.1 Register WITH key must be rejected with 400 REDEEM_IN_WEB_ONLY and never redeem
+      const withKeyRes = await fetch(`${base}/api/auth/register`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          username: 'validkeyuser',
+          username: 'withkeyuser',
           password: 'Password123!',
           confirmPassword: 'Password123!',
           key: 'KINGMC-VALID-KEY-100'
         })
       });
-      const validKeyJson = await validKeyRes.json();
-      assert.strictEqual(validKeyRes.status, 201);
-      assert.strictEqual(validKeyJson.ok, true);
-      assert.strictEqual(validKeyJson.keyRedeemed, true, 'keyRedeemed must be true on success');
-      assert.strictEqual(validKeyJson.keyError, undefined, 'keyError must not be set on success');
+      const withKeyJson = await withKeyRes.json();
+      assert.strictEqual(withKeyRes.status, 400, '/register with key must return 400 REDEEM_IN_WEB_ONLY');
+      assert.strictEqual(withKeyJson.ok, false);
+      assert.strictEqual(withKeyJson.code, 'REDEEM_IN_WEB_ONLY');
+      assert.strictEqual(redeemCallCount, 0, 'entitlementService.redeem must NOT run on /register');
+      assert.strictEqual(await store.getUser('withkeyuser'), null, 'Rejected /register must not create user');
 
-      // 7.2 Register with INVALID key -> 201, keyRedeemed: false, keyError has error details
-      shouldRedeemSucceed = false;
-      redeemErrorMessage = 'Mã quà tặng đã hết hạn sử dụng.';
-      const invalidKeyRes = await fetch(`${base}/api/auth/register`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          username: 'invalidkeyuser',
-          password: 'Password123!',
-          confirmPassword: 'Password123!',
-          key: 'KINGMC-EXPIRED-KEY-999'
-        })
-      });
-      const invalidKeyJson = await invalidKeyRes.json();
-      assert.strictEqual(invalidKeyRes.status, 201, 'Account registration still succeeds with 201');
-      assert.strictEqual(invalidKeyJson.ok, true);
-      assert.strictEqual(invalidKeyJson.keyRedeemed, false, 'keyRedeemed must be false on failure');
-      assert.strictEqual(invalidKeyJson.keyError, 'Mã quà tặng đã hết hạn sử dụng.');
-      assert.ok(
-        invalidKeyJson.message.includes('Mã quà tặng đã hết hạn sử dụng'),
-        'Message must alert user about key failure'
-      );
-
-      // 7.3 Register WITHOUT key -> 201, keyRedeemed and keyError omitted
+      // 7.2 Register WITHOUT key succeeds -> 201, no keyRedeemed/keyError fields
       const noKeyRes = await fetch(`${base}/api/auth/register`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -937,13 +911,29 @@ async function runTests() {
       assert.strictEqual(noKeyJson.ok, true);
       assert.strictEqual(noKeyJson.keyRedeemed, undefined);
       assert.strictEqual(noKeyJson.keyError, undefined);
+
+      // 7.3 Login WITH key must also be rejected with 400 REDEEM_IN_WEB_ONLY
+      const loginKeyRes = await fetch(`${base}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          username: 'nokeyuser',
+          password: 'Password123!',
+          key: 'KINGMC-VALID-KEY-100'
+        })
+      });
+      const loginKeyJson = await loginKeyRes.json();
+      assert.strictEqual(loginKeyRes.status, 400, '/login with key must return 400 REDEEM_IN_WEB_ONLY');
+      assert.strictEqual(loginKeyJson.ok, false);
+      assert.strictEqual(loginKeyJson.code, 'REDEEM_IN_WEB_ONLY');
+      assert.strictEqual(redeemCallCount, 0, 'entitlementService.redeem must NOT run on /login');
     } finally {
       server.closeIdleConnections?.();
       server.closeAllConnections?.();
       await new Promise((resolve) => server.close(resolve));
     }
   }
-  console.log('✅ AUTH-07: Explicit keyRedeemed and keyError response verified.');
+  console.log('✅ AUTH-07: Pre-auth /register and /login key rejection verified.');
 
   // =========================================================================
   // AUTH-08: DB Auth and RAM Cache Consistency (bypassCache)

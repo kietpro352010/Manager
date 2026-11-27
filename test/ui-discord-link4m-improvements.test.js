@@ -1041,3 +1041,219 @@ test('REGISTRY & DISCORD LOGS: Humanizes empty events, coalesces noisy repeats, 
   assert.ok(desc.includes('[MẤT KẾT NỐI]') && desc.includes('(×2)'));
   assert.ok(!desc.includes('{"type"'), 'Discord logs must never dump raw JSON strings');
 });
+
+test('IN-WEB KEY REDEMPTION: requires active Discord link for keys, exempts Link4M, rejects pre-auth register/login keys', async () => {
+  const http = require('node:http');
+  const crypto = require('node:crypto');
+  const { createApp } = require('../src/http/app');
+  const { HTML: DASHBOARD_HTML } = require('../src/http/views/dashboard-html');
+  const { PUBLIC_LOGIN_HTML } = require('../src/http/views/login-html');
+  const { EntitlementService } = require('../src/services/entitlement-service');
+
+  // UI guards
+  assert.strictEqual(PUBLIC_LOGIN_HTML.includes('regLicenseKey'), false, 'Public login/register must not contain regLicenseKey');
+  assert.strictEqual(DASHBOARD_HTML.includes('regLicenseKey'), false, 'Dashboard register must not contain regLicenseKey');
+  assert.strictEqual(DASHBOARD_HTML.includes('loginLicenseKey'), false, 'Dashboard login must not contain loginLicenseKey');
+  assert.ok(DASHBOARD_HTML.includes('id="sidebarRedeemKeyBtn"'), 'Sidebar redeem key button must exist inside web');
+  assert.ok(DASHBOARD_HTML.includes('id="renewDiscordGateBox"'), 'Renew modal must show Discord link gate');
+  assert.ok(DASHBOARD_HTML.includes('id="expiredDiscordGateBox"'), 'Expired overlay must show Discord link gate');
+  assert.ok(/id="discordLinkModal"[^>]*z-index:1600/.test(DASHBOARD_HTML), 'discordLinkModal must stack above accountExpiredOverlay');
+
+  const users = new Map();
+  const discordLinks = new Map();
+  const keysByLookup = new Map();
+
+  const store = {
+    async getSetting(k) {
+      if (k === 'system_settings') return { trialGiftEnabled: false, trialDays: 1 };
+      return null;
+    },
+    async setSetting() {},
+    async addAudit() {},
+    invalidateUserCache() {},
+    invalidateCache() {},
+    async getUser(username) {
+      const clean = String(username || '').trim().toLowerCase();
+      for (const u of users.values()) {
+        if (String(u.username || '').toLowerCase() === clean) return { ...u };
+      }
+      return null;
+    },
+    async listAccess() {
+      return Array.from(users.values()).map((u) => ({ ...u }));
+    },
+    async getAccess(id) {
+      const u = users.get(String(id));
+      return u ? { ...u } : null;
+    },
+    async setAccess(id, patch) {
+      const prev = users.get(String(id)) || { id: String(id), userId: String(id) };
+      const next = { ...prev, ...patch, id: String(id), userId: String(id) };
+      users.set(String(id), next);
+      return { ...next };
+    },
+    async createKey(rec) {
+      keysByLookup.set(rec.codeHash, rec);
+      keysByLookup.set(rec.code, rec);
+      return { ...rec };
+    },
+    async getKey(codeOrHash) {
+      const raw = String(codeOrHash || '').trim();
+      const rec = keysByLookup.get(raw) || keysByLookup.get(raw.replace(/[^A-Z0-9]/gi, '').toUpperCase()) || null;
+      return rec ? { ...rec } : null;
+    },
+    async redeemKeyWithAccess(codeHash, cleanUserId, accessValues) {
+      const rec = keysByLookup.get(String(codeHash || '').trim());
+      if (!rec) return false;
+      if (rec.maxUses > 0 && (rec.usedCount || 0) >= rec.maxUses) return false;
+      rec.usedCount = (rec.usedCount || 0) + 1;
+      rec.usedUsers = [...(rec.usedUsers || []), cleanUserId];
+      rec.status = (rec.maxUses > 0 && rec.usedCount >= rec.maxUses) ? 'used' : 'active';
+      await store.setAccess(cleanUserId, accessValues);
+      return true;
+    },
+    async linkDiscord(managerId, discordUserId) {
+      const u = users.get(String(managerId));
+      const rec = {
+        manager_user_id: String(managerId),
+        discord_user_id: String(discordUserId),
+        username: u?.username || '',
+        linked_at: new Date().toISOString(),
+        status: 'active'
+      };
+      discordLinks.set(String(managerId), rec);
+      if (u) discordLinks.set(String(u.username || ''), rec);
+      return rec;
+    },
+    async getDiscordLink(identifier) {
+      return discordLinks.get(String(identifier || '').trim()) || null;
+    },
+    async unlinkDiscord(identifier) {
+      const existing = discordLinks.get(String(identifier || '').trim());
+      discordLinks.delete(String(identifier || '').trim());
+      if (existing?.username) discordLinks.delete(existing.username);
+      if (existing?.manager_user_id) discordLinks.delete(existing.manager_user_id);
+      return true;
+    }
+  };
+
+  const encryptionKey = crypto.randomBytes(32);
+  const registry = {
+    store,
+    encryptionKey,
+    list: async () => [{ workerId: 'bot-1', botNumber: 1, enabled: true, rentable: true }],
+    find: async () => null,
+    getAdminPassword: () => null,
+    verifyBotSecretSync: () => false
+  };
+  const accessControl = new AccessControl({ store });
+  const entitlementService = new EntitlementService({ store, registry, accessControl });
+  const key1 = await entitlementService.createCode({ days: 7, botCount: 1, customCode: 'KMLINKREQ001', actorId: 'admin' });
+  const key2 = await entitlementService.createCode({ days: 7, botCount: 1, customCode: 'KMLINKREQ002', actorId: 'admin' });
+
+  const link4mService = new Link4mService({
+    store: {
+      ...store,
+      getSetting: async (k) => (k === 'link4m_runtime' ? { enabled: true, rewardHours: 12, dailyLimit: 2 } : store.getSetting(k)),
+      countLinkRewards: async () => 0,
+      lastLinkReward: async () => null,
+      getLatestLinkAttempt: async () => null,
+      findActiveLinkAttempt: async () => null,
+      expireLinkAttempts: async () => {},
+      createLinkAttempt: async () => {},
+      setLinkAttemptProviderUrl: async () => true
+    },
+    accessControl,
+    config: { enabled: true, link4mApiToken: 'mock-token', publicBaseUrl: 'https://mgr.example.test' },
+    fetchImpl: async () => ({ ok: true, text: async () => JSON.stringify({ shortenedUrl: 'https://link4m.co/ok' }) })
+  });
+  await link4mService.initialize();
+
+  const app = createApp({
+    store,
+    entitlementService,
+    link4mService,
+    registry,
+    broker: {},
+    config: { adminUsername: 'admin', adminPassword: 'admin-password', trialGiftEnabled: false },
+    logger: { info() {}, warn() {}, error() {}, debug() {} }
+  });
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    // 1. Registering with key is blocked (400 REDEEM_IN_WEB_ONLY)
+    const regWithKey = await fetch(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'weblink_u1', password: 'Password123!', confirmPassword: 'Password123!', key: key1.code })
+    });
+    assert.strictEqual(regWithKey.status, 400);
+    assert.strictEqual((await regWithKey.json()).code, 'REDEEM_IN_WEB_ONLY');
+
+    // 2. Register cleanly without key
+    const regOk = await fetch(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'weblink_u1', password: 'Password123!', confirmPassword: 'Password123!' })
+    });
+    assert.strictEqual(regOk.status, 201);
+    const regJson = await regOk.json();
+    const token = regJson.token;
+    const userId = regJson.user.id;
+    const headers = { 'content-type': 'application/json', Authorization: `Bearer ${token}` };
+
+    // 3. Logging in with key is also blocked (400 REDEEM_IN_WEB_ONLY)
+    const loginWithKey = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'weblink_u1', password: 'Password123!', key: key1.code })
+    });
+    assert.strictEqual(loginWithKey.status, 400);
+    assert.strictEqual((await loginWithKey.json()).code, 'REDEEM_IN_WEB_ONLY');
+
+    // 4. Unlinked user CANNOT redeem key inside web (/renew or /rental/redeem-key) -> 403 DISCORD_LINK_REQUIRED
+    for (const ep of ['/api/manager/renew', '/api/rental/redeem-key']) {
+      const r = await fetch(`${baseUrl}${ep}`, { method: 'POST', headers, body: JSON.stringify({ key: key1.code }) });
+      assert.strictEqual(r.status, 403, `${ep} must reject unlinked user with 403`);
+      const body = await r.json();
+      assert.strictEqual(body.code, 'DISCORD_LINK_REQUIRED');
+      assert.strictEqual(body.requiresDiscordLink, true);
+    }
+    assert.strictEqual(keysByLookup.get(key1.code).usedCount, 0, 'Key must remain unconsumed after DISCORD_LINK_REQUIRED rejection');
+
+    // 5. Link4M DOES NOT require Discord link!
+    const l4mStatus = await fetch(`${baseUrl}/api/rewards/link4m/status`, { headers: { Authorization: `Bearer ${token}` } });
+    assert.strictEqual(l4mStatus.status, 200, 'Link4M status must succeed without Discord link');
+    const l4mStart = await fetch(`${baseUrl}/api/rewards/link4m/start`, { method: 'POST', headers });
+    assert.strictEqual(l4mStart.status, 200, 'Link4M start must succeed without Discord link');
+    const l4mJson = await l4mStart.json();
+    assert.strictEqual(l4mJson.providerUrl || l4mJson.redirectUrl, 'https://link4m.co/ok');
+
+    // 6. After linking Discord, key redemption succeeds (200 OK)
+    await store.linkDiscord(userId, '888777666555444333');
+    const linkedRedeem = await fetch(`${baseUrl}/api/manager/renew`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ key: key1.code })
+    });
+    assert.strictEqual(linkedRedeem.status, 200, 'Linked user must redeem key successfully');
+    assert.strictEqual(keysByLookup.get(key1.code).usedCount, 1);
+
+    // 7. After unlinking Discord, redeeming another key immediately fails with 403 DISCORD_LINK_REQUIRED
+    const unlinkRes = await fetch(`${baseUrl}/api/user/discord-unlink`, { method: 'POST', headers });
+    assert.strictEqual(unlinkRes.status, 200);
+    const afterUnlinkRedeem = await fetch(`${baseUrl}/api/manager/renew`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ key: key2.code })
+    });
+    assert.strictEqual(afterUnlinkRedeem.status, 403, 'Redeem after /discord-unlink must immediately require Discord link again');
+    assert.strictEqual(keysByLookup.get(key2.code).usedCount, 0);
+  } finally {
+    server.closeIdleConnections?.();
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

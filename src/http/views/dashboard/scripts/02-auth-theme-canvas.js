@@ -690,7 +690,6 @@ async function handleLoginSubmit(event) {
     btn.textContent = '⏳ Đang xác thực...';
   }
 
-  const licenseKey = String(document.getElementById('loginLicenseKey')?.value || '').trim().toUpperCase();
   const rememberMe = !!document.getElementById('loginRememberMe')?.checked;
   let lockoutHandled = false;
 
@@ -698,7 +697,7 @@ async function handleLoginSubmit(event) {
     const res = await requestJson('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password, key: licenseKey, licenseKey, rememberMe })
+      body: JSON.stringify({ username, password, rememberMe })
     });
 
     if (res.status === 429 && Number(res.data?.retryAfterSeconds) > 0) {
@@ -945,8 +944,15 @@ function applyUserRoleUI() {
   // Ẩn nút nhập mã key chỉ đối với Admin hoặc tài khoản VIP Vĩnh Viễn thực sự (isPermanent === true)
   const renewBtnTop = document.getElementById('btnUserRenewKey');
   const renewBtnDropdown = document.getElementById('globalRenewKeyBtn');
-  if (renewBtnTop) renewBtnTop.style.display = (isAdmin || isPermanentUser) ? 'none' : '';
-  if (renewBtnDropdown) renewBtnDropdown.style.display = (isAdmin || isPermanentUser) ? 'none' : '';
+  const renewBtnSidebar = document.getElementById('sidebarRedeemKeyBtn');
+  const hideKeyBtns = (isAdmin || isPermanentUser) ? 'none' : '';
+  if (renewBtnTop) renewBtnTop.style.display = hideKeyBtns;
+  if (renewBtnDropdown) renewBtnDropdown.style.display = hideKeyBtns;
+  if (renewBtnSidebar) renewBtnSidebar.style.display = hideKeyBtns;
+  if (!isAdmin && typeof loadDiscordLinkStatus === 'function' && typeof currentDiscordLinkState === 'object' && !currentDiscordLinkState.loaded) {
+    void loadDiscordLinkStatus({ silent: true });
+  }
+  if (typeof syncRenewModalDiscordGate === 'function') syncRenewModalDiscordGate();
 
   if (typeof loadLink4mAdminSetting === 'function' && isAdmin) {
     void loadLink4mAdminSetting();
@@ -1051,6 +1057,7 @@ async function loadDiscordLinkStatus({ silent = false } = {}) {
         loaded: true
       };
       renderDiscordNotifyControls();
+      if (typeof syncRenewModalDiscordGate === 'function') syncRenewModalDiscordGate();
       if (data.linked) {
         if (statusText) { statusText.style.color = '#10b981'; statusText.textContent = '✅ Đã liên kết với Discord'; }
         if (details) details.style.display = 'block';
@@ -1126,6 +1133,7 @@ function openDiscordLinkModal() {
 
 function closeDiscordLinkModal() {
   document.getElementById('discordLinkModal')?.classList.add('hidden');
+  if (typeof refreshRenewDiscordGate === 'function') void refreshRenewDiscordGate();
 }
 
 async function unlinkDiscordAccount() {

@@ -47,6 +47,7 @@ const { ManagerRuntimeSettings } = require('./services/manager-runtime-settings'
 const WispbyteKeepAliveManager = require('./services/wispbyte-keepalive');
 const { AdminNotifier } = require('./services/admin-notifier');
 const { StatusMonitorService } = require('./discord/status-monitor');
+const { BxhMonitorService } = require('./discord/bxh-monitor');
 const { DiscordPointsService } = require('./services/discord-points-service');
 
 const { createApp } = require('./http/app');
@@ -322,6 +323,8 @@ async function main() {
   };
   const statusMonitor = new StatusMonitorService({ services, intervalMs: 15 * 60 * 1000 });
   services.statusMonitor = statusMonitor;
+  const bxhMonitor = new BxhMonitorService({ services, intervalMs: 15 * 60 * 1000 });
+  services.bxhMonitor = bxhMonitor;
 
   // 6. HTTP Application & Server
   const app = createApp({
@@ -463,6 +466,9 @@ async function main() {
         await statusMonitor.start().catch((err) => {
           logger.warn('status_monitor_start_failed', { error: err.message });
         });
+        await bxhMonitor.start().catch((err) => {
+          logger.warn('bxh_monitor_start_failed', { error: err.message });
+        });
       } catch (readyErr) {
         logger.error('discord_ready_handler_failed', { error: readyErr?.message || String(readyErr) });
       }
@@ -527,6 +533,7 @@ async function main() {
         discordLeaderStarted = false;
         client._standbyMode = true;
         statusMonitor.stop();
+        bxhMonitor.stop();
         try { client.destroy(); } catch (_) {}
         await releaseDiscordLeader();
         if (!discordStandbyInterval && !discordShuttingDown) {
@@ -549,6 +556,7 @@ async function main() {
               clearInterval(discordRenewInterval);
               discordRenewInterval = null;
               statusMonitor.stop();
+              bxhMonitor.stop();
               try { client.destroy(); } catch (_) {}
               if (!discordStandbyInterval && !discordShuttingDown) {
                 discordStandbyInterval = setInterval(() => { void pollStandbyLeader(); }, 15000);
@@ -613,6 +621,7 @@ async function main() {
       managerRuntimeSettings.stopHeartbeat?.();
       wispbyteKeepAlive.stop();
       statusMonitor.stop();
+      bxhMonitor.stop();
       discordPointsService.stop();
       await discordPointsService.flush().catch(() => {});
       await releaseDiscordLeader();

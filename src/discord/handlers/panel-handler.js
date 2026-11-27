@@ -1104,14 +1104,11 @@ async function handlePanelInteraction(interaction, services) {
     return safeUpdate(interaction, view);
   }
 
-  // 0C. Discord Points Leaderboard Tabs (Accessible to logged-in users in configured guild)
+  // 0C. Discord Points Leaderboard Tabs & Manual Refresh (Accessible to logged-in users in configured guild)
   if (customId.startsWith('points:lb:')) {
     const { resolveLoggedInPointsUser } = require('../../services/discord-points-service');
-    const {
-      renderLoginRequiredNotice,
-      renderPointsLeaderboard,
-      renderCombinedPointsLeaderboard
-    } = require('../panels/points-renderer');
+    const { renderLoginRequiredNotice } = require('../panels/points-renderer');
+    const { buildBxhPanel, normalizeBxhType } = require('../bxh-monitor');
 
     const loggedInUser = await resolveLoggedInPointsUser(discordUserId, services);
     if (!loggedInUser) {
@@ -1130,28 +1127,53 @@ async function handlePanelInteraction(interaction, services) {
       return safeDeferUpdate(interaction);
     }
     await safeDeferUpdate(interaction);
-    const rawType = customId.split(':')[2] || 'tatca';
-    if (rawType === 'tatca') {
-      const combined = await services.discordPoints.getCombinedLeaderboards({
-        guildId: interaction.guildId,
-        limit: 10,
-        viewerUserId: discordUserId
-      });
-      return safeUpdate(interaction, renderCombinedPointsLeaderboard({
-        guildName: interaction.guild?.name || 'Server',
-        combined
-      }));
+    const rawAction = customId.split(':')[2] || 'tatca';
+    const tracked = services?.bxhMonitor?.getTrackedMessage?.(interaction.channelId) || null;
+    const isTrackedMessage = Boolean(
+      tracked?.messageId && interaction.message?.id && tracked.messageId === interaction.message.id
+    );
+
+    let activeTabFromMessage = null;
+    if (rawAction === 'refresh') {
+      const rowBtns = interaction.message?.components?.[0]?.components || [];
+      const activeBtn = rowBtns.find((btn) => Boolean(btn?.disabled || btn?.data?.disabled));
+      const activeCid = activeBtn?.customId || activeBtn?.data?.custom_id || '';
+      if (activeCid.startsWith('points:lb:')) {
+        activeTabFromMessage = activeCid.split(':')[2] || null;
+      }
     }
-    const leaderboard = await services.discordPoints.getLeaderboard({
+
+    const effectiveType = rawAction === 'refresh'
+      ? normalizeBxhType((isTrackedMessage ? tracked?.type : null) || activeTabFromMessage || 'tatca')
+      : normalizeBxhType(rawAction);
+    const limit = (isTrackedMessage && Number(tracked?.limit)) ? Number(tracked.limit) : 10;
+    const intervalMs = services?.bxhMonitor?.intervalMs || 15 * 60 * 1000;
+    const guildName = interaction.guild?.name || tracked?.guildName || 'Server';
+
+    const rendered = await buildBxhPanel(services, {
       guildId: interaction.guildId,
-      type: rawType,
-      limit: 10,
-      viewerUserId: discordUserId
+      guildName,
+      type: effectiveType,
+      limit,
+      viewerUserId: discordUserId,
+      updatedAtMs: Date.now(),
+      intervalMs,
+      hasViewer: true
     });
-    return safeUpdate(interaction, renderPointsLeaderboard({
-      guildName: interaction.guild?.name || 'Server',
-      leaderboard
-    }));
+
+    if (interaction.channelId && interaction.message?.id && services?.bxhMonitor?.trackMessage && (isTrackedMessage || rawAction === 'refresh')) {
+      await services.bxhMonitor.trackMessage({
+        guildId: interaction.guildId || tracked?.guildId || null,
+        guildName,
+        channelId: interaction.channelId,
+        messageId: interaction.message.id,
+        type: rendered.type,
+        limit: rendered.limit,
+        updatedAt: new Date(rendered.updatedAtMs).toISOString()
+      }).catch(() => null);
+    }
+
+    return safeUpdate(interaction, { embeds: rendered.embeds, components: rendered.components });
   }
 
   // 0D. Discord Points 1-Day Missed Streak Restore Prompt (points:restore:yes:<userId> | points:restore:no:<userId>)

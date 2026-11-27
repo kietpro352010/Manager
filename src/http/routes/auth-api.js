@@ -478,21 +478,6 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       if (!isExempt && typeof store.isRecentAdminIp === 'function') {
         isExempt = await store.isRecentAdminIp(clientIp).catch(() => false);
       }
-      if (!isExempt && providedKey && typeof store.getKey === 'function') {
-        try {
-          const keyRow = await store.getKey(providedKey);
-          if (keyRow) {
-            const statusLower = String(keyRow.status || 'unused').toLowerCase();
-            const maxUses = Number(keyRow.maxUses ?? keyRow.max_uses ?? 1);
-            const usedCount = Number(keyRow.usedCount ?? keyRow.used_count ?? 0);
-            const isExhausted = maxUses > 0 && usedCount >= maxUses;
-            const isExpired = Boolean(keyRow.expiresAt && Date.parse(keyRow.expiresAt) <= Date.now());
-            if ((statusLower === 'active' || statusLower === 'unused' || !keyRow.status) && !isExhausted && !isExpired) {
-              isExempt = true;
-            }
-          }
-        } catch (_) {}
-      }
 
       if (!isExempt) {
         // Enforce max 2 accounts per IP
@@ -520,6 +505,14 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         }
       }
 
+      if (providedKey) {
+        return res.status(400).json({
+          ok: false,
+          code: 'REDEEM_IN_WEB_ONLY',
+          error: 'Tính năng nhập mã lúc đăng ký đã ngưng. Vui lòng đăng ký tài khoản, đăng nhập vào Web và liên kết Discord để nhập mã.'
+        });
+      }
+
       const userId = `usr_${crypto.randomUUID().slice(0, 12)}`;
       const hashedPassword = encryptUserPassword(cleanPassword);
 
@@ -541,7 +534,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       // Register user:
       let registered = null;
       let registeredWorkerIds = [];
-      const shouldAttemptTrial = isTrialEnabled && !providedKey;
+      const shouldAttemptTrial = isTrialEnabled;
 
       if (shouldAttemptTrial && typeof store.registerTrialUser !== 'function') {
         return res.status(503).json({
@@ -660,30 +653,9 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       let assignedBotIds = registeredWorkerIds.length
         ? registeredWorkerIds
         : (registered?.workerId ? [String(registered.workerId)] : []);
-      let planName = registered?.planName || 'FREE TRIAL';
-      let isPermanent = false;
-      let rentalExpiresAt = registered?.expiresAt || registered?.user?.expiresAt || null;
-
-      // If a giftcode/key was provided, redeem it
-      let keyRedeemed = false;
-      let keyError = null;
-      if (providedKey) {
-        try {
-          await entitlementService.redeem(userId, providedKey, 'user');
-          keyRedeemed = true;
-          const refreshed = await store.getUser(cleanUsername, { bypassCache: true });
-          if (refreshed) {
-            assignedBotIds = refreshed.assignedBotIds || refreshed.workerIds || assignedBotIds;
-            planName = refreshed.planName || planName;
-            isPermanent = Boolean(refreshed.isPermanent);
-            rentalExpiresAt = refreshed.expiresAt || null;
-          }
-        } catch (keyErr) {
-          keyRedeemed = false;
-          keyError = keyErr.message || 'Mã quà tặng không hợp lệ hoặc đã hết lượt.';
-          logger.warn('Key redemption on register failed', { error: keyError, username: cleanUsername });
-        }
-      }
+      const planName = registered?.planName || 'FREE TRIAL';
+      const isPermanent = false;
+      const rentalExpiresAt = registered?.expiresAt || registered?.user?.expiresAt || null;
 
       // Generate session
       const maintenance = await getMaintenanceState(store);
@@ -763,16 +735,8 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
           sessionExpiresAt: session.expiresAt
         },
         maintenance: sanitizeMaintenanceForSession(maintenance, session),
-        message: (providedKey && !keyRedeemed)
-          ? `Đăng ký tài khoản thành công, nhưng kích hoạt mã quà tặng thất bại: ${keyError}`
-          : 'Đăng ký tài khoản thành công!'
+        message: 'Đăng ký tài khoản thành công!'
       };
-      if (providedKey) {
-        responsePayload.keyRedeemed = keyRedeemed;
-        if (!keyRedeemed) {
-          responsePayload.keyError = keyError;
-        }
-      }
       return res.status(201).json(responsePayload);
     } catch (error) {
       logger.error('Registration failed', { error: error.message });
@@ -783,10 +747,10 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
   // 2. LOGIN
   router.post('/login', async (req, res) => {
     try {
-      const { username, password, key: rawKey } = req.body || {};
+      const { username, password, key: rawKey, licenseKey: rawLicenseKey } = req.body || {};
       const cleanUsername = String(username || '').trim();
       const cleanPassword = String(password || '');
-      const providedKey = String(rawKey || '').trim();
+      const providedKey = String(rawKey || rawLicenseKey || '').trim();
       const clientIp = req.clientIp || resolveClientIp(req);
 
       if (!cleanUsername || cleanUsername.length > 32 || !cleanPassword || cleanPassword.length > 256) {
@@ -795,6 +759,14 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
 
       if (!/^[a-zA-Z0-9_]{3,32}$/.test(cleanUsername)) {
         return res.status(400).json({ ok: false, error: 'Tên đăng nhập không hợp lệ.' });
+      }
+
+      if (providedKey) {
+        return res.status(400).json({
+          ok: false,
+          code: 'REDEEM_IN_WEB_ONLY',
+          error: 'Vui lòng đăng nhập vào Web (không nhập mã ở ngoài) và nhập mã bên trong hệ thống sau khi liên kết Discord.'
+        });
       }
 
       function sendFailedLoginResponse(resObj, failState, baseErrorMsg) {
@@ -975,21 +947,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         }
       }
 
-      // Redeem key if provided
-      let keyRedeemed = false;
-      let keyError = null;
-      if (providedKey) {
-        try {
-          await entitlementService.redeem(userId, providedKey, 'user');
-          keyRedeemed = true;
-        } catch (keyErr) {
-          keyRedeemed = false;
-          keyError = keyErr.message || 'Mã quà tặng không hợp lệ hoặc đã hết lượt.';
-          logger.warn('Key redeem during login failed', { error: keyError, user: cleanUsername });
-        }
-      }
-
-      // Refresh user details after key redemption
+      // Load latest user details (bypassing key redemption outside Web)
       const updatedAccess = await store.getAccess(userId);
       const rawAssigned = Array.isArray(updatedAccess?.workerIds)
         ? updatedAccess.workerIds
@@ -1098,12 +1056,6 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         maintenance: sanitizeMaintenanceForSession(maintenance, session),
         message: 'Đăng nhập thành công!'
       };
-      if (providedKey) {
-        responsePayload.keyRedeemed = keyRedeemed;
-        if (!keyRedeemed) {
-          responsePayload.keyError = keyError;
-        }
-      }
       return res.json(responsePayload);
     } catch (error) {
       logger.error('Login error', { error: error.message });

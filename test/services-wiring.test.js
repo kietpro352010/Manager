@@ -2705,7 +2705,7 @@ async function testPublicLoginViewSecurityAccessibilityAndApiContract() {
       const regUser = makeEl('input', 'regUsername', { type: 'text' });
       const regPass = makeEl('input', 'regPassword', { type: 'password' });
       const regPass2 = makeEl('input', 'regPasswordConfirm', { type: 'password' });
-      const regKey = makeEl('input', 'regLicenseKey', { type: 'text' }, ['key-input']);
+      const regKey = null; // Register key input removed; key redemption moved inside Web after Discord link
       const regBtn = makeEl('button', 'publicRegSubmitBtn', { type: 'submit' }, ['primary-cta']);
       regBtn.appendChild(makeEl('span', '', {}, ['btn-icon']));
       regBtn.appendChild(makeEl('span', '', {}, ['btn-label']));
@@ -2719,7 +2719,6 @@ async function testPublicLoginViewSecurityAccessibilityAndApiContract() {
       makeEl('div', 'publicLoginAlert', { hidden: '' }, ['login-alert', 'hidden']);
       makeEl('div', 'publicTrialCalloutBadge');
       makeEl('div', 'publicTrialCalloutText');
-      makeEl('span', 'regLicenseKeyHint');
       // FRONTEND-09: dead #serverStatusPill/#serverStatusText removed from login view
 
       const canvas = makeEl('canvas', 'publicStarfieldCanvas');
@@ -2872,7 +2871,8 @@ async function testPublicLoginViewSecurityAccessibilityAndApiContract() {
     assert.strictEqual(regBody.username, 'webtest_user');
     assert.strictEqual(regBody.password, 'SecretPass123');
     assert.strictEqual(regBody.confirmPassword, 'SecretPass123', 'Register request must include confirmPassword required by auth-api.js');
-    assert.strictEqual(regBody.key, '', 'Register request must include key field expected by auth-api.js');
+    assert.strictEqual(regBody.key, undefined, 'Register request must no longer send pre-auth key field');
+    assert.strictEqual(regBody.licenseKey, undefined, 'Register request must no longer send pre-auth licenseKey field');
     assert.strictEqual(simReal.storageMap.get('kingmc_session') || null, null, 'FRONTEND-09: must not write session token to localStorage');
     await new Promise((r) => setTimeout(r, 420));
     assert.strictEqual(simReal.ctxStats.replacedLocation, '/', 'Successful web registration must redirect to /');
