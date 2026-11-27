@@ -181,12 +181,23 @@ function isTransientUpstreamError(err) {
 
 const DEFAULT_STALE_GRACE_MS = 5 * 60 * 1000; // 5 minutes stale-if-error window
 
+function cloneSettingValue(val) {
+  if (val === null || val === undefined || typeof val !== 'object') return val;
+  if (Array.isArray(val)) return val.map(cloneSettingValue);
+  const out = {};
+  for (const [k, v] of Object.entries(val)) {
+    out[k] = cloneSettingValue(v);
+  }
+  return out;
+}
+
 class SupabaseDashboardStore {
   constructor(client) {
     this.client = client;
     this.adapter = client.adapter || null;
     this.cache = new Map();
     this._inFlight = new Map();
+    this._settingWriteGen = new Map();
     this._fallbackLock = new AsyncKeyLock();
   }
 
@@ -1928,38 +1939,56 @@ class SupabaseDashboardStore {
   // --------------------------------------------------------------------------
   // SETTINGS & RUNTIME
   // --------------------------------------------------------------------------
-  async getSetting(key, { bypassCache = false } = {}) {
-    const cacheKey = `setting:${key}`;
+  async getSetting(key, opts = {}) {
+    const cleanKey = String(key ?? '').trim();
+    if (!cleanKey) return null;
+    const bypassCache = Boolean(opts?.bypassCache);
+    const cacheKey = `setting:${cleanKey}`;
     if (!bypassCache) {
       const cached = this.getCachedEntry(cacheKey);
-      if (cached.hit) return cached.data;
-      return this._dedupeInFlight(cacheKey, () => this._fetchSettingUncached(key, cacheKey)).catch((err) => {
-        if (isTransientUpstreamError(err)) {
-          const stale = this.getStaleFallback(cacheKey);
-          if (stale.found) return stale.data;
-        }
-        throw err;
-      });
+      if (cached.hit) return cloneSettingValue(cached.data);
+      return this._dedupeInFlight(cacheKey, () => this._fetchSettingUncached(cleanKey, cacheKey))
+        .then((val) => cloneSettingValue(val))
+        .catch((err) => {
+          if (isTransientUpstreamError(err)) {
+            const stale = this.getStaleFallback(cacheKey);
+            if (stale.found) return cloneSettingValue(stale.data);
+          }
+          throw err;
+        });
     }
-    return this._fetchSettingUncached(key, cacheKey);
+    const fresh = await this._fetchSettingUncached(cleanKey, cacheKey);
+    return cloneSettingValue(fresh);
   }
 
-  async _fetchSettingUncached(key, cacheKey) {
-    const { data, error } = await this.client.from(SETTINGS).select('value,updated_at').eq('key', key).maybeSingle();
+  async _fetchSettingUncached(cleanKey, cacheKey) {
+    const startGen = this._settingWriteGen.get(cleanKey) || 0;
+    const { data, error } = await this.client.from(SETTINGS).select('value,updated_at').eq('key', cleanKey).maybeSingle();
     if (error && error.code !== 'PGRST116') throw error;
     let resolved = null;
     if (data) {
-      if (Array.isArray(data.value)) resolved = data.value;
-      else if (data.value && typeof data.value === 'object') resolved = { ...data.value, updatedAt: data.updated_at };
+      if (Array.isArray(data.value)) resolved = cloneSettingValue(data.value);
+      else if (data.value && typeof data.value === 'object') resolved = { ...cloneSettingValue(data.value), updatedAt: data.updated_at };
       else resolved = data.value ?? null;
     }
-    this.setCached(cacheKey, resolved, 30000);
+    if ((this._settingWriteGen.get(cleanKey) || 0) === startGen) {
+      this.setCached(cacheKey, resolved, 30000);
+    }
     return resolved;
   }
 
   async setSetting(key, value) {
+    const cleanKey = String(key ?? '').trim();
+    const cacheKey = `setting:${cleanKey}`;
+    const nextGen = (this._settingWriteGen.get(cleanKey) || 0) + 1;
+    if (this._settingWriteGen.size >= 500 && !this._settingWriteGen.has(cleanKey)) {
+      this._settingWriteGen.clear();
+    }
+    this._settingWriteGen.set(cleanKey, nextGen);
+    this._inFlight.delete(cacheKey);
+
     const updatedAtIso = new Date().toISOString();
-    const upsertQuery = this.client.from(SETTINGS).upsert({ key, value, updated_at: updatedAtIso }, { onConflict: 'key' });
+    const upsertQuery = this.client.from(SETTINGS).upsert({ key: cleanKey, value, updated_at: updatedAtIso }, { onConflict: 'key' });
     let savedData = null;
     let error = null;
     if (upsertQuery && typeof upsertQuery.select === 'function') {
@@ -1972,23 +2001,30 @@ class SupabaseDashboardStore {
       error = res?.error || null;
     }
     if (error) throw error;
-    this.cache.delete(`setting:${key}`);
-    if (key === 'system_maintenance') {
+
+    this._inFlight.delete(cacheKey);
+    if (cleanKey === 'system_maintenance') {
       this.cachedMaintenance = undefined;
       this.cachedMaintenanceAt = 0;
-    } else if (key === 'system_announcement') {
+    } else if (cleanKey === 'system_announcement') {
       this.cachedAnnouncement = undefined;
       this.cachedAnnouncementAt = 0;
     }
-    if (savedData && Object.prototype.hasOwnProperty.call(savedData, 'value')) {
-      let resolved = null;
-      if (Array.isArray(savedData.value)) resolved = savedData.value;
-      else if (savedData.value && typeof savedData.value === 'object') resolved = { ...savedData.value, updatedAt: savedData.updated_at || updatedAtIso };
-      else resolved = savedData.value ?? null;
-      this.setCached(`setting:${key}`, resolved, 30000);
-      return resolved;
+
+    const rawVal = (savedData && Object.prototype.hasOwnProperty.call(savedData, 'value'))
+      ? savedData.value
+      : value;
+    const rawUpdatedAt = (savedData && savedData.updated_at) ? savedData.updated_at : updatedAtIso;
+    let resolved = null;
+    if (Array.isArray(rawVal)) {
+      resolved = cloneSettingValue(rawVal);
+    } else if (rawVal && typeof rawVal === 'object') {
+      resolved = { ...cloneSettingValue(rawVal), updatedAt: rawUpdatedAt };
+    } else {
+      resolved = rawVal ?? null;
     }
-    return this.getSetting(key, { bypassCache: true });
+    this.setCached(cacheKey, resolved, 30000);
+    return cloneSettingValue(resolved);
   }
 
   // --------------------------------------------------------------------------

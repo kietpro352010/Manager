@@ -124,8 +124,23 @@ async function collectSystemStatus(services, { intervalMs = 15 * 60 * 1000 } = {
   const nextCheckAtUnix = checkedAtUnix + intervalSec;
   const intervalMinutes = Math.max(1, Math.round(intervalSec / 60));
 
-  // 7. Public Web Dashboard URL
+  // 7. Public Web Dashboard URL & Dual-Web Sync active nodes + Maintenance pause telemetry
   const publicBaseUrl = services?.managerRuntimeSettings?.snapshot?.()?.publicBaseUrl || services?.config?.publicBaseUrl || '';
+  const activeManagerUrlsRaw = services?.managerRuntimeSettings?.getActiveManagerUrls?.();
+  const activeWebNodes = Array.isArray(activeManagerUrlsRaw) && activeManagerUrlsRaw.length > 0
+    ? activeManagerUrlsRaw.length
+    : (Array.isArray(services?.config?.managerUrls) && services.config.managerUrls.length > 0
+      ? services.config.managerUrls.length
+      : 1);
+
+  const maintenanceEnabled = Boolean(maintenance?.enabled);
+  const maintenanceStartedAt = maintenanceEnabled
+    ? (maintenance?.startedAt || maintenance?.lastCompensatedAt || maintenance?.updatedAt || null)
+    : null;
+  const maintStartMs = maintenanceStartedAt ? Date.parse(maintenanceStartedAt) : NaN;
+  const maintenancePausedMinutes = (maintenanceEnabled && Number.isFinite(maintStartMs) && checkedAtMs > maintStartMs)
+    ? Math.max(0, Math.floor((checkedAtMs - maintStartMs) / 60000))
+    : 0;
 
   return {
     managerOk: true,
@@ -148,7 +163,11 @@ async function collectSystemStatus(services, { intervalMs = 15 * 60 * 1000 } = {
     platform,
     nodeVersion,
     publicBaseUrl,
+    activeWebNodes,
     maintenance,
+    maintenanceEnabled,
+    maintenanceStartedAt,
+    maintenancePausedMinutes,
     checkedAt,
     checkedAtMs,
     checkedAtUnix,

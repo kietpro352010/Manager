@@ -21,7 +21,12 @@ const {
   resolveClientIp,
   isTrustedProxyRequest
 } = require('../../services/captcha');
-const { getMaintenanceState, computeEffectiveExpiresAt, flushMaintenanceCompensation } = require('../../utils/maintenance');
+const {
+  getMaintenanceState,
+  sanitizeMaintenanceForSession,
+  computeEffectiveExpiresAt,
+  flushMaintenanceCompensation
+} = require('../../utils/maintenance');
 
 function hashSessionToken(token) {
   if (!token || typeof token !== 'string') return '';
@@ -757,7 +762,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
           rawExpiresAt: rawRentalExpiresAt,
           sessionExpiresAt: session.expiresAt
         },
-        maintenance,
+        maintenance: sanitizeMaintenanceForSession(maintenance, session),
         message: (providedKey && !keyRedeemed)
           ? `Đăng ký tài khoản thành công, nhưng kích hoạt mã quà tặng thất bại: ${keyError}`
           : 'Đăng ký tài khoản thành công!'
@@ -1090,7 +1095,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
           status: session.status,
           planName: session.planName
         },
-        maintenance,
+        maintenance: sanitizeMaintenanceForSession(maintenance, session),
         message: 'Đăng nhập thành công!'
       };
       if (providedKey) {
@@ -1185,7 +1190,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         planName: session.planName,
         allowAccountChange: session.allowAccountChange
       },
-      maintenance
+      maintenance: sanitizeMaintenanceForSession(maintenance, session)
     });
   });
 

@@ -245,6 +245,9 @@ function createApp({
 
   // 1. Lightweight Zero-Dependency Brotli/Gzip Compression Middleware (saves ~85-90% outbound bandwidth)
   app.use((req, res, next) => {
+    if (req.path === '/api/manager/stream' || req.path === '/api/user/stream' || req.path === '/api/stream') {
+      return next();
+    }
     const preferredEncoding = negotiateEncoding(req);
     const originalSend = res.send;
     res.send = function (body) {
@@ -252,8 +255,14 @@ function createApp({
         return originalSend.call(this, body);
       }
       let contentType = String(res.getHeader('Content-Type') || '').toLowerCase();
+      if (contentType.includes('text/event-stream')) {
+        return originalSend.call(this, body);
+      }
       if (!contentType && typeof body === 'string') {
         contentType = 'text/html; charset=utf-8';
+        res.setHeader('Content-Type', contentType);
+      } else if (!contentType && typeof body === 'object' && !Buffer.isBuffer(body)) {
+        contentType = 'application/json; charset=utf-8';
         res.setHeader('Content-Type', contentType);
       }
       const isCompressible = contentType.includes('json') ||
@@ -272,7 +281,8 @@ function createApp({
       } catch (_) {
         return originalSend.call(this, body);
       }
-      if (buffer.length < 384) return originalSend.call(this, body);
+      const minBytes = contentType.includes('json') ? 1024 : 384;
+      if (buffer.length < minBytes) return originalSend.call(this, body);
       if (preferredEncoding === 'br' && typeof zlib.brotliCompress === 'function') {
         zlib.brotliCompress(buffer, {
           params: {
@@ -529,6 +539,8 @@ function createApp({
     next();
   });
 
+  let userRouter = null;
+
   // Helper: Evict local cached sessions for a deleted or disabled user
   function invalidateUserSessions(identifier) {
     const raw = String(identifier || '').trim();
@@ -550,6 +562,7 @@ function createApp({
         removed += 1;
       }
     }
+    userRouter?.closeUserSseClients?.(raw);
     return removed;
   }
 
@@ -918,7 +931,7 @@ function createApp({
   app._authRouter = authRouter;
   app.use('/api/auth', authRouter);
 
-  const userRouter = createUserApi({
+  userRouter = createUserApi({
     store,
     entitlementService,
     link4mService,
@@ -944,6 +957,7 @@ function createApp({
         removed += 1;
       }
     }
+    userRouter?.closeAdminSseClients?.(excludeTokenHash);
     return removed;
   }
 
@@ -961,7 +975,10 @@ function createApp({
     logger,
     invalidateUserSessions,
     invalidateAdminSessions,
-    resetSessionAuthCache
+    resetSessionAuthCache,
+    broadcastSystemSseEvent: (eventName, payload) => userRouter?.broadcastSystemSseEvent?.(eventName, payload) ?? 0,
+    getSseClientCount: () => userRouter?.getSseClientCount?.() ?? 0,
+    getEventLoopLagSnapshot
   });
   app.use('/api/admin', adminRouter);
   app.use('/api/manager', adminRouter);
@@ -1005,9 +1022,13 @@ function createApp({
   app.invalidateAdminSessions = invalidateAdminSessions;
   app.invalidateUserSessions = invalidateUserSessions;
   app.resetSessionAuthCache = resetSessionAuthCache;
+  app.broadcastSystemSseEvent = (eventName, payload) => userRouter?.broadcastSystemSseEvent?.(eventName, payload) ?? 0;
+  app.closeAllSseClients = () => userRouter?.closeAllSseClients?.() ?? 0;
+  app.getSseClientCount = () => userRouter?.getSseClientCount?.() ?? 0;
   app.setShuttingDown = (nextVal = true) => {
     isShuttingDown = Boolean(nextVal);
     if (isShuttingDown) {
+      try { userRouter?.closeAllSseClients?.(); } catch (_) {}
       try { loopDelayMonitor?.disable?.(); } catch (_) {}
     }
   };

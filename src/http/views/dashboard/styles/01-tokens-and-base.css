@@ -573,3 +573,27 @@ button[data-copied="true"],
 .copyable[data-copied="true"] .copy-feedback-tag {
   display: inline-block;
 }
+
+/* Wave-7: Tabular Numerals & Keyboard :focus-visible Precision */
+.kpi-value,
+.vital-val,
+.fleet-res-val,
+.ram-pill,
+#detailPing,
+#detailTps,
+#detailUptime,
+#detailRam,
+#detailHostRam,
+#detailHostCpu,
+#detailHostNet {
+  font-variant-numeric: tabular-nums;
+}
+
+.bot-card:focus-visible,
+.nav-pill-btn:focus-visible,
+.sidebar-nav-btn:focus-visible,
+.card-btn:focus-visible,
+#btnOpenCommandPalette:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

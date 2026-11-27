@@ -52,6 +52,9 @@ function normalizeMaintenanceState(raw) {
   const cleanedMsg = String(obj.message || '').trim().slice(0, 600);
   const rawCompMs = Number(obj.lastCompensationMs);
   const rawCompUsers = Number(obj.compensatedUsers);
+  const partialCompensatedIds = Array.isArray(obj.partialCompensatedIds)
+    ? [...new Set(obj.partialCompensatedIds.map((id) => String(id || '').trim()).filter(Boolean))]
+    : [];
   return {
     enabled: Boolean(obj.enabled),
     message: cleanedMsg || DEFAULT_MAINTENANCE_MESSAGE,
@@ -59,8 +62,26 @@ function normalizeMaintenanceState(raw) {
     lastCompensatedAt: obj.lastCompensatedAt ? String(obj.lastCompensatedAt) : null,
     lastCompensationMs: Number.isFinite(rawCompMs) && rawCompMs >= 0 ? Math.round(rawCompMs) : 0,
     compensatedUsers: Number.isFinite(rawCompUsers) && rawCompUsers >= 0 ? Math.round(rawCompUsers) : 0,
+    partialAnchorIso: obj.partialAnchorIso ? String(obj.partialAnchorIso) : null,
+    partialCompensatedIds,
     updatedAt: obj.updatedAt ? String(obj.updatedAt) : null,
     updatedBy: obj.updatedBy ? String(obj.updatedBy) : null
+  };
+}
+
+function sanitizeMaintenanceForSession(maintenance, session = null) {
+  if (!maintenance || typeof maintenance !== 'object') return null;
+  const normalized = normalizeMaintenanceState(maintenance);
+  if (session && session.role === 'admin') {
+    return normalized;
+  }
+  return {
+    enabled: Boolean(normalized.enabled),
+    message: normalized.message,
+    startedAt: normalized.startedAt,
+    lastCompensatedAt: normalized.lastCompensatedAt,
+    lastCompensationMs: normalized.lastCompensationMs,
+    updatedAt: normalized.updatedAt
   };
 }
 
@@ -141,7 +162,8 @@ async function flushMaintenanceCompensation(
 
     let rawCurrent = null;
     if (typeof store?.getSetting === 'function') {
-      rawCurrent = await Promise.resolve(store.getSetting(MAINTENANCE_SETTING_KEY, { bypassCache: true })).catch(() => null);
+      rawCurrent = await Promise.resolve(store.getSetting(MAINTENANCE_SETTING_KEY, { bypassCache: true }))
+        .catch(() => (store?.cachedMaintenance !== undefined ? store.cachedMaintenance : null));
     } else if (store?.cachedMaintenance !== undefined) {
       rawCurrent = store.cachedMaintenance;
     }
@@ -167,6 +189,8 @@ async function flushMaintenanceCompensation(
         lastCompensatedAt: null,
         lastCompensationMs: 0,
         compensatedUsers: 0,
+        partialAnchorIso: null,
+        partialCompensatedIds: [],
         updatedAt: nowIso,
         updatedBy: cleanActor
       });
@@ -182,13 +206,15 @@ async function flushMaintenanceCompensation(
         lastCompensatedAt: nowIso,
         lastCompensationMs: 0,
         compensatedUsers: 0,
+        partialAnchorIso: null,
+        partialCompensatedIds: [],
         updatedAt: nowIso,
         updatedBy: cleanActor
       });
       return persistMaintenanceRecord(store, next);
     }
 
-    // 3. true -> true (message update only): preserve startedAt & lastCompensatedAt
+    // 3. true -> true (message update only): preserve startedAt, lastCompensatedAt & any partial checkpoint
     if (current.enabled && desiredEnabled && messageOnlyWhenEnabled) {
       const next = normalizeMaintenanceState({
         enabled: true,
@@ -197,6 +223,8 @@ async function flushMaintenanceCompensation(
         lastCompensatedAt: current.lastCompensatedAt || current.startedAt || current.updatedAt || nowIso,
         lastCompensationMs: current.lastCompensationMs,
         compensatedUsers: current.compensatedUsers,
+        partialAnchorIso: current.partialAnchorIso,
+        partialCompensatedIds: current.partialCompensatedIds,
         updatedAt: nowIso,
         updatedBy: cleanActor
       });
@@ -206,8 +234,15 @@ async function flushMaintenanceCompensation(
     // 4. Checkpoint flush (true -> true) or turn-off (true -> false)
     const effectiveTurnOff = !desiredEnabled || Boolean(turnOff);
     const anchorMs = resolveMaintenanceAnchorMs(current);
+    const anchorIso = Number.isFinite(anchorMs) ? new Date(anchorMs).toISOString() : null;
     const deltaMs = Number.isFinite(anchorMs) ? Math.max(0, Math.round(safeToMs - anchorMs)) : 0;
-    let compensatedUsers = 0;
+    const alreadyDone = new Set(
+      anchorIso && current.partialAnchorIso === anchorIso && Array.isArray(current.partialCompensatedIds)
+        ? current.partialCompensatedIds
+        : []
+    );
+    let compensatedUsers = deltaMs > 0 ? alreadyDone.size : 0;
+    let failedErr = null;
 
     if (deltaMs > 0 && typeof store?.listAccess === 'function') {
       store.invalidateCache?.();
@@ -223,14 +258,37 @@ async function flushMaintenanceCompensation(
           if (!isEligible) continue;
           const targetUserId = String(u.userId || u.id || u.username || '').trim();
           if (!targetUserId) continue;
+          if (alreadyDone.has(targetUserId)) continue;
           const newExpiresAt = new Date(expMs + deltaMs).toISOString();
-          await store.setAccess(targetUserId, { ...u, expiresAt: newExpiresAt }, 'system:maintenance_compensation');
-          compensatedUsers += 1;
+          try {
+            await store.setAccess(targetUserId, { ...u, expiresAt: newExpiresAt }, 'system:maintenance_compensation');
+            alreadyDone.add(targetUserId);
+            compensatedUsers += 1;
+          } catch (userErr) {
+            failedErr = failedErr || userErr;
+          }
         }
       }
     }
 
-    const preservedStartedAt = current.startedAt || (Number.isFinite(anchorMs) ? new Date(anchorMs).toISOString() : nowIso);
+    if (failedErr) {
+      const checkpoint = normalizeMaintenanceState({
+        ...current,
+        message: resolvedMessage,
+        partialAnchorIso: anchorIso,
+        partialCompensatedIds: [...alreadyDone],
+        updatedAt: nowIso,
+        updatedBy: cleanActor
+      });
+      if (store && typeof store === 'object') {
+        store.cachedMaintenance = checkpoint;
+        store.cachedMaintenanceAt = Date.now();
+      }
+      await persistMaintenanceRecord(store, checkpoint);
+      throw failedErr;
+    }
+
+    const preservedStartedAt = current.startedAt || (anchorIso || nowIso);
     const next = normalizeMaintenanceState({
       enabled: !effectiveTurnOff,
       message: resolvedMessage,
@@ -238,6 +296,8 @@ async function flushMaintenanceCompensation(
       lastCompensatedAt: effectiveTurnOff ? null : nowIso,
       lastCompensationMs: deltaMs,
       compensatedUsers,
+      partialAnchorIso: null,
+      partialCompensatedIds: [],
       updatedAt: nowIso,
       updatedBy: cleanActor
     });
@@ -278,6 +338,7 @@ module.exports = {
   MAINTENANCE_SETTING_KEY,
   DEFAULT_MAINTENANCE_MESSAGE,
   normalizeMaintenanceState,
+  sanitizeMaintenanceForSession,
   computeEffectiveExpiresAt,
   flushMaintenanceCompensation,
   getMaintenanceState,

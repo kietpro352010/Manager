@@ -7,7 +7,41 @@ const { validateProxyUrl, resolveAndValidateHost } = require('../../services/pro
 const { resolveClientIp } = require('../../services/captcha');
 const { resolveRequestOrigin, DEFAULT_PUBLIC_MANAGER_URL } = require('../../config/host-runtime');
 const { decryptSecret } = require('../../utils/secrets');
-const { getMaintenanceState, computeEffectiveExpiresAt } = require('../../utils/maintenance');
+const {
+  getMaintenanceState,
+  sanitizeMaintenanceForSession,
+  computeEffectiveExpiresAt
+} = require('../../utils/maintenance');
+
+const MAX_SSE_CLIENTS = 60;
+const MAX_SSE_PER_ACTOR = 3;
+const SSE_HEARTBEAT_MS = 25000;
+const SSE_PULSE_THROTTLE_MS = 400;
+const activeSseHubs = new Set();
+
+function broadcastSystemSseEvent(eventName, payload) {
+  let delivered = 0;
+  for (const hub of activeSseHubs) {
+    delivered += hub.broadcastSystemSseEvent(eventName, payload);
+  }
+  return delivered;
+}
+
+function closeAllSseClients() {
+  let closed = 0;
+  for (const hub of activeSseHubs) {
+    closed += hub.closeAllSseClients();
+  }
+  return closed;
+}
+
+function getSseClientCount() {
+  let total = 0;
+  for (const hub of activeSseHubs) {
+    total += hub.getSseClientCount();
+  }
+  return total;
+}
 
 function parseProxyInputToUrl(rawInput, { ignoreEnabledFlag = false } = {}) {
   if (rawInput === null || rawInput === undefined || rawInput === '') return '';
@@ -349,6 +383,15 @@ function createUserApi({
     return Boolean(status.manuallyStopped && !status.online) || DISCONNECTED_BOT_STATES.has(state);
   }
 
+  function isWorkerOnlineInGame(worker) {
+    if (!worker || typeof worker !== 'object') return false;
+    if (isWorkerDisconnectedForInventory(worker)) return false;
+    const status = worker.status || {};
+    if (status.online === true) return true;
+    const state = String(status.state || worker.state || '').trim().toLowerCase();
+    return state === 'online' || state === 'afk' || state === 'afk_locked';
+  }
+
   function humanizeWorkerErrorVi(failure, { isAdmin = false, worker = null, actionLabel = 'thao tác' } = {}) {
     const code = String(failure?.code || failure?.error || '').trim().toUpperCase();
     const rawMsg = String(failure?.detail || failure?.message || failure?.error || '').trim();
@@ -561,10 +604,10 @@ function createUserApi({
   function buildBotPayload(worker, session, summary = null, assignment = null, { compact = false } = {}) {
     const username = getBotUsername(worker);
     const configured = Boolean(worker.settings?.mcCredentialsCiphertext || (username && username !== 'Chưa đặt'));
-    const isOnline = worker.status?.state === 'online';
+    const isDisconnectedInv = isWorkerDisconnectedForInventory(worker);
+    const isOnline = isWorkerOnlineInGame(worker);
     const isReachable = Boolean(worker.reachable || isOnline);
     const botNum = Number(worker.botNumber || worker.workerId || 1);
-    const isDisconnectedInv = isWorkerDisconnectedForInventory(worker);
     let summaryData = summary?.data || null;
     if (summaryData && typeof summaryData === 'object') {
       if (compact || isDisconnectedInv) {
@@ -696,25 +739,29 @@ function createUserApi({
       const allBots = await registry.list({ omitHeavyFields: true });
       const assignmentMap = session.role === 'admin' ? await getUserAssignmentsMap() : null;
       const selfAssignment = session.role === 'admin' ? null : { username: session.username || null, planName: session.planName || null };
-      let globalOrder = [];
-      if (typeof store?.getSetting === 'function') {
-        const configuredOrder = await Promise.resolve(store.getSetting('bot_display_order')).catch(() => null);
-        if (Array.isArray(configuredOrder)) globalOrder = configuredOrder.map(String);
-      }
-      if (globalOrder.length) {
-        const position = new Map(globalOrder.map((workerId, index) => [workerId, index]));
-        allBots.sort((a, b) => {
-          const aPosition = position.has(String(a.workerId)) ? position.get(String(a.workerId)) : Number.MAX_SAFE_INTEGER;
-          const bPosition = position.has(String(b.workerId)) ? position.get(String(b.workerId)) : Number.MAX_SAFE_INTEGER;
-          return aPosition - bPosition || Number(a.botNumber || 0) - Number(b.botNumber || 0);
-        });
+      const assigned = session.role === 'admin'
+        ? null
+        : (Array.isArray(session.assignedBotIds) ? session.assignedBotIds.map(String) : []);
+      if (session.role === 'admin' || !assigned || assigned.length === 0) {
+        let globalOrder = [];
+        if (session.role === 'admin' && typeof store?.getSetting === 'function') {
+          const configuredOrder = await Promise.resolve(store.getSetting('bot_display_order')).catch(() => null);
+          if (Array.isArray(configuredOrder)) globalOrder = configuredOrder.map(String);
+        }
+        if (globalOrder.length) {
+          const position = new Map(globalOrder.map((workerId, index) => [workerId, index]));
+          allBots.sort((a, b) => {
+            const aPosition = position.has(String(a.workerId)) ? position.get(String(a.workerId)) : Number.MAX_SAFE_INTEGER;
+            const bPosition = position.has(String(b.workerId)) ? position.get(String(b.workerId)) : Number.MAX_SAFE_INTEGER;
+            return aPosition - bPosition || Number(a.botNumber || 0) - Number(b.botNumber || 0);
+          });
+        }
       }
 
       let visibleBots = [];
       if (session.role === 'admin') {
         visibleBots = allBots;
       } else {
-        const assigned = Array.isArray(session.assignedBotIds) ? session.assignedBotIds.map(String) : [];
         visibleBots = allBots.filter((b) => isWorkerAssignedToSession(b, assigned, allBots));
         if (assigned.length > 0) {
           const userOrderMap = new Map(assigned.map((id, idx) => [String(id).toLowerCase(), idx]));
@@ -790,13 +837,14 @@ function createUserApi({
       }
       const sig = sigHash.digest('hex').slice(0, 16);
 
+      const sanitizedMaintenance = sanitizeMaintenanceForSession(maintenance, session);
       if (typeof req.query?.sig === 'string' && req.query.sig === sig) {
         res.setHeader('Content-Type', 'application/json; charset=utf-8');
         return res.end(JSON.stringify({
           ok: true,
           unchanged: true,
           sig,
-          maintenance,
+          maintenance: sanitizedMaintenance,
           ...(managerRamMb !== undefined ? { managerRamMb } : {})
         }));
       }
@@ -806,7 +854,7 @@ function createUserApi({
         sig,
         bots: payload,
         currentUser: currentUserSnapshot,
-        maintenance,
+        maintenance: sanitizedMaintenance,
         ...(managerRamMb !== undefined ? { managerRamMb } : {})
       });
     } catch (error) {
@@ -817,6 +865,311 @@ function createUserApi({
 
   router.get('/bots', requireSession, getBotsHandler);
   router.get('/registry', requireSession, getBotsHandler);
+
+  // 1.5. REALTIME SERVER-SENT EVENTS (SSE) STREAM (/api/manager/stream)
+  const sseClients = new Set();
+  let sseWorkersCache = { at: 0, list: null, inflight: null };
+
+  async function getCachedWorkersForSse() {
+    const now = Date.now();
+    if (sseWorkersCache.list && (now - sseWorkersCache.at < 1000)) {
+      return sseWorkersCache.list;
+    }
+    if (sseWorkersCache.inflight) return sseWorkersCache.inflight;
+    sseWorkersCache.inflight = Promise.resolve(
+      typeof registry?.list === 'function' ? registry.list({ omitHeavyFields: true }) : []
+    )
+      .then((list) => {
+        const arr = Array.isArray(list) ? list : [];
+        sseWorkersCache = { at: Date.now(), list: arr, inflight: null };
+        return arr;
+      })
+      .catch(() => {
+        sseWorkersCache.inflight = null;
+        return sseWorkersCache.list || [];
+      });
+    return sseWorkersCache.inflight;
+  }
+
+  function writeRawSse(res, frame) {
+    if (!res || res.writableEnded || res.destroyed) return false;
+    try {
+      res.write(frame);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function cleanupSseClient(client) {
+    if (!client || client.closed) return false;
+    client.closed = true;
+    sseClients.delete(client);
+    if (client.heartbeatTimer) {
+      clearInterval(client.heartbeatTimer);
+      client.heartbeatTimer = null;
+    }
+    if (client.pulseTimer) {
+      clearTimeout(client.pulseTimer);
+      client.pulseTimer = null;
+    }
+    if (typeof client.unsubscribe === 'function') {
+      try { client.unsubscribe(); } catch (_) {}
+      client.unsubscribe = null;
+    }
+    try {
+      if (client.res && !client.res.writableEnded && !client.res.destroyed) {
+        client.res.end();
+      }
+    } catch (_) {}
+    return true;
+  }
+
+  function sendClientSseEvent(client, eventName, payload, eventId = null) {
+    if (!client || client.closed) return false;
+    if (client.session?.status === 'disabled') {
+      cleanupSseClient(client);
+      return false;
+    }
+    const safeEvent = String(eventName || 'message').replace(/[\r\n]+/g, '').trim() || 'message';
+    const hasEventId = eventId !== null && eventId !== undefined && String(eventId).trim() !== '';
+    const idPrefix = hasEventId
+      ? `id: ${String(eventId).replace(/[\r\n]+/g, '').trim()}\n`
+      : '';
+    let serialized = '{}';
+    try {
+      serialized = JSON.stringify(payload ?? {});
+    } catch (_) {}
+    const ok = writeRawSse(client.res, `${idPrefix}event: ${safeEvent}\ndata: ${serialized}\n\n`);
+    if (!ok) cleanupSseClient(client);
+    return ok;
+  }
+
+  function routerBroadcastSystemSseEvent(eventName, payload) {
+    let delivered = 0;
+    for (const client of [...sseClients]) {
+      if (sendClientSseEvent(client, eventName, payload)) {
+        delivered += 1;
+      }
+    }
+    return delivered;
+  }
+
+  function routerCloseAllSseClients() {
+    let closed = 0;
+    for (const client of [...sseClients]) {
+      if (cleanupSseClient(client)) closed += 1;
+    }
+    return closed;
+  }
+
+  function routerCloseUserSseClients(identifier) {
+    const raw = String(identifier || '').trim().toLowerCase();
+    if (!raw) return 0;
+    const bare = raw.startsWith('usr_') ? raw.slice(4) : raw;
+    let closed = 0;
+    for (const client of [...sseClients]) {
+      if (!client || client.session?.role === 'admin') continue;
+      const uid = String(client.session?.userId || '').trim().toLowerCase();
+      const uname = String(client.session?.username || '').trim().toLowerCase();
+      const uidBare = uid.startsWith('usr_') ? uid.slice(4) : uid;
+      if (uid === raw || uname === raw || (bare && (uid === `usr_${bare}` || uidBare === bare || uname === bare))) {
+        if (cleanupSseClient(client)) closed += 1;
+      }
+    }
+    return closed;
+  }
+
+  function routerCloseAdminSseClients(excludeTokenHash = null) {
+    let closed = 0;
+    for (const client of [...sseClients]) {
+      if (!client || client.session?.role !== 'admin') continue;
+      if (excludeTokenHash && client.session?.tokenHash === excludeTokenHash) continue;
+      if (cleanupSseClient(client)) closed += 1;
+    }
+    return closed;
+  }
+
+  function routerGetSseClientCount() {
+    return sseClients.size;
+  }
+
+  const hubHandle = {
+    broadcastSystemSseEvent: routerBroadcastSystemSseEvent,
+    closeAllSseClients: routerCloseAllSseClients,
+    getSseClientCount: routerGetSseClientCount
+  };
+  activeSseHubs.add(hubHandle);
+
+  router.get('/stream', requireSession, async (req, res) => {
+    const session = req.managerAuthSession;
+    const userKey = String(session?.userId || session?.username || 'anon').trim().toLowerCase();
+    const ipKey = String(req.clientIp || resolveClientIp(req) || 'unknown').trim().toLowerCase();
+    const rawLastRev = typeof req.headers?.['last-event-id'] === 'string' && req.headers['last-event-id'].trim() !== ''
+      ? req.headers['last-event-id'].trim()
+      : (typeof req.query?.lastRev === 'string' && req.query.lastRev.trim() !== ''
+          ? req.query.lastRev.trim()
+          : '');
+    const parsedLastRev = rawLastRev !== '' && /^\d+$/.test(rawLastRev) ? Number(rawLastRev) : NaN;
+    const lastRev = Number.isSafeInteger(parsedLastRev) && parsedLastRev >= 0 ? parsedLastRev : NaN;
+
+    const maintenance = await getMaintenanceState(store).catch(() => null);
+    if (res.writableEnded || res.destroyed) return undefined;
+
+    if (sseClients.size >= MAX_SSE_CLIENTS) {
+      return res.status(429).json({
+        ok: false,
+        error: 'Máy chủ đang đạt giới hạn kết nối trực tiếp (SSE). Hệ thống sẽ tự dùng chế độ đồng bộ định kỳ.'
+      });
+    }
+
+    let sameUserCount = 0;
+    let sameIpCount = 0;
+    for (const existing of sseClients) {
+      if (existing.closed) continue;
+      if (userKey && existing.userKey === userKey) sameUserCount += 1;
+      if (ipKey && existing.ipKey === ipKey) sameIpCount += 1;
+    }
+    if (sameUserCount >= MAX_SSE_PER_ACTOR || sameIpCount >= MAX_SSE_PER_ACTOR) {
+      return res.status(429).json({
+        ok: false,
+        error: 'Đã đạt giới hạn tối đa 3 kết nối trực tiếp (SSE) đồng thời cho tài khoản hoặc địa chỉ IP này.'
+      });
+    }
+
+    req.socket?.setTimeout?.(0);
+    req.socket?.setNoDelay?.(true);
+    req.socket?.setKeepAlive?.(true, 30000);
+    res.setTimeout?.(0);
+
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    const currentRev = typeof registry?.snapshotRevision === 'number' ? registry.snapshotRevision : 0;
+
+    const client = {
+      res,
+      session,
+      userKey,
+      ipKey,
+      closed: false,
+      heartbeatTimer: null,
+      pulseTimer: null,
+      unsubscribe: null,
+      lastPulseSentAt: 0,
+      pendingWorkerIds: new Set(),
+      hasWildcardPulse: false,
+      latestRev: currentRev,
+      latestReason: 'state_changed'
+    };
+
+    const flushQueuedPulse = () => {
+      client.pulseTimer = null;
+      if (client.closed) return;
+      const workerIds = [...client.pendingWorkerIds];
+      const soleWorkerId = (!client.hasWildcardPulse && workerIds.length === 1) ? workerIds[0] : null;
+      const reason = client.latestReason || 'state_changed';
+      const rev = client.latestRev || 0;
+      client.pendingWorkerIds.clear();
+      client.hasWildcardPulse = false;
+      client.lastPulseSentAt = Date.now();
+      sendClientSseEvent(client, 'fleet_pulse', {
+        rev,
+        workerId: soleWorkerId,
+        reason,
+        ts: client.lastPulseSentAt
+      }, rev);
+    };
+
+    const schedulePulseFlush = (pulse) => {
+      if (client.closed) return;
+      if (Number.isFinite(pulse?.rev)) client.latestRev = pulse.rev;
+      if (pulse?.reason) client.latestReason = String(pulse.reason);
+      if (pulse?.workerId) {
+        client.pendingWorkerIds.add(String(pulse.workerId));
+      } else {
+        client.hasWildcardPulse = true;
+      }
+      if (client.pulseTimer) return;
+      const elapsed = Date.now() - client.lastPulseSentAt;
+      const delay = elapsed >= SSE_PULSE_THROTTLE_MS ? 15 : Math.max(15, SSE_PULSE_THROTTLE_MS - elapsed);
+      client.pulseTimer = setTimeout(flushQueuedPulse, delay);
+      client.pulseTimer.unref?.();
+    };
+
+    if (typeof registry?.onPulse === 'function') {
+      client.unsubscribe = registry.onPulse((pulse) => {
+        if (client.closed) return;
+        if (client.session?.status === 'disabled') {
+          cleanupSseClient(client);
+          return;
+        }
+        // Invalidate 1s worker list cache on register/remove so ownership checks see fresh topology
+        if (pulse?.reason === 'register' || pulse?.reason === 'remove') {
+          sseWorkersCache.at = 0;
+          sseWorkersCache.list = null;
+        }
+        if (client.session?.role === 'admin') {
+          schedulePulseFlush(pulse);
+          return;
+        }
+        const assigned = Array.isArray(client.session?.assignedBotIds)
+          ? client.session.assignedBotIds.map(String)
+          : [];
+        if (assigned.length === 0) return;
+
+        void (async () => {
+          try {
+            const allWorkers = await getCachedWorkersForSse();
+            if (client.closed) return;
+            if (!pulse?.workerId) {
+              const hasAnyOwned = allWorkers.some((w) => isWorkerAssignedToSession(w, assigned, allWorkers));
+              if (hasAnyOwned) schedulePulseFlush(pulse);
+              return;
+            }
+            const targetIdLower = String(pulse.workerId).trim().toLowerCase();
+            let targetWorker = allWorkers.find((w) => w && String(w.workerId || '').trim().toLowerCase() === targetIdLower) || null;
+            if (!targetWorker && pulse.reason !== 'remove' && typeof registry.find === 'function') {
+              targetWorker = await registry.find(targetIdLower).catch(() => null);
+            }
+            if (targetWorker && isWorkerAssignedToSession(targetWorker, assigned, allWorkers)) {
+              schedulePulseFlush(pulse);
+            }
+          } catch (_) {}
+        })();
+      });
+    }
+
+    client.heartbeatTimer = setInterval(() => {
+      if (client.closed || res.writableEnded || res.destroyed) {
+        cleanupSseClient(client);
+        return;
+      }
+      if (!writeRawSse(res, ': keepalive\n\n')) {
+        cleanupSseClient(client);
+      }
+    }, SSE_HEARTBEAT_MS);
+    client.heartbeatTimer.unref?.();
+
+    sseClients.add(client);
+
+    const onClose = () => {
+      cleanupSseClient(client);
+    };
+    req.on('close', onClose);
+    res.on('close', onClose);
+    res.on('error', onClose);
+
+    const missed = Number.isFinite(lastRev) && lastRev > 0 && lastRev !== currentRev;
+    writeRawSse(
+      res,
+      `id: ${currentRev}\nevent: connected\ndata: ${JSON.stringify({ ok: true, rev: currentRev, missed, maintenance: sanitizeMaintenanceForSession(maintenance, session), ts: Date.now() })}\n\n`
+    );
+  });
 
   // 2. REORDER BOTS (Drag and drop in UI)
   router.post('/bots/reorder', requireSession, async (req, res) => {
@@ -2149,7 +2502,7 @@ function createUserApi({
       registry.list(),
       typeof store?.getSetting === 'function' ? store.getSetting('system_settings').catch(() => null) : null
     ]);
-    const onlineCount = bots.filter((b) => b.status?.state === 'online').length;
+    const onlineCount = bots.filter((b) => isWorkerOnlineInGame(b)).length;
     const trialGiftEnabled = persistedSys?.trialGiftEnabled !== undefined
       ? Boolean(persistedSys.trialGiftEnabled)
       : Boolean(config?.trialGiftEnabled ?? false);
@@ -2212,7 +2565,21 @@ function createUserApi({
     }
   });
 
+  router.broadcastSystemSseEvent = routerBroadcastSystemSseEvent;
+  router.closeAllSseClients = () => {
+    activeSseHubs.delete(hubHandle);
+    return routerCloseAllSseClients();
+  };
+  router.closeUserSseClients = routerCloseUserSseClients;
+  router.closeAdminSseClients = routerCloseAdminSseClients;
+  router.getSseClientCount = routerGetSseClientCount;
+
   return router;
 }
 
-module.exports = { createUserApi };
+module.exports = {
+  createUserApi,
+  broadcastSystemSseEvent,
+  closeAllSseClients,
+  getSseClientCount
+};

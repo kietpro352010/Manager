@@ -88,6 +88,45 @@ function getWorkerState(worker) {
   return { rawState, isOnline, isBusy, label, emoji, color };
 }
 
+function formatBotLocationVi(worker, state = getWorkerState(worker)) {
+  const locState = String(worker?.status?.locationState || worker?.status?.locationKind || '').trim().toLowerCase();
+  if (locState === 'login') return 'Khu đăng nhập';
+  if (locState === 'lobby') return 'Sảnh chờ';
+
+  let rawDim = worker?.status?.dimension;
+  if (typeof rawDim === 'object' && rawDim !== null) {
+    rawDim = rawDim.name || rawDim.effects || rawDim.id || '';
+  }
+  const dim = String(rawDim || '').trim().replace(/^minecraft:/i, '').toLowerCase();
+  const isInGame = Boolean(
+    state?.isOnline ||
+    locState === 'game' ||
+    locState === 'afk' ||
+    locState === 'afk_locked'
+  );
+
+  if ((dim === 'the_nether' || dim === 'nether') && (isInGame || !locState)) {
+    return 'Khu AFK · Địa ngục';
+  }
+  if ((dim === 'the_end' || dim === 'end') && (isInGame || !locState)) {
+    return 'Khu AFK · The End';
+  }
+  if (isInGame) {
+    return 'Khu sinh tồn / AFK';
+  }
+  return '';
+}
+
+function formatNetworkHealthBadge(pingMs, tpsVal, isOnline) {
+  if (!isOnline) return '';
+  const hasPing = Number.isFinite(pingMs) && pingMs >= 0;
+  const hasTps = Number.isFinite(tpsVal) && tpsVal > 0;
+  if (!hasPing && !hasTps) return '';
+  if ((hasPing && pingMs >= 300) || (hasTps && tpsVal < 14)) return '🔴 Lag cao';
+  if ((hasPing && pingMs >= 150) || (hasTps && tpsVal < 18)) return '🟡 Trung bình';
+  return '🟢 Ổn định';
+}
+
 function resolveFrozenExpiryState(rawExp, maintenance = null, nowMs = Date.now()) {
   if (!rawExp) {
     return { expMs: NaN, effectiveExpMs: NaN, effectiveIso: rawExp, frozen: false };
@@ -123,6 +162,8 @@ function resolveEffectiveExpiresAt(rawExp, maintenance = null, nowMs = Date.now(
   return resolveFrozenExpiryState(rawExp, maintenance, nowMs).effectiveIso;
 }
 
+const GRACE_PERIOD_MS = 6 * 3600 * 1000;
+
 function formatAccountPlanBadge(user, maintenance = null) {
   if (!user) return '';
   if (String(user.role || '').toLowerCase() === 'admin') {
@@ -131,13 +172,31 @@ function formatAccountPlanBadge(user, maintenance = null) {
   const status = String(user.status || 'active').toLowerCase();
   if (status === 'disabled') return '⛔ `Đã khóa`';
   if (user.isPermanent) return '♾️ `Vĩnh viễn`';
+  if (user.inGracePeriod === true) {
+    return '⏳ `Ân hạn · Gia hạn ngay`';
+  }
   const rawExp = user.expiresAt || user.expiresAtRental;
   if (!rawExp) return '';
   const nowMs = Date.now();
   const { expMs, effectiveExpMs, frozen } = resolveFrozenExpiryState(rawExp, maintenance, nowMs);
   if (!Number.isFinite(expMs)) return '';
   const diffMs = effectiveExpMs - nowMs;
-  if (diffMs <= 0) return '⚠️ `Hết hạn`';
+  if (diffMs <= 0) {
+    if (status === 'grace_period') {
+      const rawAnchor = maintenance?.enabled
+        ? (maintenance.lastCompensatedAt || maintenance.startedAt || maintenance.updatedAt || '')
+        : '';
+      const anchorMs = rawAnchor ? Date.parse(rawAnchor) : NaN;
+      const baseGraceEndMs = expMs + GRACE_PERIOD_MS;
+      const effectiveGraceEndMs = (maintenance?.enabled && Number.isFinite(anchorMs) && nowMs > anchorMs && baseGraceEndMs > anchorMs)
+        ? baseGraceEndMs + (nowMs - anchorMs)
+        : baseGraceEndMs;
+      if (effectiveGraceEndMs > nowMs) {
+        return '⏳ `Ân hạn · Gia hạn ngay`';
+      }
+    }
+    return '⚠️ `Hết hạn`';
+  }
   const days = Math.floor(diffMs / 86400000);
   const hours = Math.max(1, Math.floor((diffMs % 86400000) / 3600000));
   if (frozen) {
@@ -180,19 +239,35 @@ function renderBotsList({ user, workers = [], page = 0, pageSize = 5, notice = '
       const rawName = safe(worker.name || `BOT ${padId(worker.botNumber || 1)}`);
       const botLabel = rawName.toLowerCase().startsWith('bot #') ? rawName : `Bot #${padId(worker.botNumber || 1)} · ${rawName}`;
       const fullBotId = plainCode(worker.workerId);
-      const rawMcUsername = worker.status?.username || worker.settings?.account?.username || '';
+      const rawMcUsername = String(worker.status?.username || worker.settings?.account?.username || '').trim();
       const mcUsername = rawMcUsername ? plainCode(rawMcUsername) : 'Chưa đặt';
       const pingVal = Number(worker.status?.pingMs);
+      const rawTps = worker.status?.tps;
+      const tpsVal = rawTps !== null && rawTps !== undefined ? Number(rawTps) : NaN;
+      const rawTotem = worker.status?.totemCount ?? worker.status?.inventory?.totemCount;
+      const hasExplicitTotem = rawTotem !== null && rawTotem !== undefined && rawTotem !== '';
       const liveExtras = [];
       if (state.isOnline && Number.isFinite(pingVal) && pingVal >= 0) {
         liveExtras.push(`⚡ \`${Math.round(pingVal)}ms\``);
       }
+      if (state.isOnline && Number.isFinite(tpsVal) && tpsVal > 0) {
+        liveExtras.push(`⏱️ \`${tpsVal.toFixed(1)} TPS\``);
+      }
       if (state.isOnline && Number.isFinite(Number(worker.status?.health))) {
         liveExtras.push(`❤️ \`${Math.round(Number(worker.status.health))}/20\``);
       }
+      if (state.isOnline && hasExplicitTotem && Number(rawTotem) === 0) {
+        liveExtras.push('🛡️ `0 Totem`');
+      }
       const extraSuffix = liveExtras.length > 0 ? ` · ${liveExtras.join(' · ')}` : '';
+      const locLabel = formatBotLocationVi(worker, state);
+      const locSuffix = locLabel ? ` · 📍 ${safe(locLabel, 48)}` : '';
+      const mcHintLine = !rawMcUsername
+        ? `> 💡 *Chưa đặt tài khoản MC — hãy vào Web Dashboard cài tài khoản MC để bot khởi chạy.*\n`
+        : '';
       desc += `${state.emoji} **${botLabel}** — \`${state.label}\`${extraSuffix}\n` +
-              `> • Bot ID: \`${fullBotId}\` · Nhân vật: \`${mcUsername}\`\n\n`;
+              `> • Bot ID: \`${fullBotId}\` · Nhân vật: \`${mcUsername}\`${locSuffix}\n` +
+              `${mcHintLine}\n`;
     }
   }
 
@@ -257,23 +332,36 @@ function renderBotDetail({ user, worker, notice = '', isExecuting = false, maint
   const botName = safe(worker.name || `BOT ${padId(worker.botNumber || 1)}`);
   const rawWorkerId = String(worker.workerId || worker.id || '');
   const fullBotId = plainCode(rawWorkerId);
-  const mcUsername = plainCode(worker.status?.username || worker.settings?.account?.username || 'Chưa thiết lập');
+  const rawMcUsername = String(worker.status?.username || worker.settings?.account?.username || '').trim();
+  const mcUsername = rawMcUsername ? plainCode(rawMcUsername) : 'Chưa đặt';
+  const mcSetupHintLine = !rawMcUsername
+    ? `\n• 💡 *Chưa đặt tài khoản MC — hãy vào **Web Dashboard** cài tài khoản MC để bot khởi chạy.*`
+    : '';
   const pingMs = Number(worker.status?.pingMs);
-  const ping = state.isOnline && Number.isFinite(pingMs) ? `${pingMs} ms` : '—';
+  const ping = state.isOnline && Number.isFinite(pingMs) && pingMs >= 0 ? `${Math.round(pingMs)} ms` : '—';
   const tpsValue = worker.status?.tps;
-  const tps = tpsValue !== null && tpsValue !== undefined && Number.isFinite(Number(tpsValue))
-    ? `${Number(tpsValue).toFixed(1)}`
+  const tpsNum = tpsValue !== null && tpsValue !== undefined ? Number(tpsValue) : NaN;
+  const tps = state.isOnline && Number.isFinite(tpsNum) && tpsNum > 0
+    ? `${tpsNum.toFixed(1)}`
     : '—';
-  const uptime = state.isOnline ? uptimeText(worker.status?.uptimeSeconds) : '—';
+  const netHealth = formatNetworkHealthBadge(pingMs, tpsNum, state.isOnline);
+  const netHealthSuffix = netHealth ? `  ·  ${netHealth}` : '';
+  const rawUptimeSec = Number(worker.status?.uptimeSeconds);
+  const uptime = state.isOnline
+    ? ((!Number.isFinite(rawUptimeSec) || rawUptimeSec < 1) ? '< 1m' : uptimeText(Math.floor(rawUptimeSec)))
+    : '—';
   const reconnects = worker.status?.reconnectCount || worker.status?.reconnectAttempts || 0;
-  const server = plainCode(
-    worker.status?.server ||
-    worker.status?.serverHost ||
-    worker.settings?.serverHost ||
-    worker.serverHost ||
-    worker.server ||
-    'kingmc.vn'
-  );
+  const isAdminViewer = String(user?.role || '').toLowerCase() === 'admin';
+  const server = isAdminViewer
+    ? plainCode(
+        worker.status?.server ||
+        worker.status?.serverHost ||
+        worker.settings?.serverHost ||
+        worker.serverHost ||
+        worker.server ||
+        'kingmc.vn'
+      )
+    : 'kingmc.vn';
   const provider = plainCode(worker.provider || 'wispbyte', 40).toUpperCase();
   const position = worker.status?.position;
   const hasPosition = position &&
@@ -282,40 +370,28 @@ function renderBotDetail({ user, worker, notice = '', isExecuting = false, maint
     ? `X: ${Math.round(Number(position.x))}, Y: ${Math.round(Number(position.y))}, Z: ${Math.round(Number(position.z))}`
     : '';
 
-  const locState = String(worker.status?.locationState || worker.status?.locationKind || '').trim().toLowerCase();
-  let placeName = '';
-  if (locState === 'login') {
-    placeName = 'Login';
-  } else if (locState === 'lobby') {
-    placeName = 'Sảnh';
-  } else {
-    let rawDim = worker.status?.dimension;
-    if (typeof rawDim === 'object' && rawDim !== null) {
-      rawDim = rawDim.name || rawDim.effects || rawDim.id || '';
-    }
-    const dim = String(rawDim || '').trim().replace(/^minecraft:/i, '').toLowerCase();
-    if (dim === 'the_nether' || dim === 'nether') {
-      placeName = 'Nether';
-    } else if (dim === 'the_end' || dim === 'end') {
-      placeName = 'The End';
-    } else if (dim === 'overworld' || dim === 'world') {
-      placeName = 'World';
-    } else if (dim) {
-      placeName = dim.charAt(0).toUpperCase() + dim.slice(1);
-    } else if (locState) {
-      placeName = locState.charAt(0).toUpperCase() + locState.slice(1);
-    }
-  }
-  const location = [coordinates, placeName].filter(Boolean).join(' · ') || 'Chưa có dữ liệu vị trí';
+  const placeName = formatBotLocationVi(worker, state);
+  const locationLabel = placeName ? safe(placeName, 80) : 'Chưa có dữ liệu vị trí';
+  const locationLine = placeName
+    ? `📍 **${locationLabel}**${coordinates ? ` · \`${plainCode(coordinates, 80)}\`` : ''}`
+    : (coordinates ? `\`${plainCode(coordinates, 80)}\`` : '`Chưa có dữ liệu vị trí`');
 
   const healthVal = Number(worker.status?.health);
   const foodVal = Number(worker.status?.food);
-  const totemVal = Number(worker.status?.totemCount ?? worker.status?.inventory?.totemCount);
-  const vitalsParts = [];
-  if (state.isOnline && Number.isFinite(healthVal)) vitalsParts.push(`❤️ \`${Math.round(healthVal)}/20\``);
-  if (state.isOnline && Number.isFinite(foodVal)) vitalsParts.push(`🍖 \`${Math.round(foodVal)}/20\``);
-  if (state.isOnline && Number.isFinite(totemVal)) vitalsParts.push(`🛡️ Totem: \`${Math.max(0, Math.floor(totemVal))}\``);
-  const vitalsLine = vitalsParts.length > 0 ? `\n• **Sinh tồn:** ${vitalsParts.join(' · ')}` : '';
+  const rawTotem = worker.status?.totemCount ?? worker.status?.inventory?.totemCount;
+  const hasExplicitTotem = rawTotem !== null && rawTotem !== undefined && rawTotem !== '';
+  const totemVal = hasExplicitTotem ? Number(rawTotem) : NaN;
+  const liveExtras = [];
+  if (state.isOnline && Number.isFinite(healthVal)) liveExtras.push(`❤️ \`${Math.round(healthVal)}/20\``);
+  if (state.isOnline && Number.isFinite(foodVal)) liveExtras.push(`🍖 \`${Math.round(foodVal)}/20\``);
+  if (state.isOnline && Number.isFinite(totemVal)) {
+    if (totemVal === 0) {
+      liveExtras.push('🛡️ `0 Totem`');
+    } else {
+      liveExtras.push(`🛡️ Totem: \`${Math.max(0, Math.floor(totemVal))}\``);
+    }
+  }
+  const vitalsLine = liveExtras.length > 0 ? `\n• **Sinh tồn:** ${liveExtras.join(' · ')}` : '';
 
   const rawReason = String(worker.status?.lastKickReason || worker.status?.lastError || '').trim();
   const reasonLine = (!state.isOnline && rawReason)
@@ -330,12 +406,12 @@ function renderBotDetail({ user, worker, notice = '', isExecuting = false, maint
   descText +=
     `━━ **THÔNG TIN BOT** ━━\n` +
     `• **Bot ID:** \`${fullBotId}\`\n` +
-    `• **Nhân vật:** \`${mcUsername}\` · **Server:** \`${server}\`\n` +
+    `• **Nhân vật:** \`${mcUsername}\` · **Server:** \`${server}\`${mcSetupHintLine}\n` +
     `• **Trạng thái:** ${state.emoji} **${state.label}**${vitalsLine}${reasonLine}\n\n` +
     `━━ **HIỆU NĂNG & VỊ TRÍ** ━━\n` +
-    `• **Ping:** \`${ping}\` · **TPS:** \`${tps}\`\n` +
+    `• **Ping:** \`${ping}\` · **TPS:** \`${tps}\`${netHealthSuffix}\n` +
     `• **Uptime:** \`${uptime}\` · **Reconnects:** \`${reconnects}\`\n` +
-    `• **Vị trí:** \`${plainCode(location, 180)}\``;
+    `• **Vị trí:** ${locationLine}`;
 
   const detailEmbed = embed(
     `${state.emoji} ${botName.toUpperCase()} — CHI TIẾT BOT`,
@@ -1009,7 +1085,11 @@ function renderStatusMonitorPanel(data = {}) {
     platform = process.platform,
     nodeVersion = process.version,
     publicBaseUrl = '',
+    activeWebNodes = null,
+    activeManagerUrls = null,
     maintenance = null,
+    maintenanceStartedAt = null,
+    maintenancePausedMinutes = null,
     checkedAtMs = Date.now(),
     checkedAtUnix = Math.floor(Date.now() / 1000),
     intervalMinutes = 15,
@@ -1051,6 +1131,26 @@ function renderStatusMonitorPanel(data = {}) {
   if (disabledUsers > 0) userSummaryExtra.push(`Bị khóa: **${disabledUsers}**`);
   const extraUserLine = userSummaryExtra.length > 0 ? `\n• ${userSummaryExtra.join(' · ')}` : '';
 
+  const resolvedNodeCount = Number.isFinite(Number(activeWebNodes)) && Number(activeWebNodes) > 0
+    ? Math.floor(Number(activeWebNodes))
+    : (Array.isArray(activeManagerUrls) && activeManagerUrls.length > 0 ? activeManagerUrls.length : 1);
+
+  let pausedMinutes = 0;
+  if (maintenance?.enabled) {
+    if (maintenancePausedMinutes !== null && maintenancePausedMinutes !== undefined && Number.isFinite(Number(maintenancePausedMinutes))) {
+      pausedMinutes = Math.max(0, Math.floor(Number(maintenancePausedMinutes)));
+    } else {
+      const rawMaintStart = maintenanceStartedAt || maintenance?.startedAt || maintenance?.lastCompensatedAt || maintenance?.updatedAt || '';
+      const maintStartMs = rawMaintStart ? Date.parse(rawMaintStart) : NaN;
+      if (Number.isFinite(maintStartMs) && checkedAtMs > maintStartMs) {
+        pausedMinutes = Math.max(0, Math.floor((checkedAtMs - maintStartMs) / 60000));
+      }
+    }
+  }
+  const maintenanceDetailText = maintenance?.enabled
+    ? `Đang bật (tạm dừng trừ giờ ${pausedMinutes}m)`
+    : 'Bình thường';
+
   const maintenanceLine = maintenance?.enabled
     ? `\n🛠️ **Chế độ bảo trì:** \`ĐANG BẬT\` · ⏸️ *Giữ nguyên thời gian sử dụng bot (không trừ giờ)*`
     : '';
@@ -1082,10 +1182,12 @@ function renderStatusMonitorPanel(data = {}) {
       },
       {
         name: '🖥️ Máy chủ Manager & Kết nối',
-        value:
+        value: (
           `• Manager: ${managerStatus} (Uptime \`${uptimeFormatted}\` · RSS \`${rssMb} MB\` / Heap \`${heapUsedMb} MB\` · \`${platform}\` \`${nodeVersion}\`)\n` +
+          `• Dual-Web Sync: ${resolvedNodeCount} node  ·  Bảo trì: ${maintenanceDetailText}\n` +
           `• Cơ sở dữ liệu (Supabase): ${dbStatus} (\`${dbLatencyText}\`)\n` +
-          `• Discord Gateway: ${discordStatus} (Ping: \`${discordPingText}\`)`,
+          `• Discord Gateway: ${discordStatus} (Ping: \`${discordPingText}\`)`
+        ).slice(0, 1024),
         inline: false
       }
     )
@@ -1130,6 +1232,8 @@ module.exports = {
   buildAdminPasswordModal,
   formatAccountPlanBadge,
   resolveEffectiveExpiresAt,
+  formatBotLocationVi,
+  formatNetworkHealthBadge,
   getWorkerState,
   uptimeText,
   padId,

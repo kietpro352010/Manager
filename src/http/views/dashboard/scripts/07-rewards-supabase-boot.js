@@ -977,6 +977,661 @@ window.addEventListener('unhandledrejection',event=>{
   try{console.error('[MANAGER UI] Unhandled rejection',event.reason);}catch(_){}
 });
 
+// ============================================================================
+// REALTIME SSE LIVE-SYNC (/api/manager/stream) & COMMAND PALETTE (CTRL+K / /)
+// ============================================================================
+let _managerSseSource = null;
+let _managerSseConnected = false;
+let _managerSseReconnecting = false;
+let _managerSseLastRev = 0;
+let _managerSseReconnectTimer = null;
+let _managerSseRetryCount = 0;
+let _managerSsePulseDebounceTimer = null;
+const _managerSsePendingWorkerIds = new Set();
+let _managerSsePendingWildcard = false;
+
+function isManagerSseOpen() {
+  return Boolean(_managerSseSource && _managerSseConnected && (_managerSseSource.readyState === 1 || _managerSseSource.readyState === undefined));
+}
+window.isManagerSseOpen = isManagerSseOpen;
+window.getManagerSseLastRev = () => _managerSseLastRev;
+
+function recordManagerSseRev(rawRev, lastEventId) {
+  const candidate = rawRev !== undefined && rawRev !== null && rawRev !== '' ? Number(rawRev) : Number(lastEventId);
+  if (Number.isFinite(candidate) && candidate > 0) {
+    _managerSseLastRev = candidate;
+  }
+}
+
+const _baseUpdateLiveSyncIndicators = typeof updateLiveSyncIndicators === 'function' ? updateLiveSyncIndicators : null;
+if (_baseUpdateLiveSyncIndicators) {
+  updateLiveSyncIndicators = function patchedUpdateLiveSyncIndicators(state, customText) {
+    if (state === undefined && _managerSseReconnecting && !isManagerSseOpen() && (typeof document === 'undefined' || !document.hidden)) {
+      _baseUpdateLiveSyncIndicators('syncing', 'Đang kết nối lại luồng trực tiếp...');
+      return;
+    }
+    _baseUpdateLiveSyncIndicators(state, customText);
+    if (isManagerSseOpen() && (typeof document === 'undefined' || !document.hidden)) {
+      if (_lastSyncState !== 'paused' && _lastSyncState !== 'error' && _lastSyncState !== 'syncing') {
+        [['homeSyncStatusPill', 'homeSyncStatusDot', 'homeSyncStatusText'], ['detailSyncStatusPill', 'detailSyncStatusDot', 'detailSyncStatusText']].forEach(([pillId, dotId, txtId]) => {
+          const pill = document.getElementById(pillId);
+          const dot = document.getElementById(dotId);
+          const txt = document.getElementById(txtId);
+          if (pill) pill.className = 'live-sync-pill is-sse';
+          if (dot) dot.className = 'pulse-status-dot green';
+          if (txt) txt.textContent = '⚡ Trực tiếp (SSE)';
+        });
+      }
+    }
+  };
+  window.updateLiveSyncIndicators = updateLiveSyncIndicators;
+}
+
+function resetFleetFilters() {
+  const searchInput = document.getElementById('searchInput');
+  if (searchInput) searchInput.value = '';
+  const sortSel = document.getElementById('sortBotsSelect');
+  if (sortSel && sortSel.value !== 'default') {
+    sortSel.value = 'default';
+    if (typeof currentSortMode !== 'undefined') currentSortMode = 'default';
+  }
+  if (typeof resetBotFilters === 'function') {
+    resetBotFilters();
+  } else if (typeof filterBots === 'function') {
+    filterBots();
+  }
+  if (typeof announceGlobalStatus === 'function') {
+    announceGlobalStatus('Đã xóa toàn bộ bộ lọc danh sách bot.');
+  }
+}
+window.resetFleetFilters = resetFleetFilters;
+
+const _baseFilterBotsForEmpty = typeof filterBots === 'function' ? filterBots : null;
+if (_baseFilterBotsForEmpty) {
+  filterBots = function patchedFilterBotsWithRecovery() {
+    _baseFilterBotsForEmpty();
+    if (typeof document === 'undefined') return;
+    const grid = document.getElementById('botGrid');
+    if (!grid || typeof grid.innerHTML !== 'string' || !grid.innerHTML.includes('empty-filter-state')) return;
+    const totalCount = Array.isArray(bots) ? bots.length : 0;
+    if (typeof buildEmptyFleetFilterHtml === 'function') {
+      const nextHtml = buildEmptyFleetFilterHtml(totalCount);
+      if (grid.innerHTML !== nextHtml) grid.innerHTML = nextHtml;
+    }
+  };
+  window.filterBots = filterBots;
+}
+
+function closeManagerSseStream(resetRetry = true, resetRev = false) {
+  if (_managerSseReconnectTimer) {
+    clearTimeout(_managerSseReconnectTimer);
+    _managerSseReconnectTimer = null;
+  }
+  if (_managerSsePulseDebounceTimer) {
+    clearTimeout(_managerSsePulseDebounceTimer);
+    _managerSsePulseDebounceTimer = null;
+  }
+  _managerSsePendingWorkerIds.clear();
+  _managerSsePendingWildcard = false;
+  _managerSseConnected = false;
+  if (resetRetry) {
+    _managerSseRetryCount = 0;
+    _managerSseReconnecting = false;
+  }
+  if (resetRev) {
+    _managerSseLastRev = 0;
+  }
+  if (_managerSseSource) {
+    const src = _managerSseSource;
+    _managerSseSource = null;
+    try { src.close(); } catch (_) {}
+  }
+}
+window.closeManagerSseStream = closeManagerSseStream;
+
+function handleManagerSseAnnouncement(rawPayload) {
+  if (!currentUser || !rawPayload || typeof rawPayload !== 'object') return;
+  const ann = rawPayload.announcement && typeof rawPayload.announcement === 'object' ? rawPayload.announcement : rawPayload;
+  if (ann.enabled === false) {
+    document.getElementById('userAnnouncementModal')?.classList?.add('hidden');
+    return;
+  }
+  if (!ann.enabled || !String(ann.content || '').trim()) return;
+  const now = new Date();
+  if (ann.mode === 'time_range') {
+    if (ann.startDate && new Date(ann.startDate + 'T00:00:00') > now) return;
+    if (ann.endDate && new Date(ann.endDate + 'T23:59:59') < now) return;
+  }
+  if (typeof showUserAnnouncement === 'function') {
+    showUserAnnouncement(ann);
+  } else if (typeof checkAndShowAnnouncement === 'function') {
+    void checkAndShowAnnouncement();
+  }
+}
+
+function scheduleManagerSsePulseFlush() {
+  if (_managerSsePulseDebounceTimer) return;
+  _managerSsePulseDebounceTimer = setTimeout(async () => {
+    _managerSsePulseDebounceTimer = null;
+    const pendingIds = new Set(_managerSsePendingWorkerIds);
+    const wildcard = _managerSsePendingWildcard;
+    _managerSsePendingWorkerIds.clear();
+    _managerSsePendingWildcard = false;
+    if (!currentUser || (typeof document !== 'undefined' && document.hidden)) return;
+    _lastSyncSuccessAt = Date.now();
+    if (typeof refreshHome === 'function') {
+      void refreshHome();
+    }
+    if (selectedBotId !== null && typeof refreshDetail === 'function') {
+      const selStr = String(selectedBotId);
+      const matchDetail = wildcard || pendingIds.size === 0 || pendingIds.has(selStr) ||
+        Boolean(detailBot && (
+          (detailBot.id !== undefined && pendingIds.has(String(detailBot.id))) ||
+          (detailBot.workerId !== undefined && pendingIds.has(String(detailBot.workerId))) ||
+          (detailBot.botNumber !== undefined && pendingIds.has(String(detailBot.botNumber)))
+        ));
+      if (matchDetail) {
+        await refreshDetail(false);
+      }
+    }
+    if (typeof isCommandPaletteOpen === 'function' && isCommandPaletteOpen()) {
+      renderCommandPaletteResults();
+    }
+    if (typeof updateLiveSyncIndicators === 'function') updateLiveSyncIndicators('ok');
+  }, 250);
+}
+
+function connectManagerSseStream() {
+  if (typeof EventSource === 'undefined' || !currentUser) return;
+  if (typeof document !== 'undefined' && document.hidden) return;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+  if (_managerSseSource && _managerSseSource.readyState !== 2) return;
+
+  closeManagerSseStream(false, false);
+  const sseUrl = _managerSseLastRev > 0
+    ? ('/api/manager/stream?lastRev=' + encodeURIComponent(String(_managerSseLastRev)))
+    : '/api/manager/stream';
+  let es = null;
+  try {
+    es = new EventSource(sseUrl);
+  } catch (_) {
+    return;
+  }
+  _managerSseSource = es;
+
+  const markConnected = () => {
+    if (_managerSseSource !== es) return;
+    _managerSseConnected = true;
+    _managerSseReconnecting = false;
+    _managerSseRetryCount = 0;
+    _lastSyncSuccessAt = Date.now();
+    if (typeof updateLiveSyncIndicators === 'function') updateLiveSyncIndicators('ok');
+    scheduleNextManagerPoll();
+  };
+
+  es.onopen = markConnected;
+  es.addEventListener('connected', (ev) => {
+    if (_managerSseSource !== es || !currentUser) return;
+    markConnected();
+    let data = null;
+    try { data = ev && ev.data ? JSON.parse(ev.data) : null; } catch (_) { data = null; }
+    recordManagerSseRev(data?.rev, ev?.lastEventId);
+    if (data && data.maintenance && typeof syncSystemMaintenanceState === 'function') {
+      syncSystemMaintenanceState(data.maintenance, { rerender: true });
+    }
+    if (data && data.missed === true) {
+      if (typeof refreshHome === 'function') void refreshHome();
+      if (selectedBotId !== null && typeof refreshDetail === 'function') void refreshDetail(false);
+    }
+  });
+
+  es.addEventListener('fleet_pulse', (ev) => {
+    if (_managerSseSource !== es || !currentUser) return;
+    let payload = {};
+    try { payload = ev && ev.data ? JSON.parse(ev.data) : {}; } catch (_) { payload = {}; }
+    recordManagerSseRev(payload?.rev, ev?.lastEventId);
+    if (Array.isArray(payload?.workerIds) && payload.workerIds.length > 0) {
+      payload.workerIds.forEach((id) => { if (id !== undefined && id !== null && String(id)) _managerSsePendingWorkerIds.add(String(id)); });
+    } else if (payload && payload.workerId !== undefined && payload.workerId !== null && String(payload.workerId)) {
+      _managerSsePendingWorkerIds.add(String(payload.workerId));
+    } else {
+      _managerSsePendingWildcard = true;
+    }
+    scheduleManagerSsePulseFlush();
+  });
+
+  es.addEventListener('maintenance', (ev) => {
+    if (_managerSseSource !== es || !currentUser) return;
+    try {
+      const parsed = ev && ev.data ? JSON.parse(ev.data) : null;
+      recordManagerSseRev(parsed?.rev, ev?.lastEventId);
+      const maint = parsed && typeof parsed === 'object' ? (parsed.maintenance || parsed) : null;
+      if (maint && typeof syncSystemMaintenanceState === 'function') {
+        syncSystemMaintenanceState(maint, { rerender: true });
+      }
+      if (typeof isCommandPaletteOpen === 'function' && isCommandPaletteOpen()) {
+        renderCommandPaletteResults();
+      }
+    } catch (_) {}
+  });
+
+  es.addEventListener('announcement', (ev) => {
+    if (_managerSseSource !== es || !currentUser) return;
+    try {
+      const parsed = ev && ev.data ? JSON.parse(ev.data) : null;
+      recordManagerSseRev(parsed?.rev, ev?.lastEventId);
+      if (parsed) handleManagerSseAnnouncement(parsed);
+    } catch (_) {}
+  });
+
+  es.onerror = () => {
+    if (_managerSseSource !== es) return;
+    closeManagerSseStream(false, false);
+    const isOnlineNow = typeof navigator === 'undefined' || navigator.onLine !== false;
+    const isVisibleNow = typeof document === 'undefined' || !document.hidden;
+    if (currentUser && isOnlineNow && isVisibleNow) {
+      _managerSseReconnecting = true;
+      if (typeof updateLiveSyncIndicators === 'function') {
+        updateLiveSyncIndicators('syncing', 'Đang kết nối lại luồng trực tiếp...');
+      }
+    } else if (typeof updateLiveSyncIndicators === 'function') {
+      updateLiveSyncIndicators();
+    }
+    scheduleNextManagerPoll();
+    if (!currentUser || !isVisibleNow || !isOnlineNow) return;
+    const step = Math.min(5, _managerSseRetryCount++);
+    const delayMs = Math.min(30000, 1500 * Math.pow(2, step)) + Math.floor(Math.random() * 400);
+    _managerSseReconnectTimer = setTimeout(() => {
+      _managerSseReconnectTimer = null;
+      connectManagerSseStream();
+    }, delayMs);
+  };
+}
+window.connectManagerSseStream = connectManagerSseStream;
+
+const _baseLogoutForSse = typeof logout === 'function' ? logout : null;
+if (_baseLogoutForSse) {
+  logout = async function wrappedLogoutWithSse() {
+    closeManagerSseStream(true, true);
+    if (typeof closeCommandPalette === 'function') closeCommandPalette({ restoreFocus: false });
+    return _baseLogoutForSse.apply(this, arguments);
+  };
+  window.logout = logout;
+}
+
+// --- QUICK COMMAND & BOT JUMP PALETTE (CTRL+K / /) ---
+let _cmdPaletteQuery = '';
+let _cmdPaletteActiveIndex = 0;
+let _cmdPaletteFilteredItems = [];
+let _cmdPaletteReturnFocusEl = null;
+
+function isCommandPaletteOpen() {
+  if (typeof document === 'undefined') return false;
+  const modal = document.getElementById('commandPaletteModal');
+  return Boolean(modal && modal.classList && !modal.classList.contains('hidden'));
+}
+window.isCommandPaletteOpen = isCommandPaletteOpen;
+
+function buildCommandPaletteItems() {
+  const items = [];
+  const isAdmin = Boolean(currentUser && currentUser.role === 'admin');
+  const safeBots = Array.isArray(bots) ? bots : [];
+
+  for (let i = 0; i < safeBots.length; i++) {
+    const b = safeBots[i];
+    if (!b || typeof b !== 'object') continue;
+    const wid = String(b.workerId ?? b.id ?? '').trim();
+    if (!wid) continue;
+    const dispNum = b.displayIndex !== undefined ? b.displayIndex : (b.botNumber || wid);
+    const numPad = String(dispNum).padStart(2, '0');
+    const botLabel = String(b.label || ('Bot #' + dispNum)).trim();
+    const mcUser = String(b.username || 'Chưa đặt').trim();
+    const [dotColor, rawStLbl, errType] = typeof statusMeta === 'function'
+      ? statusMeta(b.status, b.available, Boolean(b.manuallyStopped), b)
+      : ['gray', String(b.status || 'OFFLINE'), ''];
+    const stVi = typeof humanizeStatusPillVi === 'function'
+      ? humanizeStatusPillVi(b.status, rawStLbl, b.available, Boolean(b.manuallyStopped), errType)
+      : rawStLbl;
+    const tagList = Array.isArray(b.tags) ? b.tags.map((t) => '#' + String(t || '').trim()).filter((t) => t.length > 1) : [];
+    const subParts = ['Nhân vật: ' + mcUser, 'ID: ' + wid];
+    if (tagList.length) subParts.push(tagList.join(' '));
+    items.push({
+      id: 'bot:' + wid,
+      group: 'bots',
+      numBadge: '#' + numPad,
+      title: botLabel,
+      subtitle: subParts.join(' • '),
+      metaText: stVi,
+      dotColor: dotColor || 'gray',
+      searchBlob: ('#' + numPad + ' ' + numPad + ' ' + String(dispNum) + ' ' + wid + ' ' + botLabel + ' ' + mcUser + ' ' + String(b.status || '') + ' ' + stVi + ' ' + tagList.join(' ') + ' ' + String(b.assignedUsername || '')).toLowerCase(),
+      run: () => {
+        if (typeof openBot === 'function') openBot(wid);
+      }
+    });
+  }
+
+  const curTheme = typeof getSavedDashboardTheme === 'function' ? getSavedDashboardTheme() : 'deep-galaxy';
+  const nextThemeLabel = curTheme === 'moonlight' ? 'Deep Galaxy (Tối)' : 'Moonlight (Sáng)';
+  items.push(
+    {
+      id: 'cmd:refresh',
+      group: 'commands',
+      title: 'Làm mới dữ liệu ngay',
+      subtitle: 'Đồng bộ tức thì trạng thái bot, kho đồ và thông số hệ thống',
+      metaText: '↻ Sync',
+      iconSvg: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>',
+      searchBlob: 'lam moi du lieu ngay refresh reload sync dong bo',
+      run: () => { if (typeof manualRefreshNow === 'function') void manualRefreshNow(); }
+    },
+    {
+      id: 'cmd:renew',
+      group: 'commands',
+      title: 'Mở Gia hạn / Nạp Key',
+      subtitle: 'Nhập mã License Key hoặc Giftcode để cộng thêm thời gian sử dụng',
+      metaText: 'Key',
+      iconSvg: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>',
+      searchBlob: 'mo gia han nap key renew giftcode license kich hoat',
+      run: () => { if (typeof openRenewModal === 'function') openRenewModal(); }
+    },
+    {
+      id: 'cmd:theme-toggle',
+      group: 'commands',
+      title: 'Chuyển giao diện Sáng / Tối',
+      subtitle: 'Đổi nhanh sang giao diện ' + nextThemeLabel,
+      metaText: curTheme === 'moonlight' ? 'Dark' : 'Light',
+      iconSvg: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>',
+      searchBlob: 'chuyen giao dien sang toi theme dark light moonlight deep galaxy',
+      run: () => {
+        if (typeof applyDashboardCosmicMode === 'function') {
+          const cur = typeof getSavedDashboardTheme === 'function' ? getSavedDashboardTheme() : 'deep-galaxy';
+          applyDashboardCosmicMode(cur === 'moonlight' ? 'deep-galaxy' : 'moonlight');
+        }
+      }
+    }
+  );
+
+  if (selectedBotId !== null || (typeof currentNavPage === 'string' && currentNavPage !== 'dashboard')) {
+    items.push({
+      id: 'cmd:go-dashboard',
+      group: 'commands',
+      title: 'Về Tổng quan Dashboard',
+      subtitle: 'Quay lại màn hình danh sách toàn bộ bot',
+      metaText: 'Home',
+      iconSvg: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>',
+      searchBlob: 've tong quan dashboard home danh sach bot',
+      run: () => { if (typeof navigateTo === 'function') navigateTo('dashboard'); }
+    });
+  }
+
+  if (isAdmin) {
+    const maint = typeof getSystemMaintenanceInfo === 'function' ? getSystemMaintenanceInfo() : { enabled: false };
+    items.push(
+      {
+        id: 'cmd:admin-users',
+        group: 'admin',
+        title: 'Quản lý Người dùng',
+        subtitle: 'Mở trang quản lý tài khoản khách thuê, gán bot và phát hành Key',
+        metaText: 'Admin',
+        iconSvg: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>',
+        searchBlob: 'quan ly nguoi dung users khach thue key admin',
+        run: () => { if (typeof navigateTo === 'function') navigateTo('users'); }
+      },
+      {
+        id: 'cmd:admin-audit',
+        group: 'admin',
+        title: 'Nhật ký Audit',
+        subtitle: 'Xem lịch sử thao tác quản trị và cảnh báo hạ tầng',
+        metaText: 'Admin',
+        iconSvg: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
+        searchBlob: 'nhat ky audit log lich su quan tri admin',
+        run: () => { if (typeof navigateTo === 'function') navigateTo('audit'); }
+      },
+      {
+        id: 'cmd:admin-maintenance',
+        group: 'admin',
+        title: 'Bật / Tắt Chế độ Bảo trì',
+        subtitle: maint.enabled
+          ? 'Đang BẬT (giữ nguyên giờ thuê) — Thực thi để mở lại Worker cho khách'
+          : 'Đang TẮT — Thực thi để tạm khóa Worker & đóng băng giờ thuê khách',
+        metaText: maint.enabled ? 'ĐANG BẬT' : 'ĐANG TẮT',
+        iconSvg: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+        searchBlob: 'bat tat che do bao tri maintenance khoa worker admin',
+        run: () => { if (typeof toggleMaintenanceSetting === 'function') void toggleMaintenanceSetting(); }
+      }
+    );
+  }
+  return items;
+}
+
+function normalizeSearchVi(str) {
+  return String(str || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .trim();
+}
+
+function renderCommandPaletteResults() {
+  const listEl = document.getElementById('commandPaletteList');
+  const countEl = document.getElementById('commandPaletteCount');
+  const inputEl = document.getElementById('commandPaletteInput');
+  if (!listEl) return;
+
+  const allItems = buildCommandPaletteItems();
+  const qRaw = String(_cmdPaletteQuery || '').toLowerCase().trim();
+  const qNorm = normalizeSearchVi(_cmdPaletteQuery);
+  const tokens = qNorm ? qNorm.split(/\s+/).filter(Boolean) : [];
+
+  _cmdPaletteFilteredItems = !tokens.length
+    ? allItems
+    : allItems.filter((item) => {
+        const hayRaw = item.searchBlob + ' ' + String(item.title || '').toLowerCase() + ' ' + String(item.subtitle || '').toLowerCase();
+        const hayNorm = normalizeSearchVi(hayRaw);
+        return tokens.every((tok) => hayNorm.includes(tok) || hayRaw.includes(qRaw));
+      });
+
+  if (countEl) {
+    countEl.textContent = _cmdPaletteFilteredItems.length + ' mục';
+  }
+  if (_cmdPaletteActiveIndex >= _cmdPaletteFilteredItems.length) {
+    _cmdPaletteActiveIndex = 0;
+  }
+  if (_cmdPaletteActiveIndex < 0) {
+    _cmdPaletteActiveIndex = Math.max(0, _cmdPaletteFilteredItems.length - 1);
+  }
+
+  if (!_cmdPaletteFilteredItems.length) {
+    if (inputEl) inputEl.removeAttribute('aria-activedescendant');
+    listEl.innerHTML = '<div class="cmd-palette-empty">Không tìm thấy bot hoặc lệnh khớp từ khóa <strong>' + escapeHtml(_cmdPaletteQuery) + '</strong>.</div>';
+    return;
+  }
+
+  const groupTitles = {
+    bots: 'Danh sách Bot được cấp',
+    commands: 'Lệnh điều khiển nhanh',
+    admin: 'Quản trị hệ thống'
+  };
+  let lastGroup = '';
+  let html = '';
+  for (let idx = 0; idx < _cmdPaletteFilteredItems.length; idx++) {
+    const item = _cmdPaletteFilteredItems[idx];
+    if (item.group !== lastGroup) {
+      lastGroup = item.group;
+      html += '<div class="cmd-palette-group-label" role="presentation">' + escapeHtml(groupTitles[item.group] || 'Mục') + '</div>';
+    }
+    const isActive = idx === _cmdPaletteActiveIndex;
+    const domId = 'cmdPaletteOpt_' + idx;
+    if (isActive && inputEl) {
+      inputEl.setAttribute('aria-activedescendant', domId);
+    }
+    const leftVisual = item.group === 'bots'
+      ? ('<span class="cmd-palette-item-icon"><span class="pulse-status-dot ' + escapeHtml(item.dotColor || 'gray') + '" aria-hidden="true"></span></span>')
+      : ('<span class="cmd-palette-item-icon" aria-hidden="true">' + (item.iconSvg || '') + '</span>');
+    html +=
+      '<button type="button" id="' + domId + '" role="option" aria-selected="' + (isActive ? 'true' : 'false') + '" class="cmd-palette-item' + (isActive ? ' is-active' : '') + '" data-cmd-idx="' + idx + '" onclick="executeCommandPaletteItem(' + idx + ')" onmousemove="highlightCommandPaletteItem(' + idx + ')">' +
+        '<span class="cmd-palette-item-main">' +
+          leftVisual +
+          '<span class="cmd-palette-item-text">' +
+            '<span class="cmd-palette-item-title">' +
+              (item.numBadge ? ('<span class="cmd-palette-bot-num">' + escapeHtml(item.numBadge) + '</span>') : '') +
+              '<span>' + escapeHtml(item.title) + '</span>' +
+            '</span>' +
+            '<span class="cmd-palette-item-sub">' + escapeHtml(item.subtitle || '') + '</span>' +
+          '</span>' +
+        '</span>' +
+        '<span class="cmd-palette-item-meta">' + escapeHtml(item.metaText || '') + '</span>' +
+      '</button>';
+  }
+  listEl.innerHTML = html;
+}
+
+function highlightCommandPaletteItem(index) {
+  const idx = Number(index);
+  if (!Number.isInteger(idx) || idx < 0 || idx >= _cmdPaletteFilteredItems.length || idx === _cmdPaletteActiveIndex) return;
+  _cmdPaletteActiveIndex = idx;
+  const listEl = document.getElementById('commandPaletteList');
+  const inputEl = document.getElementById('commandPaletteInput');
+  listEl?.querySelectorAll?.('.cmd-palette-item')?.forEach?.((el, i) => {
+    const active = i === idx;
+    el.classList?.toggle('is-active', active);
+    el.setAttribute?.('aria-selected', active ? 'true' : 'false');
+    if (active && inputEl && el.id) inputEl.setAttribute('aria-activedescendant', el.id);
+  });
+}
+window.highlightCommandPaletteItem = highlightCommandPaletteItem;
+
+function moveCommandPaletteSelection(delta) {
+  const len = _cmdPaletteFilteredItems.length;
+  if (!len) return;
+  _cmdPaletteActiveIndex = (_cmdPaletteActiveIndex + delta + len) % len;
+  renderCommandPaletteResults();
+  if (typeof document !== 'undefined') {
+    const activeEl = document.getElementById('cmdPaletteOpt_' + _cmdPaletteActiveIndex);
+    activeEl?.scrollIntoView?.({ block: 'nearest' });
+  }
+}
+
+function executeCommandPaletteItem(index) {
+  const idx = index !== undefined ? Number(index) : _cmdPaletteActiveIndex;
+  const item = _cmdPaletteFilteredItems[idx];
+  if (!item || typeof item.run !== 'function') return;
+  closeCommandPalette({ restoreFocus: false });
+  item.run();
+}
+window.executeCommandPaletteItem = executeCommandPaletteItem;
+
+function onCommandPaletteInput(value) {
+  _cmdPaletteQuery = String(value || '');
+  _cmdPaletteActiveIndex = 0;
+  renderCommandPaletteResults();
+}
+window.onCommandPaletteInput = onCommandPaletteInput;
+
+function openCommandPalette(initialQuery = '') {
+  if (!currentUser || typeof document === 'undefined') return;
+  const modal = document.getElementById('commandPaletteModal');
+  if (!modal) return;
+  if (!isCommandPaletteOpen()) {
+    const active = document.activeElement;
+    _cmdPaletteReturnFocusEl = (active && active !== document.body && typeof active.focus === 'function')
+      ? active
+      : document.getElementById('btnOpenCommandPalette');
+  }
+  if (typeof closeGlobalProfileDropdown === 'function') closeGlobalProfileDropdown();
+  _cmdPaletteQuery = typeof initialQuery === 'string' ? initialQuery : '';
+  _cmdPaletteActiveIndex = 0;
+  modal.classList.remove('hidden');
+  if (typeof trapModalFocus === 'function') trapModalFocus(modal);
+  const input = document.getElementById('commandPaletteInput');
+  if (input) {
+    input.value = _cmdPaletteQuery;
+    input.focus?.();
+    input.select?.();
+  }
+  renderCommandPaletteResults();
+}
+window.openCommandPalette = openCommandPalette;
+
+function closeCommandPalette(options = {}) {
+  if (typeof document === 'undefined') return;
+  const modal = document.getElementById('commandPaletteModal');
+  if (!modal || (modal.classList && modal.classList.contains('hidden'))) return;
+  modal.classList.add('hidden');
+  _cmdPaletteQuery = '';
+  _cmdPaletteFilteredItems = [];
+  const input = document.getElementById('commandPaletteInput');
+  if (input) input.value = '';
+  const targetFocus = _cmdPaletteReturnFocusEl;
+  _cmdPaletteReturnFocusEl = null;
+  if (options?.restoreFocus !== false && targetFocus && typeof targetFocus.focus === 'function') {
+    try { targetFocus.focus(); } catch (_) {}
+  }
+  if (typeof window !== 'undefined' && typeof window.__kbotRefreshAppCosmicEngine === 'function') {
+    window.__kbotRefreshAppCosmicEngine();
+  }
+}
+window.closeCommandPalette = closeCommandPalette;
+
+(function bindCommandPaletteEvents() {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+  let backdropPointerDownOutside = false;
+  const modal = document.getElementById('commandPaletteModal');
+  const card = document.getElementById('commandPaletteDialogCard');
+  if (modal && typeof modal.addEventListener === 'function') {
+    const isOutsideCard = (e) => {
+      if (!card || typeof card.getBoundingClientRect !== 'function') return e.target === modal;
+      const r = card.getBoundingClientRect();
+      if (!r || (r.width === 0 && r.height === 0)) return e.target === modal;
+      return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+    };
+    modal.addEventListener('pointerdown', (e) => { backdropPointerDownOutside = isOutsideCard(e); });
+    modal.addEventListener('pointerup', (e) => {
+      if (backdropPointerDownOutside && isOutsideCard(e)) closeCommandPalette();
+      backdropPointerDownOutside = false;
+    });
+  }
+
+  window.addEventListener('keydown', (e) => {
+    if (!e) return;
+    const open = isCommandPaletteOpen();
+    const keyLower = String(e.key || '').toLowerCase();
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && keyLower === 'k') {
+      if (!currentUser) return;
+      e.preventDefault();
+      if (open) closeCommandPalette();
+      else openCommandPalette();
+      return;
+    }
+    if (open) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        closeCommandPalette();
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        moveCommandPaletteSelection(1);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        moveCommandPaletteSelection(-1);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        executeCommandPaletteItem(_cmdPaletteActiveIndex);
+      }
+      return;
+    }
+    if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && currentUser) {
+      const t = e.target;
+      const tag = String(t?.tagName || '').toUpperCase();
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t?.isContentEditable) return;
+      const anyModalOpen = document.querySelector?.('.modal:not(.hidden), #loginGate:not(.hidden)');
+      if (anyModalOpen) return;
+      e.preventDefault();
+      openCommandPalette();
+    }
+  });
+})();
+
 (async function init(){
   updateSoundAlertButton();
   initDetailChatInputHistory();
@@ -1007,11 +1662,13 @@ window.addEventListener('unhandledrejection',event=>{
       hideLoginGate();
       const routed = await resolveRouteFromUrl();
       if (!routed) await refreshHome();
+      connectManagerSseStream();
       scheduleNextManagerPoll();
       checkAndShowAnnouncement();
       loadDiscordLinkStatus({ silent: true });
       if (typeof checkRewardQueryParams === 'function') checkRewardQueryParams();
     } else if (res.status === 401) {
+      closeManagerSseStream(true);
       currentUser = null;
       bots = [];
       selectedBotId = null;
@@ -1026,6 +1683,7 @@ window.addEventListener('unhandledrejection',event=>{
       renderHome();
       showLoginGate();
     } else if (res.status === 403) {
+      closeManagerSseStream(true);
       currentUser = null;
       applyUserRoleUI();
       renderHome();
@@ -1048,9 +1706,17 @@ window.addEventListener('unhandledrejection',event=>{
   }
 })();
 
-let lastUserActivityAt = Date.now();
+var lastUserActivityAt = Date.now();
+if (typeof window !== 'undefined') window.__kbotLastActivityAt = lastUserActivityAt;
 ['mousemove', 'keydown', 'touchstart', 'scroll'].forEach(evt => {
-  window.addEventListener(evt, () => { lastUserActivityAt = Date.now(); }, { passive: true });
+  window.addEventListener(evt, () => {
+    const wasIdleLong = (Date.now() - lastUserActivityAt) > 90000;
+    lastUserActivityAt = Date.now();
+    window.__kbotLastActivityAt = lastUserActivityAt;
+    if (wasIdleLong && typeof window.__kbotRefreshAppCosmicEngine === 'function') {
+      window.__kbotRefreshAppCosmicEngine();
+    }
+  }, { passive: true });
 });
 
 // managerPollTimerId declared at top of client script
@@ -1060,10 +1726,16 @@ function scheduleNextManagerPoll() {
     managerPollTimerId = null;
   }
   if (!currentUser) return;
+  if (typeof document === 'undefined' || !document.hidden) {
+    connectManagerSseStream();
+  }
   const idleMs = Date.now() - lastUserActivityAt;
+  const sseAlive = isManagerSseOpen();
   const hasActiveGui = selectedBotId !== null && typeof detailBot === 'object' && detailBot && Boolean(detailBot.currentWindow);
-  const activeDelay = hasActiveGui ? 4500 : (selectedBotId !== null ? 6500 : 8000);
-  const delay = document.hidden ? 30000 : (idleMs > 180000 ? 30000 : (idleMs > 60000 ? 15000 : activeDelay));
+  const activeDelay = sseAlive
+    ? (hasActiveGui ? 8000 : (selectedBotId !== null ? 12000 : 20000))
+    : (hasActiveGui ? 4500 : (selectedBotId !== null ? 6500 : 8000));
+  const delay = document.hidden ? 30000 : (idleMs > 180000 ? 30000 : (idleMs > 60000 ? Math.max(activeDelay, 15000) : activeDelay));
   managerPollTimerId = setTimeout(async () => {
     managerPollTimerId = null;
     if (!currentUser || document.hidden) return; // BW-02: pause polling completely while tab is hidden
@@ -1084,6 +1756,7 @@ function scheduleNextManagerPoll() {
 document.addEventListener('visibilitychange', () => {
   if (!currentUser) return;
   if (document.hidden) {
+    closeManagerSseStream(true);
     if (typeof updateLiveSyncIndicators === 'function') updateLiveSyncIndicators('paused');
     if (managerPollTimerId) {
       clearTimeout(managerPollTimerId);
@@ -1093,6 +1766,8 @@ document.addEventListener('visibilitychange', () => {
   }
   if (typeof updateLiveSyncIndicators === 'function') updateLiveSyncIndicators('syncing', 'Đang đồng bộ lại...');
   lastUserActivityAt = Date.now();
+  if (typeof window !== 'undefined') window.__kbotLastActivityAt = lastUserActivityAt;
+  connectManagerSseStream();
   // Preserve lastHomeSig so unchanged fleet state reconciles in <120B without full DOM teardown
   if (selectedBotId === null) void refreshHome();
   else void refreshDetail(false);
@@ -1101,6 +1776,7 @@ document.addEventListener('visibilitychange', () => {
 
 // Network-Aware Sync Engine (Online / Offline non-intrusive banner)
 window.addEventListener('offline', () => {
+  closeManagerSseStream(true);
   const staticBanner = document.getElementById('networkOfflineBanner');
   if (staticBanner) {
     staticBanner.classList.remove('hidden');
@@ -1126,6 +1802,9 @@ window.addEventListener('online', () => {
   if (!currentUser) return;
   showToast('✅ Đã kết nối lại mạng — Đồng bộ thành công!');
   lastUserActivityAt = Date.now();
+  if (typeof window !== 'undefined') window.__kbotLastActivityAt = lastUserActivityAt;
+  _managerSseRetryCount = 0;
+  connectManagerSseStream();
   if (selectedBotId === null) refreshHome();
   else refreshDetail(true);
   scheduleNextManagerPoll();

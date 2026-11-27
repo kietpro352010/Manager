@@ -1811,59 +1811,49 @@ async function loadAdminCredentials(){
       title.textContent = bot.label || ('Bot ' + bot.id);
       card.appendChild(title);
       if (bot.ok) {
-        const rowUser = document.createElement('div');
-        rowUser.className = 'credential-row';
-        const valUser = document.createElement('div');
-        valUser.className = 'credential-value';
-        valUser.textContent = bot.username || '(Chưa đặt)';
-        const btnUser = document.createElement('button');
-        btnUser.className = 'small';
-        btnUser.type = 'button';
-        btnUser.textContent = 'Copy User';
+        const rowUser = document.createElement('div'); rowUser.className = 'credential-row';
+        const valUser = document.createElement('div'); valUser.className = 'credential-value'; valUser.textContent = bot.username || '(Chưa đặt)';
+        const btnUser = document.createElement('button'); btnUser.className = 'small'; btnUser.type = 'button'; btnUser.textContent = 'Copy User';
         btnUser.addEventListener('click', () => copyText(bot.username || ''));
-        rowUser.appendChild(valUser);
-        rowUser.appendChild(btnUser);
-        card.appendChild(rowUser);
+        rowUser.appendChild(valUser); rowUser.appendChild(btnUser); card.appendChild(rowUser);
 
-        const rowPass = document.createElement('div');
-        rowPass.className = 'credential-row';
-        const valPass = document.createElement('div');
-        valPass.className = 'credential-value';
-        valPass.textContent = '••••••••';
+        const rowPass = document.createElement('div'); rowPass.className = 'credential-row';
+        const valPass = document.createElement('div'); valPass.className = 'credential-value'; valPass.textContent = '••••••••';
         valPass.setAttribute('data-full-pass', bot.password || '');
-        const btnToggle = document.createElement('button');
-        btnToggle.className = 'small';
-        btnToggle.type = 'button';
-        btnToggle.textContent = '👁 Hiện';
+        const btnToggle = document.createElement('button'); btnToggle.className = 'small'; btnToggle.type = 'button'; btnToggle.textContent = '👁 Hiện';
         btnToggle.addEventListener('click', function() {
-          if (valPass.textContent === '••••••••') {
-            valPass.textContent = valPass.getAttribute('data-full-pass') || '(Trống)';
-            btnToggle.textContent = '🙈 Ẩn';
-          } else {
-            valPass.textContent = '••••••••';
-            btnToggle.textContent = '👁 Hiện';
-          }
+          const masked = valPass.textContent === '••••••••';
+          valPass.textContent = masked ? (valPass.getAttribute('data-full-pass') || '(Trống)') : '••••••••';
+          btnToggle.textContent = masked ? '🙈 Ẩn' : '👁 Hiện';
         });
-        const btnPass = document.createElement('button');
-        btnPass.className = 'small';
-        btnPass.type = 'button';
-        btnPass.textContent = 'Copy Pass';
+        const btnPass = document.createElement('button'); btnPass.className = 'small'; btnPass.type = 'button'; btnPass.textContent = 'Copy Pass';
         btnPass.addEventListener('click', () => copyText(bot.password || ''));
-        rowPass.appendChild(valPass);
-        rowPass.appendChild(btnToggle);
-        rowPass.appendChild(btnPass);
-        card.appendChild(rowPass);
+        rowPass.appendChild(valPass); rowPass.appendChild(btnToggle); rowPass.appendChild(btnPass); card.appendChild(rowPass);
       } else {
-        const note = document.createElement('div');
-        note.className = 'note';
-        note.style.color = 'var(--red)';
-        note.textContent = '⚠️ ' + (bot.error || 'Lỗi đọc bot.');
-        card.appendChild(note);
+        const note = document.createElement('div'); note.className = 'note'; note.style.color = 'var(--red)';
+        note.textContent = '⚠️ ' + (bot.error || 'Lỗi đọc bot.'); card.appendChild(note);
       }
       box.appendChild(card);
     });
   }catch(err){box.innerHTML = '<div style="text-align:center;padding:24px;color:var(--red);">⚠️ ' + escapeHtml(err.message) + '</div>';}
 }
+
+function buildEmptyFleetFilterHtml(totalCount) {
+  const n = Math.max(0, Number(totalCount) || 0);
+  if (n > 0) {
+    return '<div class="panel empty-filter-state" style="grid-column:1/-1;text-align:center;padding:36px 20px;background:var(--card);border:1px dashed var(--border-strong);border-radius:12px;">' +
+      '<div style="display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:10px;background:var(--accent-soft);color:var(--accent-text);margin-bottom:10px;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></div>' +
+      '<div style="font-size:15px;font-weight:600;color:var(--text-primary);margin-bottom:6px;">Không có bot nào khớp bộ lọc hiện tại</div>' +
+      '<div style="font-size:13px;color:var(--text-muted);max-width:420px;margin:0 auto 16px auto;line-height:1.5;">Hệ thống đang có ' + n + ' bot nhưng bị ẩn bởi từ khóa tìm kiếm, tab trạng thái hoặc nhãn lọc.</div>' +
+      '<button type="button" class="small primary empty-filter-reset-btn" onclick="if(typeof resetFleetFilters===\'function\'){resetFleetFilters();}else if(typeof resetBotFilters===\'function\'){resetBotFilters();}">Xóa bộ lọc (' + n + ' bot)</button>' +
+      '</div>';
+  }
+  return '<div class="panel empty-filter-state" style="grid-column:1/-1;text-align:center;padding:36px 20px;background:var(--card);border:1px dashed var(--border);border-radius:12px;">' +
+    '<div style="font-size:14.5px;font-weight:600;color:var(--text-primary);margin-bottom:6px;">Chưa có bot nào trong danh sách</div>' +
+    '<div style="font-size:12.5px;color:var(--text-muted);max-width:400px;margin:0 auto;line-height:1.5;">Tài khoản hiện chưa được gán bot hoặc chưa khởi tạo worker nào trên hệ thống.</div>' +
+    '</div>';
+}
+window.buildEmptyFleetFilterHtml = buildEmptyFleetFilterHtml;
 
 async function copyText(value){
   try{await navigator.clipboard.writeText(String(value??''));showToast('Đã copy.');}
@@ -1874,16 +1864,13 @@ function handleBotCardKeydown(event, botId) {
   if (!event || event.target !== event.currentTarget) return;
   if (event.key === 'Enter' || event.key === ' ') {
     event.preventDefault();
-    if (typeof openBot === 'function' && botId) {
-      openBot(botId);
-    }
+    if (typeof openBot === 'function' && botId) openBot(botId);
   }
 }
 window.handleBotCardKeydown = handleBotCardKeydown;
 
 (function attachKeyboardAndOfflineResilience() {
   if (typeof window === 'undefined' || typeof document === 'undefined') return;
-
   function syncOfflineBanner() {
     const banner = document.getElementById('networkOfflineBanner');
     if (!banner || !banner.classList) return;
@@ -1892,14 +1879,15 @@ window.handleBotCardKeydown = handleBotCardKeydown;
     else if (!isOffline && typeof banner.classList.add === 'function') banner.classList.add('hidden');
   }
   syncOfflineBanner();
-
   document.addEventListener('keydown', (event) => {
     if (!event || event.defaultPrevented) return;
     if (event.key === 'Escape') {
       const openModals = Array.from(document.querySelectorAll('.modal:not(.hidden)'));
       if (openModals.length > 0) {
         const topModal = openModals[openModals.length - 1];
-        topModal.classList.add('hidden');
+        if (topModal.id === 'commandPaletteModal' && typeof closeCommandPalette === 'function') closeCommandPalette();
+        else topModal.classList.add('hidden');
+        if (typeof window.__kbotRefreshAppCosmicEngine === 'function') window.__kbotRefreshAppCosmicEngine();
         event.preventDefault();
         return;
       }
@@ -1912,10 +1900,10 @@ window.handleBotCardKeydown = handleBotCardKeydown;
       if (typeof closeMobileSidebar === 'function') closeMobileSidebar();
       return;
     }
-
     const activeTag = String(document.activeElement?.tagName || '').toUpperCase();
     const isTyping = activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT' || Boolean(document.activeElement?.isContentEditable);
     if (!isTyping && (event.key === '/' || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k'))) {
+      if (typeof openCommandPalette === 'function' && typeof currentUser !== 'undefined' && currentUser) return;
       const searchEl = document.getElementById('searchInput');
       const homeSection = document.getElementById('homePage');
       if (searchEl && homeSection && !homeSection.classList.contains('hidden')) {

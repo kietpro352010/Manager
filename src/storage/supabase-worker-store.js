@@ -54,6 +54,7 @@ function toRow(record, { omit = [] } = {}) {
 }
 
 const WORKER_STALE_IF_ERROR_MS = 5 * 60 * 1000;
+const MAX_WORKER_CACHE_ENTRIES = 500;
 
 function isTransientWorkerStoreError(err) {
   if (!err) return false;
@@ -77,6 +78,16 @@ class SupabaseWorkerStore {
     this._listInFlight = null;
     this._itemCache = new Map();
     this._numberCache = new Map();
+    this._itemInFlight = new Map();
+    this._numberInFlight = new Map();
+  }
+
+  _setBoundedMap(map, key, value, maxEntries = MAX_WORKER_CACHE_ENTRIES) {
+    if (!map.has(key) && map.size >= maxEntries) {
+      const oldestKey = map.keys().next().value;
+      if (oldestKey !== undefined) map.delete(oldestKey);
+    }
+    map.set(key, value);
   }
 
   invalidateCache(workerId = null) {
@@ -87,14 +98,20 @@ class SupabaseWorkerStore {
       const id = String(workerId);
       const prev = this._itemCache.get(id);
       this._itemCache.delete(id);
+      this._itemInFlight.delete(id);
       if (prev?.data?.botNumber !== undefined && prev?.data?.botNumber !== null) {
-        this._numberCache.delete(Number(prev.data.botNumber));
+        const num = Number(prev.data.botNumber);
+        this._numberCache.delete(num);
+        this._numberInFlight.delete(num);
       } else {
         this._numberCache.clear();
+        this._numberInFlight.clear();
       }
     } else {
       this._itemCache.clear();
       this._numberCache.clear();
+      this._itemInFlight.clear();
+      this._numberInFlight.clear();
     }
   }
 
@@ -112,6 +129,7 @@ class SupabaseWorkerStore {
     this._cacheGen += 1;
     const id = String(workerId || '');
     const now = Date.now();
+    this._itemInFlight.delete(id);
     const buildUpdated = (entry) => {
       if (!entry) return null;
       if (mapped) return this._cloneWorker(mapped);
@@ -124,6 +142,12 @@ class SupabaseWorkerStore {
     const cachedHit = this._itemCache.get(id);
     const existingItem = cachedHit?.data || mapped;
     const prevNumber = existingItem?.botNumber;
+    if (prevNumber !== undefined && prevNumber !== null) {
+      this._numberInFlight.delete(Number(prevNumber));
+    }
+    if (mapped?.botNumber !== undefined && mapped?.botNumber !== null) {
+      this._numberInFlight.delete(Number(mapped.botNumber));
+    }
     if (mapped) {
       if (prevNumber !== undefined && prevNumber !== null && prevNumber !== mapped.botNumber) {
         this._numberCache.delete(Number(prevNumber));
@@ -134,10 +158,14 @@ class SupabaseWorkerStore {
       if (prevNumber !== undefined && prevNumber !== null && nextItem.botNumber !== prevNumber) {
         this._numberCache.delete(Number(prevNumber));
       }
+      if (nextItem.botNumber !== undefined && nextItem.botNumber !== null) {
+        this._numberInFlight.delete(Number(nextItem.botNumber));
+      }
       this._cacheWorker(nextItem);
     } else {
       this._itemCache.delete(id);
       this._numberCache.clear();
+      this._numberInFlight.clear();
     }
 
     if (this._listCache && now < this._listCache.expiresAt && Array.isArray(this._listCache.data)) {
@@ -159,11 +187,11 @@ class SupabaseWorkerStore {
   _cacheWorker(worker) {
     if (!worker || !worker.workerId || this.cacheTtlMs <= 0) return;
     const expiresAt = Date.now() + this.cacheTtlMs;
-    if (this._itemCache.size > 500) this._itemCache.clear();
-    this._itemCache.set(String(worker.workerId), { data: worker, expiresAt });
+    const staleUntil = expiresAt + WORKER_STALE_IF_ERROR_MS;
+    const entry = { data: worker, expiresAt, staleUntil };
+    this._setBoundedMap(this._itemCache, String(worker.workerId), entry);
     if (worker.botNumber !== null && worker.botNumber !== undefined && Number.isFinite(Number(worker.botNumber))) {
-      if (this._numberCache.size > 500) this._numberCache.clear();
-      this._numberCache.set(Number(worker.botNumber), { data: worker, expiresAt });
+      this._setBoundedMap(this._numberCache, Number(worker.botNumber), entry);
     }
   }
 
@@ -182,36 +210,154 @@ class SupabaseWorkerStore {
 
   async get(workerId, { includeEvents = false, bypassCache = false } = {}) {
     const id = String(workerId || '');
-    if (!includeEvents && !bypassCache && this.cacheTtlMs > 0) {
-      const hit = this._itemCache.get(id);
-      if (hit && Date.now() < hit.expiresAt) {
-        return this._cloneWorker(hit.data);
+    if (includeEvents || bypassCache) {
+      const gen = this._cacheGen;
+      const columns = includeEvents ? '*' : WORKER_LIST_COLUMNS;
+      const { data, error } = await this.client.from(TABLE).select(columns).eq('worker_id', workerId).maybeSingle();
+      if (error && error.code !== 'PGRST116') throw error;
+      const mapped = fromRow(data);
+      if (!includeEvents && gen === this._cacheGen) {
+        if (mapped) {
+          this._cacheWorker(mapped);
+        } else {
+          const prev = this._itemCache.get(id);
+          if (prev) {
+            this._itemCache.delete(id);
+            if (prev.data?.botNumber !== undefined && prev.data?.botNumber !== null) {
+              this._numberCache.delete(Number(prev.data.botNumber));
+            }
+          }
+        }
       }
-      if (hit) this._itemCache.delete(id);
+      return this._cloneWorker(mapped);
     }
-    const gen = this._cacheGen;
-    const columns = includeEvents ? '*' : WORKER_LIST_COLUMNS;
-    const { data, error } = await this.client.from(TABLE).select(columns).eq('worker_id', workerId).maybeSingle();
-    if (error && error.code !== 'PGRST116') throw error;
-    const mapped = fromRow(data);
-    if (!includeEvents && mapped && gen === this._cacheGen) this._cacheWorker(mapped);
+
+    if (this.cacheTtlMs > 0) {
+      const now = Date.now();
+      const hit = this._itemCache.get(id);
+      if (hit) {
+        if (now < hit.expiresAt) {
+          return this._cloneWorker(hit.data);
+        }
+        if (now >= (hit.staleUntil || hit.expiresAt)) {
+          this._itemCache.delete(id);
+        }
+      }
+    }
+
+    const existing = this._itemInFlight.get(id);
+    if (existing) {
+      const shared = await existing;
+      return this._cloneWorker(shared);
+    }
+
+    const fetchItem = async () => {
+      const gen = this._cacheGen;
+      const { data, error } = await this.client.from(TABLE).select(WORKER_LIST_COLUMNS).eq('worker_id', workerId).maybeSingle();
+      if (error && error.code !== 'PGRST116') throw error;
+      const mapped = fromRow(data);
+      if (gen === this._cacheGen) {
+        if (mapped) {
+          this._cacheWorker(mapped);
+        } else {
+          const prev = this._itemCache.get(id);
+          if (prev) {
+            this._itemCache.delete(id);
+            if (prev.data?.botNumber !== undefined && prev.data?.botNumber !== null) {
+              this._numberCache.delete(Number(prev.data.botNumber));
+            }
+          }
+        }
+      }
+      return mapped;
+    };
+
+    const promise = fetchItem()
+      .catch((err) => {
+        const stale = this._itemCache.get(id);
+        if (isTransientWorkerStoreError(err) && stale && Date.now() < (stale.staleUntil || 0)) {
+          return stale.data;
+        }
+        throw err;
+      })
+      .finally(() => {
+        if (this._itemInFlight.get(id) === promise) {
+          this._itemInFlight.delete(id);
+        }
+      });
+
+    this._setBoundedMap(this._itemInFlight, id, promise);
+    const mapped = await promise;
     return this._cloneWorker(mapped);
   }
 
   async getByNumber(botNumber, { bypassCache = false } = {}) {
     const num = Number(botNumber);
-    if (!bypassCache && this.cacheTtlMs > 0 && Number.isFinite(num)) {
-      const hit = this._numberCache.get(num);
-      if (hit && Date.now() < hit.expiresAt) {
-        return this._cloneWorker(hit.data);
-      }
-      if (hit) this._numberCache.delete(num);
+    if (bypassCache || !Number.isFinite(num)) {
+      const gen = this._cacheGen;
+      const { data, error } = await this.client.from(TABLE).select(WORKER_LIST_COLUMNS).eq('bot_number', num).maybeSingle();
+      if (error && error.code !== 'PGRST116') throw error;
+      const mapped = fromRow(data);
+      if (mapped && gen === this._cacheGen) this._cacheWorker(mapped);
+      return this._cloneWorker(mapped);
     }
-    const gen = this._cacheGen;
-    const { data, error } = await this.client.from(TABLE).select(WORKER_LIST_COLUMNS).eq('bot_number', num).maybeSingle();
-    if (error && error.code !== 'PGRST116') throw error;
-    const mapped = fromRow(data);
-    if (mapped && gen === this._cacheGen) this._cacheWorker(mapped);
+
+    if (this.cacheTtlMs > 0) {
+      const now = Date.now();
+      const hit = this._numberCache.get(num);
+      if (hit) {
+        if (now < hit.expiresAt) {
+          return this._cloneWorker(hit.data);
+        }
+        if (now >= (hit.staleUntil || hit.expiresAt)) {
+          this._numberCache.delete(num);
+        }
+      }
+    }
+
+    const existing = this._numberInFlight.get(num);
+    if (existing) {
+      const shared = await existing;
+      return this._cloneWorker(shared);
+    }
+
+    const fetchByNumber = async () => {
+      const gen = this._cacheGen;
+      const { data, error } = await this.client.from(TABLE).select(WORKER_LIST_COLUMNS).eq('bot_number', num).maybeSingle();
+      if (error && error.code !== 'PGRST116') throw error;
+      const mapped = fromRow(data);
+      if (gen === this._cacheGen) {
+        if (mapped) {
+          this._cacheWorker(mapped);
+        } else {
+          const prev = this._numberCache.get(num);
+          if (prev) {
+            this._numberCache.delete(num);
+            if (prev.data?.workerId) {
+              this._itemCache.delete(String(prev.data.workerId));
+            }
+          }
+        }
+      }
+      return mapped;
+    };
+
+    const promise = fetchByNumber()
+      .catch((err) => {
+        const stale = this._numberCache.get(num);
+        if (isTransientWorkerStoreError(err) && stale && Date.now() < (stale.staleUntil || 0)) {
+          return stale.data;
+        }
+        throw err;
+      })
+      .finally(() => {
+        if (this._numberInFlight.get(num) === promise) {
+          this._numberInFlight.delete(num);
+        }
+      });
+
+    this._setBoundedMap(this._numberInFlight, num, promise);
+    const mapped = await promise;
     return this._cloneWorker(mapped);
   }
 

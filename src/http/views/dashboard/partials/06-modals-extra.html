@@ -571,4 +571,23 @@
     </div>
   </div>
 
+  <!-- QUICK COMMAND & BOT JUMP PALETTE (CTRL+K / /) -->
+  <div id="commandPaletteModal" class="modal cmd-palette-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="commandPaletteTitle">
+    <div id="commandPaletteDialogCard" class="cmd-palette-card">
+      <h2 id="commandPaletteTitle" class="sr-only">Bảng tìm nhanh Bot và Lệnh điều khiển</h2>
+      <div class="cmd-palette-search-row">
+        <svg class="cmd-palette-search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="search" id="commandPaletteInput" class="cmd-palette-input" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="commandPaletteList" autocomplete="off" spellcheck="false" placeholder="Tìm bot (#01, ID, tên bot, nhân vật MC, trạng thái, #tag) hoặc gõ lệnh..." oninput="onCommandPaletteInput(this.value)">
+        <span id="commandPaletteCount" class="cmd-palette-count" aria-live="polite">0 mục</span>
+        <button type="button" id="btnCloseCommandPalette" class="cmd-palette-esc-btn" onclick="closeCommandPalette()" aria-label="Đóng bảng lệnh nhanh">Esc</button>
+      </div>
+      <div id="commandPaletteList" class="cmd-palette-list" role="listbox" aria-label="Danh sách bot và lệnh điều khiển nhanh"></div>
+      <div class="cmd-palette-footer" aria-hidden="true">
+        <span><kbd class="cmd-palette-kbd">↑</kbd> <kbd class="cmd-palette-kbd">↓</kbd> Di chuyển</span>
+        <span><kbd class="cmd-palette-kbd">↵</kbd> Mở / Thực thi</span>
+        <span><kbd class="cmd-palette-kbd">Esc</kbd> Đóng</span>
+      </div>
+    </div>
+  </div>
+
 <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>

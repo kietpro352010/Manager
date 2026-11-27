@@ -18,6 +18,7 @@ const {
   formatAccountPlanBadge,
   resolveEffectiveExpiresAt,
   getWorkerState,
+  safe,
   embed,
   button
 } = require('../panels/renderer');
@@ -118,11 +119,14 @@ async function safeUpdate(interaction, payload) {
 }
 
 async function safeReply(interaction, payload) {
+  const safePayload = payload && typeof payload === 'object'
+    ? { ...payload, allowedMentions: payload.allowedMentions || { parse: [] } }
+    : payload;
   try {
     if (interaction.deferred || interaction.replied) {
-      return await interaction.editReply(payload);
+      return await interaction.editReply(safePayload);
     }
-    return await interaction.reply(payload);
+    return await interaction.reply(safePayload);
   } catch (err) {
     if (!isIgnorable(err)) throw err;
   }
@@ -429,7 +433,20 @@ function isUserAccountEntitled(user, services, maintenance = null) {
   const statusStr = String(normalizedUser.status || 'active').toLowerCase();
   if (statusStr === 'disabled' || statusStr === 'expired') return false;
   if (normalizedUser.isPermanent === true) return true;
+  if (normalizedUser.inGracePeriod === true) return true;
   const expiryMs = normalizedUser.expiresAt ? Date.parse(normalizedUser.expiresAt) : NaN;
+  if (statusStr === 'grace_period' && Number.isFinite(expiryMs)) {
+    const rawAnchor = maintenance?.enabled
+      ? (maintenance.lastCompensatedAt || maintenance.startedAt || maintenance.updatedAt || '')
+      : '';
+    const anchorMs = rawAnchor ? Date.parse(rawAnchor) : NaN;
+    const nowMs = Date.now();
+    const baseGraceEndMs = expiryMs + 6 * 3600 * 1000;
+    const effectiveGraceEndMs = (maintenance?.enabled && Number.isFinite(anchorMs) && nowMs > anchorMs && baseGraceEndMs > anchorMs)
+      ? baseGraceEndMs + (nowMs - anchorMs)
+      : baseGraceEndMs;
+    return effectiveGraceEndMs > nowMs;
+  }
   return Number.isFinite(expiryMs) && expiryMs > Date.now();
 }
 
@@ -1460,14 +1477,18 @@ async function handlePanelInteraction(interaction, services) {
 
     if (user.role !== 'admin') {
       if (maintenance.enabled) {
+        const cleanMaintMsg = safe(maintenance.message || 'Hệ thống đang bảo trì nâng cấp máy chủ.', 600);
         const frozenBadge = formatAccountPlanBadge(user, maintenance);
-        const badgeLine = frozenBadge ? `\n\n• **Thời hạn gói:** ${frozenBadge}` : '';
+        const badgeLine = frozenBadge ? `\n• **Thời hạn gói của bạn:** ${frozenBadge}` : '';
         return safeUpdate(interaction, {
           embeds: [embed(
             '🛠️ HỆ THỐNG ĐANG BẢO TRÌ',
-            `${maintenance.message}\n\nTạm khóa thao tác điều khiển worker đối với người dùng cho đến khi bảo trì hoàn tất. Thời gian sử dụng bot được giữ nguyên, không bị trừ trong lúc bảo trì.${badgeLine}`,
+            `${cleanMaintMsg}\n\n` +
+            `⏸️ **An tâm:** Thời gian thuê bot đang được **đóng băng (không bị trừ giờ)** — thời gian sử dụng bot được giữ nguyên, không bị trừ trong lúc bảo trì.${badgeLine}\n\n` +
+            `*Bạn vẫn có thể xem trạng thái & nhật ký bot bình thường; thao tác điều khiển sẽ mở lại ngay khi bảo trì hoàn tất.*`,
             0xf59e0b
-          )]
+          )],
+          allowedMentions: { parse: [] }
         });
       }
 

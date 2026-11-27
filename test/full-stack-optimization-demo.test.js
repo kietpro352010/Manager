@@ -898,3 +898,1248 @@ test('16. Wave-4 Render HTTPS Response Slimming: Stripped Worker headers (<300B 
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test('17. Wave-6 SSE GET /api/manager/stream: 401 guard, 3/user 429 cap, strict tenant fleet_pulse isolation (incl. 400ms multi-bot coalesce), <100ms broadcasts & revocation/shutdown cleanup', async () => {
+  const http = require('node:http');
+  const { createApp } = require('../src/http/app');
+  const { createMockSupabaseServer } = require('./e2e/harness/mock-supabase');
+  const { createSupabaseClient } = require('../src/storage/supabase-client');
+  const { WorkerRegistry } = require('../src/services/worker-registry');
+  const { AccessControl } = require('../src/services/access-control');
+  const { encryptUserPassword, hashAdminPasswordAsync } = require('../src/utils/secrets');
+
+  const supabaseServer = await createMockSupabaseServer();
+  const supabaseClient = createSupabaseClient({ url: supabaseServer.url, secretKey: supabaseServer.secretKey });
+  const workerStore = new SupabaseWorkerStore(supabaseClient);
+  const store = new SupabaseDashboardStore(supabaseClient);
+  await workerStore.initialize();
+  await store.initialize();
+
+  const encKeyHex = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+  const encKey = Buffer.from(encKeyHex, 'hex');
+  const sec = encryptSecret('w'.repeat(32), encKey);
+  const nowIso = new Date().toISOString();
+
+  supabaseServer.seed('manager_workers', [
+    { worker_id: 'bot-a1', bot_number: 1, name: 'Bot UserA 1', enabled: true, provider: 'wispbyte', service_url: '', secret_ciphertext: sec, settings: {}, status: { state: 'online', online: true }, events: [], created_at: nowIso, updated_at: nowIso },
+    { worker_id: 'bot-b1', bot_number: 2, name: 'Bot UserB 1', enabled: true, provider: 'wispbyte', service_url: '', secret_ciphertext: sec, settings: {}, status: { state: 'online', online: true }, events: [], created_at: nowIso, updated_at: nowIso },
+    { worker_id: 'bot-b2', bot_number: 3, name: 'Bot UserB 2', enabled: true, provider: 'wispbyte', service_url: '', secret_ciphertext: sec, settings: {}, status: { state: 'online', online: true }, events: [], created_at: nowIso, updated_at: nowIso }
+  ]);
+
+  const registry = new WorkerRegistry({ store: workerStore, accessStore: store, encryptionKey: encKey });
+  await registry.load();
+  registry.setAdminPassword(await hashAdminPasswordAsync('AdminSse!99'));
+
+  const futureIso = new Date(Date.now() + 7 * 86400000).toISOString();
+  await store.setAccess('user_a', {
+    id: 'user_a',
+    username: 'usera',
+    password: encryptUserPassword('PassA!99'),
+    role: 'user',
+    workerIds: ['bot-a1'],
+    status: 'active',
+    isPermanent: false,
+    expiresAt: futureIso
+  }, 'seed');
+  await store.setAccess('user_b', {
+    id: 'user_b',
+    username: 'userb',
+    password: encryptUserPassword('PassB!99'),
+    role: 'user',
+    workerIds: ['bot-b1', 'bot-b2'],
+    status: 'active',
+    isPermanent: false,
+    expiresAt: futureIso
+  }, 'seed');
+
+  const app = createApp({
+    store,
+    workerStore,
+    registry,
+    broker: { dispatch: async () => ({ delivered: true, result: { ok: true } }) },
+    entitlementService: { redeem: async () => ({ ok: true }) },
+    accessControl: new AccessControl({ store }),
+    config: {
+      adminUsername: 'admin',
+      adminPassword: 'AdminSse!99',
+      sessionSecret: 'sse-test-secret-0123456789abcdef',
+      encryptionKey: encKey,
+      encryptionKeyHex: encKeyHex,
+      publicBaseUrl: 'http://127.0.0.1'
+    },
+    logger: { info() {}, warn() {}, error() {}, debug() {} }
+  });
+
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const openStreams = [];
+
+  function openSse(port, token, clientIp) {
+    return new Promise((resolve, reject) => {
+      const events = [];
+      let rawBuf = '';
+      let closed = false;
+      let onCloseResolve = null;
+      const closedPromise = new Promise((r) => { onCloseResolve = r; });
+
+      const req = http.request({
+        hostname: '127.0.0.1',
+        port,
+        path: '/api/manager/stream',
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Accept-Encoding': 'br, gzip',
+          'X-Forwarded-For': clientIp
+        }
+      }, (res) => {
+        if (res.statusCode !== 200) {
+          const errChunks = [];
+          res.on('data', (c) => errChunks.push(c));
+          res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(errChunks).toString('utf8'), close() {} }));
+          return;
+        }
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          rawBuf += chunk;
+          let sepIdx;
+          while ((sepIdx = rawBuf.indexOf('\n\n')) !== -1) {
+            const block = rawBuf.slice(0, sepIdx);
+            rawBuf = rawBuf.slice(sepIdx + 2);
+            if (!block || block.startsWith(':')) continue;
+            let evName = 'message';
+            let evData = '';
+            for (const line of block.split('\n')) {
+              if (line.startsWith('event:')) evName = line.slice(6).trim();
+              else if (line.startsWith('data:')) evData += line.slice(5).trim();
+            }
+            let parsed = evData;
+            try { parsed = JSON.parse(evData); } catch (_) {}
+            events.push({ event: evName, data: parsed, receivedAt: Date.now() });
+            if (evName === 'connected') {
+              resolve({
+                status: 200,
+                headers: res.headers,
+                events,
+                isClosed: () => closed,
+                waitClosed: () => closedPromise,
+                close() { try { req.destroy(); } catch (_) {} }
+              });
+            }
+          }
+        });
+        const markEnd = () => {
+          closed = true;
+          if (onCloseResolve) onCloseResolve();
+        };
+        res.on('end', markEnd);
+        res.on('close', markEnd);
+      });
+      req.on('error', (err) => {
+        if (!closed) reject(err);
+      });
+      req.end();
+      openStreams.push(req);
+    });
+  }
+
+  try {
+    const port = server.address().port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    // 17a. Unauthenticated request rejected with 401
+    const unauthRes = await fetch(`${baseUrl}/api/manager/stream`);
+    assert.equal(unauthRes.status, 401);
+    await unauthRes.text();
+
+    const login = async (username, password, ip) => {
+      const r = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': ip },
+        body: JSON.stringify({ username, password })
+      });
+      return r.json();
+    };
+    const authA = await login('usera', 'PassA!99', '10.10.1.1');
+    const authB = await login('userb', 'PassB!99', '10.10.2.1');
+    const authAdmin = await login('admin', 'AdminSse!99', '10.10.9.1');
+
+    // 17b. Per-user cap (3 allowed, 4th rejected with 429) & uncompressed text/event-stream headers
+    const sA1 = await openSse(port, authA.token, '10.10.1.1');
+    const sA2 = await openSse(port, authA.token, '10.10.1.2');
+    const sA3 = await openSse(port, authA.token, '10.10.1.3');
+    assert.equal(sA1.status, 200);
+    assert.equal(sA1.headers['content-encoding'], undefined, 'SSE stream must bypass Brotli/Gzip compression');
+    assert.ok(String(sA1.headers['content-type']).includes('text/event-stream'));
+
+    const sA4 = await openSse(port, authA.token, '10.10.1.4');
+    assert.equal(sA4.status, 429, '4th concurrent SSE stream for same user must return 429');
+
+    sA2.close();
+    sA3.close();
+    await Promise.all([sA2.waitClosed(), sA3.waitClosed()]);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const sB1 = await openSse(port, authB.token, '10.10.2.1');
+    const sAdmin = await openSse(port, authAdmin.token, '10.10.9.1');
+    assert.equal(sB1.status, 200);
+    assert.equal(sAdmin.status, 200);
+
+    // 17c. Strict Tenant Isolation on fleet_pulse (including multi-bot 400ms coalescing!)
+    sA1.events.length = 0;
+    sB1.events.length = 0;
+    sAdmin.events.length = 0;
+
+    // Trigger multi-bot updates ONLY on UserB's bots ('bot-b1' + 'bot-b2') within the same 400ms window
+    await registry.addEvent('bot-b1', { type: 'spawn', message: 'UserB bot 1 spawned' });
+    await registry.addEvent('bot-b2', { type: 'spawn', message: 'UserB bot 2 spawned' });
+    await new Promise((r) => setTimeout(r, 480));
+
+    const pulsesForA = sA1.events.filter((e) => e.event === 'fleet_pulse');
+    const pulsesForB = sB1.events.filter((e) => e.event === 'fleet_pulse');
+    const pulsesForAdmin = sAdmin.events.filter((e) => e.event === 'fleet_pulse');
+    assert.equal(pulsesForA.length, 0, 'User A must NEVER receive fleet_pulse for User B bots (even multi-bot coalesced)');
+    assert.equal(pulsesForB.length, 1, 'User B must receive 1 coalesced fleet_pulse for their 2 bots');
+    assert.equal(pulsesForB[0].data.workerId, null, 'Multi-bot pulse for User B coalesces to workerId: null');
+    assert.equal(pulsesForAdmin.length, 1, 'Admin receives coalesced fleet_pulse');
+
+    // Trigger simultaneous updates across User A ('bot-a1') AND User B ('bot-b1') -> User A only sees 'bot-a1'
+    sA1.events.length = 0;
+    sB1.events.length = 0;
+    await registry.addEvent('bot-a1', { type: 'respawn', message: 'UserA respawn' });
+    await registry.addEvent('bot-b1', { type: 'respawn', message: 'UserB respawn' });
+    await new Promise((r) => setTimeout(r, 480));
+    assert.equal(sA1.events.filter((e) => e.event === 'fleet_pulse')[0]?.data?.workerId, 'bot-a1');
+    assert.equal(sB1.events.filter((e) => e.event === 'fleet_pulse')[0]?.data?.workerId, 'bot-b1');
+
+    // 17d. Instant <100ms maintenance & announcement SSE broadcasts
+    const adminHeaders = { Authorization: `Bearer ${authAdmin.token}`, 'Content-Type': 'application/json' };
+    const tMaintSend = Date.now();
+    const maintPost = await fetch(`${baseUrl}/api/admin/maintenance`, {
+      method: 'POST',
+      headers: adminHeaders,
+      body: JSON.stringify({ enabled: true, message: 'Bảo trì tức thì SSE' })
+    });
+    assert.equal(maintPost.status, 200);
+    await maintPost.text();
+    await new Promise((r) => setTimeout(r, 25));
+    const maintEvA = sA1.events.find((e) => e.event === 'maintenance');
+    assert.ok(maintEvA, 'SSE client must receive maintenance broadcast');
+    assert.equal(maintEvA.data.enabled, true);
+    assert.ok(maintEvA.receivedAt - tMaintSend < 100, `Expected maintenance SSE delivery <100ms, got ${maintEvA.receivedAt - tMaintSend}ms`);
+
+    const tAnnSend = Date.now();
+    const annPost = await fetch(`${baseUrl}/api/admin/announcement`, {
+      method: 'POST',
+      headers: adminHeaders,
+      body: JSON.stringify({ enabled: true, title: 'Thông báo SSE', content: 'Cập nhật mới!', mode: 'always' })
+    });
+    assert.equal(annPost.status, 200);
+    await annPost.text();
+    await new Promise((r) => setTimeout(r, 25));
+    const annEvB = sB1.events.find((e) => e.event === 'announcement');
+    assert.ok(annEvB, 'SSE client must receive announcement broadcast');
+    assert.ok(annEvB.receivedAt - tAnnSend < 100, `Expected announcement SSE delivery <100ms, got ${annEvB.receivedAt - tAnnSend}ms`);
+
+    // Diagnostics exposes sseClients & ramHeadroom
+    const diagJson = await fetch(`${baseUrl}/api/admin/diagnostics`, { headers: adminHeaders }).then((r) => r.json());
+    assert.equal(diagJson.ok, true);
+    assert.equal(diagJson.sseClients, 3);
+    assert.equal(diagJson.ramHeadroom?.budgetMb, 512);
+
+    // 17e. Session revocation closes target user SSE immediately; graceful shutdown closes all remaining SSE clients
+    app.invalidateUserSessions('user_a');
+    await sA1.waitClosed();
+    assert.equal(sA1.isClosed(), true, 'Revoking User A session must immediately terminate User A SSE stream');
+    assert.equal(sB1.isClosed(), false, 'User B SSE stream must remain open when User A is revoked');
+
+    app.setShuttingDown(true);
+    await Promise.all([sB1.waitClosed(), sAdmin.waitClosed()]);
+    assert.equal(sB1.isClosed(), true);
+    assert.equal(sAdmin.isClosed(), true);
+  } finally {
+    for (const req of openStreams) { try { req.destroy(); } catch (_) {} }
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+    await supabaseServer.close();
+  }
+});
+
+test('18. Wave-6 Additive WorkerRegistry.addEvent (1..1000 & mod-10 DB sync), setSetting in-place cache + cloneSettingValue & CommandStore 250ms peek dedup + 0ms invalidation', async () => {
+  const crypto = require('node:crypto');
+  const { WorkerRegistry } = require('../src/services/worker-registry');
+  const SupabaseCommandStore = require('../src/storage/supabase-command-store');
+
+  // 18a. WorkerRegistry.addEvent additive repeatCount (1..1000) & DB persistence on 1st + multiples-of-10 crossings
+  let dbEventWrites = 0;
+  const workerRec = {
+    workerId: '18',
+    botNumber: 18,
+    name: 'Bot 18',
+    enabled: true,
+    provider: 'wispbyte',
+    settings: {},
+    status: { state: 'online', online: true },
+    events: []
+  };
+  const registry = new WorkerRegistry({
+    store: {
+      get: async () => workerRec,
+      update: async (_id, patch) => Object.assign(workerRec, patch),
+      addEvent: async (_id, ev) => {
+        dbEventWrites += 1;
+        workerRec.events.push({ ...ev });
+      }
+    },
+    encryptionKey: crypto.randomBytes(32)
+  });
+
+  const t0 = Date.parse('2026-11-27T16:10:00.000Z');
+  const ev1 = await registry.addEvent('18', {
+    type: 'connection_error',
+    message: 'Minecraft connection error (ETIMEDOUT)',
+    occurredAt: new Date(t0).toISOString(),
+    repeatCount: 1
+  });
+  assert.equal(ev1.repeatCount ?? 1, 1);
+  assert.equal(dbEventWrites, 1, '1st occurrence persists to DB');
+
+  const ev2 = await registry.addEvent('18', {
+    type: 'connection_error',
+    message: 'Minecraft connection error (ETIMEDOUT)',
+    occurredAt: new Date(t0 + 8000).toISOString(),
+    repeatCount: 5
+  });
+  assert.equal(ev2.repeatCount, 6);
+  assert.equal(dbEventWrites, 1, '1 -> 6 stays within decade 0, skipping redundant DB write');
+
+  const ev3 = await registry.addEvent('18', {
+    type: 'connection_error',
+    message: 'Minecraft connection error (ETIMEDOUT)',
+    occurredAt: new Date(t0 + 16000).toISOString(),
+    repeatCount: 6
+  });
+  assert.equal(ev3.repeatCount, 12);
+  assert.equal(new Date(ev3.firstOccurredAt).toISOString(), new Date(t0).toISOString(), 'firstOccurredAt must remain anchored at t0');
+  assert.equal(dbEventWrites, 2, 'Crossing multiple-of-10 boundary (6 -> 12) must persist to DB');
+
+  const ev4 = await registry.addEvent('18', {
+    type: 'connection_error',
+    message: 'Minecraft connection error (ETIMEDOUT)',
+    occurredAt: new Date(t0 + 20000).toISOString(),
+    repeatCount: 9999
+  });
+  assert.equal(ev4.repeatCount, 1000, 'repeatCount must clamp strictly at 1000');
+
+  // 18b. SupabaseDashboardStore.setSetting updates setting cache in-place without wiping access:all, and deep-clones values
+  const mockDashClient = {
+    from(tbl) {
+      assert.equal(tbl, 'manager_settings');
+      return {
+        upsert(payload) {
+          return {
+            select() {
+              return {
+                async maybeSingle() {
+                  return { data: { value: payload.value, updated_at: payload.updated_at }, error: null };
+                }
+              };
+            }
+          };
+        }
+      };
+    }
+  };
+  const dashStore = new SupabaseDashboardStore(mockDashClient);
+  dashStore.setCached('access:all', [{ userId: 'u_keep', status: 'active' }], 30000);
+  dashStore.setCached('user:u_keep', { userId: 'u_keep' }, 30000);
+
+  const savedUrls = await dashStore.setSetting('active_manager_urls', { urls: ['https://web1.onrender.com', 'https://web2.onrender.com'] });
+  assert.equal(dashStore.getCachedEntry('access:all').hit, true, 'setSetting must NOT wipe access:all cache');
+  assert.equal(dashStore.getCachedEntry('user:u_keep').hit, true, 'setSetting must NOT wipe user:* cache');
+
+  // Mutate caller's returned object -> internal cache must remain uncorrupted
+  savedUrls.urls.push('https://attacker-mutated.example');
+  const readBack = await dashStore.getSetting('active_manager_urls');
+  assert.deepEqual(readBack.urls, ['https://web1.onrender.com', 'https://web2.onrender.com'], 'cloneSettingValue must isolate cached objects from caller mutation');
+
+  // 18c. SupabaseCommandStore.peekQueuedWorkerIds 250ms dedup (order-insensitive + subset) & 0ms invalidation on enqueue/take/clearWorker
+  let peekDbHits = 0;
+  let queuedIds = ['01'];
+  const mockCmdClient = {
+    from(tbl) {
+      if (tbl === 'manager_commands') {
+        const q = {
+          select: () => q,
+          in: () => q,
+          eq: () => q,
+          gt: () => q,
+          delete: () => ({ eq: () => ({ in: async () => ({ error: null }) }) }),
+          limit: async () => {
+            peekDbHits += 1;
+            await new Promise((r) => setTimeout(r, 15));
+            return { data: queuedIds.map((id) => ({ worker_id: id })), error: null };
+          }
+        };
+        return q;
+      }
+      return {};
+    },
+    async rpc(fnName, params) {
+      if (fnName === 'manager_enqueue_worker_command') {
+        queuedIds.push(params.p_worker_id);
+        return { data: { command_id: params.p_command_id, worker_id: params.p_worker_id, action: params.p_action, status: 'queued' }, error: null };
+      }
+      if (fnName === 'manager_take_worker_command') {
+        const w = params.p_worker_id;
+        queuedIds = queuedIds.filter((id) => id !== w);
+        return { data: { command_id: 'cmd_1', worker_id: w, action: 'status' }, error: null };
+      }
+      return { data: null, error: null };
+    }
+  };
+  const cmdStore = new SupabaseCommandStore(mockCmdClient);
+  const [p1, p2, p3] = await Promise.all([
+    cmdStore.peekQueuedWorkerIds(['01', '02']),
+    cmdStore.peekQueuedWorkerIds(['02', '01']),
+    cmdStore.peekQueuedWorkerIds(['01'])
+  ]);
+  assert.equal(peekDbHits, 1, 'Concurrent reordered & subset peekQueuedWorkerIds calls must share 1 query');
+  assert.deepEqual(p1, ['01']);
+  assert.deepEqual(p2, ['01']);
+  assert.deepEqual(p3, ['01']);
+
+  // Cached hit within 250ms
+  assert.deepEqual(await cmdStore.peekQueuedWorkerIds(['02']), []);
+  assert.equal(peekDbHits, 1, 'Subset check within 250ms TTL must hit micro-cache');
+
+  // enqueue() invalidates 0ms
+  await cmdStore.enqueue({ workerId: '02', action: 'chat', payload: { message: 'hi' } });
+  const afterEnqueue = await cmdStore.peekQueuedWorkerIds(['01', '02']);
+  assert.equal(peekDbHits, 2, 'enqueue() must invalidate peek cache in 0ms');
+  assert.deepEqual(afterEnqueue.sort(), ['01', '02']);
+
+  // take() invalidates 0ms
+  await cmdStore.take('01');
+  const afterTake = await cmdStore.peekQueuedWorkerIds(['01', '02']);
+  assert.equal(peekDbHits, 3, 'take() must invalidate peek cache in 0ms');
+  assert.deepEqual(afterTake, ['02']);
+
+  // clearWorker() invalidates 0ms
+  queuedIds = [];
+  await cmdStore.clearWorker('02');
+  const afterClear = await cmdStore.peekQueuedWorkerIds(['01', '02']);
+  assert.equal(peekDbHits, 4, 'clearWorker() must invalidate peek cache in 0ms');
+  assert.deepEqual(afterClear, []);
+});
+
+test('19. Wave-6 Discord formatBotLocationVi, /bots & detail infra-hiding + MC setup guidance, and /check Dual-Web Sync display', async () => {
+  const {
+    formatBotLocationVi,
+    renderBotsList,
+    renderBotDetail,
+    renderStatusMonitorPanel
+  } = require('../src/discord/panels/renderer');
+  const { collectSystemStatus } = require('../src/discord/status-monitor');
+
+  assert.equal(formatBotLocationVi({ status: { state: 'authenticating', locationState: 'login' } }), 'Khu đăng nhập');
+  assert.equal(formatBotLocationVi({ status: { state: 'entering', locationState: 'lobby' } }), 'Sảnh chờ');
+  assert.equal(formatBotLocationVi({ status: { state: 'afk', online: true, locationState: 'afk', dimension: 'minecraft:the_nether' } }), 'Khu AFK · Địa ngục');
+  assert.equal(formatBotLocationVi({ status: { state: 'online', online: true, locationState: 'game', dimension: 'the_end' } }), 'Khu AFK · The End');
+  assert.equal(formatBotLocationVi({ status: { state: 'online', online: true, locationState: 'game', dimension: 'minecraft:overworld' } }), 'Khu sinh tồn / AFK');
+
+  const regularUser = { id: 'u1', username: 'player1', role: 'user', status: 'active', isPermanent: true };
+  const unconfiguredBot = {
+    workerId: '07',
+    botNumber: 7,
+    name: 'Bot 07',
+    provider: 'wispbyte-secret-node',
+    serverHost: 'internal-proxy.kingmc.local',
+    status: { state: 'offline', online: false, username: '' },
+    settings: { account: { username: '' } }
+  };
+  const onlineNetherBot = {
+    workerId: '08',
+    botNumber: 8,
+    name: 'Bot 08',
+    provider: 'render-internal',
+    status: { state: 'afk', online: true, username: 'NetherAFK', locationState: 'afk', dimension: 'the_nether', pingMs: 42, tps: 19.9 }
+  };
+
+  const listPanel = renderBotsList({ user: regularUser, workers: [unconfiguredBot, onlineNetherBot], page: 0 });
+  const listDesc = listPanel.embeds[0].data.description;
+  assert.ok(listDesc.includes('Khu AFK · Địa ngục'), '/bots must show humanized Vietnamese location');
+  assert.ok(listDesc.includes('Web Dashboard'), 'Unconfigured bot must guide user to Web Dashboard');
+  assert.ok(!listDesc.includes('wispbyte-secret-node') && !listDesc.includes('internal-proxy.kingmc.local'), 'Must hide internal provider/serverHost from regular user');
+
+  const detailPanel = renderBotDetail({ user: regularUser, worker: unconfiguredBot });
+  const detailDesc = detailPanel.embeds[0].data.description;
+  assert.ok(detailDesc.includes('Web Dashboard'));
+  assert.ok(!detailDesc.includes('wispbyte-secret-node') && !detailDesc.includes('internal-proxy.kingmc.local'));
+
+  const maintStartedIso = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+  const statusData = await collectSystemStatus({
+    registry: { list: async () => [onlineNetherBot] },
+    accessStore: {
+      adapter: { ping: async () => ({ ok: true }) },
+      listAccess: async () => [regularUser],
+      getSetting: async (k) => (k === 'system_maintenance'
+        ? { enabled: true, message: 'Bảo trì cụm', startedAt: maintStartedIso, lastCompensatedAt: maintStartedIso }
+        : null)
+    },
+    managerRuntimeSettings: {
+      getActiveManagerUrls: () => ['https://mgr-primary.onrender.com', 'https://mgr-secondary.onrender.com']
+    },
+    discordClient: { isReady: () => true, ws: { ping: 38 } },
+    config: { publicBaseUrl: 'https://mgr-primary.onrender.com' }
+  });
+  assert.equal(statusData.activeWebNodes, 2);
+
+  const checkPanel = renderStatusMonitorPanel(statusData);
+  const serverField = checkPanel.embeds[0].data.fields.find((f) => f.name.includes('Máy chủ Manager'));
+  assert.ok(serverField, 'Expected server status field in /check embed');
+  assert.ok(serverField.value.length <= 1024, 'Discord embed field value must stay <= 1024 chars');
+  assert.ok(serverField.value.includes('Dual-Web Sync: 2 node'));
+  assert.ok(serverField.value.includes('Bảo trì: Đang bật (tạm dừng trừ giờ 25m)'));
+});
+
+test('20. Wave-6 Web UI Command Palette (#commandPaletteModal XSS/RBAC), EventSource SSE lifecycle in node:vm & [T7-14] <=2000 line budget', async () => {
+  const vm = require('node:vm');
+  const dashboardParts = require('../src/http/views/dashboard');
+  const { HTML: DASHBOARD_HTML } = require('../src/http/views/dashboard-html');
+
+  // 20a. Verify [T7-14] balanced module budget (40 <= lines <= 2000) & unique DOM IDs including #commandPaletteModal
+  const baseDir = path.resolve(__dirname, '../src/http/views/dashboard');
+  const allModules = [
+    ...dashboardParts.STYLE_FILES.map((f) => path.join(baseDir, f)),
+    ...dashboardParts.PARTIAL_FILES.map((f) => path.join(baseDir, f)),
+    ...dashboardParts.SCRIPT_FILES.map((f) => path.join(baseDir, f))
+  ];
+  for (const file of allModules) {
+    const lineCount = fs.readFileSync(file, 'utf8').split('\n').length;
+    assert.ok(lineCount >= 40 && lineCount <= 2000, `Module ${path.basename(file)} exceeded [T7-14] line budget: ${lineCount}`);
+  }
+  assert.ok(DASHBOARD_HTML.includes('id="btnOpenCommandPalette"'));
+  assert.ok(DASHBOARD_HTML.includes('id="commandPaletteModal"'));
+  assert.ok(DASHBOARD_HTML.includes('aria-modal="true"'));
+
+  const allIds = [...dashboardParts.BODY.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]);
+  const seenIds = new Set();
+  for (const id of allIds) {
+    assert.equal(seenIds.has(id), false, `Duplicate DOM ID detected: ${id}`);
+    seenIds.add(id);
+  }
+
+  // 20b. Execute all 7 Dashboard scripts in node:vm with MockEventSource to verify SSE lifecycle + Command Palette RBAC/XSS
+  function makeClassList(initial = []) {
+    const s = new Set(initial);
+    return {
+      add: (...c) => c.forEach((x) => s.add(x)),
+      remove: (...c) => c.forEach((x) => s.delete(x)),
+      contains: (x) => s.has(x),
+      toggle: (x, force) => {
+        const next = force === undefined ? !s.has(x) : Boolean(force);
+        if (next) s.add(x); else s.delete(x);
+        return next;
+      }
+    };
+  }
+
+  const els = new Map();
+  const getEl = (id) => {
+    if (!els.has(id)) {
+      const initHidden = id.endsWith('Modal') || id.endsWith('Banner') || id.endsWith('Dropdown') ? ['hidden'] : [];
+      els.set(id, {
+        id,
+        tagName: 'DIV',
+        value: '',
+        textContent: '',
+        innerHTML: '',
+        title: '',
+        disabled: false,
+        style: {},
+        dataset: {},
+        classList: makeClassList(initHidden),
+        attributes: new Map(),
+        setAttribute(k, v) { this.attributes.set(k, String(v)); },
+        getAttribute(k) { return this.attributes.get(k) || null; },
+        hasAttribute(k) { return this.attributes.has(k); },
+        removeAttribute(k) { this.attributes.delete(k); },
+        appendChild() {},
+        insertBefore() {},
+        querySelector() { return null; },
+        querySelectorAll() { return []; },
+        addEventListener() {},
+        removeEventListener() {},
+        focus() {},
+        select() {},
+        scrollIntoView() {},
+        getContext() { return null; },
+        getBoundingClientRect() { return { left: 0, top: 0, right: 400, bottom: 300, width: 400, height: 300 }; }
+      });
+    }
+    return els.get(id);
+  };
+
+  const docListeners = new Map();
+  const esInstances = [];
+  class MockEventSource {
+    constructor(url) {
+      this.url = url;
+      this.readyState = 0;
+      this.closed = false;
+      this.listeners = new Map();
+      esInstances.push(this);
+    }
+    addEventListener(type, fn) {
+      if (!this.listeners.has(type)) this.listeners.set(type, []);
+      this.listeners.get(type).push(fn);
+    }
+    emit(type, dataObj) {
+      const payload = { data: typeof dataObj === 'string' ? dataObj : JSON.stringify(dataObj) };
+      for (const fn of (this.listeners.get(type) || [])) fn(payload);
+    }
+    triggerOpen() {
+      this.readyState = 1;
+      if (typeof this.onopen === 'function') this.onopen();
+      this.emit('connected', { ok: true, ts: Date.now() });
+    }
+    close() {
+      this.readyState = 2;
+      this.closed = true;
+    }
+  }
+
+  const scheduledTimers = [];
+  const sandbox = {
+    console,
+    Math,
+    Date,
+    Number,
+    String,
+    Boolean,
+    Array,
+    Object,
+    Set,
+    Map,
+    RegExp,
+    JSON,
+    Promise,
+    Error,
+    Intl,
+    URLSearchParams,
+    parseInt,
+    parseFloat,
+    isNaN,
+    isFinite,
+    encodeURIComponent,
+    decodeURIComponent,
+    EventSource: MockEventSource,
+    setTimeout: (fn, ms) => {
+      const rec = { fn, ms, cleared: false };
+      scheduledTimers.push(rec);
+      return rec;
+    },
+    clearTimeout: (rec) => { if (rec) rec.cleared = true; },
+    setInterval: () => ({}),
+    clearInterval: () => {},
+    requestAnimationFrame: () => 1,
+    cancelAnimationFrame: () => {},
+    fetch: async () => ({ ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => '{"ok":true}', json: async () => ({ ok: true }) }),
+    navigator: { onLine: true, clipboard: { writeText: async () => {} } },
+    localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+    sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+    location: { origin: 'http://127.0.0.1', pathname: '/', search: '', hash: '' },
+    history: { replaceState() {}, pushState() {} },
+    matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+    document: {
+      hidden: false,
+      activeElement: getEl('btnOpenCommandPalette'),
+      documentElement: { setAttribute() {}, getAttribute() { return 'deep-galaxy'; }, style: {}, classList: makeClassList() },
+      body: { classList: makeClassList(), style: {}, appendChild() {}, prepend() {} },
+      getElementById: (id) => getEl(id),
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      createElement: () => getEl('dyn_' + Math.random()),
+      addEventListener: (ev, fn) => {
+        if (!docListeners.has(ev)) docListeners.set(ev, []);
+        docListeners.get(ev).push(fn);
+      }
+    },
+    addEventListener: () => {}
+  };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(dashboardParts.SCRIPTS, sandbox, { filename: 'dashboard-all-7.js' });
+
+  let openedBotId = null;
+  let refreshHomeCalls = 0;
+  vm.runInContext(
+    `currentUser = { id: 'u1', username: 'user1', role: 'user', status: 'active', isPermanent: true };
+     bots = [{
+       id: 'bot-xss-1',
+       workerId: 'bot-xss-1',
+       botNumber: 1,
+       displayIndex: 1,
+       label: '<img src=x onerror=alert(1)>Farm01',
+       username: '<script>evil()</script>',
+       status: 'afk',
+       available: true,
+       tags: ['<b>vip</b>']
+     }];`,
+    sandbox
+  );
+  sandbox.openBot = (wid) => { openedBotId = wid; };
+  vm.runInContext(`openBot = window.openBot; refreshHome = async function() { window.__rh = (window.__rh || 0) + 1; };`, sandbox);
+
+  // SSE connects to /api/manager/stream, updates live indicator to SSE, handles maintenance & fleet_pulse, and closes on tab hide
+  sandbox.connectManagerSseStream();
+  assert.equal(esInstances.length, 1);
+  assert.equal(esInstances[0].url, '/api/manager/stream');
+  esInstances[0].triggerOpen();
+  assert.equal(getEl('homeSyncStatusPill').className, 'live-sync-pill is-sse');
+  assert.ok(getEl('homeSyncStatusText').textContent.includes('Trực tiếp (SSE)'), 'Open SSE stream must display ⚡ Trực tiếp (SSE)');
+
+  esInstances[0].emit('maintenance', { enabled: true, message: 'Bảo trì qua SSE' });
+  assert.equal(sandbox.getSystemMaintenanceInfo().enabled, true);
+  assert.equal(sandbox.getSystemMaintenanceInfo().message, 'Bảo trì qua SSE');
+
+  esInstances[0].emit('fleet_pulse', { rev: 9, workerId: 'bot-xss-1', reason: 'status' });
+  const pulseTimer = scheduledTimers.find((t) => !t.cleared && t.ms === 250);
+  assert.ok(pulseTimer, 'fleet_pulse must schedule 250ms debounced flush');
+  await pulseTimer.fn();
+  refreshHomeCalls = vm.runInContext('window.__rh || 0', sandbox);
+  assert.equal(refreshHomeCalls, 1, 'Debounced fleet_pulse must trigger refreshHome()');
+
+  sandbox.document.hidden = true;
+  for (const fn of (docListeners.get('visibilitychange') || [])) fn();
+  assert.equal(esInstances[0].closed, true, 'Hiding tab must close EventSource immediately');
+  sandbox.document.hidden = false;
+
+  // Command Palette RBAC & XSS protection
+  sandbox.openCommandPalette('');
+  const userPaletteHtml = getEl('commandPaletteList').innerHTML;
+  assert.equal(getEl('commandPaletteModal').classList.contains('hidden'), false);
+  assert.ok(!userPaletteHtml.includes('<img src=x'), 'Bot label XSS payload must be HTML-escaped');
+  assert.ok(!userPaletteHtml.includes('<script>evil'), 'MC username XSS payload must be HTML-escaped');
+  assert.ok(userPaletteHtml.includes('&lt;img src=x onerror=alert(1)&gt;Farm01'));
+  assert.ok(!userPaletteHtml.includes('Quản lý Người dùng'), 'Regular user must NOT see admin-only commands in Command Palette');
+  assert.ok(!userPaletteHtml.includes('Bật / Tắt Chế độ Bảo trì'), 'Regular user must NOT see admin maintenance toggle in Command Palette');
+
+  // Selecting item 0 jumps to bot-xss-1 and closes modal
+  sandbox.executeCommandPaletteItem(0);
+  assert.equal(openedBotId, 'bot-xss-1');
+  assert.equal(getEl('commandPaletteModal').classList.contains('hidden'), true);
+
+  // Admin role sees admin commands & empty-search query is escaped
+  vm.runInContext(`currentUser.role = 'admin';`, sandbox);
+  sandbox.openCommandPalette('');
+  const adminPaletteHtml = getEl('commandPaletteList').innerHTML;
+  assert.ok(adminPaletteHtml.includes('Quản lý Người dùng'), 'Admin must see Quản lý Người dùng command');
+  assert.ok(adminPaletteHtml.includes('Bật / Tắt Chế độ Bảo trì'), 'Admin must see Bật / Tắt Chế độ Bảo trì command');
+
+  sandbox.onCommandPaletteInput('<svg onload=alert(9)>no_match_xyz');
+  const emptyHtml = getEl('commandPaletteList').innerHTML;
+  assert.ok(!emptyHtml.includes('<svg onload='), 'Empty-state query echo must escape HTML');
+  assert.ok(emptyHtml.includes('&lt;svg onload=alert(9)&gt;'));
+  sandbox.closeCommandPalette();
+});
+
+test('21. Wave-7 AFK online classification, lossless SSE ?lastRev=/Last-Event-ID, maintenance partial checkpoint + tenant privacy, WorkerStore single-flight, Offhand UI & Discord grace/0-totem', async () => {
+  const http = require('node:http');
+  const zlib = require('node:zlib');
+  const vm = require('node:vm');
+  const crypto = require('node:crypto');
+  const { createApp } = require('../src/http/app');
+  const { createMockSupabaseServer } = require('./e2e/harness/mock-supabase');
+  const { createSupabaseClient } = require('../src/storage/supabase-client');
+  const { WorkerRegistry } = require('../src/services/worker-registry');
+  const { AccessControl } = require('../src/services/access-control');
+  const { encryptUserPassword, hashAdminPasswordAsync } = require('../src/utils/secrets');
+  const {
+    flushMaintenanceCompensation,
+    normalizeMaintenanceState,
+    sanitizeMaintenanceForSession
+  } = require('../src/utils/maintenance');
+  const { formatAccountPlanBadge, renderBotsList } = require('../src/discord/panels/renderer');
+  const dashboardParts = require('../src/http/views/dashboard');
+
+  // 21a. HTTP + SSE + AFK online classification + Brotli JSON compression + maintenance tenant-privacy stripping
+  const supabaseServer = await createMockSupabaseServer();
+  const supabaseClient = createSupabaseClient({ url: supabaseServer.url, secretKey: supabaseServer.secretKey });
+  const workerStore = new SupabaseWorkerStore(supabaseClient);
+  const store = new SupabaseDashboardStore(supabaseClient);
+  await workerStore.initialize();
+  await store.initialize();
+
+  const encKeyHex = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+  const encKey = Buffer.from(encKeyHex, 'hex');
+  const sec = encryptSecret('w'.repeat(32), encKey);
+  const nowIso = new Date().toISOString();
+  const connectedAfkIso = new Date(Date.now() - 120000).toISOString();
+
+  const seedWorkers = [];
+  const longTags = ['afk', 'vip', 'nether', 'kingmc', 'tier-alpha'];
+  for (let i = 1; i <= 8; i += 1) {
+    seedWorkers.push({
+      worker_id: `w7-${i}`,
+      bot_number: i,
+      name: `Wave7 Bot ${i} Extra Label For Brotli Payload`,
+      enabled: true,
+      provider: 'wispbyte',
+      service_url: '',
+      secret_ciphertext: sec,
+      settings: { tags: longTags },
+      status: {
+        state: i % 2 === 0 ? 'afk_locked' : 'afk',
+        online: true,
+        username: `Wave7Mc_${i}`,
+        connectedAt: connectedAfkIso,
+        uptimeSeconds: 120
+      },
+      events: [],
+      created_at: nowIso,
+      updated_at: nowIso
+    });
+  }
+  supabaseServer.seed('manager_workers', seedWorkers);
+
+  const registry = new WorkerRegistry({ store: workerStore, accessStore: store, encryptionKey: encKey });
+  await registry.load();
+  registry.setAdminPassword(await hashAdminPasswordAsync('AdminW7!99'));
+  registry.snapshotRevision = 5;
+
+  const futureIso = new Date(Date.now() + 7 * 86400000).toISOString();
+  await store.setAccess('user_w7', {
+    id: 'user_w7',
+    username: 'userw7',
+    password: encryptUserPassword('PassW7!99'),
+    role: 'user',
+    workerIds: seedWorkers.map((w) => w.worker_id),
+    status: 'active',
+    isPermanent: false,
+    expiresAt: futureIso
+  }, 'seed');
+
+  const sensitiveMaint = normalizeMaintenanceState({
+    enabled: true,
+    message: 'Bảo trì Wave-7',
+    startedAt: nowIso,
+    lastCompensatedAt: nowIso,
+    compensatedUsers: 4,
+    partialAnchorIso: nowIso,
+    partialCompensatedIds: ['usr_secret_a', 'usr_secret_b'],
+    updatedAt: nowIso,
+    updatedBy: 'superadmin_internal'
+  });
+  await store.setSetting('system_maintenance', sensitiveMaint);
+  store.cachedMaintenance = sensitiveMaint;
+  store.cachedMaintenanceAt = Date.now();
+
+  let displayOrderReads = 0;
+  const origGetSetting = store.getSetting.bind(store);
+  store.getSetting = async (key, opts) => {
+    if (key === 'bot_display_order') displayOrderReads += 1;
+    return origGetSetting(key, opts);
+  };
+
+  const app = createApp({
+    store,
+    workerStore,
+    registry,
+    broker: { dispatch: async () => ({ delivered: true, result: { ok: true } }) },
+    entitlementService: { redeem: async () => ({ ok: true }) },
+    accessControl: new AccessControl({ store }),
+    config: {
+      adminUsername: 'admin',
+      adminPassword: 'AdminW7!99',
+      sessionSecret: 'wave7-test-secret-0123456789abcdef',
+      encryptionKey: encKey,
+      encryptionKeyHex: encKeyHex,
+      publicBaseUrl: 'http://127.0.0.1'
+    },
+    logger: { info() {}, warn() {}, error() {}, debug() {} }
+  });
+
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const openReqs = [];
+  try {
+    const port = server.address().port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const doLogin = async (username, password, ip) => {
+      const r = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': ip },
+        body: JSON.stringify({ username, password })
+      });
+      return r.json();
+    };
+
+    const userLogin = await doLogin('userw7', 'PassW7!99', '10.77.1.1');
+    const adminLogin = await doLogin('admin', 'AdminW7!99', '10.77.1.2');
+    assert.ok(userLogin.token && adminLogin.token);
+    assert.equal(userLogin.maintenance.partialCompensatedIds, undefined, 'Non-admin /login must strip partialCompensatedIds');
+    assert.equal(userLogin.maintenance.partialAnchorIso, undefined, 'Non-admin /login must strip partialAnchorIso');
+    assert.equal(userLogin.maintenance.updatedBy, undefined, 'Non-admin /login must strip updatedBy');
+    assert.deepEqual(adminLogin.maintenance.partialCompensatedIds, ['usr_secret_a', 'usr_secret_b'], 'Admin /login keeps full maintenance state');
+
+    // Non-admin GET /api/auth/me strips sensitive maintenance fields
+    const meRes = await fetch(`${baseUrl}/api/auth/me`, {
+      headers: { Authorization: `Bearer ${userLogin.token}`, 'X-Forwarded-For': '10.77.1.1' }
+    });
+    const meJson = await meRes.json();
+    assert.equal(meJson.maintenance.partialCompensatedIds, undefined);
+    assert.equal(meJson.maintenance.compensatedUsers, undefined);
+    assert.equal(meJson.maintenance.updatedBy, undefined);
+
+    // Non-admin GET /api/manager/bots -> 0 bot_display_order reads, AFK/AFK_LOCKED online:true, br compression, sanitized maintenance
+    displayOrderReads = 0;
+    const rawBotsResp = await new Promise((resolve, reject) => {
+      http.get(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/api/manager/bots',
+          headers: {
+            Authorization: `Bearer ${userLogin.token}`,
+            'Accept-Encoding': 'br',
+            'X-Forwarded-For': '10.77.1.1'
+          }
+        },
+        (res) => {
+          const chunks = [];
+          res.on('data', (c) => chunks.push(c));
+          res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+        }
+      ).on('error', reject);
+    });
+    assert.equal(rawBotsResp.status, 200);
+    assert.equal(displayOrderReads, 0, 'Non-admin /bots must NOT query bot_display_order');
+    assert.equal(rawBotsResp.headers['content-encoding'], 'br', 'Large /bots JSON >= 1024B must compress with Brotli');
+    const botsJson = JSON.parse(zlib.brotliDecompressSync(rawBotsResp.body).toString('utf8'));
+    assert.equal(botsJson.bots.length, 8);
+    for (const b of botsJson.bots) {
+      assert.equal(b.online, true, `Bot ${b.workerId} in state=${b.status} must report online:true`);
+      assert.equal(b.available, true);
+      assert.equal(b.connectedAt, connectedAfkIso);
+    }
+    assert.equal(botsJson.maintenance.partialCompensatedIds, undefined);
+    assert.equal(botsJson.maintenance.updatedBy, undefined);
+
+    // Lossless SSE ?lastRev= & Last-Event-ID + stripped maintenance
+    const readConnectedSse = (pathWithQuery, headers = {}) => new Promise((resolve, reject) => {
+      let buf = '';
+      const req = http.request({
+        hostname: '127.0.0.1',
+        port,
+        path: pathWithQuery,
+        method: 'GET',
+        headers: { Authorization: `Bearer ${userLogin.token}`, 'X-Forwarded-For': '10.77.1.1', ...headers }
+      }, (res) => {
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          buf += chunk;
+          if (buf.includes('\n\n')) {
+            const firstBlock = buf.split('\n\n')[0];
+            try { req.destroy(); } catch (_) {}
+            resolve({ status: res.statusCode, firstBlock });
+          }
+        });
+      });
+      req.on('error', (err) => {
+        if (!buf.includes('\n\n')) reject(err);
+      });
+      req.end();
+      openReqs.push(req);
+    });
+
+    const sseMissed = await readConnectedSse('/api/manager/stream?lastRev=1');
+    assert.equal(sseMissed.status, 200);
+    assert.ok(sseMissed.firstBlock.includes('id: 5'), 'SSE connected event must emit id: <rev>');
+    const missedData = JSON.parse(sseMissed.firstBlock.split('\n').find((l) => l.startsWith('data:')).slice(5));
+    assert.equal(missedData.rev, 5);
+    assert.equal(missedData.missed, true);
+    assert.equal(missedData.maintenance.partialCompensatedIds, undefined);
+    assert.equal(missedData.maintenance.updatedBy, undefined);
+
+    const sseSynced = await readConnectedSse('/api/manager/stream', { 'Last-Event-ID': '5' });
+    const syncedData = JSON.parse(sseSynced.firstBlock.split('\n').find((l) => l.startsWith('data:')).slice(5));
+    assert.equal(syncedData.missed, false);
+
+    assert.equal(sanitizeMaintenanceForSession(sensitiveMaint, { role: 'admin' }).compensatedUsers, 4);
+  } finally {
+    for (const r of openReqs) { try { r.destroy(); } catch (_) {} }
+    app.setShuttingDown(true);
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+    await supabaseServer.close();
+  }
+
+  // 21b. flushMaintenanceCompensation mid-batch checkpoint & retry without double-compensation
+  const anchorTime = Date.parse('2026-11-27T10:00:00.000Z');
+  const endTime = anchorTime + 30 * 60000;
+  let maintDoc = normalizeMaintenanceState({
+    enabled: true,
+    message: 'Bảo trì checkpoint test',
+    startedAt: new Date(anchorTime).toISOString(),
+    lastCompensatedAt: new Date(anchorTime).toISOString()
+  });
+  const usersDb = new Map([
+    ['u1', { userId: 'u1', username: 'u1', status: 'active', isPermanent: false, expiresAt: new Date(anchorTime + 3600000).toISOString() }],
+    ['u2', { userId: 'u2', username: 'u2', status: 'active', isPermanent: false, expiresAt: new Date(anchorTime + 7200000).toISOString() }]
+  ]);
+  let failUserU2Once = true;
+  const setAccessCalls = new Map([['u1', 0], ['u2', 0]]);
+  const checkpointStore = {
+    invalidateCache() {},
+    async getSetting(k) { return k === 'system_maintenance' ? { ...maintDoc } : null; },
+    async setSetting(k, val) { if (k === 'system_maintenance') maintDoc = { ...val }; return val; },
+    async listAccess() { return [...usersDb.values()].map((u) => ({ ...u })); },
+    async setAccess(id, rec) {
+      if (id === 'u2' && failUserU2Once) {
+        failUserU2Once = false;
+        throw new Error('503 temporary upstream error');
+      }
+      setAccessCalls.set(id, (setAccessCalls.get(id) || 0) + 1);
+      usersDb.set(id, { ...rec });
+    }
+  };
+  await assert.rejects(
+    () => flushMaintenanceCompensation(checkpointStore, { toMs: endTime, turnOff: true, actor: 'admin' }),
+    /503 temporary/
+  );
+  assert.deepEqual(maintDoc.partialCompensatedIds, ['u1']);
+  assert.equal(maintDoc.partialAnchorIso, new Date(anchorTime).toISOString());
+  const finalMaint = await flushMaintenanceCompensation(checkpointStore, { toMs: endTime, turnOff: true, actor: 'admin' });
+  assert.equal(setAccessCalls.get('u1'), 1, 'u1 already checkpointed must NOT be double-compensated on retry');
+  assert.equal(setAccessCalls.get('u2'), 1, 'u2 must be compensated on retry');
+  assert.equal(finalMaint.enabled, false);
+  assert.equal(finalMaint.compensatedUsers, 2);
+  assert.deepEqual(finalMaint.partialCompensatedIds, []);
+  assert.equal(finalMaint.partialAnchorIso, null);
+
+  // 21c. SupabaseWorkerStore.get() & getByNumber() single-flight + clone isolation + stale-if-error + fail-closed 42501
+  let itemSelects = 0;
+  let numSelects = 0;
+  let forceErrMode = null;
+  const singleRow = {
+    worker_id: 'w9',
+    bot_number: 9,
+    name: 'SingleFlight 9',
+    provider: 'wispbyte',
+    service_url: '',
+    render_service_id: '',
+    secret_ciphertext: 'enc',
+    enabled: true,
+    settings: { nested: { flag: true } },
+    status: { state: 'afk', online: true },
+    last_event: null,
+    last_heartbeat: nowIso,
+    created_at: nowIso,
+    updated_at: nowIso
+  };
+  const sfClient = {
+    from() {
+      return {
+        select() {
+          return {
+            eq(col) {
+              return {
+                async maybeSingle() {
+                  await new Promise((r) => setTimeout(r, 15));
+                  if (forceErrMode === '503') {
+                    const e = new Error('503 Service Unavailable');
+                    e.status = 503;
+                    throw e;
+                  }
+                  if (forceErrMode === '42501') {
+                    const e = new Error('permission denied');
+                    e.code = '42501';
+                    throw e;
+                  }
+                  if (col === 'worker_id') itemSelects += 1;
+                  if (col === 'bot_number') numSelects += 1;
+                  return { data: singleRow, error: null };
+                }
+              };
+            }
+          };
+        }
+      };
+    }
+  };
+  const sfStore = new SupabaseWorkerStore(sfClient, { cacheTtlMs: 25 });
+  const [g1, g2, g3] = await Promise.all([sfStore.get('w9'), sfStore.get('w9'), sfStore.get('w9')]);
+  assert.equal(itemSelects, 1, 'Concurrent get() calls must coalesce into 1 query');
+  g1.status.state = 'mutated_caller';
+  assert.equal(g2.status.state, 'afk', 'Returned clones must be isolated across callers');
+  assert.equal(g3.botNumber, 9);
+
+  sfStore.invalidateCache();
+  const [n1, n2] = await Promise.all([sfStore.getByNumber(9), sfStore.getByNumber(9)]);
+  assert.equal(numSelects, 1, 'Concurrent getByNumber() calls must coalesce into 1 query');
+  assert.equal(n1.workerId, 'w9');
+  assert.equal(n2.workerId, 'w9');
+
+  await new Promise((r) => setTimeout(r, 35)); // expire TTL while within staleUntil
+  forceErrMode = '503';
+  const staleRes = await sfStore.get('w9');
+  assert.equal(staleRes.workerId, 'w9', 'Transient 503 must serve bounded stale-if-error entry');
+  forceErrMode = '42501';
+  await assert.rejects(() => sfStore.get('w9'), /permission denied/);
+
+  // 21d. Web UI Offhand object display + Empty filter recovery + [T7-14]
+  const baseDir = path.resolve(__dirname, '../src/http/views/dashboard');
+  const allModules = [
+    ...dashboardParts.STYLE_FILES.map((f) => path.join(baseDir, f)),
+    ...dashboardParts.PARTIAL_FILES.map((f) => path.join(baseDir, f)),
+    ...dashboardParts.SCRIPT_FILES.map((f) => path.join(baseDir, f))
+  ];
+  for (const file of allModules) {
+    const lineCount = fs.readFileSync(file, 'utf8').split('\n').length;
+    assert.ok(lineCount >= 40 && lineCount <= 1950, `Module ${path.basename(file)} exceeded Wave-7 1950 line budget: ${lineCount}`);
+  }
+  const allDomIds = [...dashboardParts.BODY.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]);
+  assert.equal(new Set(allDomIds).size, allDomIds.length, 'Dashboard HTML must have 0 duplicate DOM IDs');
+
+  const uiEls = new Map();
+  const makeCls = () => {
+    const s = new Set();
+    return { add: (...c) => c.forEach((x) => s.add(x)), remove: (...c) => c.forEach((x) => s.delete(x)), contains: (x) => s.has(x), toggle: (x, f) => (f === undefined ? (s.has(x) ? (s.delete(x), false) : (s.add(x), true)) : (f ? (s.add(x), true) : (s.delete(x), false))) };
+  };
+  const getUiEl = (id) => {
+    if (!uiEls.has(id)) {
+      const el = {
+        id,
+        value: '',
+        textContent: '',
+        _html: '',
+        style: {},
+        dataset: {},
+        children: [],
+        parent: null,
+        classList: makeCls(),
+        get innerHTML() {
+          if (this.children.length > 0 && !this._html) {
+            return this.children.map((c) => c._rawHtml || c.innerHTML || '').join('');
+          }
+          return this._html;
+        },
+        set innerHTML(val) {
+          this._html = String(val || '');
+          this.children = [];
+          const trimmed = this._html.trim();
+          if (trimmed) {
+            const child = getUiEl(`child_${id}_${Math.random().toString(36).slice(2, 7)}`);
+            child.parent = this;
+            child._rawHtml = trimmed;
+            child._html = trimmed;
+            const clsMatch = trimmed.match(/class="([^"]+)"/i);
+            if (clsMatch) clsMatch[1].split(/\s+/).filter(Boolean).forEach((c) => child.classList.add(c));
+            const bidMatch = trimmed.match(/data-bot-id="([^"]+)"/i);
+            if (bidMatch) child.dataset.botId = bidMatch[1];
+            this.children.push(child);
+          }
+        },
+        get firstElementChild() { return this.children[0] || null; },
+        remove() {
+          if (this.parent) {
+            this.parent.children = this.parent.children.filter((c) => c !== this);
+            this.parent._html = this.parent.children.map((c) => c._rawHtml || c.innerHTML || '').join('');
+            this.parent = null;
+          }
+        },
+        setAttribute(k, v) { if (k === 'data-bot-id') this.dataset.botId = String(v); },
+        getAttribute(k) { return k === 'data-bot-id' ? (this.dataset.botId || null) : null; },
+        removeAttribute() {},
+        appendChild(c) { c.parent = this; this.children.push(c); this._html = ''; },
+        insertBefore(c, ref) {
+          c.parent = this;
+          this.children = this.children.filter((x) => x !== c);
+          const idx = ref ? this.children.indexOf(ref) : -1;
+          if (idx >= 0) this.children.splice(idx, 0, c);
+          else this.children.push(c);
+          this._html = this.children.map((x) => x._rawHtml || x.innerHTML || '').join('');
+        },
+        querySelector() { return null; },
+        querySelectorAll() { return []; },
+        addEventListener() {},
+        getContext() { return null; }
+      };
+      uiEls.set(id, el);
+    }
+    return uiEls.get(id);
+  };
+  const uiSandbox = {
+    console, Math, Date, Number, String, Boolean, Array, Object, Set, Map, RegExp, JSON, Promise, Error, Intl, URLSearchParams,
+    parseInt, parseFloat, isNaN, isFinite, encodeURIComponent, decodeURIComponent,
+    setTimeout: () => ({}), clearTimeout: () => {}, setInterval: () => ({}), clearInterval: () => {},
+    requestAnimationFrame: () => 1, cancelAnimationFrame: () => {},
+    navigator: { onLine: true },
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    sessionStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    location: { origin: 'http://127.0.0.1', pathname: '/', search: '', hash: '' },
+    history: { replaceState() {}, pushState() {} },
+    matchMedia: () => ({ matches: false, addEventListener() {} }),
+    document: {
+      hidden: false,
+      documentElement: { setAttribute() {}, getAttribute: () => 'deep-galaxy', style: {}, classList: makeCls() },
+      body: { classList: makeCls(), style: {}, appendChild() {}, prepend() {} },
+      getElementById: getUiEl,
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      createElement: (tag) => getUiEl(`dyn_${tag}_${crypto.randomBytes(2).toString('hex')}`),
+      addEventListener() {}
+    },
+    addEventListener() {}
+  };
+  uiSandbox.window = uiSandbox;
+  uiSandbox.globalThis = uiSandbox;
+  vm.createContext(uiSandbox);
+  vm.runInContext(dashboardParts.SCRIPTS, uiSandbox, { filename: 'dashboard-wave7.js' });
+  vm.runInContext(`
+    currentUser = { id: 'u7', username: 'u7', role: 'user', status: 'active', isPermanent: true };
+    bots = [{ id: 'b1', workerId: 'b1', botNumber: 1, name: 'Bot 01', label: 'Bot 01', username: 'Hero', status: 'afk', online: true, available: true, tags: [] }];
+    detailBot = bots[0];
+    detailInventory = {
+      health: 20,
+      food: 20,
+      goldenAppleCount: 3,
+      totemCount: 2,
+      foodCount: 16,
+      revision: 4,
+      armor: {},
+      offhand: { name: 'totem_of_undying', count: 1 },
+      slots: { '45': { name: 'totem_of_undying', count: 1 } }
+    };
+  `, uiSandbox);
+  uiSandbox.renderDetailInventory();
+  const offhandLabel = getUiEl('detailOffhand').textContent;
+  assert.ok(offhandLabel && !offhandLabel.includes('[object Object]'), `Offhand label must not show [object Object], got: ${offhandLabel}`);
+
+  getUiEl('searchInput').value = '__no_such_bot_wave7__';
+  uiSandbox.filterBots();
+  assert.ok(getUiEl('botGrid').innerHTML.includes('Xóa bộ lọc (1 bot)'), 'Empty search filter must render 1-click recovery button');
+  uiSandbox.resetFleetFilters();
+  assert.equal(getUiEl('searchInput').value, '');
+  assert.ok(!getUiEl('botGrid').innerHTML.includes('empty-filter-state'), 'resetFleetFilters() must restore bot cards');
+
+  // 21e. Discord grace badge + 0 Totem survival warning + <1m uptime
+  const graceBadge = formatAccountPlanBadge({ role: 'user', status: 'grace_period', inGracePeriod: true });
+  assert.equal(graceBadge, '⏳ `Ân hạn · Gia hạn ngay`');
+  const zeroTotemPanel = renderBotsList({
+    user: { id: 'u7', username: 'u7', role: 'user', status: 'grace_period', inGracePeriod: true },
+    workers: [{
+      workerId: 'w7',
+      botNumber: 7,
+      name: 'RiskBot',
+      status: { state: 'afk', online: true, username: 'RiskUser', totemCount: 0, health: 18, pingMs: 35, tps: 19.8 }
+    }],
+    page: 0
+  });
+  const panelDesc = zeroTotemPanel.embeds[0].data.description;
+  assert.ok(panelDesc.includes('⏳ `Ân hạn · Gia hạn ngay`'));
+  assert.ok(panelDesc.includes('🛡️ `0 Totem`'));
+});

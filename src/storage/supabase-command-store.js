@@ -115,7 +115,11 @@ class SupabaseCommandStore {
     const envIdleMs = process.env.COMMAND_IDLE_EMPTY_CACHE_MS !== undefined ? Number(process.env.COMMAND_IDLE_EMPTY_CACHE_MS) : NaN;
     const parsedIdleMs = options?.idleEmptyCacheMs !== undefined ? Number(options.idleEmptyCacheMs) : envIdleMs;
     this.idleEmptyCacheMs = Number.isFinite(parsedIdleMs) && parsedIdleMs >= 0 ? parsedIdleMs : 4000;
+    const parsedPeekMs = options?.peekDedupTtlMs !== undefined ? Number(options.peekDedupTtlMs) : 250;
+    this.peekDedupTtlMs = Number.isFinite(parsedPeekMs) && parsedPeekMs >= 0 ? parsedPeekMs : 250;
     this._emptyQueueVerifiedUntil = new Map();
+    this._peekCache = new Map();
+    this._peekInFlight = new Map();
     this._noPendingSyncUntil = 0;
     this.stateSyncRpcState = {
       ok: true,
@@ -265,7 +269,7 @@ class SupabaseCommandStore {
     } catch (_) {}
   }
 
-  invalidateIdleGate(workerId = null) {
+  _clearEmptyQueueGateOnly(workerId = null) {
     if (workerId === null || workerId === undefined) {
       this._emptyQueueVerifiedUntil.clear();
       return;
@@ -275,31 +279,142 @@ class SupabaseCommandStore {
     this._emptyQueueVerifiedUntil.delete(raw.toLowerCase());
   }
 
+  invalidatePeekCache(workerId = null) {
+    if (workerId === null || workerId === undefined) {
+      for (const inflight of this._peekInFlight.values()) {
+        inflight.invalidated = true;
+      }
+      this._peekInFlight.clear();
+      this._peekCache.clear();
+      return;
+    }
+    const targetLower = String(workerId).trim().toLowerCase();
+    if (!targetLower) return;
+    for (const [key, entry] of this._peekCache.entries()) {
+      if (!entry?.idSetLower || entry.idSetLower.has(targetLower)) {
+        this._peekCache.delete(key);
+      }
+    }
+    for (const [key, inflight] of this._peekInFlight.entries()) {
+      if (!inflight?.idSetLower || inflight.idSetLower.has(targetLower)) {
+        inflight.invalidated = true;
+        this._peekInFlight.delete(key);
+      }
+    }
+  }
+
+  invalidateIdleGate(workerId = null) {
+    this._clearEmptyQueueGateOnly(workerId);
+    this.invalidatePeekCache(workerId);
+  }
+
   async peekQueuedWorkerIds(workerIds = []) {
     if (!Array.isArray(workerIds) || workerIds.length === 0) return [];
     if (!this.client || typeof this.client.from !== 'function') return [];
     const uniqueIds = [...new Set(workerIds.map((id) => String(id || '').trim()).filter(Boolean))];
     if (uniqueIds.length === 0) return [];
-    try {
-      let query = this.client.from(TABLE).select('worker_id');
-      if (typeof query?.in !== 'function') return [];
-      query = query.in('worker_id', uniqueIds).eq('status', 'queued');
-      if (typeof query.gt === 'function') {
-        query = query.gt('expires_at', new Date().toISOString());
+
+    const requestedLowerSet = new Set(uniqueIds.map((id) => id.toLowerCase()));
+    const cacheKey = [...requestedLowerSet].sort().join('\u0000');
+    const filterForCaller = (readyList) => {
+      if (!Array.isArray(readyList) || readyList.length === 0) return [];
+      return readyList.filter((id) => requestedLowerSet.has(String(id).toLowerCase()));
+    };
+
+    const now = Date.now();
+    if (this.peekDedupTtlMs > 0) {
+      const directHit = this._peekCache.get(cacheKey);
+      if (directHit && now < directHit.expiresAt) {
+        return [...directHit.ready];
       }
-      if (typeof query.limit === 'function') {
-        query = query.limit(Math.max(10, uniqueIds.length * 2));
+      if (directHit) this._peekCache.delete(cacheKey);
+      for (const [k, entry] of this._peekCache.entries()) {
+        if (now >= entry.expiresAt) {
+          this._peekCache.delete(k);
+          continue;
+        }
+        if (entry.idSetLower && entry.idSetLower.size >= requestedLowerSet.size) {
+          let coversAll = true;
+          for (const reqId of requestedLowerSet) {
+            if (!entry.idSetLower.has(reqId)) {
+              coversAll = false;
+              break;
+            }
+          }
+          if (coversAll) return filterForCaller(entry.ready);
+        }
       }
-      const { data, error } = await query;
-      if (error || !Array.isArray(data) || data.length === 0) return [];
-      const ready = [...new Set(data.map((row) => String(row?.worker_id || '').trim()).filter(Boolean))];
-      for (const wid of ready) {
-        this.invalidateIdleGate(wid);
-      }
-      return ready;
-    } catch (_) {
-      return [];
     }
+
+    const directInFlight = this._peekInFlight.get(cacheKey);
+    if (directInFlight && !directInFlight.invalidated) {
+      const shared = await directInFlight.promise;
+      return [...shared];
+    }
+    for (const inflight of this._peekInFlight.values()) {
+      if (inflight.invalidated || !inflight.idSetLower || inflight.idSetLower.size < requestedLowerSet.size) continue;
+      let coversAll = true;
+      for (const reqId of requestedLowerSet) {
+        if (!inflight.idSetLower.has(reqId)) {
+          coversAll = false;
+          break;
+        }
+      }
+      if (coversAll) {
+        const shared = await inflight.promise;
+        return filterForCaller(shared);
+      }
+    }
+
+    const inflightEntry = { idSetLower: requestedLowerSet, invalidated: false, promise: null };
+    const promise = (async () => {
+      try {
+        let query = this.client.from(TABLE).select('worker_id');
+        if (typeof query?.in !== 'function') return [];
+        query = query.in('worker_id', uniqueIds).eq('status', 'queued');
+        if (typeof query.gt === 'function') {
+          query = query.gt('expires_at', new Date().toISOString());
+        }
+        if (typeof query.limit === 'function') {
+          query = query.limit(Math.max(10, uniqueIds.length * 2));
+        }
+        const { data, error } = await query;
+        if (error || !Array.isArray(data)) return [];
+        const ready = [...new Set(data.map((row) => String(row?.worker_id || '').trim()).filter(Boolean))];
+        for (const wid of ready) {
+          this._clearEmptyQueueGateOnly(wid);
+        }
+        if (!inflightEntry.invalidated && this.peekDedupTtlMs > 0) {
+          if (this._peekCache.size >= 128 && !this._peekCache.has(cacheKey)) {
+            const sweepNow = Date.now();
+            for (const [k, v] of this._peekCache.entries()) {
+              if (!v || sweepNow >= v.expiresAt) this._peekCache.delete(k);
+            }
+            if (this._peekCache.size >= 128) {
+              const oldest = this._peekCache.keys().next().value;
+              if (oldest !== undefined) this._peekCache.delete(oldest);
+            }
+          }
+          this._peekCache.set(cacheKey, {
+            idSetLower: requestedLowerSet,
+            ready,
+            expiresAt: Date.now() + this.peekDedupTtlMs
+          });
+        }
+        return ready;
+      } catch (_) {
+        return [];
+      } finally {
+        if (this._peekInFlight.get(cacheKey) === inflightEntry) {
+          this._peekInFlight.delete(cacheKey);
+        }
+      }
+    })();
+
+    inflightEntry.promise = promise;
+    this._peekInFlight.set(cacheKey, inflightEntry);
+    const result = await promise;
+    return [...result];
   }
 
   _markQueueVerifiedEmpty(workerId) {

@@ -2,15 +2,17 @@
 function updateEquipSlot(elId, item) {
   const el = document.getElementById(elId);
   if (!el) return;
-  const label = itemLabel(item);
-  if (!item || !item.name) {
+  const normItem = typeof item === 'string' && item.trim() ? { name: item.trim(), count: 1 } : item;
+  if (!normItem || typeof normItem !== 'object' || (!normItem.name && !normItem.displayName)) {
     el.innerHTML = '<span class="equip-text">-</span>';
     return;
   }
-  const iconUrl = typeof getMinecraftItemIconUrl === 'function' ? getMinecraftItemIconUrl(item.name) : '';
+  const label = itemLabel(normItem);
+  const rawName = String(normItem.name || normItem.displayName || '');
+  const iconUrl = typeof getMinecraftItemIconUrl === 'function' ? getMinecraftItemIconUrl(rawName) : '';
   let imgHtml = '';
   if (iconUrl) {
-    imgHtml = '<img class="equip-icon-img" src="' + escapeHtml(iconUrl) + '" alt="' + escapeHtml(label) + '" data-item-name="' + escapeHtml(item.name) + '" onerror="handleItemIconError(this, this.dataset.itemName)" loading="lazy">';
+    imgHtml = '<img class="equip-icon-img" src="' + escapeHtml(iconUrl) + '" alt="' + escapeHtml(label) + '" data-item-name="' + escapeHtml(rawName) + '" onerror="handleItemIconError(this, this.dataset.itemName)" loading="lazy">';
   }
   el.innerHTML = imgHtml + '<span class="equip-text">' + escapeHtml(label) + '</span>';
 }
@@ -40,10 +42,13 @@ function renderDetailInventory(){
   document.getElementById('detailFoodBar').style.width=(isOfflineBot ? 0 : (food/20*100))+'%';
   document.getElementById('detailGolden').textContent=String(activeInv.goldenAppleCount||0);
   document.getElementById('detailTotem').textContent=String(activeInv.totemCount||0);
-  const offSlotObj = activeInv.slots ? activeInv.slots['45'] : null;
+  const offSlotObj = (activeInv.slots && activeInv.slots['45']) || (activeInv.offhand && typeof activeInv.offhand === 'object' ? activeInv.offhand : null);
+  const offStrClean = typeof activeInv.offhand === 'string' && activeInv.offhand.trim()
+    ? activeInv.offhand.trim().replace(/^minecraft:/i, '').replace(/_/g, ' ')
+    : '';
   document.getElementById('detailOffhand').textContent = isOfflineBot
     ? '-'
-    : (offSlotObj && offSlotObj.name ? itemLabel(offSlotObj) : (activeInv.offhand ? String(activeInv.offhand).replace(/_/g, ' ') : 'Trống'));
+    : ((offSlotObj && (offSlotObj.name || offSlotObj.displayName)) ? itemLabel(offSlotObj) : (offStrClean || 'Trống'));
   document.getElementById('detailFoodCount').textContent = String(activeInv.foodCount || 0);
   document.getElementById('detailInventoryRevision').textContent = 'Đồng bộ túi đồ #' + String(activeInv.revision || 0) + (isOfflineBot ? ' • Bot đang tắt' : ' • Tự động cập nhật');
   const armor=activeInv.armor||{};
@@ -51,7 +56,7 @@ function renderDetailInventory(){
   updateEquipSlot('equipTorso', armor.torso);
   updateEquipSlot('equipLegs', armor.legs);
   updateEquipSlot('equipFeet', armor.feet);
-  const off=activeInv.slots?activeInv.slots['45']:null;
+  const off = isOfflineBot ? null : (offSlotObj || (typeof activeInv.offhand === 'string' && activeInv.offhand.trim() ? { name: activeInv.offhand.trim(), count: 1 } : null));
   updateEquipSlot('equipOffhand', off);
 
   const slots=activeInv.slots||{};

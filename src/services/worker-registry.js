@@ -374,7 +374,41 @@ class WorkerRegistry {
     this._secretRefreshPromises = new Map(); // botId -> in-flight credential lookup promise
     this._lastBypassReloadAt = new Map(); // botId -> ms (throttle 1-shot bypassCache reload on secret mismatch)
     this._hasActivePoller = null;
+    this.snapshotRevision = 0;
+    this._pulseListeners = new Set();
+    this.maxPulseListeners = 256;
     this.statusLock = new AsyncKeyLock();
+  }
+
+  onPulse(listener) {
+    if (typeof listener !== 'function') return () => false;
+    if (this._pulseListeners.size >= this.maxPulseListeners && !this._pulseListeners.has(listener)) {
+      const oldest = this._pulseListeners.values().next().value;
+      if (oldest) this._pulseListeners.delete(oldest);
+    }
+    this._pulseListeners.add(listener);
+    let active = true;
+    return () => {
+      if (!active) return false;
+      active = false;
+      return this._pulseListeners.delete(listener);
+    };
+  }
+
+  _emitPulse(workerId = null, reason = 'state_changed') {
+    this.snapshotRevision = (this.snapshotRevision || 0) + 1;
+    if (!this._pulseListeners || this._pulseListeners.size === 0) return;
+    const payload = {
+      rev: this.snapshotRevision,
+      workerId: workerId ? String(workerId).trim().toLowerCase() : null,
+      reason: String(reason || 'state_changed'),
+      ts: Date.now()
+    };
+    for (const listener of [...this._pulseListeners]) {
+      try {
+        listener(payload);
+      } catch (_) {}
+    }
   }
 
   setPollerCheck(fn) {
@@ -622,7 +656,13 @@ class WorkerRegistry {
     await this.store.create(record);
     this.clearBotMemory(id);
     this.secretCache.set(id, { secret, enabled: true, cachedAt: Date.now() });
+    this.bumpRevision(id);
+    this._emitPulse(id, 'register');
     return { worker: this.publicView(record), secret };
+  }
+
+  async register(opts = {}) {
+    return this.add(opts);
   }
 
   async remove(workerId) {
@@ -632,6 +672,7 @@ class WorkerRegistry {
       if (removed) {
         await this.accessStore?.removeWorkerAssignments?.(id);
         this.clearBotMemory(id);
+        this._emitPulse(id, 'remove');
         // Do NOT shift remaining workers' botNumber on deletion (botNumber is a stable identity
         // backed by manager_bot_number_seq; shifting it causes cross-tenant IDOR & UNIQUE collisions).
       }
@@ -807,7 +848,9 @@ class WorkerRegistry {
       this.clearBotMemory(record.workerId, { preserveSettingsRev: true });
       this.bumpRevision(record.workerId);
       this.bumpSettingsRevision(record.workerId);
-      return this.publicView(await this.find(record.workerId, { bypassCache: true }));
+      const resetView = this.publicView(await this.find(record.workerId, { bypassCache: true }));
+      this._emitPulse(record.workerId, 'reset');
+      return resetView;
     });
   }
 
@@ -1088,7 +1131,8 @@ class WorkerRegistry {
       const needsProviderHeal = needsProviderHealToWispbyte || needsProviderHealToRender;
 
       const prevFingerprint = this.lastDbStatusFingerprint.get(id);
-      if (prevFingerprint !== fingerprint || needsProviderHeal) {
+      const stateChanged = prevFingerprint !== fingerprint || needsProviderHeal;
+      if (stateChanged) {
         this.bumpRevision(id);
       }
 
@@ -1118,6 +1162,9 @@ class WorkerRegistry {
       const updated = rawUpdated || { ...existing, ...updatePatch, status: safeStatus, updatedAt: managerNow };
       this.lastDbStatusFingerprint.set(id, fingerprint);
       this.lastDbStatusPersistAt.set(id, Date.now());
+      if (stateChanged) {
+        this._emitPulse(id, 'status');
+      }
 
       // Kiểm tra và gửi cảnh báo admin (bỏ qua sự cố kết nối / gameplay Minecraft bình thường)
       if (this.adminNotifier && updated && safeStatus.state === 'error') {
@@ -1202,6 +1249,7 @@ class WorkerRegistry {
       this.lastDbStatusFingerprint.delete(id);
       this.bumpRevision(id);
       this.bumpSettingsRevision(id);
+      this._emitPulse(id, 'offline_stop');
       return this.publicView(rawUpdated || { ...existing, status: safeStatus });
     });
   }
@@ -1229,6 +1277,7 @@ class WorkerRegistry {
       this.lastDbStatusPersistAt.set(id, Date.now());
       if (needsHeal) {
         this.bumpRevision(id);
+        this._emitPulse(id, 'provider_heal');
       }
       return this.publicView(rawUpdated || { ...existing, ...patch });
     });
@@ -1250,13 +1299,29 @@ class WorkerRegistry {
     if (isChat && ['outgoing', 'spawn_command', 'auto_chat', 'scheduled_chat'].includes(rawSource) && safeMessage && !safeMessage.startsWith('→')) {
       safeMessage = `→ ${safeMessage}`.slice(0, 300);
     }
+    const parsedRepeat = Number(event?.repeatCount);
+    const incomingRepeat = Number.isFinite(parsedRepeat) && parsedRepeat >= 1
+      ? Math.min(1000, Math.floor(parsedRepeat))
+      : 1;
+    let occurredAtDate = event?.occurredAt ? new Date(event.occurredAt) : new Date();
+    if (Number.isNaN(occurredAtDate.getTime())) occurredAtDate = new Date();
+    let incomingFirstAt = null;
+    if (event?.firstOccurredAt) {
+      const parsedFirst = new Date(event.firstOccurredAt);
+      if (!Number.isNaN(parsedFirst.getTime())) incomingFirstAt = parsedFirst;
+    }
     const safeEvent = {
       type: safeType,
       message: safeMessage,
       ...(rawSource ? { source: rawSource } : {}),
-      occurredAt: event?.occurredAt ? new Date(event.occurredAt) : new Date()
+      ...(incomingRepeat > 1
+        ? {
+            firstOccurredAt: incomingFirstAt || occurredAtDate,
+            repeatCount: incomingRepeat
+          }
+        : (incomingFirstAt ? { firstOccurredAt: incomingFirstAt } : {})),
+      occurredAt: occurredAtDate
     };
-    if (Number.isNaN(safeEvent.occurredAt.getTime())) safeEvent.occurredAt = new Date();
 
     if (isChat) {
       // Chat messages stay in botChatLogsCache & best-effort persist to Supabase bot_chat_logs
@@ -1270,27 +1335,34 @@ class WorkerRegistry {
         void this.store.addChatLog(stableBotKey, safeEvent).catch(() => {});
       }
     } else {
-      // Coalesce consecutive identical noisy events within 45s to prevent DB write & 100-line log buffer exhaustion
+      // Coalesce consecutive identical noisy events within 45s (additive with Worker source-side repeatCount)
       const logs = this.botLogsCache.get(id) || [];
       const prev = logs.length > 0 ? logs[logs.length - 1] : null;
       const prevTimeMs = prev?.occurredAt ? new Date(prev.occurredAt).getTime() : NaN;
       const curTimeMs = safeEvent.occurredAt.getTime();
+      const firstRefMs = incomingFirstAt ? incomingFirstAt.getTime() : curTimeMs;
+      const withinCoalesceWindow = Number.isFinite(prevTimeMs) && (
+        Math.abs(curTimeMs - prevTimeMs) <= 45000 ||
+        Math.abs(firstRefMs - prevTimeMs) <= 45000
+      );
       const canCoalesceRepeat = Boolean(
         COALESCE_REPEATABLE_EVENT_TYPES.has(safeEvent.type) &&
         prev &&
         prev.type === safeEvent.type &&
         prev.message === safeEvent.message &&
-        Number.isFinite(prevTimeMs) &&
-        Math.abs(curTimeMs - prevTimeMs) <= 45000
+        withinCoalesceWindow
       );
       if (canCoalesceRepeat) {
+        const prevCount = Math.max(1, Math.min(1000, Math.floor(Number(prev.repeatCount) || 1)));
+        const nextCount = Math.min(1000, prevCount + incomingRepeat);
         if (!prev.firstOccurredAt) prev.firstOccurredAt = prev.occurredAt;
         prev.occurredAt = safeEvent.occurredAt;
-        prev.repeatCount = (Number(prev.repeatCount) || 1) + 1;
-        safeEvent.repeatCount = prev.repeatCount;
+        prev.repeatCount = nextCount;
+        safeEvent.firstOccurredAt = prev.firstOccurredAt;
+        safeEvent.repeatCount = nextCount;
         this.botLogsCache.set(id, logs);
         this.botLogRev.set(id, (this.botLogRev.get(id) || 0) + 1);
-        if (prev.repeatCount % 10 === 0) {
+        if (Math.floor(prevCount / 10) !== Math.floor(nextCount / 10)) {
           await this.store.addEvent(id, { ...prev });
         }
       } else {
@@ -1302,6 +1374,7 @@ class WorkerRegistry {
       }
     }
     this.bumpRevision(id);
+    this._emitPulse(id, isChat ? 'chat_event' : 'event');
 
     const ERROR_EVENT_TYPES = [
       'crash', 'process_error', 'system_error', 'error'
@@ -1430,6 +1503,7 @@ class WorkerRegistry {
     await this.store.patchSettings(worker.workerId, { mcCredentialsCiphertext, _settingsRevision: nextSettingsRev });
     this.workerSettingsRev.set(idLower, nextSettingsRev);
     this.bumpRevision(worker.workerId);
+    this._emitPulse(worker.workerId, 'credentials');
     return { username: name, credentialsConfigured: true };
   }
 
@@ -1685,6 +1759,7 @@ class WorkerRegistry {
       if (bumpsWorkerSettings) {
         this.workerSettingsRev.set(id, next._settingsRevision);
       }
+      this._emitPulse(worker.workerId, 'settings');
     }
     return {
       afkMode: 'still',
@@ -1721,6 +1796,8 @@ class WorkerRegistry {
         this.secretCache.delete(id);
         this.summaryCache.delete(id);
       }
+      this.bumpRevision(id);
+      this._emitPulse(id, isEnabled ? 'enabled' : 'disabled');
       return updated;
     });
   }
@@ -1813,6 +1890,7 @@ class WorkerRegistry {
     this._lastLogRefreshAt.delete(`${kind}:${id}`);
     this._lastLogRefreshAt.delete(`all:${id}`);
     this.bumpRevision(id);
+    this._emitPulse(id, 'logs_cleared');
     if (typeof this.store?.clearLogs === 'function') {
       await this.store.clearLogs(id, { botNumber: existing?.botNumber || null, kind }).catch(() => {});
     }

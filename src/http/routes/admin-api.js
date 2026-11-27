@@ -13,7 +13,12 @@ const { validateSafeBotUrl } = require('../../services/proxy-validation');
 const { isWispbyteControlPanelUrl } = require('../../utils/http');
 const { resolveClientIp } = require('../../services/captcha');
 const { resolveRequestOrigin, DEFAULT_PUBLIC_MANAGER_URL } = require('../../config/host-runtime');
-const { getMaintenanceState, setMaintenanceState, flushMaintenanceCompensation } = require('../../utils/maintenance');
+const {
+  getMaintenanceState,
+  setMaintenanceState,
+  sanitizeMaintenanceForSession,
+  flushMaintenanceCompensation
+} = require('../../utils/maintenance');
 const rawSchema = require('../../storage/schema-sql');
 const SCHEMA_SQL = typeof rawSchema === 'string' ? rawSchema : (rawSchema?.SCHEMA_SQL || '');
 
@@ -163,7 +168,10 @@ function createAdminApi({
   logger,
   invalidateUserSessions,
   invalidateAdminSessions,
-  resetSessionAuthCache
+  resetSessionAuthCache,
+  broadcastSystemSseEvent = null,
+  getSseClientCount = null,
+  getEventLoopLagSnapshot = null
 }) {
   const discordProfileCache = new Map();
   const DISCORD_PROFILE_HIT_TTL_MS = 10 * 60 * 1000;
@@ -2186,6 +2194,9 @@ function createAdminApi({
       }
       store.cachedAnnouncement = record;
       store.cachedAnnouncementAt = Date.now();
+      if (typeof broadcastSystemSseEvent === 'function') {
+        broadcastSystemSseEvent('announcement', record);
+      }
       return res.json({ ok: true, message: 'Đã cập nhật thông báo hệ thống.', announcement: record });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
@@ -2220,6 +2231,9 @@ function createAdminApi({
       );
       if (typeof resetSessionAuthCache === 'function') {
         resetSessionAuthCache();
+      }
+      if (typeof broadcastSystemSseEvent === 'function') {
+        broadcastSystemSseEvent('maintenance', sanitizeMaintenanceForSession(maintenance, null));
       }
       const compensatedUsers = Number(maintenance.compensatedUsers) || 0;
       if (typeof store?.addAudit === 'function') {
@@ -2859,6 +2873,17 @@ function createAdminApi({
   // 12. DIAGNOSTICS & SYSTEM METRICS
   router.get('/diagnostics', async (_req, res) => {
     const memory = process.memoryUsage();
+    const rssMb = Math.round(memory.rss / (1024 * 1024));
+    const heapTotalMb = Math.round(memory.heapTotal / (1024 * 1024));
+    const heapUsedMb = Math.round(memory.heapUsed / (1024 * 1024));
+    const externalMb = Math.round(memory.external / (1024 * 1024));
+    const budgetMb = 512;
+    const sseClients = typeof getSseClientCount === 'function' ? (Number(getSseClientCount()) || 0) : 0;
+    const eventLoopLagMs = typeof getEventLoopLagSnapshot === 'function' ? getEventLoopLagSnapshot() : null;
+    const activeManagerUrls = typeof managerRuntimeSettings?.getActiveManagerUrls === 'function'
+      ? managerRuntimeSettings.getActiveManagerUrls()
+      : (config?.publicBaseUrl ? [config.publicBaseUrl] : []);
+    const workers = await registry.list({ omitHeavyFields: true });
     return res.json({
       ok: true,
       process: {
@@ -2869,13 +2894,28 @@ function createAdminApi({
         arch: process.arch
       },
       memory: {
-        rssMb: Math.round(memory.rss / (1024 * 1024)),
-        heapTotalMb: Math.round(memory.heapTotal / (1024 * 1024)),
-        heapUsedMb: Math.round(memory.heapUsed / (1024 * 1024)),
-        externalMb: Math.round(memory.external / (1024 * 1024))
+        rssMb,
+        heapTotalMb,
+        heapUsedMb,
+        externalMb,
+        budgetMb,
+        headroomMb: Math.max(0, budgetMb - rssMb),
+        usagePercent: Math.min(100, Math.round((rssMb / budgetMb) * 100))
       },
+      ramHeadroom: {
+        rssMb,
+        heapUsedMb,
+        budgetMb,
+        headroomMb: Math.max(0, budgetMb - rssMb),
+        usagePercent: Math.min(100, Math.round((rssMb / budgetMb) * 100))
+      },
+      sseClients,
+      ...(eventLoopLagMs ? { eventLoopLagMs } : {}),
+      activeManagerUrls,
       fleet: {
-        total: (await registry.list()).length
+        total: workers.length,
+        online: workers.filter((w) => w?.status?.online === true || w?.status?.state === 'online').length,
+        reachable: workers.filter((w) => w?.reachable === true).length
       }
     });
   });

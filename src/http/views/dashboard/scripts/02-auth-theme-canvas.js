@@ -467,12 +467,28 @@ function initCosmicStars() {
 }
   initCosmicStars();
 
+  var fpsTimerId = null;
+  if (typeof window !== 'undefined' && !window.__kbotLastActivityAt) {
+    window.__kbotLastActivityAt = Date.now();
+  }
+
   function shouldRunCosmicLoop() {
     var isOff = isDashboardBgEffectsDisabled() || document.body.classList.contains('cosmic-mode-off') || document.body.classList.contains('theme-off');
-    return !document.hidden && !isOff && !kbotReducedMotionQuery.matches;
+    if (document.hidden || isOff || kbotReducedMotionQuery.matches) return false;
+    if (typeof document.querySelector === 'function' && document.querySelector('.modal:not(.hidden)')) return false;
+    var lastAct = typeof window !== 'undefined' ? Number(window.__kbotLastActivityAt || 0) : 0;
+    if (!lastAct) {
+      try { if (typeof lastUserActivityAt === 'number') lastAct = lastUserActivityAt; } catch (_) {}
+    }
+    if (lastAct > 0 && (Date.now() - lastAct > 90000)) return false;
+    return true;
   }
 
   function stopCosmicLoop() {
+    if (fpsTimerId !== null) {
+      clearTimeout(fpsTimerId);
+      fpsTimerId = null;
+    }
     if (rafId !== null) {
       cancelAnimationFrame(rafId);
       rafId = null;
@@ -480,12 +496,24 @@ function initCosmicStars() {
     if (ctx) ctx.clearRect(0, 0, w, h);
   }
 
+  function scheduleNextCosmicFrame() {
+    if (fpsTimerId !== null || rafId !== null) return;
+    fpsTimerId = setTimeout(function() {
+      fpsTimerId = null;
+      if (!shouldRunCosmicLoop()) {
+        stopCosmicLoop();
+        return;
+      }
+      rafId = requestAnimationFrame(render);
+    }, 50);
+  }
+
   function startCosmicLoop() {
     if (!shouldRunCosmicLoop()) {
       stopCosmicLoop();
       return;
     }
-    if (rafId === null) {
+    if (rafId === null && fpsTimerId === null) {
       rafId = requestAnimationFrame(render);
     }
   }
@@ -515,7 +543,7 @@ function initCosmicStars() {
   }
 
   var lastTime = 0;
-  var frameInterval = 1000 / 24;
+  var frameInterval = 1000 / 20;
 
   function render(timestamp) {
     rafId = null;
@@ -527,7 +555,8 @@ function initCosmicStars() {
 
     var dt = timestamp && lastTime ? Math.min((timestamp - lastTime) / 16.667, 3.0) : 1;
     if (timestamp && (timestamp - lastTime < frameInterval)) {
-      rafId = requestAnimationFrame(render);
+      if (typeof scheduleNextCosmicFrame === 'function') scheduleNextCosmicFrame();
+      else rafId = requestAnimationFrame(render);
       return;
     }
     lastTime = timestamp || (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -585,15 +614,34 @@ function initCosmicStars() {
       }
       if (s.x < -12) s.x = w + 10;
       else if (s.x > w + 12) s.x = -10;
-
-      var r = Math.max(0.9, s.r * s.z * 0.75);
-      ctx.beginPath();
-      ctx.arc(s.x | 0, s.y | 0, r, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(' + dotRgb + ', ' + (s.a * alphaScale).toFixed(2) + ')';
-      ctx.fill();
+      s._b = s.a < 0.28 ? 0 : (s.a < 0.46 ? 1 : 2);
     }
 
-    rafId = requestAnimationFrame(render);
+    var bucketAlphas = [0.20, 0.38, 0.56];
+    for (var b = 0; b < 3; b++) {
+      var hasStar = false;
+      ctx.beginPath();
+      for (var j = 0; j < stars.length; j++) {
+        var st = stars[j];
+        if (st._b !== b) continue;
+        var sr = Math.max(0.9, st.r * st.z * 0.75);
+        var sx = st.x | 0;
+        var sy = st.y | 0;
+        ctx.moveTo(sx + sr, sy);
+        ctx.arc(sx, sy, sr, 0, Math.PI * 2);
+        hasStar = true;
+      }
+      if (hasStar) {
+        ctx.fillStyle = 'rgba(' + dotRgb + ', ' + (bucketAlphas[b] * alphaScale).toFixed(2) + ')';
+        ctx.fill();
+      }
+    }
+
+    if (typeof scheduleNextCosmicFrame === 'function') {
+      scheduleNextCosmicFrame();
+    } else {
+      rafId = requestAnimationFrame(render);
+    }
   }
   startCosmicLoop();
 })();

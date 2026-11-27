@@ -138,6 +138,11 @@
       </nav>
     </div>
     <div class="global-header-right">
+      <button type="button" id="btnOpenCommandPalette" class="cmd-palette-trigger-btn" onclick="openCommandPalette()" aria-label="Mở bảng tìm nhanh bot và lệnh điều khiển (Ctrl+K)" title="Tìm nhanh bot &amp; lệnh điều khiển (Ctrl+K hoặc /)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <span class="cmd-palette-trigger-label">Tìm nhanh...</span>
+        <kbd class="cmd-palette-kbd" aria-hidden="true">Ctrl K</kbd>
+      </button>
       <button type="button" id="cosmicModeToggleBtn" class="cosmic-toggle-pill" onclick="cycleDashboardCosmicMode()" title="Chuyển nhanh 4 giao diện: Deep Galaxy / Ocean Abyss / Violet Dusk / Moonlight">Deep Galaxy</button>
       <span id="globalUserRoleBadge" class="vip-pill" style="background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.3);">CHƯA ĐĂNG NHẬP</span>
       <span class="ram-pill admin-only">RAM <strong id="globalManagerRam">-- MB</strong></span>
