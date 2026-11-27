@@ -1000,6 +1000,9 @@ window.addEventListener('unhandledrejection',event=>{
       if (res.data?.maintenance && typeof syncSystemMaintenanceState === 'function') {
         syncSystemMaintenanceState(res.data.maintenance, { rerender: false });
       }
+      if (typeof normalizeCurrentUserMaintenanceExpiry === 'function') {
+        normalizeCurrentUserMaintenanceExpiry(currentUser, res.data?.maintenance);
+      }
       applyUserRoleUI();
       hideLoginGate();
       const routed = await resolveRouteFromUrl();

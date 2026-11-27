@@ -1,8 +1,11 @@
 'use strict';
 
-const { uptimeText } = require('./panels/renderer');
+const { uptimeText, resolveEffectiveExpiresAt } = require('./panels/renderer');
+const { getMaintenanceState } = require('../utils/maintenance');
 
 async function collectSystemStatus(services, { intervalMs = 15 * 60 * 1000 } = {}) {
+  const maintenance = await getMaintenanceState(services?.accessStore || services?.store);
+
   // 1. Worker Online/Offline statistics
   let allWorkers = [];
   try {
@@ -52,8 +55,10 @@ async function collectSystemStatus(services, { intervalMs = 15 * 60 * 1000 } = {
             activeUsers++;
             continue;
           }
-          const expMs = u.expiresAt ? Date.parse(u.expiresAt) : NaN;
-          if (st === 'expired' || st === 'grace_period' || (Number.isFinite(expMs) && expMs <= nowMs)) {
+          const effectiveExp = resolveEffectiveExpiresAt(u.expiresAt, maintenance, nowMs);
+          const expMs = effectiveExp ? Date.parse(effectiveExp) : NaN;
+          const isFrozenGrace = Boolean(maintenance?.enabled && st === 'grace_period' && Number.isFinite(expMs) && expMs > nowMs);
+          if (!isFrozenGrace && (st === 'expired' || st === 'grace_period' || (Number.isFinite(expMs) && expMs <= nowMs))) {
             expiredUsers++;
           } else if (Number.isFinite(expMs) && expMs > nowMs) {
             activeUsers++;
@@ -143,6 +148,7 @@ async function collectSystemStatus(services, { intervalMs = 15 * 60 * 1000 } = {
     platform,
     nodeVersion,
     publicBaseUrl,
+    maintenance,
     checkedAt,
     checkedAtMs,
     checkedAtUnix,

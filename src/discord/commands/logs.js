@@ -15,6 +15,7 @@ const {
   isUserAccountEntitled,
   resolvePublicBaseUrl
 } = require('../handlers/panel-handler');
+const { getMaintenanceState } = require('../../utils/maintenance');
 
 const definition = new SlashCommandBuilder()
   .setName('logs')
@@ -38,9 +39,11 @@ async function execute(interaction, services) {
     return renderUnauthenticatedPanel({ discordUserId, publicBaseUrl });
   }
 
+  const maintenance = await getMaintenanceState(services?.accessStore || services?.store);
+
   if (user.role !== 'admin') {
     const normalizedUser = { ...user, expiresAt: user.expiresAt || user.expiresAtRental || null };
-    if (!isUserAccountEntitled(normalizedUser, services)) {
+    if (!isUserAccountEntitled(normalizedUser, services, maintenance)) {
       return renderEntitlementBlockedPanel({
         user: normalizedUser,
         discordUserId,
@@ -49,7 +52,7 @@ async function execute(interaction, services) {
     }
   }
 
-  const userBots = await getUserBots(user, services);
+  const userBots = await getUserBots(user, services, maintenance);
   const botIdOption = interaction.options?.getString?.('bot_id');
   const linesOption = Math.max(1, Math.min(100, interaction.options?.getInteger?.('lines') || 20));
 

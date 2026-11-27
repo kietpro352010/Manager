@@ -126,6 +126,7 @@ const { createAdminApi } = require('./routes/admin-api');
 const { createWorkerApi } = require('./routes/worker-api');
 const { timingSafeStringEquals } = require('../utils/secrets');
 const { resolveRequestOrigin, isPublicHttpsUrl } = require('../config/host-runtime');
+const { getMaintenanceState, computeEffectiveExpiresAt } = require('../utils/maintenance');
 
 function createApp({
   store,
@@ -552,6 +553,17 @@ function createApp({
     return removed;
   }
 
+  function resetSessionAuthCache() {
+    let count = 0;
+    for (const cached of activeSessions.values()) {
+      if (cached && typeof cached === 'object') {
+        cached._authVerifiedAt = 0;
+        count += 1;
+      }
+    }
+    return count;
+  }
+
   const gracePeriodMs = Number.isFinite(config?.botExpirationGraceHours)
     ? config.botExpirationGraceHours * 3600 * 1000
     : (entitlementService?.gracePeriodMs !== undefined
@@ -560,26 +572,45 @@ function createApp({
             ? Number(process.env.BOT_EXPIRATION_GRACE_HOURS) * 3600 * 1000
             : 6 * 60 * 60 * 1000));
 
-  function applyFreshAccessToSession(targetSession, userRec) {
+  function applyFreshAccessToSession(targetSession, userRec, maintenance = null) {
     const freshAssigned = Array.isArray(userRec.workerIds) && userRec.workerIds.length
       ? userRec.workerIds
       : (Array.isArray(userRec.assignedBotIds) ? userRec.assignedBotIds : []);
     targetSession.assignedBotIds = freshAssigned.map(String);
-    if (userRec.expiresAt !== undefined) targetSession.expiresAtRental = userRec.expiresAt;
     if (userRec.role) targetSession.role = userRec.role;
     if (userRec.planName) targetSession.planName = userRec.planName;
     targetSession.isPermanent = Boolean(userRec.isPermanent);
     targetSession.allowAccountChange = userRec.allowAccountChange !== false;
+
+    const rawExpiresAt = userRec.expiresAt !== undefined
+      ? userRec.expiresAt
+      : (targetSession.rawExpiresAtRental !== undefined ? targetSession.rawExpiresAtRental : targetSession.expiresAtRental);
+    targetSession.rawExpiresAtRental = targetSession.isPermanent ? null : (rawExpiresAt ?? null);
+    const nowMs = Date.now();
+    const effExpiresAt = targetSession.isPermanent
+      ? null
+      : computeEffectiveExpiresAt(targetSession.rawExpiresAtRental, maintenance, nowMs);
+    targetSession.expiresAtRental = effExpiresAt ?? null;
+
     const rawStatus = String(userRec.status || targetSession.status || 'active').toLowerCase();
-    const effExpiresAt = userRec.expiresAt || targetSession.expiresAtRental;
     const expiryTime = effExpiresAt ? Date.parse(effExpiresAt) : null;
-    const isPastExpires = !targetSession.isPermanent && Number.isFinite(expiryTime) && expiryTime <= Date.now();
+    const isPastExpires = !targetSession.isPermanent && Number.isFinite(expiryTime) && expiryTime <= nowMs;
+    const anchorMs = maintenance?.enabled
+      ? Date.parse(maintenance.lastCompensatedAt || maintenance.startedAt || maintenance.updatedAt || '')
+      : NaN;
+    const frozenGraceBonusMs = (
+      maintenance?.enabled &&
+      Number.isFinite(anchorMs) &&
+      nowMs > anchorMs &&
+      Number.isFinite(expiryTime) &&
+      (expiryTime + gracePeriodMs) > anchorMs
+    ) ? (nowMs - anchorMs) : 0;
 
     if (rawStatus === 'disabled') {
       targetSession.status = 'disabled';
       targetSession.inGracePeriod = false;
     } else if (isPastExpires) {
-      if (Date.now() <= expiryTime + gracePeriodMs) {
+      if (nowMs <= expiryTime + gracePeriodMs + frozenGraceBonusMs) {
         targetSession.status = 'grace_period';
         targetSession.inGracePeriod = true;
       } else {
@@ -648,6 +679,11 @@ function createApp({
       cachedSession._authVerifiedAt &&
       (Date.now() - cachedSession._authVerifiedAt < READ_POLL_AUTH_CACHE_TTL_MS)
     ) {
+      if (cachedSession.role !== 'admin' && !cachedSession.isPermanent) {
+        const maint = await getMaintenanceState(store);
+        const rawExp = cachedSession.rawExpiresAtRental !== undefined ? cachedSession.rawExpiresAtRental : cachedSession.expiresAtRental;
+        cachedSession.expiresAtRental = computeEffectiveExpiresAt(rawExp, maint);
+      }
       session = cachedSession;
     } else if (useDbAuth) {
       try {
@@ -667,8 +703,9 @@ function createApp({
           ) {
             // read_manager_authorization already returned the authoritative fresh DB user row;
             // no redundant store.getAccess(bypassCache: true) query needed!
+            const maintenance = await getMaintenanceState(store);
             const candidate = { ...dbSession, _authVerifiedAt: Date.now() };
-            applyFreshAccessToSession(candidate, dbUser);
+            applyFreshAccessToSession(candidate, dbUser, maintenance);
             session = candidate;
           }
         }
@@ -691,7 +728,10 @@ function createApp({
         session = cachedSession;
       } else if (typeof store.getAccess === 'function') {
         try {
-          const userRec = await store.getAccess(cachedSession.userId, { bypassCache: true });
+          const [userRec, maintenance] = await Promise.all([
+            store.getAccess(cachedSession.userId, { bypassCache: true }),
+            getMaintenanceState(store)
+          ]);
           const idMismatch = Boolean(
             userRec &&
             cachedSession.userId &&
@@ -706,7 +746,7 @@ function createApp({
             }
             session = null;
           } else {
-            applyFreshAccessToSession(cachedSession, userRec);
+            applyFreshAccessToSession(cachedSession, userRec, maintenance);
             cachedSession._authVerifiedAt = Date.now();
             session = cachedSession;
           }
@@ -715,6 +755,11 @@ function createApp({
           session = null;
         }
       } else {
+        if (cachedSession.role !== 'admin' && !cachedSession.isPermanent) {
+          const maintenance = await getMaintenanceState(store);
+          const rawExp = cachedSession.rawExpiresAtRental !== undefined ? cachedSession.rawExpiresAtRental : cachedSession.expiresAtRental;
+          cachedSession.expiresAtRental = computeEffectiveExpiresAt(rawExp, maintenance);
+        }
         session = cachedSession;
       }
     }
@@ -915,7 +960,8 @@ function createApp({
     config,
     logger,
     invalidateUserSessions,
-    invalidateAdminSessions
+    invalidateAdminSessions,
+    resetSessionAuthCache
   });
   app.use('/api/admin', adminRouter);
   app.use('/api/manager', adminRouter);
@@ -958,6 +1004,7 @@ function createApp({
 
   app.invalidateAdminSessions = invalidateAdminSessions;
   app.invalidateUserSessions = invalidateUserSessions;
+  app.resetSessionAuthCache = resetSessionAuthCache;
   app.setShuttingDown = (nextVal = true) => {
     isShuttingDown = Boolean(nextVal);
     if (isShuttingDown) {

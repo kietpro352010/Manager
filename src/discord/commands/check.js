@@ -3,6 +3,7 @@
 const { SlashCommandBuilder } = require('discord.js');
 const { renderStatusMonitorPanel, embed } = require('../panels/renderer');
 const { collectSystemStatus } = require('../status-monitor');
+const { getMaintenanceState } = require('../../utils/maintenance');
 
 function checkUserAdmin(interaction, services, user, allowedGuildId) {
   const { isUserAdmin } = require('../handlers/interaction-handler');
@@ -37,7 +38,8 @@ async function execute(interaction, services) {
   const statusData = await collectSystemStatus(services, {
     intervalMs: services?.statusMonitor?.intervalMs || 15 * 60 * 1000
   });
-  const panel = renderStatusMonitorPanel(statusData);
+  const maintenance = statusData?.maintenance || await getMaintenanceState(services?.accessStore || services?.store);
+  const panel = renderStatusMonitorPanel({ ...statusData, maintenance });
 
   // If already deferred by interaction-handler (with ephemeral: false)
   if (interaction.deferred) {

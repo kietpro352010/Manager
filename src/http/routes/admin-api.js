@@ -13,7 +13,7 @@ const { validateSafeBotUrl } = require('../../services/proxy-validation');
 const { isWispbyteControlPanelUrl } = require('../../utils/http');
 const { resolveClientIp } = require('../../services/captcha');
 const { resolveRequestOrigin, DEFAULT_PUBLIC_MANAGER_URL } = require('../../config/host-runtime');
-const { getMaintenanceState, setMaintenanceState } = require('../../utils/maintenance');
+const { getMaintenanceState, setMaintenanceState, flushMaintenanceCompensation } = require('../../utils/maintenance');
 const rawSchema = require('../../storage/schema-sql');
 const SCHEMA_SQL = typeof rawSchema === 'string' ? rawSchema : (rawSchema?.SCHEMA_SQL || '');
 
@@ -162,7 +162,8 @@ function createAdminApi({
   config,
   logger,
   invalidateUserSessions,
-  invalidateAdminSessions
+  invalidateAdminSessions,
+  resetSessionAuthCache
 }) {
   const discordProfileCache = new Map();
   const DISCORD_PROFILE_HIT_TTL_MS = 10 * 60 * 1000;
@@ -739,7 +740,21 @@ function createAdminApi({
         if (!Number.isFinite(addedDays) || addedDays === 0 || addedDays < -3650 || addedDays > 3650) {
           return res.status(400).json({ ok: false, error: 'Số ngày gia hạn phải nằm trong khoảng -3650 đến 3650 (khác 0).' });
         }
-        const currentMs = access.expiresAt ? Date.parse(access.expiresAt) : NaN;
+        let currentMs = access.expiresAt ? Date.parse(access.expiresAt) : NaN;
+        if (addedDays > 0 && (!Number.isFinite(currentMs) || currentMs <= now)) {
+          const maint = await getMaintenanceState(store);
+          if (maint?.enabled) {
+            await flushMaintenanceCompensation(store, {
+              toMs: now,
+              gracePeriodMs: entitlementService?.gracePeriodMs,
+              turnOff: false,
+              actor: 'system:admin_renew_checkpoint',
+              logger
+            });
+            const refreshed = await store.getAccess(id, { bypassCache: true });
+            if (refreshed?.expiresAt) currentMs = Date.parse(refreshed.expiresAt);
+          }
+        }
         const baseMs = addedDays > 0
           ? Math.max(now, Number.isFinite(currentMs) ? currentMs : now)
           : (Number.isFinite(currentMs) ? currentMs : now);
@@ -795,7 +810,21 @@ function createAdminApi({
       if (!user) return res.status(404).json({ ok: false, error: 'Không tìm thấy người dùng.' });
 
       const now = Date.now();
-      const currentMs = user.expiresAt ? Date.parse(user.expiresAt) : NaN;
+      let currentMs = user.expiresAt ? Date.parse(user.expiresAt) : NaN;
+      if (addedDays > 0 && (!Number.isFinite(currentMs) || currentMs <= now)) {
+        const maint = await getMaintenanceState(store);
+        if (maint?.enabled) {
+          await flushMaintenanceCompensation(store, {
+            toMs: now,
+            gracePeriodMs: entitlementService?.gracePeriodMs,
+            turnOff: false,
+            actor: 'system:admin_add_days_checkpoint',
+            logger
+          });
+          const refreshed = await store.getAccess(username, { bypassCache: true });
+          if (refreshed?.expiresAt) currentMs = Date.parse(refreshed.expiresAt);
+        }
+      }
       const baseMs = addedDays > 0
         ? Math.max(now, Number.isFinite(currentMs) ? currentMs : now)
         : (Number.isFinite(currentMs) ? currentMs : now);
@@ -2183,8 +2212,16 @@ function createAdminApi({
           enabled: body.enabled,
           message: body.message
         },
-        actor
+        actor,
+        {
+          gracePeriodMs: entitlementService?.gracePeriodMs,
+          logger
+        }
       );
+      if (typeof resetSessionAuthCache === 'function') {
+        resetSessionAuthCache();
+      }
+      const compensatedUsers = Number(maintenance.compensatedUsers) || 0;
       if (typeof store?.addAudit === 'function') {
         await store.addAudit({
           action: 'ADMIN_SET_MAINTENANCE',
@@ -2194,7 +2231,11 @@ function createAdminApi({
           actorIp: resolveClientIp(req) || '127.0.0.1',
           details: {
             enabled: maintenance.enabled,
-            message: maintenance.message
+            message: maintenance.message,
+            startedAt: maintenance.startedAt,
+            lastCompensatedAt: maintenance.lastCompensatedAt,
+            lastCompensationMs: maintenance.lastCompensationMs,
+            compensatedUsers
           }
         }).catch(() => {});
       }
@@ -2202,8 +2243,10 @@ function createAdminApi({
         ok: true,
         maintenance,
         message: maintenance.enabled
-          ? 'Đã BẬT chế độ bảo trì — tạm khóa thao tác worker đối với người dùng.'
-          : 'Đã TẮT chế độ bảo trì — đã mở lại thao tác worker cho người dùng.'
+          ? 'Đã BẬT chế độ bảo trì — tạm khóa thao tác worker đối với người dùng và đóng băng thời gian thuê bot của khách.'
+          : (compensatedUsers > 0
+              ? `Đã TẮT chế độ bảo trì — đã mở lại thao tác worker cho người dùng và cộng bù thời gian bảo trì cho ${compensatedUsers} tài khoản.`
+              : 'Đã TẮT chế độ bảo trì — đã mở lại thao tác worker cho người dùng.')
       });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });

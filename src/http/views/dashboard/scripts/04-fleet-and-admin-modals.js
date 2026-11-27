@@ -1391,6 +1391,10 @@ async function refreshHome() {
       const prevStatus = currentUser.status;
       const prevPlan = currentUser.planName;
       Object.assign(currentUser, data.currentUser);
+      if (data.currentUser.rawExpiresAt === undefined) delete currentUser.rawExpiresAt;
+      if (typeof normalizeCurrentUserMaintenanceExpiry === 'function') {
+        normalizeCurrentUserMaintenanceExpiry(currentUser, data.maintenance);
+      }
       if (prevExp !== currentUser.expiresAt || prevIsPermanent !== currentUser.isPermanent || prevBots !== JSON.stringify(currentUser.assignedBotIds || []) || prevStatus !== currentUser.status || prevPlan !== currentUser.planName) {
         applyUserRoleUI();
         updateUserHeaderCountdown();

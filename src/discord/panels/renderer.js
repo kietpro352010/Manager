@@ -88,7 +88,42 @@ function getWorkerState(worker) {
   return { rawState, isOnline, isBusy, label, emoji, color };
 }
 
-function formatAccountPlanBadge(user) {
+function resolveFrozenExpiryState(rawExp, maintenance = null, nowMs = Date.now()) {
+  if (!rawExp) {
+    return { expMs: NaN, effectiveExpMs: NaN, effectiveIso: rawExp, frozen: false };
+  }
+  const expMs = Date.parse(rawExp);
+  if (!Number.isFinite(expMs)) {
+    return { expMs: NaN, effectiveExpMs: NaN, effectiveIso: rawExp, frozen: false };
+  }
+  if (!maintenance?.enabled) {
+    return { expMs, effectiveExpMs: expMs, effectiveIso: rawExp, frozen: false };
+  }
+  const rawAnchor = maintenance.lastCompensatedAt || maintenance.startedAt || maintenance.updatedAt || '';
+  const anchorMs = rawAnchor ? Date.parse(rawAnchor) : NaN;
+  if (Number.isFinite(anchorMs)) {
+    if (expMs > anchorMs) {
+      const effectiveExpMs = nowMs > anchorMs ? expMs + (nowMs - anchorMs) : expMs;
+      return {
+        expMs,
+        effectiveExpMs,
+        effectiveIso: new Date(effectiveExpMs).toISOString(),
+        frozen: true
+      };
+    }
+    return { expMs, effectiveExpMs: expMs, effectiveIso: rawExp, frozen: false };
+  }
+  if (expMs > nowMs) {
+    return { expMs, effectiveExpMs: expMs, effectiveIso: rawExp, frozen: true };
+  }
+  return { expMs, effectiveExpMs: expMs, effectiveIso: rawExp, frozen: false };
+}
+
+function resolveEffectiveExpiresAt(rawExp, maintenance = null, nowMs = Date.now()) {
+  return resolveFrozenExpiryState(rawExp, maintenance, nowMs).effectiveIso;
+}
+
+function formatAccountPlanBadge(user, maintenance = null) {
   if (!user) return '';
   if (String(user.role || '').toLowerCase() === 'admin') {
     return '🛡️ `Admin`';
@@ -98,19 +133,25 @@ function formatAccountPlanBadge(user) {
   if (user.isPermanent) return '♾️ `Vĩnh viễn`';
   const rawExp = user.expiresAt || user.expiresAtRental;
   if (!rawExp) return '';
-  const expMs = Date.parse(rawExp);
+  const nowMs = Date.now();
+  const { expMs, effectiveExpMs, frozen } = resolveFrozenExpiryState(rawExp, maintenance, nowMs);
   if (!Number.isFinite(expMs)) return '';
-  const diffMs = expMs - Date.now();
+  const diffMs = effectiveExpMs - nowMs;
   if (diffMs <= 0) return '⚠️ `Hết hạn`';
   const days = Math.floor(diffMs / 86400000);
   const hours = Math.max(1, Math.floor((diffMs % 86400000) / 3600000));
+  if (frozen) {
+    return days > 0
+      ? `⏸️ \`Bảo trì · Giữ nguyên ${days}d ${hours}h\``
+      : `⏸️ \`Bảo trì · Giữ nguyên ${hours}h\``;
+  }
   return days > 0 ? `⏳ \`Còn ${days}d ${hours}h\`` : `⏳ \`Còn ${hours}h\``;
 }
 
 // ----------------------------------------------------------------------------
 // 1. MAIN BOTS LIST PANEL (/bots)
 // ----------------------------------------------------------------------------
-function renderBotsList({ user, workers = [], page = 0, pageSize = 5, notice = '' }) {
+function renderBotsList({ user, workers = [], page = 0, pageSize = 5, notice = '', maintenance = null }) {
   const totalBots = workers.length;
   const onlineCount = workers.filter((w) => getWorkerState(w).isOnline).length;
   const offlineCount = Math.max(0, totalBots - onlineCount);
@@ -119,9 +160,13 @@ function renderBotsList({ user, workers = [], page = 0, pageSize = 5, notice = '
   const startIndex = currentPage * pageSize;
   const currentWorkers = workers.slice(startIndex, startIndex + pageSize);
 
-  const planBadge = formatAccountPlanBadge(user);
+  const planBadge = formatAccountPlanBadge(user, maintenance);
   const badgeSegment = planBadge ? `  ·  ${planBadge}` : '';
   let desc = `👤 **Tài khoản:** \`${plainCode(user?.username || 'Khách')}\`${badgeSegment}  ·  🤖 **Bot:** **${totalBots}** (🟢 **${onlineCount}** / 🔴 **${offlineCount}**)`;
+  if (maintenance?.enabled) {
+    const maintMsg = safe(maintenance.message || 'Hệ thống đang bảo trì nâng cấp máy chủ.', 220);
+    desc += `\n\n🛠️ **Đang bảo trì:** *${maintMsg}*\n> ⏸️ *Thời gian sử dụng bot được giữ nguyên, không bị trừ trong lúc bảo trì.*`;
+  }
   if (notice) {
     desc += `\n\n${notice}`;
   }
@@ -200,7 +245,7 @@ function renderBotsList({ user, workers = [], page = 0, pageSize = 5, notice = '
 // ----------------------------------------------------------------------------
 // 2. PER-BOT DETAIL PANEL (bot:view:{workerId})
 // ----------------------------------------------------------------------------
-function renderBotDetail({ user, worker, notice = '', isExecuting = false }) {
+function renderBotDetail({ user, worker, notice = '', isExecuting = false, maintenance = null }) {
   if (!worker) {
     return {
       embeds: [embed('❌ LỖI', 'Không tìm thấy thông tin bot này hoặc bot đã bị xóa.', COLOR_OFFLINE)],
@@ -277,7 +322,11 @@ function renderBotDetail({ user, worker, notice = '', isExecuting = false }) {
     ? `\n• **Ghi chú dừng:** *${safe(redactStringSecrets(rawReason), 140)}*`
     : '';
 
-  let descText = notice ? `${notice}\n\n` : '';
+  const planBadge = maintenance?.enabled ? formatAccountPlanBadge(user, maintenance) : '';
+  const maintBanner = maintenance?.enabled
+    ? `🛠️ **Hệ thống đang bảo trì**${planBadge ? `  ·  ${planBadge}` : ''}\n> ⏸️ *Thời gian sử dụng bot được giữ nguyên, không bị trừ trong lúc bảo trì.*\n\n`
+    : '';
+  let descText = `${maintBanner}${notice ? `${notice}\n\n` : ''}`;
   descText +=
     `━━ **THÔNG TIN BOT** ━━\n` +
     `• **Bot ID:** \`${fullBotId}\`\n` +
@@ -531,16 +580,17 @@ function renderEntitlementBlockedPanel({ user, discordUserId = '', publicBaseUrl
   };
 }
 
-function renderAlreadyLoggedInPanel({ user, discordUserId, roleSyncNote = '', publicBaseUrl = '' }) {
+function renderAlreadyLoggedInPanel({ user, discordUserId, roleSyncNote = '', publicBaseUrl = '', maintenance = null }) {
   const uid = String(discordUserId || '').trim();
   const uname = plainCode(user?.username || 'unknown', 64);
   const isAdmin = String(user?.role || '').toLowerCase() === 'admin';
   const rawStatus = String(user?.status || 'active').toLowerCase();
   const rawExp = user?.expiresAt || user?.expiresAtRental;
-  const expiryMs = rawExp ? Date.parse(rawExp) : NaN;
-  const isExpired = !isAdmin && !user?.isPermanent && (rawStatus === 'expired' || (Number.isFinite(expiryMs) && expiryMs <= Date.now()) || (!rawExp && rawStatus !== 'active'));
+  const nowMs = Date.now();
+  const { effectiveExpMs: expiryMs, frozen: isFrozen } = resolveFrozenExpiryState(rawExp, maintenance, nowMs);
+  const isExpired = !isAdmin && !user?.isPermanent && (rawStatus === 'expired' || (Number.isFinite(expiryMs) && expiryMs <= nowMs) || (!rawExp && rawStatus !== 'active'));
   const isDisabled = rawStatus === 'disabled';
-  const canOpenBots = isAdmin || (!isDisabled && (user?.isPermanent === true || (Number.isFinite(expiryMs) && expiryMs > Date.now())));
+  const canOpenBots = isAdmin || (!isDisabled && (user?.isPermanent === true || (Number.isFinite(expiryMs) && expiryMs > nowMs)));
 
   let statusLine = '';
   if (isAdmin) {
@@ -554,10 +604,15 @@ function renderAlreadyLoggedInPanel({ user, discordUserId, roleSyncNote = '', pu
       expiryText = '♾️ Vĩnh viễn';
     } else if (Number.isFinite(expiryMs)) {
       const dateStr = new Date(expiryMs).toLocaleDateString('vi-VN');
-      const remDays = Math.floor((expiryMs - Date.now()) / 86400000);
-      expiryText = expiryMs <= Date.now()
-        ? `${dateStr} *(Đã hết hạn)*`
-        : (remDays > 0 ? `Còn **${remDays} ngày** *(đến ${dateStr})*` : `Đến **${dateStr}** *(dưới 24h)*`);
+      const remDays = Math.floor((expiryMs - nowMs) / 86400000);
+      if (isFrozen && expiryMs > nowMs) {
+        const frozenBadge = formatAccountPlanBadge(user, maintenance);
+        expiryText = `${frozenBadge} *(tạm đóng băng khi bảo trì)*`;
+      } else {
+        expiryText = expiryMs <= nowMs
+          ? `${dateStr} *(Đã hết hạn)*`
+          : (remDays > 0 ? `Còn **${remDays} ngày** *(đến ${dateStr})*` : `Đến **${dateStr}** *(dưới 24h)*`);
+      }
     }
     statusLine = `• **Gói dịch vụ:** ${planText}\n• **Hạn sử dụng:** ${expiryText}`;
   }
@@ -655,7 +710,12 @@ async function botDashboard(services, userId, role, notice = '') {
   if (services?.accessStore?.getUserByDiscordId) {
     user = (await services.accessStore.getUserByDiscordId(userId)) || user;
   }
-  return renderBotsList({ user, workers, notice });
+  let maintenance = null;
+  try {
+    const { getMaintenanceState } = require('../../utils/maintenance');
+    maintenance = await getMaintenanceState(services?.accessStore || services?.store);
+  } catch (_) {}
+  return renderBotsList({ user, workers, notice, maintenance });
 }
 
 function renderBotLogs({ user, worker, logs = [], workers = [] }) {
@@ -949,6 +1009,7 @@ function renderStatusMonitorPanel(data = {}) {
     platform = process.platform,
     nodeVersion = process.version,
     publicBaseUrl = '',
+    maintenance = null,
     checkedAtMs = Date.now(),
     checkedAtUnix = Math.floor(Date.now() / 1000),
     intervalMinutes = 15,
@@ -990,8 +1051,11 @@ function renderStatusMonitorPanel(data = {}) {
   if (disabledUsers > 0) userSummaryExtra.push(`Bị khóa: **${disabledUsers}**`);
   const extraUserLine = userSummaryExtra.length > 0 ? `\n• ${userSummaryExtra.join(' · ')}` : '';
 
+  const maintenanceLine = maintenance?.enabled
+    ? `\n🛠️ **Chế độ bảo trì:** \`ĐANG BẬT\` · ⏸️ *Giữ nguyên thời gian sử dụng bot (không trừ giờ)*`
+    : '';
   const desc =
-    `${overallStatusEmoji} **Tình trạng hệ thống:** **${overallStatusText}**\n` +
+    `${overallStatusEmoji} **Tình trạng hệ thống:** **${overallStatusText}**${maintenanceLine}\n` +
     `🕒 **Kiểm tra lúc:** \`${checkedTimeFormatted}\` (<t:${checkedAtUnix}:R>)\n` +
     `⏱️ **Tự động cập nhật tiếp theo:** <t:${nextCheckAtUnix}:R> (mỗi **${intervalMinutes} phút**)`;
 
@@ -1064,6 +1128,8 @@ module.exports = {
   renderAlreadyLoggedInPanel,
   renderLoggedOutPanel,
   buildAdminPasswordModal,
+  formatAccountPlanBadge,
+  resolveEffectiveExpiresAt,
   getWorkerState,
   uptimeText,
   padId,

@@ -2,7 +2,9 @@ window.__INITIAL_USER__ = null;
 window.systemMaintenance = {
   enabled: false,
   message: 'Hệ thống đang bảo trì nâng cấp máy chủ. Tạm khóa thao tác điều khiển worker, vui lòng quay lại sau.',
-  updatedAt: null
+  updatedAt: null,
+  startedAt: null,
+  lastCompensatedAt: null
 };
 let currentUser = window.__INITIAL_USER__ || null;
 let userManagementList = [];
@@ -758,17 +760,107 @@ function formatHardwareMetric(value) {
   return Number.isFinite(numeric) ? numeric.toFixed(1) : '0.0';
 }
 
+const DEFAULT_SYSTEM_MAINTENANCE_MSG =
+  'Hệ thống đang bảo trì nâng cấp máy chủ. Tạm khóa thao tác điều khiển worker, vui lòng quay lại sau.';
+const MAINTENANCE_FREEZE_NOTE_VI =
+  'Thời gian sử dụng bot đang được giữ nguyên, không bị trừ trong lúc bảo trì.';
+let _localMaintFreezeAtMs = 0;
+
+function getSystemMaintenanceInfo() {
+  const m = window.systemMaintenance || {};
+  const msg = String(m.message || '').trim() || DEFAULT_SYSTEM_MAINTENANCE_MSG;
+  return {
+    enabled: Boolean(m.enabled),
+    message: msg,
+    updatedAt: m.updatedAt || null,
+    startedAt: m.startedAt || null,
+    lastCompensatedAt: m.lastCompensatedAt || null
+  };
+}
+window.getSystemMaintenanceInfo = getSystemMaintenanceInfo;
+
+function getMaintenanceFreezeAnchorMs(maint) {
+  const m = maint || getSystemMaintenanceInfo();
+  if (!m || !m.enabled) return NaN;
+  const rawAnchor = m.lastCompensatedAt || m.startedAt || m.updatedAt || '';
+  return rawAnchor ? Date.parse(rawAnchor) : NaN;
+}
+
+function getEffectiveUserExpiresAt(rawExpiresAt) {
+  if (!rawExpiresAt) return rawExpiresAt;
+  const maint = getSystemMaintenanceInfo();
+  if (!maint.enabled) return rawExpiresAt;
+  const anchorMs = getMaintenanceFreezeAnchorMs(maint);
+  const expMs = Date.parse(rawExpiresAt);
+  const nowMs = Date.now();
+  if (Number.isFinite(anchorMs) && Number.isFinite(expMs) && nowMs > anchorMs && expMs > anchorMs) {
+    return new Date(expMs + (nowMs - anchorMs)).toISOString();
+  }
+  return rawExpiresAt;
+}
+window.getEffectiveUserExpiresAt = getEffectiveUserExpiresAt;
+
+function normalizeCurrentUserMaintenanceExpiry(userObj, maintObj) {
+  if (!userObj || typeof userObj !== 'object') return userObj;
+  const m = maintObj && typeof maintObj === 'object' ? maintObj : getSystemMaintenanceInfo();
+  if (!m || !m.enabled) {
+    delete userObj.rawExpiresAt;
+    delete userObj.effectiveExpiresAt;
+    return userObj;
+  }
+  if (!userObj.rawExpiresAt && userObj.expiresAt && !userObj.isPermanent && userObj.role !== 'admin') {
+    const anchorRaw = m.lastCompensatedAt || m.startedAt || m.updatedAt || '';
+    const anchorMs = anchorRaw ? Date.parse(anchorRaw) : NaN;
+    const srvExpMs = Date.parse(userObj.expiresAt);
+    const nowMs = Date.now();
+    if (Number.isFinite(anchorMs) && Number.isFinite(srvExpMs) && nowMs > anchorMs && srvExpMs > nowMs) {
+      userObj.effectiveExpiresAt = userObj.expiresAt;
+      userObj.rawExpiresAt = new Date(srvExpMs - (nowMs - anchorMs)).toISOString();
+    }
+  }
+  return userObj;
+}
+window.normalizeCurrentUserMaintenanceExpiry = normalizeCurrentUserMaintenanceExpiry;
+
+function formatMaintenanceBannerMessageVi(rawMsg) {
+  const base = String(rawMsg || '').trim() || DEFAULT_SYSTEM_MAINTENANCE_MSG;
+  if (/không bị trừ|tạm dừng trừ giờ/i.test(base)) return base;
+  const sep = /[.!?]$/.test(base) ? ' ' : '. ';
+  return base + sep + MAINTENANCE_FREEZE_NOTE_VI;
+}
+
 function getUserExpirationInfo() {
   const user = (typeof currentUser !== 'undefined') ? currentUser : null;
   if (!user || user.role === 'admin' || user.isPermanent) {
     return { isExpired: false, inGracePeriod: false, isGraceExpired: false, remainingGraceMs: 0 };
   }
   const status = String(user.status || 'active').toLowerCase();
-  const rawExpiresAt = user.expiresAt;
-  const expiryTime = rawExpiresAt ? Date.parse(rawExpiresAt) : null;
+  const baseExpiresAt = user.rawExpiresAt || user.expiresAt || user.effectiveExpiresAt || null;
+  const maint = getSystemMaintenanceInfo();
+  const anchorMs = getMaintenanceFreezeAnchorMs(maint);
+  const rawExpMs = baseExpiresAt ? Date.parse(baseExpiresAt) : NaN;
   const now = Date.now();
   const GRACE_PERIOD_MS = 6 * 60 * 60 * 1000;
 
+  if (maint.enabled && Number.isFinite(rawExpMs) && status !== 'expired' && status !== 'grace_period' && user.inGracePeriod !== true) {
+    const validForFreeze = Number.isFinite(anchorMs) ? (rawExpMs > anchorMs) : (rawExpMs > now);
+    if (validForFreeze) {
+      const effIso = getEffectiveUserExpiresAt(baseExpiresAt);
+      const effMs = effIso ? Date.parse(effIso) : rawExpMs;
+      return {
+        isExpired: false,
+        inGracePeriod: false,
+        isGraceExpired: false,
+        remainingGraceMs: 0,
+        frozenByMaintenance: true,
+        effectiveExpiresAt: effIso || baseExpiresAt,
+        expiryTime: Number.isFinite(effMs) ? effMs : rawExpMs
+      };
+    }
+  }
+
+  const effExpiresAt = getEffectiveUserExpiresAt(baseExpiresAt);
+  const expiryTime = effExpiresAt ? Date.parse(effExpiresAt) : null;
   const isPastTime = Number.isFinite(expiryTime) && expiryTime <= now;
   const isGraceStatus = status === 'grace_period' || user.inGracePeriod === true;
   const isExpiredStatus = status === 'expired';
@@ -777,7 +869,10 @@ function getUserExpirationInfo() {
     return { isExpired: false, inGracePeriod: false, isGraceExpired: false, remainingGraceMs: 0 };
   }
 
-  const effectiveExpiry = Number.isFinite(expiryTime) ? expiryTime : (now - 1000);
+  let effectiveExpiry = Number.isFinite(expiryTime) ? expiryTime : (now - 1000);
+  if (maint.enabled && !isExpiredStatus && Number.isFinite(anchorMs) && Number.isFinite(rawExpMs) && (rawExpMs + GRACE_PERIOD_MS) > anchorMs && now > anchorMs) {
+    effectiveExpiry = rawExpMs + (now - anchorMs);
+  }
   const graceEndTime = effectiveExpiry + GRACE_PERIOD_MS;
   const remainingGraceMs = Math.max(0, graceEndTime - now);
 
@@ -793,20 +888,6 @@ function getUserExpirationInfo() {
   };
 }
 window.getUserExpirationInfo = getUserExpirationInfo;
-
-const DEFAULT_SYSTEM_MAINTENANCE_MSG =
-  'Hệ thống đang bảo trì nâng cấp máy chủ. Tạm khóa thao tác điều khiển worker, vui lòng quay lại sau.';
-
-function getSystemMaintenanceInfo() {
-  const m = window.systemMaintenance || {};
-  const msg = String(m.message || '').trim() || DEFAULT_SYSTEM_MAINTENANCE_MSG;
-  return {
-    enabled: Boolean(m.enabled),
-    message: msg,
-    updatedAt: m.updatedAt || null
-  };
-}
-window.getSystemMaintenanceInfo = getSystemMaintenanceInfo;
 
 function getWorkerLockInfo() {
   const isAdmin = Boolean(typeof currentUser !== 'undefined' && currentUser && currentUser.role === 'admin');
@@ -866,10 +947,11 @@ function renderSystemMaintenanceBanner() {
           ? 'CHẾ ĐỘ BẢO TRÌ ĐANG BẬT (NGƯỜI DÙNG BỊ KHÓA WORKER)'
           : 'HỆ THỐNG ĐANG BẢO TRÌ';
       }
+      const displayMaintMsg = formatMaintenanceBannerMessageVi(maint.message);
       if (msgEl) {
         msgEl.textContent = isAdmin
-          ? ('Thông báo đang hiển thị cho khách: ' + maint.message)
-          : maint.message;
+          ? ('Thông báo đang hiển thị cho khách: ' + displayMaintMsg)
+          : displayMaintMsg;
       }
       if (actionsEl) {
         actionsEl.style.display = isAdmin ? 'flex' : 'none';
@@ -884,7 +966,7 @@ function renderSystemMaintenanceBanner() {
     if (maint.enabled && isLoggedIn && !isAdmin) {
       detailBanner.classList.remove('hidden');
       const dMsg = document.getElementById('detailMaintenanceBannerMessage');
-      if (dMsg) dMsg.textContent = maint.message;
+      if (dMsg) dMsg.textContent = formatMaintenanceBannerMessageVi(maint.message);
     } else {
       detailBanner.classList.add('hidden');
     }
@@ -920,13 +1002,33 @@ function syncSystemMaintenanceState(nextMaint, options = {}) {
   const prev = getSystemMaintenanceInfo();
   const cleanMsg = String(nextMaint.message || '').trim() || DEFAULT_SYSTEM_MAINTENANCE_MSG;
   const nextEnabled = Boolean(nextMaint.enabled);
-  const changed = prev.enabled !== nextEnabled || prev.message !== cleanMsg;
+  const nextStartedAt = nextMaint.startedAt || null;
+  const nextLastCompensatedAt = nextMaint.lastCompensatedAt || null;
+  const changed =
+    prev.enabled !== nextEnabled ||
+    prev.message !== cleanMsg ||
+    prev.startedAt !== nextStartedAt ||
+    prev.lastCompensatedAt !== nextLastCompensatedAt;
+  if (nextEnabled && !prev.enabled) {
+    _localMaintFreezeAtMs = Date.now();
+  } else if (!nextEnabled) {
+    _localMaintFreezeAtMs = 0;
+    if (typeof currentUser !== 'undefined' && currentUser) {
+      delete currentUser.rawExpiresAt;
+      delete currentUser.effectiveExpiresAt;
+    }
+  }
   window.systemMaintenance = {
     enabled: nextEnabled,
     message: cleanMsg,
-    updatedAt: nextMaint.updatedAt || null
+    updatedAt: nextMaint.updatedAt || null,
+    startedAt: nextStartedAt,
+    lastCompensatedAt: nextLastCompensatedAt
   };
   renderSystemMaintenanceBanner();
+  if (changed && typeof updateUserHeaderCountdown === 'function') {
+    updateUserHeaderCountdown();
+  }
   if (changed && options && options.rerender !== false) {
     if (typeof renderHome === 'function') renderHome();
     if (typeof selectedBotId !== 'undefined' && selectedBotId !== null && typeof detailStatusHtml === 'function') {
@@ -943,41 +1045,13 @@ function botCardHtml(bot) {
   const username = bot.username || 'Chưa đặt';
   const isOffline = !bot.available || ['offline', 'kicked', 'error', 'disconnected', 'stopped'].includes(String(bot.status || '').toLowerCase());
   const pingRaw = bot.ping;
-
-  const pingVal =
-      pingRaw === null ||
-      pingRaw === undefined ||
-      String(pingRaw).trim() === ''
-          ? NaN
-          : Number(pingRaw);
-
-  const ping =
-      Number.isFinite(pingVal) && pingVal >= 0
-          ? pingVal + ' ms'
-          : (isOffline ? '-- ms (Tắt)' : '--');
-
+  const pingVal = (pingRaw === null || pingRaw === undefined || String(pingRaw).trim() === '') ? NaN : Number(pingRaw);
+  const ping = (Number.isFinite(pingVal) && pingVal >= 0) ? (pingVal + ' ms') : (isOffline ? '-- ms (Tắt)' : '--');
   const tpsRaw = bot.tps ?? bot.serverTps;
-
-  const tpsVal =
-      tpsRaw === null ||
-      tpsRaw === undefined ||
-      String(tpsRaw).trim() === ''
-          ? NaN
-          : Number(tpsRaw);
-
+  const tpsVal = (tpsRaw === null || tpsRaw === undefined || String(tpsRaw).trim() === '') ? NaN : Number(tpsRaw);
   const hasTps = Number.isFinite(tpsVal) && tpsVal >= 0;
-
-  const tpsText = hasTps
-      ? tpsVal.toFixed(1) + ' TPS'
-      : (isOffline ? '-- TPS (Tắt)' : '-- TPS');
-
-  const tpsColor = !hasTps
-      ? 'var(--muted)'
-      : tpsVal >= 18.5
-          ? 'var(--green)'
-          : tpsVal >= 14.0
-              ? 'var(--yellow)'
-              : 'var(--red)';
+  const tpsText = hasTps ? (tpsVal.toFixed(1) + ' TPS') : (isOffline ? '-- TPS (Tắt)' : '-- TPS');
+  const tpsColor = !hasTps ? 'var(--muted)' : (tpsVal >= 18.5 ? 'var(--green)' : (tpsVal >= 14.0 ? 'var(--yellow)' : 'var(--red)'));
   const posObj = bot.position || bot.roundedLocation;
   const pos = posObj && Number.isFinite(Number(posObj.x)) && Number.isFinite(Number(posObj.y)) && Number.isFinite(Number(posObj.z))
     ? (Math.round(Number(posObj.x)) + ' ' + Math.round(Number(posObj.y)) + ' ' + Math.round(Number(posObj.z)))
@@ -1143,7 +1217,7 @@ function botCardHtml(bot) {
       '<div class="bot-card-expire-badge">🛠️ HỆ THỐNG ĐANG BẢO TRÌ</div>' +
       '<div class="bot-card-expire-title">TẠM KHÓA THAO TÁC WORKER</div>' +
       '<div class="bot-card-expire-desc">' + escapeHtml(lockInfo.message) + '</div>' +
-      '<div class="bot-card-maintenance-note">Tài khoản vẫn đăng nhập bình thường. Worker sẽ mở lại ngay khi bảo trì hoàn tất.</div>' +
+      '<div class="bot-card-maintenance-note">Thời gian sử dụng bot đang được giữ nguyên, không bị trừ trong lúc bảo trì. Worker sẽ mở lại ngay khi hoàn tất.</div>' +
     '</div>';
   } else if (isCardLocked) {
     if (userExp.inGracePeriod) {

@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const { safeEqual, decryptSecret } = require('../utils/secrets');
 const { DEFAULT_PUBLIC_MANAGER_URL } = require('../config/host-runtime');
+const { getMaintenanceState, flushMaintenanceCompensation } = require('../utils/maintenance');
 
 const API_ENDPOINTS = ['https://link4m.co/api-shorten/v2', 'https://link4m.co/api'];
 const ATTEMPT_ORIGINS_SETTING_KEY = 'link4m_attempt_origins';
@@ -660,11 +661,32 @@ class Link4mService {
 
   async completeVerifiedAttempt(attempt, tokenHash) {
     const run = async () => {
-      const member = await this.accessControl.memberFor(attempt.userId, { bypassCache: true });
+      let member = await this.accessControl.memberFor(attempt.userId, { bypassCache: true });
       if (!member || member.status === 'disabled') {
         throw new Error('Tài khoản không đủ điều kiện nhận thưởng.');
       }
       const isPermanent = member.isPermanent === true;
+      if (!isPermanent) {
+        const maint = await getMaintenanceState(this.store);
+        const checkNow = Date.now();
+        const currentExp = member.expiresAt ? Date.parse(member.expiresAt) : NaN;
+        if (maint?.enabled && (!Number.isFinite(currentExp) || currentExp <= checkNow)) {
+          const graceHours = Number(this.config?.botExpirationGraceHours);
+          const graceMs = Number.isFinite(graceHours) && graceHours >= 0 ? graceHours * 3600 * 1000 : 6 * 3600 * 1000;
+          await flushMaintenanceCompensation(this.store, {
+            toMs: checkNow,
+            gracePeriodMs: graceMs,
+            turnOff: false,
+            actor: 'system:link4m_checkpoint',
+            logger: this.logger
+          });
+          const refreshedMember = await this.accessControl.memberFor(attempt.userId, { bypassCache: true });
+          if (refreshedMember) member = refreshedMember;
+          if (member.status === 'disabled') {
+            throw new Error('Tài khoản không đủ điều kiện nhận thưởng.');
+          }
+        }
+      }
 
       // Thử gọi RPC claim_manager_link4m_reward nguyên tử
       if (this.store.adapter && typeof this.store.adapter.claimLink4mReward === 'function') {

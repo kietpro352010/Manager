@@ -7,7 +7,7 @@ const { validateProxyUrl, resolveAndValidateHost } = require('../../services/pro
 const { resolveClientIp } = require('../../services/captcha');
 const { resolveRequestOrigin, DEFAULT_PUBLIC_MANAGER_URL } = require('../../config/host-runtime');
 const { decryptSecret } = require('../../utils/secrets');
-const { getMaintenanceState } = require('../../utils/maintenance');
+const { getMaintenanceState, computeEffectiveExpiresAt } = require('../../utils/maintenance');
 
 function parseProxyInputToUrl(rawInput, { ignoreEnabledFlag = false } = {}) {
   if (rawInput === null || rawInput === undefined || rawInput === '') return '';
@@ -742,9 +742,17 @@ function createUserApi({
         ? Math.round(process.memoryUsage().rss / (1024 * 1024))
         : undefined;
       const maintenance = await getMaintenanceState(store);
+      const isAdminOrPerm = session.role === 'admin' || Boolean(session.isPermanent);
+      const rawUserExpiresAt = isAdminOrPerm
+        ? null
+        : (session.rawExpiresAtRental !== undefined ? session.rawExpiresAtRental : (session.expiresAtRental || null));
+      const effectiveUserExpiresAt = isAdminOrPerm
+        ? null
+        : computeEffectiveExpiresAt(rawUserExpiresAt, maintenance);
       const currentUserSnapshot = {
         status: session.status || 'active',
-        expiresAt: session.expiresAtRental || null,
+        expiresAt: effectiveUserExpiresAt,
+        rawExpiresAt: rawUserExpiresAt,
         isPermanent: Boolean(session.isPermanent),
         planName: session.planName || '',
         assignedBotIds: Array.isArray(session.assignedBotIds) ? session.assignedBotIds : [],
@@ -753,8 +761,16 @@ function createUserApi({
       // Compute stable signature excluding per-second volatile fields without cloning every bot object
       const sigHash = crypto.createHash('sha1');
       sigHash.update(JSON.stringify({
-        currentUser: currentUserSnapshot,
-        maintenance: { enabled: maintenance.enabled, message: maintenance.message }
+        currentUser: {
+          ...currentUserSnapshot,
+          expiresAt: maintenance.enabled ? rawUserExpiresAt : currentUserSnapshot.expiresAt
+        },
+        maintenance: {
+          enabled: maintenance.enabled,
+          message: maintenance.message,
+          startedAt: maintenance.startedAt,
+          lastCompensatedAt: maintenance.lastCompensatedAt
+        }
       }));
       for (let i = 0; i < payload.length; i += 1) {
         const b = payload[i];
@@ -1807,13 +1823,19 @@ function createUserApi({
 
     try {
       const result = await entitlementService.redeem(session.userId, key, session.role);
+      const maintenance = await getMaintenanceState(store);
+      const rawRentalExpiresAt = result.isPermanent ? null : (result.expiresAt || null);
+      const effectiveExpiresAt = result.isPermanent
+        ? null
+        : computeEffectiveExpiresAt(rawRentalExpiresAt, maintenance);
 
       // Refresh session assigned bots and expiry in memory
       session.assignedBotIds = (Array.isArray(result.workerIds) ? result.workerIds : []).map((id) => String(id).trim()).filter(Boolean);
       session.isPermanent = result.isPermanent;
       session.status = 'active';
       session.inGracePeriod = false;
-      session.expiresAtRental = result.expiresAt;
+      session.rawExpiresAtRental = rawRentalExpiresAt;
+      session.expiresAtRental = effectiveExpiresAt;
       if (result.allowAccountChange !== undefined) {
         session.allowAccountChange = result.allowAccountChange !== false;
       }
@@ -1831,7 +1853,8 @@ function createUserApi({
         ok: true,
         message: 'Kích hoạt / Gia hạn Giftcode thành công!',
         isPermanent: result.isPermanent,
-        expiresAt: result.expiresAt,
+        expiresAt: effectiveExpiresAt,
+        rawExpiresAt: rawRentalExpiresAt,
         assignedBotIds: session.assignedBotIds
       });
     } catch (error) {

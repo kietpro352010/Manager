@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const { normalizeMaxUses } = require('../storage/supabase-client');
+const { getMaintenanceState, flushMaintenanceCompensation } = require('../utils/maintenance');
 
 function normalizeCode(value) {
   return String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -208,7 +209,7 @@ class EntitlementService {
     }
 
     const cleanUserId = String(userId || '').trim();
-    const member = this.accessControl
+    let member = this.accessControl
       ? await this.accessControl.memberFor(cleanUserId, { bypassCache: true })
       : (this.store && typeof this.store.getAccess === 'function' ? await this.store.getAccess(cleanUserId, { bypassCache: true }) : null);
     if (member?.status === 'disabled') {
@@ -240,6 +241,26 @@ class EntitlementService {
     }
     if (key.expiresAt && Date.parse(key.expiresAt) <= Date.now()) {
       throw new Error('Mã Giftcode này đã quá hạn sử dụng.');
+    }
+
+    // Flush checkpoint bảo trì trước khi gán now + duration cho user chưa có hạn tương lai để tránh cộng bù ngược thời gian trước lúc nạp mã
+    const activeMaint = await getMaintenanceState(this.store);
+    const preCheckNow = Date.now();
+    const preCheckExpiry = member?.expiresAt ? Date.parse(member.expiresAt) : NaN;
+    if (activeMaint?.enabled && !(member?.isPermanent === true) && (!Number.isFinite(preCheckExpiry) || preCheckExpiry <= preCheckNow)) {
+      await flushMaintenanceCompensation(this.store, {
+        toMs: preCheckNow,
+        gracePeriodMs: this.gracePeriodMs,
+        turnOff: false,
+        actor: 'system:redeem_checkpoint',
+        logger: this.logger
+      });
+      member = this.accessControl
+        ? await this.accessControl.memberFor(cleanUserId, { bypassCache: true })
+        : (this.store && typeof this.store.getAccess === 'function' ? await this.store.getAccess(cleanUserId, { bypassCache: true }) : member);
+      if (member?.status === 'disabled') {
+        throw new Error('Tài khoản này đã bị khóa quyền nạp mã.');
+      }
     }
 
     // 2. Tính toán thời hạn thuê mới (Cộng dồn nếu còn hạn, hoặc tính từ now)
@@ -494,6 +515,10 @@ class EntitlementService {
     }
     this.isSweepRunning = true;
     try {
+      const maint = await getMaintenanceState(this.store);
+      if (maint?.enabled) {
+        return { checked: 0, expired: 0, pausedByMaintenance: true };
+      }
       const users = await this.store.listAccess();
       if (!Array.isArray(users) || users.length === 0) return { checked: 0, expired: 0 };
       const now = Date.now();

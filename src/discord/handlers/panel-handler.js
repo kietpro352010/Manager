@@ -15,6 +15,8 @@ const {
   renderAlreadyLoggedInPanel,
   renderLoggedOutPanel,
   buildLoginModal,
+  formatAccountPlanBadge,
+  resolveEffectiveExpiresAt,
   getWorkerState,
   embed,
   button
@@ -32,6 +34,18 @@ const panelControlLock = new AsyncKeyLock();
 const resolvedUserCache = new WeakMap();
 const resolvedGuildCache = new WeakMap();
 const resolvedRolesCache = new WeakMap();
+const resolvedMaintenanceCache = new WeakMap();
+
+async function resolveInteractionMaintenance(services, interaction = null) {
+  if (interaction && typeof interaction === 'object' && resolvedMaintenanceCache.has(interaction)) {
+    return resolvedMaintenanceCache.get(interaction);
+  }
+  const maint = await getMaintenanceState(services?.accessStore || services?.store);
+  if (interaction && typeof interaction === 'object') {
+    resolvedMaintenanceCache.set(interaction, maint);
+  }
+  return maint;
+}
 
 async function resolveAllowedGuildId(services, interaction = null) {
   if (interaction && typeof interaction === 'object' && resolvedGuildCache.has(interaction)) {
@@ -403,10 +417,12 @@ function resolvePublicBaseUrl(services) {
   return raw.startsWith('http') ? raw : '';
 }
 
-function isUserAccountEntitled(user, services) {
+function isUserAccountEntitled(user, services, maintenance = null) {
   if (!user) return false;
   if (String(user.role || '').toLowerCase() === 'admin') return true;
-  const normalizedUser = { ...user, expiresAt: user.expiresAt || user.expiresAtRental || null };
+  const rawExp = user.expiresAt || user.expiresAtRental || null;
+  const effectiveExp = resolveEffectiveExpiresAt(rawExp, maintenance);
+  const normalizedUser = { ...user, expiresAt: effectiveExp };
   if (services?.accessControl?.isEntitled) {
     return Boolean(services.accessControl.isEntitled(normalizedUser));
   }
@@ -417,10 +433,12 @@ function isUserAccountEntitled(user, services) {
   return Number.isFinite(expiryMs) && expiryMs > Date.now();
 }
 
-async function syncDiscordMemberRolesForUser(interaction, user, services) {
+async function syncDiscordMemberRolesForUser(interaction, user, services, maintenance = null) {
   if (!interaction?.guild || !user || !services) return '';
   const { adminRoleId, userRoleId } = await getEffectiveRoleIds(services, interaction);
   if (!adminRoleId && !userRoleId) return '';
+
+  const effectiveMaintenance = maintenance || await resolveInteractionMaintenance(services, interaction).catch(() => null);
 
   const memberRoles = Array.isArray(interaction?.member?.roles)
     ? interaction.member.roles.map(String)
@@ -445,7 +463,7 @@ async function syncDiscordMemberRolesForUser(interaction, user, services) {
   }
 
   if (!userRoleId) return '';
-  const entitled = isUserAccountEntitled(user, services);
+  const entitled = isUserAccountEntitled(user, services, effectiveMaintenance);
   const hasUserRole = memberRoles.includes(String(userRoleId));
 
   if (entitled && !hasUserRole) {
@@ -593,13 +611,14 @@ function checkBotOwnership(user, workerId, worker = null, allWorkers = null) {
 }
 
 // Get user's accessible bots
-async function getUserBots(user, services) {
+async function getUserBots(user, services, maintenance = null) {
   if (!user || typeof services?.registry?.list !== 'function') return [];
   const allWorkers = await services.registry.list();
   if (user.role === 'admin') return allWorkers;
 
   if (services?.accessControl?.isEntitled) {
-    const normalizedUser = { ...user, expiresAt: user.expiresAt || user.expiresAtRental || null };
+    const rawExp = user.expiresAt || user.expiresAtRental || null;
+    const normalizedUser = { ...user, expiresAt: resolveEffectiveExpiresAt(rawExp, maintenance) };
     if (!services.accessControl.isEntitled(normalizedUser)) {
       return [];
     }
@@ -638,12 +657,14 @@ async function handlePanelInteraction(interaction, services) {
 
     const alreadyLinked = await resolveActiveDiscordAccountLink(discordUserId, services).catch(() => null);
     if (alreadyLinked) {
-      const roleSyncNote = await syncDiscordMemberRolesForUser(interaction, alreadyLinked, services).catch(() => '');
+      const maint = await resolveInteractionMaintenance(services, interaction).catch(() => null);
+      const roleSyncNote = await syncDiscordMemberRolesForUser(interaction, alreadyLinked, services, maint).catch(() => '');
       return safeReply(interaction, renderAlreadyLoggedInPanel({
         user: alreadyLinked,
         discordUserId,
         roleSyncNote,
-        publicBaseUrl: resolvePublicBaseUrl(services)
+        publicBaseUrl: resolvePublicBaseUrl(services),
+        maintenance: maint
       }));
     }
 
@@ -858,8 +879,9 @@ async function handlePanelInteraction(interaction, services) {
     }).catch(() => null);
 
     // Never grant userRoleId to expired/unentitled users (DISCORD-03)
+    const loginMaint = await resolveInteractionMaintenance(services, interaction).catch(() => null);
     const normalizedUser = { ...user, expiresAt: user.expiresAt || user.expiresAtRental || null };
-    const isUserEntitled = isUserAccountEntitled(normalizedUser, services);
+    const isUserEntitled = isUserAccountEntitled(normalizedUser, services, loginMaint);
 
     const { adminRoleId, userRoleId } = await getEffectiveRoleIds(services);
     const targetRoleId = user.role === 'admin' ? (adminRoleId || userRoleId) : userRoleId;
@@ -899,9 +921,12 @@ async function handlePanelInteraction(interaction, services) {
     );
 
     const rawExpiry = normalizedUser.expiresAt;
+    const frozenLoginBadge = loginMaint?.enabled ? formatAccountPlanBadge(normalizedUser, loginMaint) : '';
     const expiryLabel = normalizedUser.isPermanent
       ? 'Vĩnh viễn'
-      : (rawExpiry ? new Date(rawExpiry).toLocaleDateString('vi-VN') : '—');
+      : (frozenLoginBadge && isUserEntitled
+        ? `${frozenLoginBadge} *(không trừ giờ khi bảo trì)*`
+        : (rawExpiry ? new Date(rawExpiry).toLocaleDateString('vi-VN') : '—'));
 
     return safeReply(interaction, {
       embeds: [
@@ -1293,9 +1318,10 @@ async function handlePanelInteraction(interaction, services) {
         })
       ]);
       if (existingUser) {
+        const promptMaint = await resolveInteractionMaintenance(services, interaction).catch(() => null);
         let syncTimer = null;
         const roleSyncNote = await Promise.race([
-          syncDiscordMemberRolesForUser(interaction, existingUser, services).catch(() => ''),
+          syncDiscordMemberRolesForUser(interaction, existingUser, services, promptMaint).catch(() => ''),
           new Promise((resolve) => {
             syncTimer = setTimeout(() => resolve(''), 800);
             syncTimer.unref?.();
@@ -1308,7 +1334,8 @@ async function handlePanelInteraction(interaction, services) {
             user: existingUser,
             discordUserId,
             roleSyncNote,
-            publicBaseUrl: resolvePublicBaseUrl(services)
+            publicBaseUrl: resolvePublicBaseUrl(services),
+            maintenance: promptMaint
           }),
           flags: MessageFlags.Ephemeral
         });
@@ -1354,9 +1381,11 @@ async function handlePanelInteraction(interaction, services) {
     );
   }
 
+  const maintenance = await resolveInteractionMaintenance(services, interaction);
+
   if (user.role !== 'admin') {
     const normalizedUser = { ...user, expiresAt: user.expiresAt || user.expiresAtRental || null };
-    if (!isUserAccountEntitled(normalizedUser, services)) {
+    if (!isUserAccountEntitled(normalizedUser, services, maintenance)) {
       return safeUpdate(
         interaction,
         renderEntitlementBlockedPanel({
@@ -1376,7 +1405,7 @@ async function handlePanelInteraction(interaction, services) {
     customId === 'bots:last' ||
     customId.startsWith('bots:page:')
   ) {
-    const userBots = await getUserBots(user, services);
+    const userBots = await getUserBots(user, services, maintenance);
     const totalPages = Math.max(1, Math.ceil(userBots.length / 5));
     let page = 0;
     if (customId === 'bots:first' || customId === 'bots:list') {
@@ -1396,7 +1425,7 @@ async function handlePanelInteraction(interaction, services) {
         page = Math.max(0, Math.min(totalPages - 1, Number(match[1]) - 1));
       }
     }
-    const view = renderBotsList({ user, workers: userBots, page });
+    const view = renderBotsList({ user, workers: userBots, page, maintenance });
     return safeUpdate(interaction, view);
   }
 
@@ -1409,11 +1438,11 @@ async function handlePanelInteraction(interaction, services) {
     if (!worker || !checkBotOwnership(user, workerId, worker, allWorkers)) {
       return safeUpdate(interaction, {
         embeds: [embed('⛔ TỪ CHỐI TRUY CẬP', 'Bạn không có quyền truy cập hoặc bot này không tồn tại.', 0xef4444)],
-        components: [renderBotsList({ user, workers: await getUserBots(user, services) }).components[0]]
+        components: [renderBotsList({ user, workers: await getUserBots(user, services, maintenance), maintenance }).components[0]]
       });
     }
 
-    const view = renderBotDetail({ user, worker });
+    const view = renderBotDetail({ user, worker, maintenance });
     return safeUpdate(interaction, view);
   }
 
@@ -1430,19 +1459,20 @@ async function handlePanelInteraction(interaction, services) {
     }
 
     if (user.role !== 'admin') {
-      const maintenance = await getMaintenanceState(services?.accessStore || services?.store);
       if (maintenance.enabled) {
+        const frozenBadge = formatAccountPlanBadge(user, maintenance);
+        const badgeLine = frozenBadge ? `\n\n• **Thời hạn gói:** ${frozenBadge}` : '';
         return safeUpdate(interaction, {
           embeds: [embed(
             '🛠️ HỆ THỐNG ĐANG BẢO TRÌ',
-            `${maintenance.message}\n\nTạm khóa thao tác điều khiển worker đối với người dùng cho đến khi bảo trì hoàn tất.`,
+            `${maintenance.message}\n\nTạm khóa thao tác điều khiển worker đối với người dùng cho đến khi bảo trì hoàn tất. Thời gian sử dụng bot được giữ nguyên, không bị trừ trong lúc bảo trì.${badgeLine}`,
             0xf59e0b
           )]
         });
       }
 
       const normalizedUser = { ...user, expiresAt: user.expiresAt || user.expiresAtRental || null };
-      if (!isUserAccountEntitled(normalizedUser, services)) {
+      if (!isUserAccountEntitled(normalizedUser, services, maintenance)) {
         return safeUpdate(
           interaction,
           renderEntitlementBlockedPanel({
@@ -1488,7 +1518,7 @@ async function handlePanelInteraction(interaction, services) {
     });
 
     const updatedWorker = (await services.registry.find(workerId)) || worker;
-    const view = renderBotDetail({ user, worker: updatedWorker, notice });
+    const view = renderBotDetail({ user, worker: updatedWorker, notice, maintenance });
     return safeUpdate(interaction, view);
   }
 
@@ -1502,7 +1532,7 @@ async function handlePanelInteraction(interaction, services) {
     if (!worker || !checkBotOwnership(user, workerId, worker, allWorkers)) {
       return safeUpdate(interaction, {
         embeds: [embed('⛔ BOT KHÔNG KHẢ DỤNG', 'Bot không tồn tại hoặc bạn không có quyền xem bot này.', 0xef4444)],
-        components: [renderBotsList({ user, workers: await getUserBots(user, services) }).components[0]]
+        components: [renderBotsList({ user, workers: await getUserBots(user, services, maintenance), maintenance }).components[0]]
       });
     }
 
@@ -1531,7 +1561,7 @@ async function handlePanelInteraction(interaction, services) {
       logs = [{ time: new Date().toISOString(), type: 'error', message: 'Không thể tải logs: ' + err.message }];
     }
 
-    const userBots = await getUserBots(user, services);
+    const userBots = await getUserBots(user, services, maintenance);
     return safeUpdate(interaction, renderBotLogs({
       user,
       worker,

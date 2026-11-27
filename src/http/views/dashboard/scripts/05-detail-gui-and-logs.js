@@ -850,29 +850,27 @@ function formatFullDateTime(isoString) {
 }
 
 function formatRentalCountdown(isoString) {
-  if (!isoString) return { expired: false, text: 'Vĩnh viễn', color: 'var(--green)' };
-  const expTime = Date.parse(isoString);
-  if (isNaN(expTime)) return { expired: false, text: 'Không xác định', color: 'var(--muted)' };
-  const diffMs = expTime - Date.now();
-  if (diffMs <= 0) {
-    return { expired: true, text: 'ĐÃ HẾT HẠN', color: 'var(--red)' };
-  }
-  const totalHours = Math.floor(diffMs / 3600000);
+  if (!isoString) return { expired: false, frozen: false, text: 'Vĩnh viễn', rawCountdown: 'Vĩnh viễn', color: 'var(--green)' };
+  const rawMs = Date.parse(isoString);
+  if (isNaN(rawMs)) return { expired: false, frozen: false, text: 'Không xác định', rawCountdown: 'Không xác định', color: 'var(--muted)' };
+  const maint = (typeof getSystemMaintenanceInfo === 'function') ? getSystemMaintenanceInfo() : (window.systemMaintenance || {});
+  const nowMs = Date.now();
+  const anchorRaw = maint.enabled ? (maint.lastCompensatedAt || maint.startedAt || maint.updatedAt || '') : '';
+  const anchorMs = anchorRaw ? Date.parse(anchorRaw)
+    : ((maint.enabled && typeof _localMaintFreezeAtMs === 'number' && _localMaintFreezeAtMs > 0) ? _localMaintFreezeAtMs : NaN);
+  const isFrozen = Boolean(maint.enabled && ((Number.isFinite(anchorMs) && rawMs > anchorMs) || (!Number.isFinite(anchorMs) && rawMs > nowMs)));
+  const diffMs = (isFrozen && Number.isFinite(anchorMs) && nowMs > anchorMs && rawMs > anchorMs) ? (rawMs - anchorMs) : (rawMs - nowMs);
+  if (diffMs <= 0 && !isFrozen) return { expired: true, frozen: false, text: 'ĐÃ HẾT HẠN', rawCountdown: '0 phút', color: 'var(--red)' };
+  const safeMs = Math.max(0, diffMs);
+  const totalHours = Math.floor(safeMs / 3600000);
   const days = Math.floor(totalHours / 24);
   const hours = totalHours % 24;
-  const minutes = Math.floor((diffMs % 3600000) / 60000);
-  let text = '';
-  if (days > 0) {
-    text = 'Còn ' + days + ' ngày ' + hours + ' giờ ' + minutes + ' phút';
-  } else if (hours > 0) {
-    text = 'Còn ' + hours + ' giờ ' + minutes + ' phút';
-  } else {
-    text = 'Còn ' + minutes + ' phút';
-  }
-  let color = 'var(--green)';
-  if (days < 1) color = 'var(--red)';
-  else if (days < 3) color = 'var(--yellow)';
-  return { expired: false, text: text, color: color };
+  const minutes = Math.floor((safeMs % 3600000) / 60000);
+  const rawCountdown = days > 0 ? (days + ' ngày ' + hours + ' giờ ' + minutes + ' phút')
+    : (hours > 0 ? (hours + ' giờ ' + minutes + ' phút') : (minutes + ' phút'));
+  const text = isFrozen ? ('⏸️ Bảo trì · Tạm dừng trừ giờ (Còn ' + rawCountdown + ')') : ('Còn ' + rawCountdown);
+  const color = isFrozen ? '#fbbf24' : (days < 1 ? 'var(--red)' : (days < 3 ? 'var(--yellow)' : 'var(--green)'));
+  return { expired: false, frozen: isFrozen, text, rawCountdown, color };
 }
 
 function updateUserHeaderCountdown() {
@@ -894,7 +892,7 @@ function updateUserHeaderCountdown() {
   const setBadgeStyle = (bg, color, border, html) => {
     if (!badge) return;
     Object.assign(badge.style, { display: 'inline-flex', background: bg, color, border });
-    badge.innerHTML = html;
+    if (badge.innerHTML !== html) badge.innerHTML = html;
   };
   const bannerIcon = document.getElementById('userRentalBannerIcon');
   const bannerPlan = document.getElementById('userRentalBannerPlan');
@@ -915,7 +913,8 @@ function updateUserHeaderCountdown() {
     }
     return;
   }
-  if (!currentUser.expiresAt) {
+  const baseExpIso = currentUser.rawExpiresAt || currentUser.expiresAt || currentUser.effectiveExpiresAt || null;
+  if (!baseExpIso) {
     setBadgeStyle('rgba(148,163,184,0.15)', '#cbd5e1', '1px solid rgba(148,163,184,0.35)', '<span>⚪ <b>Chưa kích hoạt gói</b></span><button class="small primary" onclick="openRenewModal()" style="margin-left:6px;">🔑 Nhập Key kích hoạt</button>');
     if (banner) {
       if (bannerIcon) bannerIcon.textContent = '🔑';
@@ -926,10 +925,11 @@ function updateUserHeaderCountdown() {
     }
     return;
   }
-  const exactFormatted = formatFullDateTime(currentUser.expiresAt);
-  const countdown = formatRentalCountdown(currentUser.expiresAt);
+  const effectiveExpIso = (typeof getEffectiveUserExpiresAt === 'function') ? getEffectiveUserExpiresAt(baseExpIso) : baseExpIso;
+  const exactFormatted = formatFullDateTime(effectiveExpIso);
+  const countdown = formatRentalCountdown(baseExpIso);
   const userExp = (typeof getUserExpirationInfo === 'function') ? getUserExpirationInfo() : { isExpired: false };
-  if (countdown.expired || userExp.isExpired) {
+  if ((countdown.expired || userExp.isExpired) && !countdown.frozen && !userExp.frozenByMaintenance) {
     if (userExp.inGracePeriod) {
       const remainingMin = Math.max(1, Math.round(userExp.remainingGraceMs / 60000));
       const hours = Math.floor(remainingMin / 60);
@@ -955,6 +955,17 @@ function updateUserHeaderCountdown() {
     }
     return;
   }
+  if (countdown.frozen) {
+    setBadgeStyle('rgba(245,158,11,0.18)', '#fbbf24', '1px solid rgba(245,158,11,0.42)', '<span><b>' + countdown.text + '</b></span><button class="small" onclick="openRenewModal()" style="margin-left:4px;">🎁 Gia Hạn</button>');
+    if (banner) {
+      if (bannerIcon) bannerIcon.textContent = '⏸️';
+      if (bannerExactTime) bannerExactTime.textContent = exactFormatted;
+      if (bannerCountdown) { bannerCountdown.textContent = countdown.text; bannerCountdown.style.color = '#fbbf24'; }
+      banner.style.background = 'rgba(245,158,11,0.12)';
+      banner.style.borderColor = 'rgba(245,158,11,0.38)';
+    }
+    return;
+  }
   setBadgeStyle(
     countdown.color === 'var(--green)' ? 'rgba(16,185,129,0.15)' : (countdown.color === 'var(--yellow)' ? 'rgba(234,179,8,0.15)' : 'rgba(239,68,68,0.2)'),
     countdown.color,
@@ -972,6 +983,7 @@ function updateUserHeaderCountdown() {
 window.formatFullDateTime = formatFullDateTime;
 window.formatRentalCountdown = formatRentalCountdown;
 window.updateUserHeaderCountdown = updateUserHeaderCountdown;
+window.updateRentalCountdownUI = updateUserHeaderCountdown;
 
 let detailLastRevMap = new Map();
 let detailRequestPromise = null;

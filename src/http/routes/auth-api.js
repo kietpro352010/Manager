@@ -21,7 +21,7 @@ const {
   resolveClientIp,
   isTrustedProxyRequest
 } = require('../../services/captcha');
-const { getMaintenanceState } = require('../../utils/maintenance');
+const { getMaintenanceState, computeEffectiveExpiresAt, flushMaintenanceCompensation } = require('../../utils/maintenance');
 
 function hashSessionToken(token) {
   if (!token || typeof token !== 'string') return '';
@@ -547,6 +547,15 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       }
 
       if (shouldAttemptTrial) {
+        const currentMaint = await getMaintenanceState(store);
+        if (currentMaint?.enabled) {
+          await flushMaintenanceCompensation(store, {
+            turnOff: false,
+            gracePeriodMs,
+            actor: 'system:register_checkpoint',
+            logger
+          });
+        }
         try {
           registered = await store.registerTrialUser({
             userId,
@@ -672,9 +681,15 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       }
 
       // Generate session
+      const maintenance = await getMaintenanceState(store);
+      const regNowMs = Date.now();
+      const rawRentalExpiresAt = isPermanent ? null : (rentalExpiresAt || null);
+      const effectiveRentalExpiresAt = isPermanent
+        ? null
+        : computeEffectiveExpiresAt(rawRentalExpiresAt, maintenance, regNowMs);
       const token = crypto.randomBytes(32).toString('hex');
       const tokenHash = hashSessionToken(token);
-      const expiresAt = Date.now() + sessionDurationMs;
+      const expiresAt = regNowMs + sessionDurationMs;
 
       const session = {
         tokenHash,
@@ -682,9 +697,10 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         username: cleanUsername,
         role: 'user',
         assignedBotIds,
-        createdAt: Date.now(),
+        createdAt: regNowMs,
         expiresAt,
-        expiresAtRental: rentalExpiresAt,
+        rawExpiresAtRental: rawRentalExpiresAt,
+        expiresAtRental: effectiveRentalExpiresAt,
         status: 'active',
         isPermanent,
         planName,
@@ -737,9 +753,11 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
           assignedBotIds,
           isPermanent,
           planName,
-          expiresAt: rentalExpiresAt,
+          expiresAt: effectiveRentalExpiresAt,
+          rawExpiresAt: rawRentalExpiresAt,
           sessionExpiresAt: session.expiresAt
         },
+        maintenance,
         message: (providedKey && !keyRedeemed)
           ? `Đăng ký tài khoản thành công, nhưng kích hoạt mã quà tặng thất bại: ${keyError}`
           : 'Đăng ký tài khoản thành công!'
@@ -973,12 +991,24 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         : (Array.isArray(user.assignedBotIds) ? user.assignedBotIds : []);
       const assignedIds = rawAssigned.map((id) => String(id).trim()).filter(Boolean);
 
+      const maintenance = await getMaintenanceState(store);
       const isPermanent = Boolean(updatedAccess?.isPermanent ?? user.isPermanent);
-      const expiresAtDate = updatedAccess?.expiresAt || user.expiresAt;
-      const expMs = expiresAtDate ? Date.parse(expiresAtDate) : NaN;
+      const rawExpiresAtDate = isPermanent ? null : (updatedAccess?.expiresAt || user.expiresAt || null);
       const nowMs = Date.now();
+      const expiresAtDate = isPermanent ? null : computeEffectiveExpiresAt(rawExpiresAtDate, maintenance, nowMs);
+      const expMs = expiresAtDate ? Date.parse(expiresAtDate) : NaN;
       const isExpired = !isPermanent && Number.isFinite(expMs) && expMs <= nowMs;
-      const inGracePeriod = Boolean(isExpired && (nowMs - expMs) <= gracePeriodMs);
+      const anchorMs = maintenance?.enabled
+        ? Date.parse(maintenance.lastCompensatedAt || maintenance.startedAt || maintenance.updatedAt || '')
+        : NaN;
+      const frozenGraceBonusMs = (
+        maintenance?.enabled &&
+        Number.isFinite(anchorMs) &&
+        nowMs > anchorMs &&
+        Number.isFinite(expMs) &&
+        (expMs + gracePeriodMs) > anchorMs
+      ) ? (nowMs - anchorMs) : 0;
+      const inGracePeriod = Boolean(isExpired && (nowMs - expMs) <= (gracePeriodMs + frozenGraceBonusMs));
 
       const token = crypto.randomBytes(32).toString('hex');
       const tokenHash = hashSessionToken(token);
@@ -997,6 +1027,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         gracePeriodMs,
         isPermanent,
         planName: updatedAccess?.planName || user.planName || 'Gói thường',
+        rawExpiresAtRental: rawExpiresAtDate,
         expiresAtRental: expiresAtDate,
         allowAccountChange: user.allowAccountChange !== false
       };
@@ -1044,7 +1075,6 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         details: { ip: clientIp, isExpired, isPermanent }
       });
 
-      const maintenance = await getMaintenanceState(store);
       res.setHeader('Set-Cookie', serializeCookie('kingmc_mgr_session', token, { maxAge: cookieMaxAge, secure: isHttps(req, config?.publicBaseUrl) }));
       const responsePayload = {
         ok: true,
@@ -1056,6 +1086,7 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
           assignedBotIds: assignedIds,
           isPermanent,
           expiresAt: expiresAtDate,
+          rawExpiresAt: rawExpiresAtDate,
           status: session.status,
           planName: session.planName
         },
@@ -1132,6 +1163,13 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
       return res.status(401).json({ ok: false, error: 'Chưa đăng nhập.' });
     }
     const maintenance = await getMaintenanceState(store);
+    const isAdminOrPerm = session.role === 'admin' || Boolean(session.isPermanent);
+    const rawExpiresAt = isAdminOrPerm
+      ? null
+      : (session.rawExpiresAtRental !== undefined ? session.rawExpiresAtRental : (session.expiresAtRental ?? null));
+    const effectiveExpiresAt = isAdminOrPerm
+      ? null
+      : computeEffectiveExpiresAt(rawExpiresAt, maintenance);
     return res.json({
       ok: true,
       user: {
@@ -1140,7 +1178,8 @@ function createAuthApi({ store, entitlementService, registry, config, logger, ac
         role: session.role,
         assignedBotIds: session.assignedBotIds,
         isPermanent: Boolean(session.isPermanent),
-        expiresAt: session.role === 'admin' ? null : (session.expiresAtRental ?? null),
+        expiresAt: effectiveExpiresAt,
+        ...(session.role === 'admin' ? {} : { rawExpiresAt }),
         sessionExpiresAt: session.expiresAt,
         status: session.status,
         planName: session.planName,

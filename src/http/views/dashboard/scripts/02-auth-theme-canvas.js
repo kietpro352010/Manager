@@ -706,6 +706,9 @@ async function handleLoginSubmit(event) {
     if (data.maintenance && typeof syncSystemMaintenanceState === 'function') {
       syncSystemMaintenanceState(data.maintenance, { rerender: false });
     }
+    if (typeof normalizeCurrentUserMaintenanceExpiry === 'function') {
+      normalizeCurrentUserMaintenanceExpiry(currentUser, data.maintenance);
+    }
     if (alertEl) {
       alertEl.textContent = (data.partial ? '⚠️ ' : '✅ ') + (data.warning || data.message || 'Đăng nhập thành công!');
       alertEl.className = 'login-alert ' + (data.partial ? 'error' : 'success');

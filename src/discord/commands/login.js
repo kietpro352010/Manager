@@ -7,6 +7,7 @@ const {
   syncDiscordMemberRolesForUser,
   resolvePublicBaseUrl
 } = require('../handlers/panel-handler');
+const { getMaintenanceState } = require('../../utils/maintenance');
 
 const definition = new SlashCommandBuilder()
   .setName('login')
@@ -25,9 +26,19 @@ async function execute(interaction, services) {
         })
       ]);
       if (existingUser) {
+        let maintTimer = null;
+        const maintenance = await Promise.race([
+          getMaintenanceState(services?.accessStore || services?.store).catch(() => null),
+          new Promise((resolve) => {
+            maintTimer = setTimeout(() => resolve(null), 400);
+            maintTimer.unref?.();
+          })
+        ]).finally(() => {
+          if (maintTimer) clearTimeout(maintTimer);
+        });
         let syncTimer = null;
         const roleSyncNote = await Promise.race([
-          syncDiscordMemberRolesForUser(interaction, existingUser, services).catch(() => ''),
+          syncDiscordMemberRolesForUser(interaction, existingUser, services, maintenance).catch(() => ''),
           new Promise((resolve) => {
             syncTimer = setTimeout(() => resolve(''), 800);
             syncTimer.unref?.();
@@ -39,7 +50,8 @@ async function execute(interaction, services) {
           user: existingUser,
           discordUserId,
           roleSyncNote,
-          publicBaseUrl: resolvePublicBaseUrl(services)
+          publicBaseUrl: resolvePublicBaseUrl(services),
+          maintenance
         });
       }
     } catch (_) {
