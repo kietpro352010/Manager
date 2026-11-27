@@ -40,9 +40,12 @@ function renderDetailInventory(){
   document.getElementById('detailFoodBar').style.width=(isOfflineBot ? 0 : (food/20*100))+'%';
   document.getElementById('detailGolden').textContent=String(activeInv.goldenAppleCount||0);
   document.getElementById('detailTotem').textContent=String(activeInv.totemCount||0);
-  document.getElementById('detailOffhand').textContent=String(activeInv.offhand||'-').replace(/_/g,' ');
-  document.getElementById('detailFoodCount').textContent=String(activeInv.foodCount||0);
-  document.getElementById('detailInventoryRevision').textContent='revision '+String(activeInv.revision||0);
+  const offSlotObj = activeInv.slots ? activeInv.slots['45'] : null;
+  document.getElementById('detailOffhand').textContent = isOfflineBot
+    ? '-'
+    : (offSlotObj && offSlotObj.name ? itemLabel(offSlotObj) : (activeInv.offhand ? String(activeInv.offhand).replace(/_/g, ' ') : 'Trống'));
+  document.getElementById('detailFoodCount').textContent = String(activeInv.foodCount || 0);
+  document.getElementById('detailInventoryRevision').textContent = 'Đồng bộ túi đồ #' + String(activeInv.revision || 0) + (isOfflineBot ? ' • Bot đang tắt' : ' • Tự động cập nhật');
   const armor=activeInv.armor||{};
   updateEquipSlot('equipHead', armor.head);
   updateEquipSlot('equipTorso', armor.torso);
@@ -57,8 +60,11 @@ function renderDetailInventory(){
   const hotBox=document.getElementById('detailHotbar');hotBox.innerHTML='';
   const selected=isOfflineBot ? -1 : Number(activeInv.selectedHotbar??activeInv.selectedSlot??0);
   for(let slot=36;slot<=44;slot++) hotBox.appendChild(createDetailSlot(slots[String(slot)]||null,slot,slot-36===selected));
-  const hintEl = document.getElementById('detailTouchHint');
-  if (hintEl) hintEl.remove();
+  if (isOfflineBot && typeof cancelDetailSlotSelection === 'function') {
+    cancelDetailSlotSelection();
+  } else if (typeof updateDetailTouchHint === 'function') {
+    updateDetailTouchHint();
+  }
 }
 
 function allowDrop(event){
@@ -130,31 +136,38 @@ async function moveDetailItem(sourceSlot,destSlot){
     await _moveDetailItemLocked(sourceSlot,destSlot);
   } finally {detailInventoryBusy=false;}
 }
+async function dropDetailSlotDirect(sourceSlot) {
+  const source = Number(sourceSlot);
+  if (!Number.isInteger(source)) return;
+  if (source >= 5 && source <= 8) { await unequipDetail(getEquipmentNameBySlot(source) || 'head'); return; }
+  if (source === 45) { await unequipDetail('off-hand'); return; }
+  if (detailInventoryBusy || !detailInventory) return;
+  detailInventoryBusy = true;
+  try {
+    let result = await detailPost('/inventory/drop', { sourceSlot: source, revision: detailInventory.revision });
+    if (!result.ok && (result.status === 409 || String(result.data?.error || '').includes('revision_mismatch'))) {
+      if (result.data?.inventory) {
+        detailInventory = result.data.inventory;
+        renderDetailInventory();
+      } else {
+        await refreshDetail(true);
+      }
+      result = await detailPost('/inventory/drop', { sourceSlot: source, revision: detailInventory?.revision });
+    }
+    if (result.data?.inventory) { detailInventory = result.data.inventory; renderDetailInventory(); }
+    showToast(result.data?.message || result.data?.error || 'Đã vứt item.');
+    if (!result.ok) await refreshDetail(true);
+  } finally { detailInventoryBusy = false; }
+}
+window.dropDetailSlotDirect = dropDetailSlotDirect;
+
 async function dropDetailItemToWorld(event){
   event.preventDefault();clearDragOver(event);
   let source=detailDragged&&detailDragged.slot;
   try{const value=event.dataTransfer.getData('text/plain');if(value!=='') source=Number(value);}catch(_){}
   detailDragged=null;
   if(!Number.isInteger(source)) return;
-  if(source>=5&&source<=8){await unequipDetail({head:'head',torso:'torso',legs:'legs',feet:'feet'}[getEquipmentNameBySlot(source)]||'head');return;}
-  if(source===45){await unequipDetail('off-hand');return;}
-  if(detailInventoryBusy||!detailInventory) return;
-  detailInventoryBusy=true;
-  try{
-    let result=await detailPost('/inventory/drop',{sourceSlot:source,revision:detailInventory.revision});
-    if(!result.ok && (result.status === 409 || String(result.data?.error || '').includes('revision_mismatch'))){
-      if(result.data?.inventory){
-        detailInventory=result.data.inventory;
-        renderDetailInventory();
-      } else {
-        await refreshDetail(true);
-      }
-      result=await detailPost('/inventory/drop',{sourceSlot:source,revision:detailInventory?.revision});
-    }
-    if(result.data?.inventory){detailInventory=result.data.inventory;renderDetailInventory();}
-    showToast(result.data?.message||result.data?.error||'Đã vứt item.');
-    if(!result.ok) await refreshDetail(true);
-  } finally {detailInventoryBusy=false;}
+  await dropDetailSlotDirect(source);
 }
 function getEquipmentNameBySlot(slot){return slot===5?'head':slot===6?'torso':slot===7?'legs':'feet';}
 async function dropEquip(event,destination){
@@ -243,6 +256,7 @@ function renderDetailSettings(data){
   if(typeof setDetailSettingsDisabled==='function'&&!detailSettingsSaveInFlight){
     setDetailSettingsDisabled(false);
   }
+  if (typeof syncFormDirtyBadges === 'function') syncFormDirtyBadges();
 }
 
 function renderDetailAutoChatSchedules(schedules){
@@ -401,6 +415,10 @@ async function saveDetailSettings(){
     if(result.ok){
       detailSettingsDirty=false;
       renderDetailSettings(result.data.settings||result.data);
+      if (typeof syncFormDirtyBadges === 'function') syncFormDirtyBadges();
+      if (typeof setDetailActionFeedback === 'function') {
+        setDetailActionFeedback({ busy: false, tone: 'success', title: 'Đã lưu Cài đặt tự động', detail: 'Cấu hình bảo vệ mới đã được đồng bộ xuống Worker.' });
+      }
       lastHomeSig = '';
       if(selectedBotId!==null)detailLastRevMap.delete(selectedBotId);
       await refreshDetail(true);
@@ -418,6 +436,10 @@ async function saveDetailAutoChat(){
       detailAutoChatDirty=false;
       detailAutoChatSchedules=result.data?.autoChatSchedules||schedules;
       renderDetailAutoChatSchedules(detailAutoChatSchedules);
+      if (typeof syncFormDirtyBadges === 'function') syncFormDirtyBadges();
+      if (typeof setDetailActionFeedback === 'function') {
+        setDetailActionFeedback({ busy: false, tone: 'success', title: 'Đã lưu lịch Auto Chat', detail: 'Lịch gửi tin nhắn tự động đã được cập nhật.' });
+      }
       lastHomeSig = '';
       if(selectedBotId!==null)detailLastRevMap.delete(selectedBotId);
       await refreshDetail(true);
@@ -434,6 +456,10 @@ async function saveDetailBotSchedules(){
       detailBotScheduleDirty=false;
       detailBotSchedules=result.data?.botSchedules||schedules;
       renderDetailBotSchedules(detailBotSchedules);
+      if (typeof syncFormDirtyBadges === 'function') syncFormDirtyBadges();
+      if (typeof setDetailActionFeedback === 'function') {
+        setDetailActionFeedback({ busy: false, tone: 'success', title: 'Đã lưu Hẹn giờ bật/tắt Bot', detail: 'Lịch hoạt động mới đã kích hoạt.' });
+      }
       lastHomeSig = '';
       if(selectedBotId!==null)detailLastRevMap.delete(selectedBotId);
       await refreshDetail(true);
@@ -532,9 +558,16 @@ async function detailAction(action){
     lastHomeSig = '';
     if (selectedBotId !== null) detailLastRevMap.delete(selectedBotId);
 
+    const actionLabel = action==='start' ? 'Chạy bot' : (action==='stop' ? 'Dừng bot' : 'Khởi động lại bot');
+    if (typeof setDetailActionFeedback === 'function') {
+      setDetailActionFeedback({ busy: true, tone: 'info', title: 'Đang thực hiện: ' + actionLabel + '...', detail: 'Đang gửi lệnh và chờ Worker đồng bộ trạng thái.' });
+    }
     showToast(action==='start'?'Đang chạy bot...':action==='stop'?'Đang dừng bot...':'Đang khởi động lại bot...');
     const result=await detailPost('/'+encodeURIComponent(action),{});
     if (result.ok) {
+      if (typeof setDetailActionFeedback === 'function') {
+        setDetailActionFeedback({ busy: false, tone: 'success', title: 'Đã thực hiện: ' + actionLabel, detail: result.data?.message || 'Tiến trình trạng thái đang cập nhật trực tiếp.' });
+      }
       showToast(result.data?.message||result.data?.error||'Đã xử lý thành công!', 'success');
       lastHomeSig = '';
       if (selectedBotId !== null) detailLastRevMap.delete(selectedBotId);
@@ -546,6 +579,9 @@ async function detailAction(action){
       if (bIdx !== -1 && prevBotState) Object.assign(bots[bIdx], prevBotState);
       if (typeof detailStatusHtml === 'function') detailStatusHtml();
       var err = result.data?.error || 'Không thể thực hiện thao tác.';
+      if (typeof setDetailActionFeedback === 'function') {
+        setDetailActionFeedback({ busy: false, tone: 'error', title: 'Không thể ' + actionLabel.toLowerCase(), detail: err });
+      }
       if (action === 'start' && (err.indexOf('username') !== -1 || err.indexOf('password') !== -1 || err.indexOf('chưa có') !== -1)) {
         showToast('⚠️ ' + err + ' Vui lòng nhập Username Ingame bên dưới và bấm "Lưu & Chạy lại ngay"!', 'warning', 6000);
         var uInput = document.getElementById('detailUsernameInput');
@@ -561,6 +597,9 @@ async function detailAction(action){
     if (detailBot && prevDetailState) Object.assign(detailBot, prevDetailState);
     if (bIdx !== -1 && prevBotState) Object.assign(bots[bIdx], prevBotState);
     if (typeof detailStatusHtml === 'function') detailStatusHtml();
+    if (typeof setDetailActionFeedback === 'function') {
+      setDetailActionFeedback({ busy: false, tone: 'error', title: 'Lỗi gửi lệnh điều khiển', detail: err.message || 'Không thể thực hiện thao tác.' });
+    }
     showToast(err.message||'Không thể thực hiện thao tác.', 'error');
     lastHomeSig = '';
     if (selectedBotId !== null) detailLastRevMap.delete(selectedBotId);
@@ -624,19 +663,34 @@ window.quickDetailCommand = quickDetailCommand;
 async function quickEnterServer() {
   if (!selectedBotId) return;
   if (detailBot?.currentWindow && Array.isArray(detailBot.currentWindow.slots) && detailBot.currentWindow.slots.length > 24) {
+    if (typeof setDetailActionFeedback === 'function') {
+      setDetailActionFeedback({ busy: true, tone: 'info', title: 'Đang bấm Slot 24 để vào Server...', detail: 'Cửa sổ Menu đã sẵn sàng.' });
+    }
     showToast('Đang click Slot 24 vào server...');
     await clickDetailGuiSlot(24);
   } else {
+    if (typeof setDetailActionFeedback === 'function') {
+      setDetailActionFeedback({ busy: true, tone: 'info', title: 'Đang gửi lệnh /menu để vào Server...', detail: 'Bot sẽ tự chọn Slot 24 ngay khi cửa sổ Menu mở.' });
+    }
     showToast('Đang gửi lệnh /menu để vào server...');
     try {
       const res = await detailPost('/send', { text: '/menu' });
       if (res.ok) {
+        if (typeof setDetailActionFeedback === 'function') {
+          setDetailActionFeedback({ busy: false, tone: 'success', title: 'Đã gửi lệnh /menu', detail: 'Bot sẽ tự click Slot 24 ngay khi menu mở.' });
+        }
         showToast('Đã gửi /menu! Bot sẽ tự động click slot 24 ngay khi menu mở.', 'success');
         await refreshDetail(true);
       } else {
+        if (typeof setDetailActionFeedback === 'function') {
+          setDetailActionFeedback({ busy: false, tone: 'error', title: 'Không gửi được lệnh /menu', detail: res.data?.error || 'Lỗi không xác định.' });
+        }
         showToast(res.data?.error || 'Không thể gửi /menu.', 'error');
       }
     } catch(e) {
+      if (typeof setDetailActionFeedback === 'function') {
+        setDetailActionFeedback({ busy: false, tone: 'error', title: 'Lỗi gửi /menu', detail: e.message || 'Lỗi mạng.' });
+      }
       showToast(e.message || 'Lỗi gửi /menu', 'error');
     }
   }
@@ -655,8 +709,14 @@ async function quickEquipTotem() {
     }
   }
   if (totemSlot === null) {
+    if (typeof setDetailActionFeedback === 'function') {
+      setDetailActionFeedback({ busy: false, tone: 'warning', title: 'Không tìm thấy Totem trong rương đồ', detail: 'Hãy chuẩn bị Totem trong 36 ô túi đồ trước khi lắp tay phụ.' });
+    }
     showToast('⚠️ Không tìm thấy Totem trong 36 ô rương đồ!', 'warning');
     return;
+  }
+  if (typeof setDetailActionFeedback === 'function') {
+    setDetailActionFeedback({ busy: true, tone: 'info', title: 'Đang lắp Totem vào tay phụ...', detail: 'Từ ô số #' + totemSlot + ' sang ô Tay phụ.' });
   }
   showToast('Đang trang bị Totem vào tay phụ...');
   try {
@@ -666,12 +726,21 @@ async function quickEquipTotem() {
       revision: detailInventory.revision
     });
     if (res.ok) {
+      if (typeof setDetailActionFeedback === 'function') {
+        setDetailActionFeedback({ busy: false, tone: 'success', title: 'Đã lắp Totem vào tay phụ', detail: 'Bot đã được trang bị Totem dự phòng an toàn.' });
+      }
       showToast('🛡️ Đã trang bị Totem vào tay phụ thành công!', 'success');
       await refreshDetail(true);
     } else {
+      if (typeof setDetailActionFeedback === 'function') {
+        setDetailActionFeedback({ busy: false, tone: 'error', title: 'Lỗi lắp Totem tay phụ', detail: res.data?.error || 'Không thể trang bị Totem.' });
+      }
       showToast(res.data?.error || 'Lỗi trang bị Totem.', 'error');
     }
   } catch (e) {
+    if (typeof setDetailActionFeedback === 'function') {
+      setDetailActionFeedback({ busy: false, tone: 'error', title: 'Lỗi lắp Totem tay phụ', detail: e.message || 'Lỗi kết nối.' });
+    }
     showToast(e.message || 'Lỗi gửi yêu cầu trang bị Totem.', 'error');
   }
 }
@@ -758,16 +827,32 @@ async function quickCardAction(btn, botId, action) {
 }
 window.quickCardAction = quickCardAction;
 
-async function copyToClipboard(text, label) {
+async function copyToClipboard(text, label, triggerEl) {
   text = String(text || '').trim();
-  if (!text || text === '-') return;
+  if (!text || text === '-' || text === '--') return;
+  const targetEl = (triggerEl && typeof triggerEl.setAttribute === 'function')
+    ? triggerEl
+    : (typeof document !== 'undefined' && document.activeElement && (document.activeElement.classList?.contains('copyable') || document.activeElement.tagName === 'BUTTON') ? document.activeElement : null);
+  const markCopiedVisual = () => {
+    if (targetEl && typeof targetEl.setAttribute === 'function') {
+      if (targetEl._copyResetTimer) clearTimeout(targetEl._copyResetTimer);
+      targetEl.setAttribute('data-copied', 'true');
+      targetEl._copyResetTimer = setTimeout(() => {
+        try { targetEl.removeAttribute('data-copied'); } catch (_) {}
+      }, 1800);
+    }
+    if (typeof announceGlobalStatus === 'function') {
+      announceGlobalStatus('Đã sao chép ' + (label || 'nội dung') + '.');
+    }
+  };
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       await navigator.clipboard.writeText(text);
     } else {
       throw new Error('Clipboard API not supported');
     }
-    showToast('Đã sao chép ' + (label || 'nội dung') + ': ' + text);
+    markCopiedVisual();
+    showToast('Đã sao chép ' + (label || 'nội dung') + ': ' + text, 'success');
   } catch (_) {
     const ta = document.createElement('textarea');
     ta.value = text;
@@ -778,7 +863,8 @@ async function copyToClipboard(text, label) {
     ta.select();
     try {
       document.execCommand('copy');
-      showToast('Đã sao chép ' + (label || 'nội dung') + ': ' + text);
+      markCopiedVisual();
+      showToast('Đã sao chép ' + (label || 'nội dung') + ': ' + text, 'success');
     } catch (e) {
       showToast('Không thể sao chép tự động: ' + text);
     }
@@ -830,6 +916,10 @@ async function saveDetailAccount(){
     if(result.ok){
       if(userInput){ userInput.removeAttribute('data-dirty'); userInput.value=''; }
       if(passInput){ passInput.removeAttribute('data-dirty'); passInput.value=''; }
+      if (typeof syncFormDirtyBadges === 'function') syncFormDirtyBadges();
+      if (typeof setDetailActionFeedback === 'function') {
+        setDetailActionFeedback({ busy: false, tone: 'success', title: 'Đã lưu tài khoản Minecraft', detail: 'Tài khoản mới đã được lưu. Bạn có thể bấm "Chạy lại" để vào game bằng tài khoản vừa đổi.' });
+      }
       lastHomeSig = '';
       if(selectedBotId!==null)detailLastRevMap.delete(selectedBotId);
       await refreshDetail(true);
@@ -851,13 +941,29 @@ async function saveAndRestartBot(){
   if(userInput)userInput.disabled=true;
   if(passInput)passInput.disabled=true;
   try{
+    if (typeof setDetailActionFeedback === 'function') {
+      setDetailActionFeedback({ busy: true, tone: 'info', title: 'Đang lưu tài khoản & khởi động lại bot...', detail: 'Bước 1/2: Cập nhật thông tin đăng nhập Minecraft xuống Worker.' });
+    }
     const result=await detailPost('/account',{username,password});
-    if(!result.ok){showToast(result.data?.error||'Không thể cập nhật tài khoản.');return;}
+    if(!result.ok){
+      if (typeof setDetailActionFeedback === 'function') {
+        setDetailActionFeedback({ busy: false, tone: 'error', title: 'Không thể lưu tài khoản Minecraft', detail: result.data?.error || 'Lỗi cập nhật tài khoản.' });
+      }
+      showToast(result.data?.error||'Không thể cập nhật tài khoản.');
+      return;
+    }
     showToast('Đã lưu tài khoản. Đang khởi động lại bot...');
     if(userInput){ userInput.removeAttribute('data-dirty'); userInput.value=''; }
     if(passInput){ passInput.removeAttribute('data-dirty'); passInput.value=''; }
+    if (typeof syncFormDirtyBadges === 'function') syncFormDirtyBadges();
+    if (typeof setDetailActionFeedback === 'function') {
+      setDetailActionFeedback({ busy: true, tone: 'info', title: 'Đang khởi động lại bot...', detail: 'Bước 2/2: Bot đang kết nối lại với tài khoản mới.' });
+    }
     const restartRes=await detailPost('/restart',{});
     showToast(restartRes.data?.message||restartRes.data?.error||'Đã gửi lệnh chạy lại bot.');
+    if (restartRes.ok && typeof setDetailActionFeedback === 'function') {
+      setDetailActionFeedback({ busy: false, tone: 'success', title: 'Đã lưu tài khoản & khởi động lại', detail: 'Theo dõi 4 bước kết nối bên dưới để xem bot đăng nhập và vào AFK.' });
+    }
     lastHomeSig = '';
     if(selectedBotId!==null)detailLastRevMap.delete(selectedBotId);
     await refreshDetail(true);

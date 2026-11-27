@@ -671,6 +671,49 @@ function renderBotLogs({ user, worker, logs = [], workers = [] }) {
       .replace(/```/g, '`\u200b`\u200b`');
   };
 
+  const LOG_TYPE_LABEL_MAP = {
+    connecting: 'KẾT NỐI',
+    spawn: 'VÀO SẢNH',
+    online: 'VÀO GAME',
+    connection_error: 'MẤT KẾT NỐI',
+    kicked: 'NGẮT KẾT NỐI',
+    afk_kicked: 'VĂNG AFK',
+    afk_recovered: 'VÀO LẠI AFK',
+    stopped: 'ĐÃ DỪNG',
+    totem_popped: 'DÙNG TOTEM',
+    bot_death: 'HẠ GỤC',
+    respawn: 'HỒI SINH',
+    window_open: 'MỞ MENU',
+    window_close: 'ĐÓNG MENU',
+    window_click: 'CHỌN MENU',
+    maintenance: 'BẢO TRÌ',
+    maintenance_window: 'BẢO TRÌ',
+    credentials_missing: 'THIẾU TK',
+    reconnect_exhausted: 'DỪNG THỬ LẠI',
+    host_switch: 'ĐỔI MÁY CHỦ',
+    auth_failed: 'ĐĂNG NHẬP',
+    invalid_proxy: 'LỖI PROXY',
+    ip_limited: 'GIỚI HẠN IP',
+    banned: 'BỊ KHÓA',
+    info: 'THÔNG TIN',
+    warn: 'CẢNH BÁO',
+    warning: 'CẢNH BÁO',
+    error: 'LỖI'
+  };
+  const EMPTY_LOG_FALLBACK_MAP = {
+    window_open: 'Mở cửa sổ menu trong game.',
+    window_close: 'Đã đóng cửa sổ menu trong game.',
+    window_click: 'Đã thao tác chọn ô trên menu GUI.',
+    stopped: 'Bot đã dừng hoạt động.',
+    connecting: 'Đang kết nối tới máy chủ Minecraft...',
+    spawn: 'Bot đã xuất hiện trong máy chủ.',
+    online: 'Đã vào khu vực chơi / AFK.',
+    connection_error: 'Tạm mất kết nối tới máy chủ Minecraft.',
+    kicked: 'Bot bị ngắt kết nối khỏi máy chủ.',
+    maintenance: 'Máy chủ đang bảo trì.',
+    maintenance_window: 'Tạm nghỉ khung giờ bảo trì định kỳ.'
+  };
+
   const formattedLogs = safeLogs.map((l) => {
     if (!l) return '';
     if (typeof l === 'string') return sanitize(l);
@@ -688,9 +731,15 @@ function renderBotLogs({ user, worker, logs = [], workers = [] }) {
         timeStr = `[${String(rawTime).slice(11, 19)}] `;
       }
     }
-    const levelStr = (l.type || l.level) ? `[${String(l.type || l.level).toUpperCase()}] ` : '';
-    const msg = l.message || l.text || JSON.stringify(l);
-    return sanitize(`${timeStr}${levelStr}${msg}`);
+    const rawType = String(l.type || l.level || '').trim();
+    const mappedLabel = LOG_TYPE_LABEL_MAP[rawType.toLowerCase()] || rawType.toUpperCase();
+    const levelStr = mappedLabel ? `[${mappedLabel}] ` : '';
+    const baseMsg = String(l.message || l.text || '').trim()
+      || EMPTY_LOG_FALLBACK_MAP[rawType.toLowerCase()]
+      || (l.reason ? String(l.reason).trim() : '')
+      || (mappedLabel ? `Sự kiện ${mappedLabel.toLowerCase()}` : 'Sự kiện hệ thống');
+    const repeatSuffix = Number(l.repeatCount) > 1 ? ` (×${Number(l.repeatCount)})` : '';
+    return sanitize(`${timeStr}${levelStr}${baseMsg}${repeatSuffix}`);
   }).filter(Boolean);
 
   const logContent = formattedLogs.length > 0

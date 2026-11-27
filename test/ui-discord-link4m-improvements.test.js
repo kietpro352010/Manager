@@ -697,3 +697,347 @@ test('WEB UI UNSLOP + ANIMATE UI: Enforces motion tokens, fine-pointer hover gat
   assert.match(rawTokensCss, /unslop/i, '01-tokens-and-base.css must retain unslop attribution');
   assert.match(PUBLIC_LOGIN_HTML, /unslop/i, 'login-html.js must retain unslop attribution');
 });
+
+test('WEB UI OBSERVABILITY, ACTION FEEDBACK & TOUCH INVENTORY: Contracts, ARIA & VM behavior', async () => {
+  const vm = require('node:vm');
+  const dash = require('../src/http/views/dashboard');
+
+  const requiredBodySnippets = [
+    'id="globalActionLiveRegion"',
+    'id="homeSyncStatusPill"',
+    'id="btnHomeRefreshNow"',
+    'id="fleetActionBanner"',
+    'id="fleetAttentionBar"',
+    'role="toolbar"',
+    'id="detailSyncStatusPill"',
+    'id="btnDetailRefreshNow"',
+    'id="detailActionBanner"',
+    'id="detailLifecycleStepper"',
+    'id="detailStatusExplain"',
+    'id="detailChatFilterBar"',
+    'id="detailEventFilterBar"',
+    'id="detailChatScrollBtn"',
+    'id="detailEventScrollBtn"',
+    'id="detailInventoryInteractHint"',
+    'id="detailSettingsSyncBadge"',
+    'id="detailAccountSyncBadge"',
+    'id="detailAutoChatSyncBadge"',
+    'id="detailBotScheduleSyncBadge"'
+  ];
+  for (const snippet of requiredBodySnippets) {
+    assert.ok(dash.BODY.includes(snippet), `DASHBOARD BODY must include ${snippet}`);
+  }
+
+  // Modern Web Guidance checks: spinner reduced-motion slowdown, toolbar [aria-pressed="true"], non-disabling copy feedback
+  assert.match(dash.STYLES, /progress\.loading-spinner/, 'Dashboard CSS must style progress.loading-spinner');
+  assert.match(dash.STYLES, /\.fleet-toolbar\[role="toolbar"\]\s+button\[aria-pressed="true"\]/, 'Toolbar toggled style must bind to [aria-pressed="true"]');
+  assert.match(dash.STYLES, /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*progress\.loading-spinner[\s\S]*animation-duration:/, 'Spinner must slow down under prefers-reduced-motion: reduce');
+  assert.ok(dash.SCRIPTS.includes("setAttribute('data-copied', 'true')"), 'copyToClipboard must expose data-copied visual state without disabling button');
+
+  function makeMockEl(id = '') {
+    const classSet = new Set();
+    const attrs = {};
+    return {
+      id,
+      tagName: 'DIV',
+      value: '',
+      textContent: '',
+      _innerHTML: '',
+      get innerHTML() { return this._innerHTML; },
+      set innerHTML(v) { this._innerHTML = String(v ?? ''); },
+      get className() { return [...classSet].join(' '); },
+      set className(v) {
+        classSet.clear();
+        String(v || '').split(/\s+/).filter(Boolean).forEach((n) => classSet.add(n));
+      },
+      checked: false,
+      disabled: false,
+      style: {},
+      dataset: {},
+      children: [],
+      scrollHeight: 200,
+      scrollTop: 200,
+      clientHeight: 200,
+      setAttribute(k, v) { attrs[k] = String(v); },
+      getAttribute(k) { return attrs[k] ?? null; },
+      removeAttribute(k) { delete attrs[k]; },
+      hasAttribute(k) { return Object.prototype.hasOwnProperty.call(attrs, k); },
+      addEventListener() {},
+      focus() {},
+      scrollIntoView() {},
+      remove() {},
+      appendChild(child) { this.children.push(child); return child; },
+      prepend(child) { this.children.unshift(child); return child; },
+      querySelector() { return null; },
+      querySelectorAll() { return []; },
+      getBoundingClientRect() { return { top: 0, bottom: 100 }; },
+      classList: {
+        add(...names) { names.forEach((n) => n && classSet.add(n)); },
+        remove(...names) { names.forEach((n) => classSet.delete(n)); },
+        toggle(n, force) {
+          const next = force === undefined ? !classSet.has(n) : Boolean(force);
+          if (next) classSet.add(n); else classSet.delete(n);
+          return next;
+        },
+        contains(n) { return classSet.has(n); }
+      }
+    };
+  }
+
+  const elements = new Map();
+  const getEl = (id) => {
+    if (!elements.has(id)) elements.set(id, makeMockEl(id));
+    return elements.get(id);
+  };
+  const postedRequests = [];
+
+  const sandbox = {
+    URL,
+    Date,
+    Math,
+    Number,
+    String,
+    Boolean,
+    Array,
+    Object,
+    Set,
+    Map,
+    JSON,
+    Promise,
+    Error,
+    RegExp,
+    parseInt,
+    setTimeout,
+    clearTimeout,
+    setInterval: () => ({ unref() {} }),
+    clearInterval: () => {},
+    console,
+    navigator: { onLine: true, clipboard: { writeText: async () => {} } },
+    window: { addEventListener() {}, location: { href: 'http://localhost:3000/' }, matchMedia: () => ({ matches: false }) },
+    document: {
+      hidden: false,
+      activeElement: null,
+      getElementById: (id) => getEl(id),
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      addEventListener: () => {},
+      createElement: () => makeMockEl('')
+    },
+    localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+    sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} }
+  };
+  sandbox.window.document = sandbox.document;
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+
+  for (const scriptName of ['01-core-and-cards.js', '04-fleet-and-admin-modals.js', '05-detail-gui-and-logs.js', '06-detail-inventory-sched.js']) {
+    const code = fs.readFileSync(path.join(__dirname, '../src/http/views/dashboard/scripts', scriptName), 'utf8');
+    vm.runInContext(code, sandbox);
+  }
+
+  // 1. Operational stage & Bot Card enhancements
+  vm.runInContext(`currentUser = { role: 'user', username: 'khach01' };`, sandbox);
+  const setupStage = sandbox.describeBotOperationalStage({
+    id: 'w1', workerId: 'w1', available: true, manuallyStopped: true, status: 'stopped', username: 'Chưa đặt'
+  });
+  assert.strictEqual(setupStage.needsAccountSetup, true);
+  assert.strictEqual(setupStage.tone, 'idle');
+  assert.ok(setupStage.headlineVi.includes('Chưa cài tài khoản'));
+
+  const onlineStage = sandbox.describeBotOperationalStage({
+    id: 'w1', workerId: 'w1', available: true, manuallyStopped: false, status: 'afk', online: true, username: 'BotVN01', locationState: 'game'
+  });
+  assert.strictEqual(onlineStage.stageIndex, 4);
+  assert.strictEqual(onlineStage.tone, 'ok');
+  assert.ok(onlineStage.headlineVi.includes('Đang treo AFK ổn định'));
+
+  const userErrorStage = sandbox.describeBotOperationalStage({
+    id: 'w1', workerId: 'w1', available: true, manuallyStopped: false, status: 'error', username: 'BotVN01',
+    lastError: 'Minecraft connection error (ECONNREFUSED)'
+  });
+  assert.ok(!userErrorStage.headlineVi.includes('ECONNREFUSED'), 'Regular user stage summary must not leak raw ECONNREFUSED');
+
+  sandbox.setBotActionFeedback('w1', { busy: true, tone: 'info', title: 'Đang gửi lệnh chạy...' });
+  const cardHtml = sandbox.botCardHtml({
+    id: 'w1', workerId: 'w1', botNumber: 1, label: 'FarmBot', status: 'stopped', available: true, manuallyStopped: true,
+    username: 'Chưa đặt', food: 18, health: 20, totemCount: 2, settings: { ecoMode: true, autoTotem: true }
+  });
+  assert.ok(cardHtml.includes('bot-card-stage-bar'));
+  assert.ok(cardHtml.includes('bot-setup-cta-btn'));
+  assert.ok(cardHtml.includes('bot-action-live-strip'));
+  assert.ok(cardHtml.includes('<progress class="loading-spinner"'));
+  assert.ok(cardHtml.includes('Độ no: 18 / 20'));
+  assert.ok(cardHtml.includes('bot-protection-row'));
+
+  // 2. Detail Lifecycle Stepper & Live Session Trail
+  vm.runInContext(`
+    detailBot = {
+      id: 'w1', workerId: 'w1', botNumber: 1, label: 'FarmBot',
+      status: 'afk', online: true, available: true, username: 'BotVN01',
+      server: 'kingmc.vn', position: { x: 100.4, y: 64, z: -200.2 }, locationState: 'game',
+      settings: { ecoMode: true, autoTotem: true, antiHungry: true, autoReconnect: true, antiAfkKick: true }
+    };
+    detailStatusHtml();
+  `, sandbox);
+  assert.ok(getEl('detailLifecycleStepper').innerHTML.includes('Treo AFK'));
+  assert.ok(getEl('detailStatusExplain').innerHTML.includes('Đang treo AFK ổn định'));
+  assert.ok(getEl('detailPositionHistory').innerHTML.includes('Auto-Totem'));
+  assert.ok(getEl('detailPositionHistory').innerHTML.includes('100, 64, -200'));
+
+  // 3. Click/Tap Inventory -> Move / Equip / Drop workflow
+  sandbox.requestJson = async (url, opts) => {
+    postedRequests.push({ url, body: JSON.parse(opts.body || '{}') });
+    return { ok: true, status: 200, data: { ok: true, message: 'OK', inventory: sandbox.detailInventory } };
+  };
+  vm.runInContext(`
+    detailBot = { id: 'w1', workerId: 'w1', status: 'online', available: true, manuallyStopped: false };
+    detailInventory = {
+      revision: 3,
+      health: 20, food: 20, totemCount: 1, goldenAppleCount: 0, foodCount: 5, selectedHotbar: 0,
+      armor: {},
+      slots: { '9': { slot: 9, name: 'totem_of_undying', count: 1 }, '10': { slot: 10, name: 'apple', count: 5 } }
+    };
+    selectedBotId = 'w1';
+  `, sandbox);
+  sandbox.handleDetailSlotClick(9, { slot: 9, name: 'totem_of_undying', count: 1 });
+  assert.ok(getEl('detailInventoryInteractHint').innerHTML.includes('totem of undying'));
+  await sandbox.handleDetailEquipmentClick('off-hand');
+  assert.strictEqual(postedRequests[0].url, '/api/manager/bot/w1/inventory/equip');
+  assert.deepStrictEqual(postedRequests[0].body, { sourceSlot: 9, destination: 'off-hand', revision: 3 });
+
+  sandbox.handleDetailSlotClick(10, { slot: 10, name: 'apple', count: 5 });
+  await sandbox.handleDetailDropZoneClick();
+  assert.strictEqual(postedRequests[1].url, '/api/manager/bot/w1/inventory/drop');
+  assert.deepStrictEqual(postedRequests[1].body, { sourceSlot: 10, revision: 3 });
+
+  // 4. Event Filter & Dirty Save Badge
+  vm.runInContext(`
+    _rawDetailEventEntries = [
+      { timestamp: '2026-11-26T10:00:00Z', type: 'kicked', message: 'Mất kết nối server' },
+      { timestamp: '2026-11-26T10:01:00Z', type: 'online', message: 'Đã vào AFK thành công' }
+    ];
+    setDetailEventFilter('error', '');
+  `, sandbox);
+  assert.strictEqual(getEl('detailEventCount').textContent, '1/2 sự kiện');
+  assert.ok(getEl('detailEventLogs').innerHTML.includes('Mất kết nối'));
+  assert.ok(!getEl('detailEventLogs').innerHTML.includes('vào AFK thành công'));
+
+  sandbox.markDetailSettingsDirty();
+  assert.ok(getEl('detailSettingsSyncBadge').classList.contains('is-dirty'));
+  assert.ok(getEl('detailSettingsSyncBadge').textContent.toLowerCase().includes('chưa lưu'));
+
+  // 5. Copy button sets data-copied without disabling control
+  const copyBtn = makeMockEl('copyBtnTest');
+  await sandbox.copyToClipboard('1.2.3.4', 'IP', copyBtn);
+  assert.strictEqual(copyBtn.getAttribute('data-copied'), 'true');
+  assert.strictEqual(copyBtn.disabled, false);
+
+  // 6. Log deduplication/grouping, Chat classification (player vs outgoing vs server), & readable telemetry labels
+  vm.runInContext(`
+    detailBot = {
+      id: 'w1', workerId: 'w1', botNumber: 1, label: 'FarmBot',
+      provider: 'wispbyte', status: 'afk', online: true, available: true,
+      username: 'BotVN01', locationState: 'other', dimension: 'overworld',
+      lastSeen: new Date().toISOString(),
+      hostHardware: { ramUsedMb: 180, ramTotalMb: 400, ramPercent: 45, cpuPercent: 12.5, cpuCores: 1, netDownKb: 4.2, netUpKb: 1.1 },
+      settings: { ecoMode: true, autoTotem: true }
+    };
+    detailStatusHtml();
+    detailInventory = { revision: 4, health: 20, food: 20, totemCount: 1, goldenAppleCount: 0, foodCount: 5, selectedHotbar: 0, armor: {}, slots: {} };
+    renderDetailInventory();
+  `, sandbox);
+  assert.strictEqual(getEl('detailPlatformPill').textContent, 'WISPBYTE');
+  assert.strictEqual(getEl('detailDimension').textContent, 'Khu sinh tồn / AFK');
+  assert.strictEqual(getEl('detailHostNet').textContent, '↓ 4.2 KB/s • ↑ 1.1 KB/s');
+  assert.ok(!getEl('detailHostNet').textContent.includes('0.0 MB'));
+  assert.ok(getEl('detailInventoryRevision').textContent.includes('Đồng bộ túi đồ #4'));
+
+  vm.runInContext(`
+    _rawDetailEventEntries = [
+      { occurredAt: '2026-11-26T10:00:00Z', type: 'connection_error', message: 'Minecraft connection error (ECONNRESET)' },
+      { occurredAt: '2026-11-26T10:00:10Z', type: 'connection_error', message: 'Minecraft connection error (ECONNRESET)' },
+      { occurredAt: '2026-11-26T10:01:00Z', type: 'window_open', message: '' }
+    ];
+    setDetailEventFilter('all', '');
+  `, sandbox);
+  assert.ok(getEl('detailEventLogs').innerHTML.includes('log-repeat-badge') && getEl('detailEventLogs').innerHTML.includes('×2'));
+  assert.ok(getEl('detailEventLogs').innerHTML.includes('Mở cửa sổ menu trong game'));
+  assert.strictEqual(getEl('detailEventCount').textContent, '2 dòng (3 lần)');
+
+  vm.runInContext(`
+    _rawDetailChatEntries = [
+      { occurredAt: '2026-11-26T10:00:00Z', type: 'chat', source: 'spawn_command', message: '[BotVN01] /spawn' },
+      { occurredAt: '2026-11-26T10:00:05Z', type: 'chat', message: '[SteveVN] xin chao moi nguoi' },
+      { occurredAt: '2026-11-26T10:00:10Z', type: 'chat', message: '[KingMC] Chào mừng trở lại!' }
+    ];
+    setDetailChatFilter('outgoing', '');
+  `, sandbox);
+  assert.strictEqual(getEl('detailChatCount').textContent, '1/3 tin');
+  assert.ok(getEl('detailChatLogs').innerHTML.includes('BOT →') && getEl('detailChatLogs').innerHTML.includes('/spawn'));
+
+  vm.runInContext(`setDetailChatFilter('player', '');`, sandbox);
+  assert.strictEqual(getEl('detailChatCount').textContent, '1/3 tin');
+  assert.ok(getEl('detailChatLogs').innerHTML.includes('SteveVN:'));
+
+  vm.runInContext(`setDetailChatFilter('server', '');`, sandbox);
+  assert.strictEqual(getEl('detailChatCount').textContent, '1/3 tin');
+  assert.ok(getEl('detailChatLogs').innerHTML.includes('KINGMC') && getEl('detailChatLogs').innerHTML.includes('Chào mừng'));
+});
+
+test('REGISTRY & DISCORD LOGS: Humanizes empty events, coalesces noisy repeats, and renders Vietnamese Discord tags', async () => {
+  const crypto = require('node:crypto');
+  const { WorkerRegistry } = require('../src/services/worker-registry');
+  const { renderBotLogs } = require('../src/discord/panels/renderer');
+
+  let dbAddEventCount = 0;
+  const storedWorker = {
+    workerId: '24',
+    botNumber: 24,
+    name: 'KingMC Bot 24',
+    enabled: true,
+    provider: 'wispbyte',
+    settings: {},
+    status: { state: 'online', online: true },
+    events: []
+  };
+  const registry = new WorkerRegistry({
+    store: {
+      get: async () => storedWorker,
+      update: async (_id, patch) => ({ ...storedWorker, ...patch }),
+      addEvent: async (_id, ev) => {
+        dbAddEventCount += 1;
+        storedWorker.events.push(ev);
+      }
+    },
+    accessStore: null,
+    encryptionKey: crypto.randomBytes(32)
+  });
+
+  const openEv = await registry.addEvent('24', { type: 'window_open', title: 'KingSMP Menu' });
+  assert.ok(openEv.message.includes('Mở cửa sổ menu trong game: KingSMP Menu'));
+
+  const stopEv = await registry.addEvent('24', { type: 'stopped', reason: 'manager_stop' });
+  assert.ok(stopEv.message.includes('Đã dừng bot theo lệnh điều khiển'));
+
+  const dbWritesBefore = dbAddEventCount;
+  const t1 = new Date('2026-11-26T10:05:00Z');
+  const t2 = new Date('2026-11-26T10:05:12Z');
+  const err1 = await registry.addEvent('24', { type: 'connection_error', message: 'Minecraft connection error (ECONNRESET)', occurredAt: t1 });
+  const err2 = await registry.addEvent('24', { type: 'connection_error', message: 'Minecraft connection error (ECONNRESET)', occurredAt: t2 });
+  assert.strictEqual(dbAddEventCount - dbWritesBefore, 1, 'Duplicate connection_error within 45s must coalesce DB writes');
+  assert.ok(err1.message.includes('Tạm mất kết nối'));
+  assert.strictEqual(err2.repeatCount, 2);
+
+  const discordLogsView = renderBotLogs({
+    user: { role: 'admin' },
+    worker: { workerId: '24', botNumber: 24, name: 'Bot 24', status: { state: 'online', online: true } },
+    logs: [
+      { type: 'window_open', message: '', title: 'KingSMP Menu', occurredAt: t1 },
+      ...registry.getLogs('24')
+    ]
+  });
+  const desc = discordLogsView.embeds[0].data.description;
+  assert.ok(desc.includes('[MỞ MENU]'));
+  assert.ok(desc.includes('[MẤT KẾT NỐI]') && desc.includes('(×2)'));
+  assert.ok(!desc.includes('{"type"'), 'Discord logs must never dump raw JSON strings');
+});

@@ -512,3 +512,64 @@ select option {
   max-width: calc(100vw - 24px);
   text-align: center;
 }
+
+.sr-only {
+  position: absolute !important;
+  clip-path: inset(50%) !important;
+  overflow: hidden !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  white-space: nowrap !important;
+}
+
+/* Accessible indeterminate <progress> spinner (modern-web-guidance: spinner) */
+progress.loading-spinner {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(148, 163, 184, 0.30);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  flex-shrink: 0;
+  display: inline-block;
+  vertical-align: middle;
+  animation: spin 0.85s linear infinite;
+}
+progress.loading-spinner::-webkit-progress-bar {
+  background: transparent;
+}
+progress.loading-spinner::-webkit-progress-value {
+  background: transparent;
+}
+progress.loading-spinner::-moz-progress-bar {
+  background: transparent;
+}
+
+/* Accessible copy-button feedback without disabling control (modern-web-guidance: copy-button) */
+.copyable {
+  position: relative;
+}
+.copyable[data-copied="true"],
+button[data-copied="true"],
+.bot-ip-pill[data-copied="true"] {
+  border-color: var(--green) !important;
+  background: rgba(52, 179, 126, 0.14) !important;
+  color: var(--green) !important;
+}
+.copy-feedback-tag {
+  display: none;
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--green);
+}
+.copyable[data-copied="true"] .copy-feedback-tag {
+  display: inline-block;
+}

@@ -88,12 +88,14 @@ async function main() {
     previousEncryptionKey: config.previousEncryptionKey,
     initial: {
       publicBaseUrl: config.publicBaseUrl,
+      managerUrls: config.managerUrls,
       renderApiKey: config.renderApiKey,
       link4mApiToken: config.link4mApiToken,
       link4mSecretKey: config.link4mSecretKey
     }
   });
   const integrationSettings = await managerRuntimeSettings.initialize();
+  managerRuntimeSettings.startHeartbeat?.();
 
   // 3. Discord Access Control & Setup
   let roleSettings = await accessStore.getSetting('discord_access');
@@ -608,6 +610,7 @@ async function main() {
       clearInterval(memorySweepInterval);
       clearInterval(maintenanceCleanupInterval);
       broker.stopOutboxProcessor();
+      managerRuntimeSettings.stopHeartbeat?.();
       wispbyteKeepAlive.stop();
       statusMonitor.stop();
       discordPointsService.stop();

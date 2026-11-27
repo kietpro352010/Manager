@@ -1,4 +1,5 @@
   <main id="mainContent" class="app-main-content" role="main">
+  <div id="globalActionLiveRegion" class="sr-only" role="status" aria-live="polite"></div>
   <section id="homePage">
     <!-- FLEET WELCOME HEADER -->
     <div class="fleet-welcome-header">
@@ -7,7 +8,12 @@
           <h1 class="fleet-welcome-title">Bảng điều khiển hệ thống Bot</h1>
           <span class="vip-pill">KBOT V12.1.1 PRO</span>
           <span id="userRoleBadge" class="vip-pill" style="background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.3);">CHƯA ĐĂNG NHẬP</span>
-          <span class="platform-pill admin-only">RENDER CLOUD</span>
+          <span id="homeSyncStatusPill" class="live-sync-pill" title="Trạng thái đồng bộ dữ liệu thời gian thực">
+            <span id="homeSyncStatusDot" class="pulse-status-dot green" aria-hidden="true"></span>
+            <span id="homeSyncStatusText">Đang kết nối dữ liệu...</span>
+          </span>
+          <button type="button" id="btnHomeRefreshNow" class="small live-refresh-btn" onclick="manualRefreshNow()" title="Làm mới dữ liệu ngay lập tức">↻ Làm mới</button>
+          <span class="platform-pill admin-only">WISPBYTE / CLOUD</span>
           <span class="ram-pill admin-only">RAM: <strong id="managerRamUsage">-- MB</strong></span>
         </div>
         <div id="homeSubtitle" class="fleet-welcome-subtitle">Giám sát trạng thái, túi đồ và lịch hoạt động Bot AFK KingMC theo thời gian thực</div>
@@ -142,24 +148,24 @@
       </div>
       <div class="kpi-card kpi-offline">
         <div class="kpi-header">
-          <span class="kpi-title">Offline / Kicked</span>
+          <span class="kpi-title">Đang dừng / Rớt mạng</span>
           <span class="pulse-status-dot red" aria-hidden="true"></span>
         </div>
         <div id="kpiOffline" class="kpi-value" style="color:var(--red)">0</div>
-        <div class="kpi-sub">Ngắt kết nối hoặc bị kick</div>
+        <div class="kpi-sub">Đã chủ động dừng hoặc bị kick khỏi game</div>
       </div>
       <div class="kpi-card kpi-unreachable">
         <div class="kpi-header">
-          <span class="kpi-title">Lỗi / Unreachable</span>
+          <span class="kpi-title">Mất kết nối Worker</span>
           <span class="pulse-status-dot orange" aria-hidden="true"></span>
         </div>
         <div id="kpiUnreachable" class="kpi-value" style="color:#f97316">0</div>
-        <div class="kpi-sub">Mất kết nối container worker</div>
+        <div class="kpi-sub">Container Wispbyte / Worker chưa phản hồi</div>
       </div>
     </div>
 
     <!-- FLEET TOOLBAR -->
-    <div class="fleet-toolbar">
+    <div class="fleet-toolbar" role="toolbar" aria-label="Công cụ điều khiển danh sách bot">
       <div class="fleet-toolbar-primary">
         <button type="button" id="allStartButton" class="primary" onclick="runAllAction('start')">▶ Chạy tất cả</button>
         <button type="button" id="allStopButton" class="danger" onclick="runAllAction('stop')">■ Dừng tất cả</button>
@@ -168,8 +174,8 @@
         <button type="button" id="btnCleanDeadBots" class="small danger-btn admin-only" onclick="cleanDeadBots()" title="Tự động phát hiện và dọn dẹp các bot chết (404/Unreachable)">Dọn bot chết</button>
       </div>
       <div class="fleet-toolbar-tools">
-        <button type="button" id="soundAlertBtn" class="small sound-btn" onclick="toggleSoundAlert()">Cảnh báo âm: TẮT</button>
-        <button type="button" id="discordDmNotifyBtn" class="small" onclick="toggleDiscordNotifications()" title="Bật/Tắt nhận tin nhắn riêng Discord (DM) khi bot đang AFK bị kick, die hoặc reconnect (chỉ tài khoản Web đã liên kết Discord)">TB Discord: BẬT</button>
+        <button type="button" id="soundAlertBtn" class="small sound-btn" aria-pressed="false" onclick="toggleSoundAlert()">Cảnh báo âm: TẮT</button>
+        <button type="button" id="discordDmNotifyBtn" class="small" aria-pressed="true" onclick="toggleDiscordNotifications()" title="Bật/Tắt nhận tin nhắn riêng Discord (DM) khi bot đang AFK bị kick, die hoặc reconnect (chỉ tài khoản Web đã liên kết Discord)">TB Discord: BẬT</button>
         <button type="button" id="btnUserRenewKey" class="small user-only" onclick="openRenewModal()" title="Nhập mã key gia hạn hạn thuê">Nhập Key</button>
         <button type="button" class="small admin-only" onclick="openKeyManagementModal()" title="Quản lý mã key kích hoạt / gia hạn">Quản lý Key</button>
         <button type="button" class="small admin-only" onclick="openWebhookModal()" title="Cài đặt thông báo Discord / Telegram khi bot offline">Webhook</button>
@@ -179,14 +185,17 @@
       </div>
     </div>
 
+    <div id="fleetActionBanner" class="action-feedback-banner hidden" role="status" aria-live="polite"></div>
+    <div id="fleetAttentionBar" class="fleet-attention-bar hidden"></div>
+
     <!-- FLEET SEARCH & FILTER -->
     <div class="fleet-search-filter-row">
       <div class="filter-tabs" role="tablist" aria-label="Lọc trạng thái bot">
         <button type="button" class="tab-btn active" id="tabAll" onclick="setStatusFilter('all')">Tất cả (<span id="countAll">0</span>)</button>
-        <button type="button" class="tab-btn" id="tabOnline" onclick="setStatusFilter('online')"><span class="pulse-status-dot green" style="margin-right:6px;"></span>Online (<span id="countOnline">0</span>)</button>
-        <button type="button" class="tab-btn" id="tabConnecting" onclick="setStatusFilter('connecting')"><span class="pulse-status-dot yellow" style="margin-right:6px;"></span>Đang kết nối (<span id="countConnecting">0</span>)</button>
-        <button type="button" class="tab-btn" id="tabOffline" onclick="setStatusFilter('offline')"><span class="pulse-status-dot red" style="margin-right:6px;"></span>Offline / Kicked (<span id="countOffline">0</span>)</button>
-        <button type="button" class="tab-btn" id="tabUnreachable" onclick="setStatusFilter('unreachable')"><span class="pulse-status-dot orange" style="margin-right:6px;"></span>Unreachable (<span id="countUnreachable">0</span>)</button>
+        <button type="button" class="tab-btn" id="tabOnline" onclick="setStatusFilter('online')"><span class="pulse-status-dot green" style="margin-right:6px;"></span>Đang treo AFK (<span id="countOnline">0</span>)</button>
+        <button type="button" class="tab-btn" id="tabConnecting" onclick="setStatusFilter('connecting')"><span class="pulse-status-dot yellow" style="margin-right:6px;"></span>Đang vào game (<span id="countConnecting">0</span>)</button>
+        <button type="button" class="tab-btn" id="tabOffline" onclick="setStatusFilter('offline')"><span class="pulse-status-dot red" style="margin-right:6px;"></span>Đang dừng / Rớt (<span id="countOffline">0</span>)</button>
+        <button type="button" class="tab-btn" id="tabUnreachable" onclick="setStatusFilter('unreachable')"><span class="pulse-status-dot orange" style="margin-right:6px;"></span>Mất kết nối (<span id="countUnreachable">0</span>)</button>
       </div>
       <div class="fleet-search-sort-wrap">
         <input id="searchInput" type="search" aria-label="Tìm kiếm bot theo ID, tên, tài khoản ingame hoặc IP" class="search-box" placeholder="Tìm theo ID, tên bot, username hoặc IP" oninput="filterBots()">
@@ -235,10 +244,17 @@
       <div class="detail-hud" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
         <span class="vip-pill">KBOT V12.1.1 PRO</span>
         <span id="detailUserRoleBadge" class="vip-pill" style="background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.3);">CHƯA ĐĂNG NHẬP</span>
-        <span class="platform-pill admin-only">RENDER CLOUD</span>
+        <span id="detailSyncStatusPill" class="live-sync-pill" title="Trạng thái đồng bộ dữ liệu thời gian thực">
+          <span id="detailSyncStatusDot" class="pulse-status-dot green" aria-hidden="true"></span>
+          <span id="detailSyncStatusText">Đang tải...</span>
+        </span>
+        <button type="button" id="btnDetailRefreshNow" class="small live-refresh-btn" onclick="manualRefreshNow()" title="Làm mới thông số bot ngay">↻ Làm mới</button>
+        <span id="detailPlatformPill" class="platform-pill admin-only">WISPBYTE</span>
         <span class="ram-pill admin-only">RAM: <strong id="detailManagerRamUsage">-- MB</strong></span>
       </div>
     </div>
+
+    <div id="detailActionBanner" class="action-feedback-banner hidden" role="status" aria-live="polite"></div>
 
     <div class="grid detail-grid">
 
@@ -246,30 +262,33 @@
       <div class="panel" id="detailStatusPanel">
         <h3>Trạng thái vận hành</h3>
         <div id="detailStatus" class="big-status"></div>
+        <div id="detailLifecycleStepper" class="lifecycle-stepper" aria-label="Tiến trình kết nối của bot"></div>
+        <div id="detailStatusExplain" class="detail-status-explain hidden"></div>
         <div class="info">
           <div class="info-item"><div class="info-label">Bot ID</div><div id="detailBotId" class="info-value">-</div></div>
-          <div class="info-item copyable" onclick="copyToClipboard(document.getElementById('detailUsername')?.innerText, 'Username')" title="Click để sao chép Username"><div class="info-label">Username (sao chép)</div><div id="detailUsername" class="info-value">-</div></div>
+          <div class="info-item copyable" onclick="copyToClipboard(document.getElementById('detailUsername')?.innerText, 'Username', this)" title="Click để sao chép Username"><div class="info-label">Nhân vật MC (chép)<span class="copy-feedback-tag">✓ Đã chép</span></div><div id="detailUsername" class="info-value">-</div></div>
           <div class="info-item"><div class="info-label">Máy chủ</div><div id="detailServer" class="info-value">-</div></div>
-          <div class="info-item"><div class="info-label">Độ trễ Ping</div><div id="detailPing" class="info-value">-</div></div>
-          <div class="info-item"><div class="info-label">Server TPS</div><div id="detailTps" class="info-value" style="color:var(--green);font-weight:600;">--</div></div>
-          <div class="info-item location-info copyable" onclick="copyToClipboard(document.getElementById('detailPosition')?.innerText, 'Tọa độ')" title="Click để sao chép Tọa độ"><div class="info-label">Tọa độ (sao chép)</div><div class="info-value location-value"><span id="detailPosition" class="position-value">-</span><span class="location-separator">•</span><span id="detailDimension">-</span></div></div>
-          <div class="info-item admin-only"><div class="info-label">RAM máy Host</div><div id="detailHostRam" class="info-value" style="color:var(--green);font-weight:600;">-</div></div>
-          <div class="info-item admin-only"><div class="info-label">CPU máy Host</div><div id="detailHostCpu" class="info-value" style="color:var(--accent-text);font-weight:600;">-</div></div>
+          <div class="info-item"><div class="info-label">Độ trễ mạng (Ping)</div><div id="detailPing" class="info-value">-</div></div>
+          <div class="info-item"><div class="info-label">Độ mượt server (TPS)</div><div id="detailTps" class="info-value" style="color:var(--green);font-weight:600;">--</div></div>
+          <div class="info-item location-info copyable" onclick="copyToClipboard(document.getElementById('detailPosition')?.innerText, 'Tọa độ', this)" title="Click để sao chép Tọa độ"><div class="info-label">Vị trí &amp; Tọa độ (chép)<span class="copy-feedback-tag">✓ Đã chép</span></div><div class="info-value location-value"><span id="detailPosition" class="position-value">-</span><span class="location-separator">•</span><span id="detailDimension">-</span></div></div>
+          <div class="info-item admin-only"><div class="info-label">RAM Container / Host</div><div id="detailHostRam" class="info-value" style="color:var(--green);font-weight:600;">-</div></div>
+          <div class="info-item admin-only"><div class="info-label">CPU Container</div><div id="detailHostCpu" class="info-value" style="color:var(--accent-text);font-weight:600;">-</div></div>
           <div class="info-item admin-only"><div class="info-label">Lưu lượng mạng</div><div id="detailHostNet" class="info-value" style="color:var(--yellow);font-weight:600;">-</div></div>
-          <div id="detailIpItem" class="info-item copyable admin-only" onclick="copyToClipboard(document.getElementById('detailIp')?.innerText, 'IP')" title="Click để sao chép IP"><div class="info-label">Bot IP (sao chép)</div><div id="detailIp" class="info-value">-</div></div>
+          <div id="detailIpItem" class="info-item copyable admin-only" onclick="copyToClipboard(document.getElementById('detailIp')?.innerText, 'IP', this)" title="Click để sao chép IP"><div class="info-label">Bot IP (chép)<span class="copy-feedback-tag">✓ Đã chép</span></div><div id="detailIp" class="info-value">-</div></div>
           <div class="info-item admin-only"><div class="info-label">RAM Worker</div><div id="detailRam" class="info-value" style="color:var(--accent-text);font-weight:600;">-</div></div>
-          <div class="info-item"><div class="info-label">Thời gian Uptime</div><div id="detailUptime" class="info-value" style="color:var(--accent-text);font-weight:600;">-</div></div>
-          <div class="info-item"><div class="info-label">Số lần Reconnect</div><div id="detailReconnects" class="info-value">-</div></div>
+          <div class="info-item"><div class="info-label">Thời gian treo (Uptime)</div><div id="detailUptime" class="info-value" style="color:var(--accent-text);font-weight:600;">-</div></div>
+          <div class="info-item"><div class="info-label">Tự kết nối lại</div><div id="detailReconnects" class="info-value">-</div></div>
+          <div class="info-item"><div class="info-label">Phản hồi cuối</div><div id="detailLastSeen" class="info-value">-</div></div>
         </div>
         <div class="controls">
           <button type="button" id="detailStartButton" class="primary" onclick="detailAction('start')">▶ Chạy</button>
           <button type="button" id="detailStopButton" class="danger" onclick="detailAction('stop')">■ Dừng</button>
-          <button type="button" id="detailRestartButton" onclick="detailAction('restart')">↻ Chạy lại</button>
+          <button type="button" id="detailRestartButton" class="small" onclick="detailAction('restart')">↻ Chạy lại</button>
           <button type="button" id="detailResetCustomerBtn" class="danger admin-only" onclick="resetCustomerBot()" style="margin-left:auto;" title="Dừng bot, xóa trắng tài khoản và lịch sử để bàn giao khách mới">Reset bàn giao khách mới</button>
         </div>
         <div class="note" style="margin-top:12px;">
-          <div style="font-weight:600;margin-bottom:4px;color:var(--text-secondary);">Lịch sử tọa độ gần nhất</div>
-          <div id="detailPositionHistory" style="max-height:180px;overflow:auto;line-height:1.6;">Theo dõi tọa độ trực tiếp ở bảng Trạng thái hiện tại (endpoint lịch sử tọa độ không khả dụng).</div>
+          <div style="font-weight:600;margin-bottom:4px;color:var(--text-secondary);">Cơ chế bảo vệ &amp; Lịch sử vị trí phiên xem</div>
+          <div id="detailPositionHistory" style="max-height:180px;overflow:auto;line-height:1.6;">Đang thu thập thông số bảo vệ và vị trí bot...</div>
         </div>
       </div>
 
@@ -296,7 +315,19 @@
       <!-- PANEL 3: BẢNG CHAT -->
       <div class="panel" id="detailChatPanel">
         <div class="chat-title-row"><h3>Chat &amp; Lệnh</h3><span id="detailChatCount" class="log-count-pill">0 tin</span><button type="button" class="small danger admin-only" style="margin-left:auto;" onclick="clearDetailChat()">Xóa lịch sử</button></div>
-        <div id="detailChatLogs" class="log"></div>
+        <div id="detailChatFilterBar" class="log-filter-bar" role="toolbar" aria-label="Lọc tin nhắn chat">
+          <div class="log-filter-chips">
+            <button type="button" class="log-filter-chip active" data-chat-filter="all" aria-pressed="true" onclick="setDetailChatFilter('all', null, this)">Tất cả</button>
+            <button type="button" class="log-filter-chip" data-chat-filter="player" aria-pressed="false" onclick="setDetailChatFilter('player', null, this)">Người chơi</button>
+            <button type="button" class="log-filter-chip" data-chat-filter="outgoing" aria-pressed="false" onclick="setDetailChatFilter('outgoing', null, this)">Lệnh Bot gửi</button>
+            <button type="button" class="log-filter-chip" data-chat-filter="server" aria-pressed="false" onclick="setDetailChatFilter('server', null, this)">Hệ thống</button>
+          </div>
+          <input id="detailChatFilterInput" class="log-filter-input" type="search" aria-label="Tìm nội dung chat" placeholder="Tìm trong chat..." oninput="onDetailChatSearchInput(this.value)">
+        </div>
+        <div class="log-wrap-relative">
+          <div id="detailChatLogs" class="log"></div>
+          <button type="button" id="detailChatScrollBtn" class="log-jump-bottom-btn hidden" onclick="resumeLogAutoScroll('chat')">↓ Tạm dừng cuộn — Xem tin mới nhất</button>
+        </div>
         <form id="detailChatForm" class="chat-row chat-form" onsubmit="sendDetailMessage(event)">
           <input id="detailMessageInput" autocomplete="off" aria-label="Nhập chat hoặc lệnh điều khiển bot" placeholder="Nhập chat hoặc lệnh (↑↓ xem lại lịch sử)">
           <button id="detailSendButton" class="primary" type="submit">Gửi</button>
@@ -319,7 +350,18 @@
       <!-- PANEL 4: BẢNG EVENT LOG -->
       <div class="panel" id="detailEventPanel">
         <div class="chat-title-row"><h3>Nhật ký sự kiện</h3><span id="detailEventCount" class="log-count-pill">0 sự kiện</span><button type="button" class="small" onclick="exportBotLogs(event,selectedBotId)" style="margin-left:auto;margin-right:8px;">Tải Log</button><button type="button" class="small danger admin-only" onclick="clearDetailLogs()">Xóa lịch sử</button></div>
-        <div id="detailEventLogs" class="log"></div>
+        <div id="detailEventFilterBar" class="log-filter-bar" role="toolbar" aria-label="Lọc nhật ký sự kiện">
+          <div class="log-filter-chips">
+            <button type="button" class="log-filter-chip active" data-event-filter="all" aria-pressed="true" onclick="setDetailEventFilter('all', null, this)">Tất cả</button>
+            <button type="button" class="log-filter-chip" data-event-filter="error" aria-pressed="false" onclick="setDetailEventFilter('error', null, this)">Lỗi &amp; Cảnh báo</button>
+            <button type="button" class="log-filter-chip" data-event-filter="flow" aria-pressed="false" onclick="setDetailEventFilter('flow', null, this)">Vào game &amp; Menu</button>
+          </div>
+          <input id="detailEventFilterInput" class="log-filter-input" type="search" aria-label="Tìm nhật ký sự kiện" placeholder="Tìm sự kiện..." oninput="onDetailEventSearchInput(this.value)">
+        </div>
+        <div class="log-wrap-relative">
+          <div id="detailEventLogs" class="log"></div>
+          <button type="button" id="detailEventScrollBtn" class="log-jump-bottom-btn hidden" onclick="resumeLogAutoScroll('event')">↓ Tạm dừng cuộn — Xem sự kiện mới nhất</button>
+        </div>
       </div>
 
       <!-- PANEL 5: INVENTORY MANAGER -->
@@ -328,6 +370,9 @@
           <h3>Túi đồ &amp; Trang bị</h3>
           <span id="detailInventoryCapacity" class="capacity-badge">0/36 ô (0%)</span>
           <button type="button" class="small warning-btn" style="margin-left:auto;" onclick="quickEquipTotem()" title="Tự động tìm Totem trong 36 ô rương đồ và lắp vào tay phụ">Lắp Totem tay phụ</button>
+        </div>
+        <div id="detailInventoryInteractHint" class="inventory-interact-banner">
+          <span>Chạm hoặc bấm 1 lần vào vật phẩm để chọn chuyển ô, mặc giáp, lắp tay phụ hoặc vứt ra ngoài.</span>
         </div>
         <div class="inventory-grid">
           <div class="inventory-stat"><div class="info-label">Sinh lực (HP)</div><div id="detailHealth" class="info-value">20 / 20</div><div class="bar health-bar"><span id="detailHealthBar"></span></div></div>
@@ -352,12 +397,12 @@
         <div class="info-label" style="margin-top:12px;">Thanh công cụ (9 ô)</div>
         <div id="detailHotbar" class="slot-grid"></div>
         <div id="detailDropZone" class="drop-zone" ondragover="allowDrop(event)" ondragleave="clearDragOver(event)" ondrop="dropDetailItemToWorld(event)" onclick="handleDetailDropZoneClick()">Kéo vật phẩm vào đây để vứt ra ngoài</div>
-        <div id="detailInventoryRevision" class="note">revision 0</div>
+        <div id="detailInventoryRevision" class="note">Đồng bộ túi đồ #0</div>
       </div>
 
       <!-- PANEL 6: SETTINGS -->
       <div class="panel" id="detailSettingsPanel">
-        <div class="chat-title-row"><h3>Cài đặt tự động</h3><div class="revision">đồng bộ từ worker</div></div>
+        <div class="chat-title-row"><h3>Cài đặt tự động</h3><span id="detailSettingsSyncBadge" class="panel-sync-badge">✓ Đã đồng bộ</span></div>
         <div class="setting-list">
           <label class="check-row"><input id="detailSettingEcoMode" type="checkbox" checked onchange="markDetailSettingsDirty()"> <span>Eco Mode tiết kiệm tài nguyên (giảm tải CPU &amp; giữ RAM &lt; 220 MB)</span></label>
           <label class="check-row"><input id="detailSettingAutoTotem" type="checkbox" checked onchange="markDetailSettingsDirty()"> <span>Auto Totem phản xạ tức thì (&lt; 50 ms)</span></label>
@@ -380,7 +425,7 @@
       </div>
 
       <div class="panel" id="detailAccountPanel">
-        <h3>Tài khoản Minecraft Bot</h3>
+        <div class="chat-title-row"><h3>Tài khoản Minecraft Bot</h3><span id="detailAccountSyncBadge" class="panel-sync-badge">✓ Đã lưu</span></div>
         <div class="form-row">
           <label for="detailUsernameInput">Tên nhân vật Ingame</label>
           <input id="detailUsernameInput" autocomplete="off" placeholder="Nhập tên nhân vật Minecraft">
@@ -400,14 +445,14 @@
       </div>
 
       <div id="detailAutoChatPanel" class="panel">
-        <div class="chat-title-row"><h3>Auto Chat</h3><button type="button" class="small primary" onclick="addDetailAutoChatSchedule()">＋ Thêm dòng</button></div>
+        <div class="chat-title-row"><h3>Auto Chat</h3><span id="detailAutoChatSyncBadge" class="panel-sync-badge">✓ Đã đồng bộ</span><button type="button" class="small primary" onclick="addDetailAutoChatSchedule()">＋ Thêm dòng</button></div>
         <div id="detailAutoChatSchedules" class="schedule-list"></div>
         <div class="note">Mỗi dòng là một lịch riêng. Kéo ⋮⋮ để đổi thứ tự, sửa trực tiếp rồi bấm Lưu Auto Chat.</div>
         <button type="button" id="saveDetailAutoChatButton" class="primary compact-save" onclick="saveDetailAutoChat()">Lưu Auto Chat</button>
       </div>
 
       <div id="detailBotSchedulePanel" class="panel">
-        <div class="chat-title-row"><h3>Hẹn giờ bật tắt Bot</h3><button type="button" class="small primary" onclick="addDetailBotSchedule()">＋ Thêm lịch</button></div>
+        <div class="chat-title-row"><h3>Hẹn giờ bật tắt Bot</h3><span id="detailBotScheduleSyncBadge" class="panel-sync-badge">✓ Đã đồng bộ</span><button type="button" class="small primary" onclick="addDetailBotSchedule()">＋ Thêm lịch</button></div>
         <div class="scheduler-toolbar">
           <label class="scheduler-mode-box"><span style="font-size:12px;color:var(--text-secondary);">Chế độ lịch</span>
             <select id="detailBotScheduleMode" onchange="detailBotScheduleModeChanged(this)">

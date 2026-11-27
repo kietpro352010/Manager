@@ -54,6 +54,9 @@ async function quickBotAction(event, id, action) {
     }
     const actionLabelsVi = { start: 'chạy', stop: 'dừng', restart: 'khởi động lại', reconnect: 'kết nối lại' };
     const actionVi = actionLabelsVi[action] || action;
+    if (typeof setBotActionFeedback === 'function') {
+      setBotActionFeedback(id, { busy: true, tone: 'info', title: 'Đang gửi lệnh ' + actionVi + '...', detail: 'Đang chờ Worker phản hồi trạng thái mới' });
+    }
     showToast('Đang gửi lệnh ' + actionVi + ' tới Bot #' + (targetBot?.botNumber || id) + '...');
     try {
       const res = await requestJson('/api/manager/bot/' + id + '/' + action, {
@@ -62,12 +65,18 @@ async function quickBotAction(event, id, action) {
         body: JSON.stringify({})
       });
       if (res.ok) {
+        if (typeof setBotActionFeedback === 'function') {
+          setBotActionFeedback(id, { busy: false, tone: 'success', title: 'Đã tiếp nhận lệnh ' + actionVi, detail: res.data?.message || 'Đang đồng bộ trạng thái trực tiếp' });
+        }
         showToast(res.data?.message || ('Đã ' + actionVi + ' Bot #' + (targetBot?.botNumber || id) + ' thành công!'), 'success');
         lastHomeSig = '';
         void refreshHome();
         setTimeout(() => { if (typeof document === 'undefined' || !document.hidden) void refreshHome(); }, 1200);
       } else {
         var errText = res.data?.error || ('Lỗi khi ' + action + ' bot.');
+        if (typeof setBotActionFeedback === 'function') {
+          setBotActionFeedback(id, { busy: false, tone: 'error', title: 'Thao tác ' + actionVi + ' chưa hoàn tất', detail: errText });
+        }
         if (errText.indexOf('username') !== -1 || errText.indexOf('password') !== -1 || errText.indexOf('chưa có') !== -1) {
           showToast('⚠️ ' + errText + ' Đang mở Chi tiết để cài đặt...', 'warning', 4000);
           openBot(id);
@@ -78,6 +87,9 @@ async function quickBotAction(event, id, action) {
         }
       }
     } catch (err) {
+      if (typeof setBotActionFeedback === 'function') {
+        setBotActionFeedback(id, { busy: false, tone: 'error', title: 'Lỗi gửi lệnh ' + actionVi, detail: err.message || 'Lỗi kết nối.' });
+      }
       showToast(err.message || 'Lỗi kết nối.', 'error');
       lastHomeSig = '';
       void refreshHome();
@@ -174,10 +186,12 @@ function updateSoundAlertButton() {
   if (!btn) return;
   if (soundAlertEnabled) {
     btn.className = 'small sound-btn active';
-    btn.textContent = 'Cảnh báo: BẬT';
+    btn.setAttribute('aria-pressed', 'true');
+    btn.textContent = 'Cảnh báo âm: BẬT';
   } else {
     btn.className = 'small sound-btn';
-    btn.textContent = 'Cảnh báo: TẮT';
+    btn.setAttribute('aria-pressed', 'false');
+    btn.textContent = 'Cảnh báo âm: TẮT';
   }
 }
 window.toggleSoundAlert = toggleSoundAlert;
@@ -284,11 +298,17 @@ async function reconnectOfflineBots() {
     return;
   }
   if (!confirm('Kết nối lại ' + offlineList.length + ' bot đang Offline / Lỗi?')) return;
+  if (typeof setFleetActionFeedback === 'function') {
+    setFleetActionFeedback({ busy: true, tone: 'info', title: 'Đang kết nối lại ' + offlineList.length + ' bot bị ngắt...', detail: 'Hệ thống đang lần lượt gửi lệnh bật lại các bot gặp lỗi.' });
+  }
   showToast('Đang kết nối lại ' + offlineList.length + ' bot...');
   if (currentUser?.role === 'admin') {
     try {
       const res = await requestJson('/api/manager/all/reconnect', { method: 'POST', timeoutMs: 30000 });
       if (res.ok) {
+        if (typeof setFleetActionFeedback === 'function') {
+          setFleetActionFeedback({ busy: false, tone: 'success', title: 'Đã gửi lệnh kết nối lại', detail: res.data?.message || 'Các bot lỗi đang bắt đầu kết nối lại vào máy chủ.' });
+        }
         showToast(res.data?.message || ('Đã gửi lệnh kết nối lại các bot lỗi!'), 'success');
         await refreshHome();
         return;
@@ -304,6 +324,14 @@ async function reconnectOfflineBots() {
       });
       if (res.ok) success++;
     } catch (_) {}
+  }
+  if (typeof setFleetActionFeedback === 'function') {
+    setFleetActionFeedback({
+      busy: false,
+      tone: success > 0 ? 'success' : 'warning',
+      title: 'Đã kích hoạt kết nối lại ' + success + '/' + offlineList.length + ' bot',
+      detail: 'Danh sách đang cập nhật trạng thái vào game theo thời gian thực.'
+    });
   }
   showToast('Đã kích hoạt kết nối lại ' + success + '/' + offlineList.length + ' bot!');
   await refreshHome();
@@ -633,16 +661,21 @@ function buildSharedCardSigContext() {
 
 function computeBotCardSig(b, sharedCtx) {
   const ctx = sharedCtx || buildSharedCardSigContext();
+  const id = String(b.workerId || b.id);
   const pos = b.position || b.roundedLocation || null;
   const posStr = pos && Number.isFinite(Number(pos.x)) ? `${Math.round(pos.x)},${Math.round(pos.y)},${Math.round(pos.z)}` : '';
+  const actionStamp = (typeof _botActionFeedbackMap !== 'undefined' && _botActionFeedbackMap && _botActionFeedbackMap.get(id))
+    ? _botActionFeedbackMap.get(id).updatedAt
+    : 0;
   return JSON.stringify([
     b.status, b.available, !!b.online, !!b.manuallyStopped, b.label, b.username,
     b.displayIndex ?? b.botNumber ?? null, b.provider || '', b.httpStatus ?? null,
     b.ping !== null && b.ping !== undefined ? Math.round(Number(b.ping) / 10) : null,
     b.tps !== null && b.tps !== undefined ? Number(b.tps).toFixed(1) : null,
-    b.health, b.totemCount, Math.floor(Number(b.uptimeSeconds || 0) / 60),
-    posStr, b.ecoMode, b.settings?.ecoMode, b.rentable, b.assignedUsername, b.assignedPlan || '',
-    b.lastError, b.lastKickReason, b.ipAddress, b.tags,
+    b.health, b.food ?? null, b.totemCount, Math.floor(Number(b.uptimeSeconds || 0) / 60),
+    posStr, b.ecoMode, b.settings?.ecoMode, b.settings?.autoTotem, b.settings?.antiHungry, b.settings?.antiAfkKick,
+    b.rentable, b.assignedUsername, b.assignedPlan || '',
+    b.lastError, b.lastKickReason, b.ipAddress, b.tags, actionStamp,
     b.hostHardware?.botRssMb ?? b.hardware?.botRamMb ?? null,
     b.hostHardware?.cpuPercent ?? b.hardware?.hostCpuPercent ?? null,
     ctx.role, ctx.expKey, ctx.maintKey
@@ -730,8 +763,83 @@ function reconcileBotCards(filtered) {
   });
 }
 
+function renderFleetAttentionBar() {
+  const bar = document.getElementById('fleetAttentionBar');
+  if (!bar) return;
+  const list = Array.isArray(bots) ? bots : [];
+  if (!list.length) {
+    bar.className = 'fleet-attention-bar hidden';
+    bar.innerHTML = '';
+    return;
+  }
+  const unconfigured = list.filter(b => !b.username || String(b.username).trim() === 'Chưa đặt');
+  const recoverable = list.filter(b => !b.manuallyStopped && (!b.available || ['offline', 'kicked', 'error'].includes(String(b.status || '').toLowerCase())));
+  if (!unconfigured.length && !recoverable.length) {
+    bar.className = 'fleet-attention-bar hidden';
+    bar.innerHTML = '';
+    return;
+  }
+  const parts = [];
+  if (unconfigured.length) parts.push(unconfigured.length + ' bot chưa cài tài khoản Minecraft');
+  if (recoverable.length) parts.push(recoverable.length + ' bot đang mất kết nối / bị kick');
+  const actions = [];
+  if (unconfigured.length === 1) {
+    const firstId = String(unconfigured[0].workerId || unconfigured[0].id);
+    actions.push('<button type="button" class="small primary" onclick="openBotAndFocusAccount(event,' + escapeHtml(JSON.stringify(firstId)) + ')">Cài tài khoản Bot #' + escapeHtml(String(unconfigured[0].botNumber || firstId)) + '</button>');
+  } else if (unconfigured.length > 1) {
+    actions.push('<button type="button" class="small" onclick="filterUnconfiguredBots()">Xem bot chưa cài nick</button>');
+  }
+  if (recoverable.length) {
+    actions.push('<button type="button" class="small warning-btn" onclick="reconnectOfflineBots()">Reconnect ' + recoverable.length + ' bot lỗi</button>');
+  }
+  bar.className = 'fleet-attention-bar';
+  bar.innerHTML =
+    '<div><strong>Cần chú ý:</strong> ' + escapeHtml(parts.join(' • ')) + '</div>' +
+    '<div class="fleet-attention-actions">' + actions.join('') + '</div>';
+}
+window.renderFleetAttentionBar = renderFleetAttentionBar;
+
+function filterUnconfiguredBots() {
+  const input = document.getElementById('searchInput');
+  if (input) {
+    input.value = 'Chưa đặt';
+    setStatusFilter('all');
+  }
+}
+window.filterUnconfiguredBots = filterUnconfiguredBots;
+
+function openBotAndFocusAccount(event, id) {
+  if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+  openBot(id);
+  setTimeout(() => {
+    const input = document.getElementById('detailUsernameInput');
+    if (input) {
+      input.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+      input.focus?.();
+    }
+  }, 160);
+}
+window.openBotAndFocusAccount = openBotAndFocusAccount;
+
+async function manualRefreshNow() {
+  if (typeof updateLiveSyncIndicators === 'function') {
+    updateLiveSyncIndicators('syncing', 'Đang làm mới ngay...');
+  }
+  if (selectedBotId !== null && typeof refreshDetail === 'function') {
+    detailLastRevMap?.delete?.(selectedBotId);
+    await refreshDetail(true);
+    if (typeof announceGlobalStatus === 'function') announceGlobalStatus('Đã cập nhật dữ liệu mới nhất cho bot.');
+  } else if (typeof refreshHome === 'function') {
+    lastHomeSig = '';
+    await refreshHome();
+    if (typeof announceGlobalStatus === 'function') announceGlobalStatus('Đã cập nhật danh sách bot.');
+  }
+}
+window.manualRefreshNow = manualRefreshNow;
+
 function renderHome() {
   updateKpis();
+  renderFleetAttentionBar();
   filterBots();
 }
 
@@ -1303,6 +1411,7 @@ async function refreshHome() {
       }
       if (maintChanged) renderHome();
       updateUserHeaderCountdown();
+      if (typeof updateLiveSyncIndicators === 'function') updateLiveSyncIndicators('ok');
       return;
     }
     bots=Array.isArray(data.bots)?data.bots:[];
@@ -1318,10 +1427,12 @@ async function refreshHome() {
     const subtitle=document.getElementById('homeSubtitle');
     if(subtitle) subtitle.textContent='Quản lý tập trung '+bots.length+' bot';
     renderHome();
+    if (typeof updateLiveSyncIndicators === 'function') updateLiveSyncIndicators('ok');
   updateUserHeaderCountdown();
   } catch(err) {
     const subtitle=document.getElementById('homeSubtitle');
     if(subtitle) subtitle.textContent='Không tải được danh sách bot';
+    if (typeof updateLiveSyncIndicators === 'function') updateLiveSyncIndicators('error', 'Không tải được dữ liệu — sẽ tự thử lại');
   } finally {
     homeRequestInFlight=false;
   }
@@ -1582,6 +1693,9 @@ function openBot(id) {
   detailSettingsDirty=false;
   detailAutoChatDirty=false;
   detailBotScheduleDirty=false;
+  if (typeof resetDetailLogFilters === 'function') resetDetailLogFilters();
+  if (typeof clearDetailActionFeedback === 'function') clearDetailActionFeedback();
+  if (typeof syncFormDirtyBadges === 'function') syncFormDirtyBadges();
   renderDetailRemoteGui(null);
   setTimeout(initDetailChatInputHistory, 50);
   void refreshDetail(true);
@@ -1719,6 +1833,10 @@ async function runAllAction(action) {
   }
   if(allLifecycleActionInFlight) return;
   allLifecycleActionInFlight=true;
+  const actionVi = action === 'start' ? 'Bật toàn bộ bot' : (action === 'stop' ? 'Dừng toàn bộ bot' : 'Khởi động lại toàn bộ bot');
+  if (typeof setFleetActionFeedback === 'function') {
+    setFleetActionFeedback({ busy: true, tone: 'info', title: 'Đang thực hiện: ' + actionVi, detail: 'Manager đang điều phối lệnh xuống từng Worker...' });
+  }
   const buttonMap={start:'allStartButton',stop:'allStopButton',restart:'allRestartButton'};
   Object.values(buttonMap).forEach(id=>{const button=document.getElementById(id);if(button)button.disabled=true;});
   try {
@@ -1726,14 +1844,27 @@ async function runAllAction(action) {
     const data=result.data||{};
     if(!result.ok) throw new Error(data.error||'Thao tác thất bại.');
     const items=Array.isArray(data.result?.results)?data.result.results:(Array.isArray(data.results)?data.results:[]);
+    const okCount = items.filter(x => x.ok).length;
+    const failCount = items.filter(x => !x.ok).length;
     const summary=items.map(x=>{
       const label=x.label||(bots.find(b=>String(b.id)===String(x.workerId))?.label)||('Bot '+(x.workerId||'?'));
       const status=x.ok?(x.pending?'PENDING':'OK'):'FAIL';
       return label+': '+status;
     }).join(' | ');
+    if (typeof setFleetActionFeedback === 'function') {
+      setFleetActionFeedback({
+        busy: false,
+        tone: failCount > 0 ? 'warning' : 'success',
+        title: actionVi + ': ' + (items.length ? (okCount + '/' + items.length + ' thành công') : 'Đã tiếp nhận'),
+        detail: summary || data.message || 'Đang đồng bộ trạng thái từng bot.'
+      });
+    }
     showToast(summary||data.message||'Đã thực hiện.');
     await refreshHome();
   } catch(err) {
+    if (typeof setFleetActionFeedback === 'function') {
+      setFleetActionFeedback({ busy: false, tone: 'error', title: 'Lỗi khi ' + actionVi.toLowerCase(), detail: err.message || 'Không thể thực hiện thao tác.' });
+    }
     showToast(err.message||'Không thể thực hiện thao tác.');
   } finally {
     allLifecycleActionInFlight=false;

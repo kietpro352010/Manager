@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const express = require('express');
 const { createWorkerAuth, extractWorkerSecret } = require('../middleware/worker-auth');
 const { resolveClientIp } = require('../../services/captcha');
@@ -13,7 +14,7 @@ const POLL_TELEMETRY_KEYS = [
   'inventory', 'currentWindow', 'lastError', 'lastKickReason', 'restriction',
   'manuallyStopped', 'maintenanceWindow', 'proxyEnabled', 'serverHost', 'server',
   'uptimeSeconds', 'connectedAt', 'reconnectAttempts', 'reconnectCount',
-  'cpuPercent', 'rssMb', 'heapUsedMb', 'lastStateAt'
+  'cpuPercent', 'rssMb', 'heapUsedMb', 'netDownKb', 'netUpKb', 'lastStateAt'
 ];
 
 function hasFiniteCoord(val) {
@@ -24,6 +25,19 @@ function sendCompactWorkerJson(res, payload) {
   const raw = JSON.stringify(payload);
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   return res.end(raw);
+}
+
+function computeUrlsSig(urls = []) {
+  if (!Array.isArray(urls) || !urls.length) return '';
+  const canonical = [...new Set(urls.map((u) => String(u || '').trim()).filter(Boolean))].sort().join(',');
+  return canonical ? crypto.createHash('sha1').update(canonical).digest('hex').slice(0, 8) : '';
+}
+
+function attachManagerUrlsHeaderIfNeeded(req, res, managerUrls) {
+  if (!Array.isArray(managerUrls) || !managerUrls.length) return;
+  const clientSig = String(req?.headers?.['x-manager-urls-sig'] || '').trim();
+  if (clientSig && clientSig === computeUrlsSig(managerUrls)) return;
+  res.setHeader('x-manager-urls', managerUrls.join(','));
 }
 
 function createWorkerApi({ registry, broker, workerStore, managerRuntimeSettings = null, adminNotifier, config, logger }) {
@@ -77,11 +91,11 @@ function createWorkerApi({ registry, broker, workerStore, managerRuntimeSettings
       const statusWithIp = { ...incomingStatus, ...(clientIp ? { clientIp } : {}) };
       const worker = await registry.updateStatus(req.workerId, statusWithIp, 'worker-heartbeat');
       if (!worker) return res.status(404).json({ ok: false, error: 'worker_not_found' });
-      const settingsRevision = typeof registry.syncSettingsRevision === 'function'
-        ? await registry.syncSettingsRevision(req.workerId)
-        : (typeof registry.getSettingsRevision === 'function' ? registry.getSettingsRevision(req.workerId) : 1);
+      const settingsRevision = typeof registry.getSettingsRevision === 'function'
+        ? registry.getSettingsRevision(req.workerId)
+        : 1;
       const managerUrls = await resolveManagerUrlsForReq(req);
-      if (managerUrls.length) res.setHeader('x-manager-urls', managerUrls.join(','));
+      attachManagerUrlsHeaderIfNeeded(req, res, managerUrls);
       return sendCompactWorkerJson(res, { ok: true, settingsRevision });
     } catch (error) { return next(error); }
   });
@@ -141,6 +155,8 @@ function createWorkerApi({ registry, broker, workerStore, managerRuntimeSettings
         }
       }
 
+      const managerUrls = await resolveManagerUrlsForReq(req, { refresh: false });
+      attachManagerUrlsHeaderIfNeeded(req, res, managerUrls);
       return sendCompactWorkerJson(res, Array.isArray(body.events) ? { ok: true, count: incomingEvents.length } : { ok: true });
     } catch (error) { return next(error); }
   });
@@ -195,14 +211,16 @@ function createWorkerApi({ registry, broker, workerStore, managerRuntimeSettings
         enumerable: false,
         configurable: true
       });
+      const pollWaitStartedAt = Date.now();
       const command = await broker.poll(req.workerId, pollOpts);
       if (res.writableEnded || ac.signal.aborted) return undefined;
       registry.touchLiveHeartbeat?.(req.workerId);
-      const settingsRevision = typeof registry.syncSettingsRevision === 'function'
+      const pollWaitedMs = Date.now() - pollWaitStartedAt;
+      const settingsRevision = (pollWaitedMs >= 2000 && typeof registry.syncSettingsRevision === 'function')
         ? await registry.syncSettingsRevision(req.workerId)
         : (typeof registry.getSettingsRevision === 'function' ? registry.getSettingsRevision(req.workerId) : 1);
       const managerUrls = await resolveManagerUrlsForReq(req, { refresh: true });
-      if (managerUrls.length) res.setHeader('x-manager-urls', managerUrls.join(','));
+      attachManagerUrlsHeaderIfNeeded(req, res, managerUrls);
       if (!command) {
         return sendCompactWorkerJson(res, { ok: true, command: null, settingsRevision });
       }
@@ -249,7 +267,9 @@ function createWorkerApi({ registry, broker, workerStore, managerRuntimeSettings
           ...(accepted?.partialResetFailures ? { partialResetFailures: accepted.partialResetFailures } : {})
         });
       }
-      return res.json({ ok: true, accepted });
+      const managerUrls = await resolveManagerUrlsForReq(req, { refresh: false });
+      attachManagerUrlsHeaderIfNeeded(req, res, managerUrls);
+      return sendCompactWorkerJson(res, { ok: true, accepted });
     } catch (error) { return next(error); }
   });
 
@@ -291,7 +311,7 @@ function createWorkerApi({ registry, broker, workerStore, managerRuntimeSettings
         return res.status(404).json({ ok: false, error: 'worker_not_found_or_disabled' });
       }
       const managerUrls = await resolveManagerUrlsForReq(req);
-      if (managerUrls.length) res.setHeader('x-manager-urls', managerUrls.join(','));
+      attachManagerUrlsHeaderIfNeeded(req, res, managerUrls);
 
       const incomingStatus = req.body?.status || req.body || {};
       const status = { ...incomingStatus, ...(clientIp ? { clientIp } : {}) };

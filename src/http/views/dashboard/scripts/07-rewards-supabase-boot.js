@@ -1081,12 +1081,14 @@ function scheduleNextManagerPoll() {
 document.addEventListener('visibilitychange', () => {
   if (!currentUser) return;
   if (document.hidden) {
+    if (typeof updateLiveSyncIndicators === 'function') updateLiveSyncIndicators('paused');
     if (managerPollTimerId) {
       clearTimeout(managerPollTimerId);
       managerPollTimerId = null;
     }
     return;
   }
+  if (typeof updateLiveSyncIndicators === 'function') updateLiveSyncIndicators('syncing', 'Đang đồng bộ lại...');
   lastUserActivityAt = Date.now();
   // Preserve lastHomeSig so unchanged fleet state reconciles in <120B without full DOM teardown
   if (selectedBotId === null) void refreshHome();
@@ -1153,6 +1155,11 @@ document.addEventListener('focusout', (e) => {
   }
 }, { passive: true });
 
-setInterval(() => { if (!document.hidden) updateDetailUptime(); }, 1000);
+setInterval(() => {
+  if (!document.hidden) {
+    updateDetailUptime();
+    if (typeof updateLiveSyncIndicators === 'function') updateLiveSyncIndicators();
+  }
+}, 1000);
 setInterval(() => { if (!document.hidden) updateUserHeaderCountdown(); }, 5000);
 setInterval(() => { if (!document.hidden) updateCardGraceCountdowns(); }, 1000);

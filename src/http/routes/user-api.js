@@ -635,17 +635,34 @@ function createUserApi({
         ping: worker.status?.pingHistory || [],
         ram: worker.status?.ramHistory || []
       },
-      hostHardware: {
-        ramUsedMb: worker.status?.rssMb || 0,
-        ramTotalMb: 512,
-        ramPercent: worker.status?.rssMb ? Math.round((worker.status.rssMb / 512) * 100) : 0,
-        cpuPercent: worker.status?.cpuPercent || 0,
-        cpuCores: 1,
-        botRssMb: worker.status?.rssMb || 0,
-        botHeapMb: worker.status?.heapUsedMb || 0,
-        netDownKb: 0,
-        netUpKb: 0
-      }
+      hostHardware: (() => {
+        const effectiveProvider = String(worker.provider || worker.platform || 'wispbyte').toLowerCase();
+        const ramTotalMb = effectiveProvider === 'wispbyte' ? 400 : 512;
+        const ramUsedMb = worker.status?.rssMb || 0;
+        const rawRxKb = isDisconnectedInv
+          ? 0
+          : (worker.status?.netDownKb !== undefined
+            ? Number(worker.status.netDownKb)
+            : ((Number(worker.status?.bandwidthRxBps) || 0) / 1024));
+        const rawTxKb = isDisconnectedInv
+          ? 0
+          : (worker.status?.netUpKb !== undefined
+            ? Number(worker.status.netUpKb)
+            : ((Number(worker.status?.bandwidthTxBps) || 0) / 1024));
+        const netDownKb = Number.isFinite(rawRxKb) && rawRxKb > 0 ? Math.round(rawRxKb * 10) / 10 : 0;
+        const netUpKb = Number.isFinite(rawTxKb) && rawTxKb > 0 ? Math.round(rawTxKb * 10) / 10 : 0;
+        return {
+          ramUsedMb,
+          ramTotalMb,
+          ramPercent: ramUsedMb ? Math.round((ramUsedMb / ramTotalMb) * 100) : 0,
+          cpuPercent: isDisconnectedInv ? 0 : (worker.status?.cpuPercent || 0),
+          cpuCores: 1,
+          botRssMb: ramUsedMb,
+          botHeapMb: worker.status?.heapUsedMb || 0,
+          netDownKb,
+          netUpKb
+        };
+      })()
     }, session);
 
     return safeBot;
@@ -676,7 +693,7 @@ function createUserApi({
   const getBotsHandler = async (req, res) => {
     try {
       const session = req.managerAuthSession;
-      const allBots = await registry.list();
+      const allBots = await registry.list({ omitHeavyFields: true });
       const assignmentMap = session.role === 'admin' ? await getUserAssignmentsMap() : null;
       const selfAssignment = session.role === 'admin' ? null : { username: session.username || null, planName: session.planName || null };
       let globalOrder = [];
@@ -758,13 +775,14 @@ function createUserApi({
       const sig = sigHash.digest('hex').slice(0, 16);
 
       if (typeof req.query?.sig === 'string' && req.query.sig === sig) {
-        return res.json({
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        return res.end(JSON.stringify({
           ok: true,
           unchanged: true,
           sig,
           maintenance,
           ...(managerRamMb !== undefined ? { managerRamMb } : {})
-        });
+        }));
       }
 
       return res.json({
@@ -905,21 +923,23 @@ function createUserApi({
     const inventory = isWorkerDisconnectedForInventory(worker)
       ? buildEmptyInventoryPayload(worker.status?.inventory?.revision || 0)
       : (worker.status?.inventory || buildEmptyInventoryPayload(0));
-    const logs = typeof registry.getLogs === 'function' ? registry.getLogs(worker.workerId) : [];
 
     const rev = typeof registry.getSnapshotRevision === 'function'
-      ? registry.getSnapshotRevision(worker, { inventory, logs })
+      ? registry.getSnapshotRevision(worker, { inventory })
       : String(
           worker.updatedAt
             ? new Date(worker.updatedAt).getTime()
-            : `${worker.status?.state || ''}:${inventory.revision || 0}:${logs.length}`
+            : `${worker.status?.state || ''}:${inventory.revision || 0}:${(typeof registry.getLogs === 'function' ? registry.getLogs(worker.workerId) : []).length}`
         );
 
     const maintenance = await getMaintenanceState(store);
     const reqRev = typeof req.query?.rev === 'string' ? req.query.rev : '';
     if (reqRev && reqRev === rev) {
-      return res.json({ ok: true, unchanged: true, rev, maintenance });
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      return res.end(JSON.stringify({ ok: true, unchanged: true, rev, maintenance }));
     }
+
+    const logs = typeof registry.getLogs === 'function' ? registry.getLogs(worker.workerId) : [];
 
     const assignmentMap = session.role === 'admin' ? await getUserAssignmentsMap() : null;
     const assignment = assignmentMap

@@ -42,6 +42,373 @@ let detailLifecycleActionInFlight = false;
 let allLifecycleActionInFlight = false;
 let detailRefreshGeneration = 0;
 
+let _lastSyncSuccessAt = 0;
+let _lastSyncState = 'connecting';
+let _lastSyncCustomText = '';
+const _botActionFeedbackMap = new Map();
+const _botActionClearTimers = new Map();
+let _fleetActionFeedback = null;
+let _fleetActionClearTimer = null;
+let _detailActionFeedback = null;
+let _detailActionClearTimer = null;
+const _detailSessionTrailMap = new Map();
+
+function announceGlobalStatus(message) {
+  if (typeof document === 'undefined') return;
+  const el = document.getElementById('globalActionLiveRegion');
+  if (!el) return;
+  const clean = String(message || '').trim();
+  if (!clean) return;
+  el.textContent = '';
+  el.textContent = clean;
+}
+window.announceGlobalStatus = announceGlobalStatus;
+
+function formatRelativeSyncAge(timestampMs) {
+  if (!timestampMs) return 'chưa đồng bộ';
+  const sec = Math.max(0, Math.floor((Date.now() - timestampMs) / 1000));
+  if (sec < 4) return 'vừa xong';
+  if (sec < 60) return sec + 's trước';
+  const min = Math.floor(sec / 60);
+  return min + 'm trước';
+}
+
+function formatRelativeAgeVi(dateOrIso) {
+  if (!dateOrIso) return 'Chưa ghi nhận';
+  const ms = dateOrIso instanceof Date ? dateOrIso.getTime() : Date.parse(dateOrIso);
+  if (!Number.isFinite(ms)) return 'Chưa ghi nhận';
+  const diffSec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (diffSec < 5) return 'Vừa xong';
+  if (diffSec < 60) return diffSec + ' giây trước';
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return diffMin + ' phút trước';
+  const diffHours = Math.floor(diffMin / 60);
+  if (diffHours < 24) return diffHours + ' giờ trước';
+  const diffDays = Math.floor(diffHours / 24);
+  return diffDays + ' ngày trước';
+}
+window.formatRelativeAgeVi = formatRelativeAgeVi;
+
+function humanizeBotLocationVi(locState, dimension) {
+  const loc = String(locState || '').trim().toLowerCase();
+  if (loc === 'login') return 'Khu đăng nhập';
+  if (loc === 'lobby') return 'Sảnh chờ (Lobby)';
+  let rawDim = dimension;
+  if (rawDim && typeof rawDim === 'object') {
+    rawDim = rawDim.name || rawDim.effects || rawDim.id || '';
+  }
+  const dim = String(rawDim || '').trim().replace(/^minecraft:/i, '').toLowerCase();
+  if (loc === 'other' || loc === 'game' || loc === 'afk') {
+    if (dim === 'the_nether' || dim === 'nether') return 'Khu AFK · Địa ngục (Nether)';
+    if (dim === 'the_end' || dim === 'end') return 'Khu AFK · The End';
+    return 'Khu sinh tồn / AFK';
+  }
+  if (dim === 'the_nether' || dim === 'nether') return 'Địa ngục (Nether)';
+  if (dim === 'the_end' || dim === 'end') return 'The End';
+  if (dim === 'overworld' || dim === 'world') return 'Cụm sinh tồn';
+  if (dim && dim !== 'unknown' && dim !== 'other') return dim.charAt(0).toUpperCase() + dim.slice(1);
+  return '';
+}
+window.humanizeBotLocationVi = humanizeBotLocationVi;
+
+function humanizeStatusPillVi(status, label, available, manuallyStopped, errorType) {
+  const st = String(status || '').trim().toLowerCase();
+  if (errorType === 'stopped' || label === 'STOPPED') return 'STOPPED · Đã dừng';
+  if (!available) return label;
+  const subMap = {
+    online: 'ONLINE · Trong game',
+    afk: 'ONLINE · Treo AFK',
+    waking: 'Đang đánh thức...',
+    connecting: 'Đang kết nối...',
+    authenticating: 'Đang đăng nhập...',
+    entering: 'Đang vào cụm...',
+    maintenance: 'Đang bảo trì',
+    banned: 'Bị khóa (Ban)',
+    ip_limited: 'Giới hạn IP',
+    error: 'Lỗi kết nối',
+    kicked: 'Vừa bị kick',
+    offline: 'Ngoại tuyến'
+  };
+  return subMap[st] || label;
+}
+window.humanizeStatusPillVi = humanizeStatusPillVi;
+
+function updateLiveSyncIndicators(state, customText) {
+  if (state) _lastSyncState = state;
+  if (state === 'ok') {
+    _lastSyncSuccessAt = Date.now();
+    _lastSyncCustomText = '';
+  } else if (customText !== undefined) {
+    _lastSyncCustomText = String(customText || '');
+  }
+
+  let dotClass = 'green';
+  let pillExtra = '';
+  let text = '';
+  if (_lastSyncState === 'paused' || (typeof document !== 'undefined' && document.hidden)) {
+    dotClass = 'yellow';
+    pillExtra = 'is-paused';
+    text = 'Tạm dừng khi ẩn tab';
+  } else if (_lastSyncState === 'syncing') {
+    dotClass = 'blue';
+    text = customText || 'Đang đồng bộ...';
+  } else if (_lastSyncState === 'error') {
+    dotClass = 'red';
+    pillExtra = 'is-error';
+    text = _lastSyncCustomText || 'Mất đồng bộ — sẽ tự thử lại';
+  } else if (_lastSyncSuccessAt > 0) {
+    dotClass = 'green';
+    text = 'Trực tiếp • ' + formatRelativeSyncAge(_lastSyncSuccessAt);
+  } else {
+    dotClass = 'yellow';
+    text = _lastSyncCustomText || 'Đang kết nối dữ liệu...';
+  }
+
+  if (typeof document === 'undefined') return;
+  [['homeSyncStatusPill', 'homeSyncStatusDot', 'homeSyncStatusText'], ['detailSyncStatusPill', 'detailSyncStatusDot', 'detailSyncStatusText']].forEach(([pillId, dotId, txtId]) => {
+    const pill = document.getElementById(pillId);
+    const dot = document.getElementById(dotId);
+    const txt = document.getElementById(txtId);
+    if (pill) pill.className = 'live-sync-pill' + (pillExtra ? (' ' + pillExtra) : '');
+    if (dot) dot.className = 'pulse-status-dot ' + dotClass;
+    if (txt) txt.textContent = text;
+  });
+}
+window.updateLiveSyncIndicators = updateLiveSyncIndicators;
+
+function renderActionFeedbackBanner(containerId, feedbackObj, dismissFnName) {
+  if (typeof document === 'undefined') return;
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  if (!feedbackObj || !feedbackObj.title) {
+    el.className = 'action-feedback-banner hidden';
+    el.innerHTML = '';
+    return;
+  }
+  const tone = feedbackObj.busy ? 'is-busy' : ('is-' + (feedbackObj.tone || 'info'));
+  const iconHtml = feedbackObj.busy
+    ? '<progress class="loading-spinner" aria-label="Đang thực hiện"></progress>'
+    : '<span class="pulse-status-dot ' + (feedbackObj.tone === 'success' ? 'green' : feedbackObj.tone === 'warning' ? 'yellow' : feedbackObj.tone === 'error' ? 'red' : 'blue') + '" aria-hidden="true"></span>';
+  const dismissHtml = !feedbackObj.busy && dismissFnName
+    ? '<button type="button" class="small" onclick="' + dismissFnName + '()" aria-label="Đóng thông báo hành động">Đã hiểu</button>'
+    : '';
+  el.className = 'action-feedback-banner ' + tone;
+  el.innerHTML =
+    '<div class="action-feedback-main">' +
+      iconHtml +
+      '<div style="min-width:0;">' +
+        '<div class="action-feedback-title">' + escapeHtml(feedbackObj.title) + '</div>' +
+        (feedbackObj.detail ? ('<div class="action-feedback-sub">' + escapeHtml(feedbackObj.detail) + '</div>') : '') +
+      '</div>' +
+    '</div>' +
+    (feedbackObj.actionHtml || '') +
+    dismissHtml;
+}
+
+function setFleetActionFeedback(state) {
+  if (_fleetActionClearTimer) {
+    clearTimeout(_fleetActionClearTimer);
+    _fleetActionClearTimer = null;
+  }
+  _fleetActionFeedback = state ? { ...state, updatedAt: Date.now() } : null;
+  renderActionFeedbackBanner('fleetActionBanner', _fleetActionFeedback, 'clearFleetActionFeedback');
+  if (state?.title) announceGlobalStatus(state.title + (state.detail ? '. ' + state.detail : ''));
+  if (_fleetActionFeedback && !_fleetActionFeedback.busy && _fleetActionFeedback.tone === 'success') {
+    _fleetActionClearTimer = setTimeout(() => {
+      _fleetActionFeedback = null;
+      renderActionFeedbackBanner('fleetActionBanner', null, 'clearFleetActionFeedback');
+    }, 5000);
+  }
+}
+function clearFleetActionFeedback() { setFleetActionFeedback(null); }
+window.setFleetActionFeedback = setFleetActionFeedback;
+window.clearFleetActionFeedback = clearFleetActionFeedback;
+
+function setDetailActionFeedback(state) {
+  if (_detailActionClearTimer) {
+    clearTimeout(_detailActionClearTimer);
+    _detailActionClearTimer = null;
+  }
+  _detailActionFeedback = state ? { ...state, updatedAt: Date.now() } : null;
+  renderActionFeedbackBanner('detailActionBanner', _detailActionFeedback, 'clearDetailActionFeedback');
+  if (state?.title) announceGlobalStatus(state.title + (state.detail ? '. ' + state.detail : ''));
+  if (_detailActionFeedback && !_detailActionFeedback.busy && _detailActionFeedback.tone === 'success') {
+    _detailActionClearTimer = setTimeout(() => {
+      _detailActionFeedback = null;
+      renderActionFeedbackBanner('detailActionBanner', null, 'clearDetailActionFeedback');
+    }, 5000);
+  }
+}
+function clearDetailActionFeedback() { setDetailActionFeedback(null); }
+window.setDetailActionFeedback = setDetailActionFeedback;
+window.clearDetailActionFeedback = clearDetailActionFeedback;
+
+function setBotActionFeedback(botId, state) {
+  const key = String(botId || '');
+  if (!key) return;
+  const oldTimer = _botActionClearTimers.get(key);
+  if (oldTimer) {
+    clearTimeout(oldTimer);
+    _botActionClearTimers.delete(key);
+  }
+  if (!state) {
+    _botActionFeedbackMap.delete(key);
+  } else {
+    const entry = { ...state, updatedAt: Date.now() };
+    _botActionFeedbackMap.set(key, entry);
+    if (!entry.busy && entry.tone === 'success') {
+      const t = setTimeout(() => {
+        _botActionFeedbackMap.delete(key);
+        _botActionClearTimers.delete(key);
+        if (typeof selectedBotId === 'undefined' || selectedBotId === null) {
+          if (typeof filterBots === 'function') filterBots();
+        }
+      }, 4500);
+      _botActionClearTimers.set(key, t);
+    }
+  }
+  if (state?.title) announceGlobalStatus(state.title + (state.detail ? '. ' + state.detail : ''));
+  if (typeof selectedBotId !== 'undefined' && String(selectedBotId) === key) {
+    setDetailActionFeedback(state);
+  }
+}
+window.setBotActionFeedback = setBotActionFeedback;
+
+function summarizeBotProtections(bot) {
+  const s = bot?.settings || {};
+  const hasSettings = Boolean(bot && (bot.settings || bot.ecoMode !== undefined));
+  return [
+    { key: 'eco', label: 'Eco RAM', enabled: hasSettings ? (s.ecoMode !== false && bot?.ecoMode !== false) : true },
+    { key: 'totem', label: 'Auto-Totem', enabled: s.autoTotem !== false },
+    { key: 'eat', label: 'Auto-Eat', enabled: s.antiHungry !== false },
+    { key: 'reconnect', label: 'Auto-Reconnect', enabled: s.autoReconnect !== false },
+    { key: 'afk', label: 'Anti-AFK', enabled: s.antiAfkKick !== false }
+  ];
+}
+window.summarizeBotProtections = summarizeBotProtections;
+
+function describeBotOperationalStage(bot) {
+  if (!bot) {
+    return { stageIndex: 0, steps: [], headlineVi: 'Chưa có dữ liệu bot', hintVi: '', tone: 'warn', needsAccountSetup: false };
+  }
+  const isAdmin = Boolean(typeof currentUser !== 'undefined' && currentUser && currentUser.role === 'admin');
+  const uname = String(bot.username || '').trim();
+  const needsAccountSetup = !uname || uname === 'Chưa đặt';
+  const rawStatus = String(bot.status || '').toLowerCase();
+  const locState = String(bot.locationState || bot.locationKind || '').toLowerCase();
+  const isStopped = Boolean(isBotIntentionallyStopped(bot));
+  const rawErr = String(bot.lastError || bot.error || '');
+  const cleanErr = isAdmin ? (rawErr.length > 90 ? (rawErr.slice(0, 87) + '...') : rawErr) : humanizeBotErrorForUser(rawErr);
+
+  let stageIndex = 1;
+  let tone = 'warn';
+  let headlineVi = '';
+  let hintVi = '';
+
+  if (isStopped) {
+    stageIndex = bot.available ? 1 : 0;
+    tone = 'idle';
+    headlineVi = needsAccountSetup
+      ? 'Đang dừng • Chưa cài tài khoản Minecraft'
+      : 'Đã chủ động dừng theo lệnh của bạn';
+    hintVi = needsAccountSetup
+      ? 'Bấm "Thiết lập tài khoản Minecraft" hoặc mở Chi tiết để nhập tên & mật khẩu ingame trước khi bật.'
+      : 'Bấm "Bật" để khởi động lại bot và tự động vào khu vực AFK.';
+  } else if (!bot.available) {
+    stageIndex = 0;
+    tone = 'error';
+    headlineVi = bot.httpStatus === 503 || bot.httpStatus === 521 || rawStatus === 'waking'
+      ? 'Máy chủ Bot đang thức dậy sau chế độ ngủ (~15-40s)'
+      : 'Máy chủ Bot (Worker) hiện chưa phản hồi';
+    hintVi = cleanErr || 'Đang chờ container worker khởi động hoặc kết nối lại Manager.';
+  } else if (needsAccountSetup) {
+    stageIndex = 1;
+    tone = 'warn';
+    headlineVi = 'Chưa cài tài khoản Minecraft để đăng nhập';
+    hintVi = 'Nhập tên nhân vật và mật khẩu (/login) trong Chi tiết bot rồi bấm "Lưu & Chạy lại ngay".';
+  } else if (rawStatus === 'online' || rawStatus === 'afk' || bot.online) {
+    stageIndex = 4;
+    tone = 'ok';
+    headlineVi = locState === 'lobby'
+      ? 'Đã vào Sảnh (Lobby) — đang chuẩn bị vào cụm chơi'
+      : 'Đang treo AFK ổn định trong game';
+    hintVi = locState === 'lobby'
+      ? 'Nếu bot ở Sảnh quá lâu, bấm "Vào Server (Slot 24)" trong bảng Chat & Lệnh.'
+      : 'Các cơ chế Auto-Totem, Auto-Eat, Anti-AFK và Watchdog RAM đang giám sát tự động.';
+  } else if (rawStatus === 'authenticating' || rawStatus === 'entering') {
+    stageIndex = 3;
+    tone = 'warn';
+    headlineVi = rawStatus === 'authenticating'
+      ? 'Đang đăng nhập (/login) vào máy chủ KingMC...'
+      : 'Đang mở Menu chọn cụm để vào khu vực AFK...';
+    hintVi = 'Thường mất 5-15 giây. Bạn có thể theo dõi cửa sổ GUI trực tiếp ở bên phải.';
+  } else if (rawStatus === 'waking' || rawStatus === 'connecting') {
+    stageIndex = 2;
+    tone = 'warn';
+    headlineVi = 'Đang kết nối tới máy chủ Minecraft...';
+    hintVi = 'Bot đang thiết lập phiên đăng nhập vào server.';
+  } else if (rawStatus === 'maintenance') {
+    stageIndex = 1;
+    tone = 'warn';
+    headlineVi = 'Đang tạm nghỉ trong khung bảo trì máy chủ';
+    hintVi = 'Bot sẽ tự kết nối lại khi qua khung giờ bảo trì.';
+  } else {
+    stageIndex = 1;
+    tone = 'error';
+    headlineVi = cleanErr || 'Bot bị ngắt kết nối hoặc vừa bị kick khỏi server';
+    hintVi = 'Bấm "Chạy" / "Reconnect lỗi" hoặc kiểm tra Nhật ký sự kiện để xem lý do chi tiết.';
+  }
+
+  const steps = [
+    { key: 'worker', label: 'Máy chủ Bot', sub: bot.available ? 'Sẵn sàng' : (isStopped ? 'Tạm nghỉ' : 'Chờ kết nối') },
+    { key: 'server', label: 'Kết nối Server', sub: stageIndex >= 2 ? (bot.server || 'kingmc.vn') : (needsAccountSetup ? 'Thiếu nick MC' : 'Chờ bật') },
+    { key: 'auth', label: 'Đăng nhập & Menu', sub: stageIndex >= 3 ? (stageIndex >= 4 ? 'Đã hoàn tất' : 'Đang xử lý') : 'Chưa vào' },
+    { key: 'afk', label: 'Treo AFK', sub: stageIndex >= 4 ? (locState === 'lobby' ? 'Tại Sảnh' : 'Hoạt động') : 'Chờ vào game' }
+  ].map((step, idx) => {
+    const stepNum = idx + 1;
+    let state = 'idle';
+    if (stageIndex >= stepNum && (stepNum < 4 || stageIndex === 4)) {
+      if (stageIndex === stepNum && tone === 'warn') state = 'active';
+      else state = 'done';
+    } else if (tone === 'error' && stageIndex === idx) {
+      state = 'error';
+    }
+    if (stageIndex === 0 && idx === 0 && tone === 'error') state = 'error';
+    return { ...step, state, stepNum };
+  });
+
+  return { stageIndex, steps, headlineVi, hintVi, tone, needsAccountSetup };
+}
+window.describeBotOperationalStage = describeBotOperationalStage;
+
+function syncFormDirtyBadges() {
+  if (typeof document === 'undefined') return;
+  const setBadge = (id, dirty, cleanLabel) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (dirty) {
+      el.className = 'panel-sync-badge is-dirty';
+      el.textContent = '● Có thay đổi chưa lưu';
+    } else {
+      el.className = 'panel-sync-badge is-saved';
+      el.textContent = cleanLabel || '✓ Đã đồng bộ';
+    }
+    if (el.classList && typeof el.classList.toggle === 'function') {
+      el.classList.toggle('panel-sync-badge', true);
+      el.classList.toggle('is-dirty', Boolean(dirty));
+      el.classList.toggle('is-saved', !dirty);
+    }
+  };
+  setBadge('detailSettingsSyncBadge', Boolean(detailSettingsDirty), '✓ Đã đồng bộ');
+  setBadge('detailAutoChatSyncBadge', Boolean(detailAutoChatDirty), '✓ Đã đồng bộ');
+  setBadge('detailBotScheduleSyncBadge', Boolean(detailBotScheduleDirty), '✓ Đã đồng bộ');
+  const uIn = document.getElementById('detailUsernameInput');
+  const pIn = document.getElementById('detailPasswordInput');
+  const accDirty = Boolean((uIn && uIn.getAttribute('data-dirty') === 'true') || (pIn && pIn.getAttribute('data-dirty') === 'true'));
+  setBadge('detailAccountSyncBadge', accDirty, '✓ Đã lưu');
+}
+window.syncFormDirtyBadges = syncFormDirtyBadges;
+
 function invalidateDetailReads() {
   detailRefreshGeneration++;
   return detailRefreshGeneration;
@@ -115,7 +482,10 @@ function setDetailSettingsDisabled(disabled) {
 }
 
 // BUG-24: Detail settings giờ có field Spawn Commands; textarea input phải bật cờ dirty.
-function markDetailSettingsDirty() { detailSettingsDirty = true; }
+function markDetailSettingsDirty() {
+  detailSettingsDirty = true;
+  if (typeof syncFormDirtyBadges === 'function') syncFormDirtyBadges();
+}
 
 function setDetailAutoChatDisabled(disabled) {
   document.querySelectorAll('#detailAutoChatPanel button, #detailAutoChatPanel input, #detailAutoChatPanel select, #detailAutoChatPanel textarea')
@@ -134,33 +504,43 @@ document.addEventListener('click', event => {
   const copyIpBtn = event.target?.closest?.('.btn-copy-bot-ip');
   if (copyIpBtn && copyIpBtn.dataset.ip && copyIpBtn.dataset.ip !== '--') {
     event.stopPropagation();
-    copyToClipboard(copyIpBtn.dataset.ip, 'IP Bot');
+    copyToClipboard(copyIpBtn.dataset.ip, 'IP Bot', copyIpBtn);
   }
 });
 document.addEventListener('input',event=>{
   if(event.target?.closest?.('#detailAutoChatSchedules')){
     detailAutoChatDirty=true;
+    if (typeof syncFormDirtyBadges === 'function') syncFormDirtyBadges();
     return;
   }
   if(event.target?.id==='detailBotScheduleEnabled' || event.target?.closest?.('#detailBotSchedules')){
     detailBotScheduleDirty=true;
+    if (typeof syncFormDirtyBadges === 'function') syncFormDirtyBadges();
     return;
   }
   if(['detailSettingEcoMode','detailSettingAutoTotem','detailSettingAntiHungry','detailSettingAutoReconnect','detailSettingAntiAfkKick','detailSettingUserNotifyEnabled','detailSettingNotifyOnAfkKick','detailSettingNotifyOnAfkRecover','detailSettingNotifyOnReconnectExhausted','detailSpawnCommands'].includes(event.target?.id)){
     detailSettingsDirty=true;
+    if (typeof syncFormDirtyBadges === 'function') syncFormDirtyBadges();
+    return;
+  }
+  if(['detailUsernameInput','detailPasswordInput'].includes(event.target?.id)){
+    if (typeof syncFormDirtyBadges === 'function') syncFormDirtyBadges();
   }
 });
 document.addEventListener('change',event=>{
   if(event.target?.closest?.('#detailAutoChatSchedules')){
     detailAutoChatDirty=true;
+    if (typeof syncFormDirtyBadges === 'function') syncFormDirtyBadges();
     return;
   }
   if(event.target?.id==='detailBotScheduleEnabled' || event.target?.closest?.('#detailBotSchedules')){
     detailBotScheduleDirty=true;
+    if (typeof syncFormDirtyBadges === 'function') syncFormDirtyBadges();
     return;
   }
   if(['detailSettingEcoMode','detailSettingAutoTotem','detailSettingAntiHungry','detailSettingAutoReconnect','detailSettingAntiAfkKick','detailSettingUserNotifyEnabled','detailSettingNotifyOnAfkKick','detailSettingNotifyOnAfkRecover','detailSettingNotifyOnReconnectExhausted','detailSpawnCommands'].includes(event.target?.id)){
     detailSettingsDirty=true;
+    if (typeof syncFormDirtyBadges === 'function') syncFormDirtyBadges();
   }
 });
 
@@ -276,6 +656,18 @@ function humanizeBotErrorForUser(rawText) {
   }
   if (lower.includes('reconnect is paused until 05:30') || lower.includes('scheduled stop 04:30')) {
     return 'Đang tạm nghỉ bảo trì định kỳ (04:30 - 05:30).';
+  }
+  if (lower.includes('already connected') || lower.includes('another location')) {
+    return 'Tài khoản đang đăng nhập ở phiên khác.';
+  }
+  if (lower.includes('flying is not enabled')) {
+    return 'Máy chủ nhắc lỗi đứng lơ lửng khi AFK.';
+  }
+  if (lower.includes('restarting') || lower.includes('server closed')) {
+    return 'Máy chủ Minecraft đang khởi động lại.';
+  }
+  if (lower.includes('keepalive') || lower.includes('read timed out')) {
+    return 'Mất phản hồi mạng tạm thời (timeout), đang tự vào lại.';
   }
   return clean.length > 90 ? (clean.slice(0, 87) + '...') : clean;
 }
@@ -612,7 +1004,7 @@ function botCardHtml(bot) {
   // Host CPU & Net
   const hostCpuPercentDisplay = hw ? formatHardwareMetric(hw.cpuPercent) : '--';
   const cpuColor = hw && hw.cpuPercent > 85 ? 'var(--red)' : hw && hw.cpuPercent > 60 ? 'var(--yellow)' : '#38bdf8';
-  const netText = hw ? ('↓ ' + formatHardwareMetric(hw.netDownKb) + ' • ↑ ' + formatHardwareMetric(hw.netUpKb) + ' KB/s') : '--';
+  const netText = isOffline ? '--' : (hw ? ('↓ ' + formatHardwareMetric(hw.netDownKb) + ' • ↑ ' + formatHardwareMetric(hw.netUpKb) + ' KB/s') : '--');
 
   const pingSpark = generateSparklineSvg(bot.history?.ping, '#38bdf8');
   const ramSpark = generateSparklineSvg(bot.history?.ram, ramColor);
@@ -636,17 +1028,36 @@ function botCardHtml(bot) {
   // Ownership badge (Hỗ trợ click để lọc theo tag trạng thái thuê)
   let ownerBadgeHtml = '';
   if (bot.rentable === false) {
-    ownerBadgeHtml = '<button type="button" class="bot-owner-pill blocked" onclick="event.stopPropagation(); filterByTag(\'sys:not-rentable\')" title="Bấm để lọc các bot Không Cho Thuê" style="background:rgba(148,163,184,0.15);color:var(--muted);border:1px solid rgba(148,163,184,0.3);font-size:11px;padding:2px 8px;border-radius:12px;cursor:pointer;">🚫 Không Cho Thuê</button>';
+    ownerBadgeHtml = '<button type="button" class="bot-owner-pill blocked" onclick="event.stopPropagation(); filterByTag(\'sys:not-rentable\')" title="Bấm để lọc các bot Không Cho Thuê" style="background:rgba(148,163,184,0.15);color:var(--muted);border:1px solid rgba(148,163,184,0.3);font-size:11px;padding:2px 8px;border-radius:12px;cursor:pointer;">Không Cho Thuê</button>';
   } else if (bot.assignedUsername) {
     ownerBadgeHtml = '<button type="button" class="bot-owner-pill rented" onclick="event.stopPropagation(); filterByTag(\'sys:rented\')" title="Bấm để lọc các bot Đang Được Thuê (Thuộc: ' + escapeHtml(bot.assignedUsername) + ')" style="cursor:pointer;">' +
-      '👤 Thuộc: <strong>' + escapeHtml(bot.assignedUsername) + '</strong>' +
+      'Thuộc: <strong>' + escapeHtml(bot.assignedUsername) + '</strong>' +
       (bot.assignedPlan ? ' <small>(' + escapeHtml(bot.assignedPlan) + ')</small>' : '') +
       '</button>';
   } else {
     ownerBadgeHtml = '<button type="button" class="bot-owner-pill free" onclick="event.stopPropagation(); filterByTag(\'sys:rentable\')" title="Bấm để lọc các bot Sẵn Sàng Cho Thuê" style="cursor:pointer;">' +
-      '✨ Sẵn Sàng Cho Thuê' +
+      'Sẵn Sàng Cho Thuê' +
       '</button>';
   }
+
+  const stageInfo = typeof describeBotOperationalStage === 'function'
+    ? describeBotOperationalStage(bot)
+    : { stageIndex: 1, headlineVi: label, tone: 'warn', needsAccountSetup: username === 'Chưa đặt' };
+  const liveAction = (typeof _botActionFeedbackMap !== 'undefined' && _botActionFeedbackMap)
+    ? _botActionFeedbackMap.get(id)
+    : null;
+  const liveActionHtml = liveAction && liveAction.title
+    ? ('<div class="bot-action-live-strip' + (liveAction.tone && !liveAction.busy ? (' is-' + escapeHtml(liveAction.tone)) : '') + '">' +
+        (liveAction.busy ? '<progress class="loading-spinner" aria-label="Đang thực hiện"></progress>' : '') +
+        '<span>' + escapeHtml(liveAction.title) + '</span>' +
+      '</div>')
+    : '';
+  const foodVal = Number.isFinite(Number(bot.food)) ? Number(bot.food) : null;
+  const foodSubText = foodVal !== null ? ('Độ no: ' + Math.round(foodVal) + ' / 20') : (isOffline ? 'Độ no: --' : 'Độ no: -- / 20');
+  const protChipsHtml = (typeof summarizeBotProtections === 'function' ? summarizeBotProtections(bot) : [])
+    .slice(0, 4)
+    .map(p => '<span class="bot-prot-chip' + (p.enabled ? ' is-on' : '') + '">' + (p.enabled ? '✓ ' : '') + escapeHtml(p.label) + '</span>')
+    .join('');
 
   const isOnlineIngame = bot.status === 'online' || bot.status === 'afk' || Boolean(bot.online);
   const isConnectingWaiting = ['waking', 'connecting', 'authenticating', 'entering'].includes(String(bot.status || '').toLowerCase());
@@ -797,50 +1208,55 @@ function botCardHtml(bot) {
     '<div class="bot-status-strip">' +
       '<div class="bot-status-pill ' + color + '">' +
         '<span class="pulse-status-dot ' + color + '"></span>' +
-        '<span>' + escapeHtml(label) + '</span>' +
+        '<span>' + escapeHtml(humanizeStatusPillVi(bot.status, label, bot.available, !!bot.manuallyStopped, errorType)) + '</span>' +
       '</div>' +
-      (isEco ? '<span class="eco-badge-glow" title="Eco Mode: Tiết kiệm 80% CPU & Watchdog khóa RAM < 220MB">🌱 ECO</span>' : '') +
+      (isEco ? '<span class="eco-badge-glow" title="Eco Mode: Tiết kiệm CPU & khóa RAM < 220MB">ECO</span>' : '') +
       '<div class="bot-owner-wrap">' + ownerBadgeHtml + '</div>' +
       tagsHtml +
     '</div>' +
+    '<div class="bot-card-stage-bar is-' + escapeHtml(stageInfo.tone) + '"><span>' + escapeHtml(stageInfo.headlineVi) + '</span></div>' +
+    liveActionHtml +
     errorBannerHtml +
     (isOffline && errorType !== 'stopped' ? kickWarning : '') +
+    ((stageInfo.needsAccountSetup && !isCardLocked)
+      ? ('<button type="button" class="bot-setup-cta-btn" onclick="event.stopPropagation(); if(typeof openBotAndFocusAccount===\'function\'){openBotAndFocusAccount(event,' + escapeHtml(idArg) + ');}else{openBot(' + escapeHtml(idArg) + ');}">Thiết lập tài khoản Minecraft →</button>')
+      : '') +
 
     '<div class="bot-ingame-row">' +
       '<div class="bot-ingame-user" title="Nhân vật Minecraft ingame">' +
-        '<span class="ingame-icon">🎮</span>' +
-        '<span class="ingame-name">' + escapeHtml(username) + '</span>' +
+        '<span class="ingame-name">Nhân vật: ' + escapeHtml(username) + '</span>' +
       '</div>' +
-      (isAdmin ? ('<div class="bot-ip-pill btn-copy-bot-ip" data-ip="' + escapeHtml(ipDisplay) + '" title="Click để copy IP Bot: ' + escapeHtml(ipDisplay) + '" style="cursor:pointer;">' +
-        '<span>🌐 ' + escapeHtml(ipDisplay) + '</span>' +
-        (ipDisplay !== '--' ? '<button type="button" class="btn-copy-bot-ip bot-mini-btn" data-ip="' + escapeHtml(ipDisplay) + '" title="Copy IP bot" style="padding:1px 4px;font-size:10px;margin-left:4px;cursor:pointer;">📋</button>' : '') +
+      (isAdmin ? ('<div class="bot-ip-pill btn-copy-bot-ip" data-ip="' + escapeHtml(ipDisplay) + '" title="Click để sao chép IP Bot: ' + escapeHtml(ipDisplay) + '" style="cursor:pointer;">' +
+        '<span>IP: ' + escapeHtml(ipDisplay) + '</span>' +
+        (ipDisplay !== '--' ? '<button type="button" class="btn-copy-bot-ip bot-mini-btn" data-ip="' + escapeHtml(ipDisplay) + '" title="Sao chép IP bot" style="padding:1px 5px;font-size:10px;margin-left:4px;cursor:pointer;">Chép</button>' : '') +
       '</div>') : '') +
     '</div>' +
 
     '<div class="bot-vitals-matrix">' +
       '<div class="vital-card hp-card">' +
         '<div class="vital-label-row">' +
-          '<span class="vital-label">❤️ MÁU (HP)</span>' +
+          '<span class="vital-label">Sinh lực (HP)</span>' +
           '<span class="vital-val" style="color:' + hpColor + ';">' + hpText + '</span>' +
         '</div>' +
         '<div class="hp-bar-track">' +
           '<div class="hp-bar-fill" style="width:' + hpPercent + '%;background:' + hpColor + ';"></div>' +
         '</div>' +
+        '<div class="vital-sub-info">' + escapeHtml(foodSubText) + '</div>' +
       '</div>' +
 
       '<div class="vital-card totem-card">' +
         '<div class="vital-label-row">' +
-          '<span class="vital-label">🪙 TOTEM</span>' +
-          '<span class="vital-val" style="color:var(--gold);">' + totems + ' Cái</span>' +
+          '<span class="vital-label">Totem dự trữ</span>' +
+          '<span class="vital-val" style="color:var(--gold);">' + totems + ' cái</span>' +
         '</div>' +
         (totems === 0 ?
-          '<div class="totem-warning-badge">⚠️ Hết Totem!</div>' :
-          '<div class="totem-ok-badge">🛡️ An Toàn</div>') +
+          '<div class="totem-warning-badge">Hết Totem</div>' :
+          '<div class="totem-ok-badge">An toàn</div>') +
       '</div>' +
 
       '<div class="vital-card ping-card">' +
         '<div class="vital-label-row">' +
-          '<span class="vital-label">📶 PING / TPS</span>' +
+          '<span class="vital-label">Ping / TPS</span>' +
           '<span class="vital-val" style="color:#38bdf8;">' + escapeHtml(ping) + ' <small style="color:' + tpsColor + ';font-weight:700;">(' + escapeHtml(tpsText) + ')</small></span>' +
         '</div>' +
         '<div class="sparkline-container">' + pingSpark + '</div>' +
@@ -848,19 +1264,21 @@ function botCardHtml(bot) {
 
       '<div class="vital-card uptime-card">' +
         '<div class="vital-label-row">' +
-          '<span class="vital-label">⏱ UPTIME</span>' +
+          '<span class="vital-label">Thời gian treo</span>' +
           '<span class="vital-val" style="color:var(--green);">' + uptimeText + '</span>' +
         '</div>' +
-        '<div class="vital-sub-info">Tọa độ: ' + escapeHtml(pos) + '</div>' +
+        '<div class="vital-sub-info">' + ((!isOffline && humanizeBotLocationVi(bot.locationState || bot.locationKind, bot.dimension)) ? (escapeHtml(humanizeBotLocationVi(bot.locationState || bot.locationKind, bot.dimension)) + ' • ') : 'Tọa độ: ') + escapeHtml(pos) + '</div>' +
       '</div>' +
     '</div>' +
+
+    (protChipsHtml ? ('<div class="bot-protection-row" title="Các cơ chế bảo vệ tự động đang cấu hình">' + protChipsHtml + '</div>') : '') +
 
     (isAdmin && hostRamTotalMb > 0 ?
       '<div class="bot-ram-meter-box">' +
         '<div class="bot-ram-meter-labels" style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;font-size:11px;">' +
-          '<span>🧠 RAM: <strong style="color:' + ramColor + ';">' + botRamDisplay + ' MB</strong>' + (botHeapMb > 0 ? ' <small style="color:var(--muted);">(Heap: ' + botHeapDisplay + 'MB)</small>' : '') + '</span>' +
-          '<span>⚡ CPU: <strong style="color:' + cpuColor + ';">' + (hw ? hostCpuPercentDisplay + '%' : '--') + '</strong></span>' +
-          '<span>🌐 Net: <strong style="color:#a78bfa;">' + netText + '</strong></span>' +
+          '<span>RAM: <strong style="color:' + ramColor + ';">' + botRamDisplay + ' MB</strong>' + (botHeapMb > 0 ? ' <small style="color:var(--muted);">(Heap: ' + botHeapDisplay + 'MB)</small>' : '') + '</span>' +
+          '<span>CPU: <strong style="color:' + cpuColor + ';">' + (isOffline ? '--' : (hw ? hostCpuPercentDisplay + '%' : '--')) + '</strong></span>' +
+          '<span>Net: <strong style="color:#a78bfa;">' + netText + '</strong></span>' +
         '</div>' +
         '<div class="ram-meter-track" style="margin-top:6px;">' +
           '<div class="ram-meter-bar-fill" style="width:' + Math.max(4, Math.min(100, hostRamPercent)) + '%;background:' + ramColor + ';" title="Host RAM: ' + hostRamUsedDisplay + '/' + hostRamTotalDisplay + ' MB (' + hostRamPercentDisplay + '%)"></div>' +
@@ -868,12 +1286,12 @@ function botCardHtml(bot) {
       '</div>' : '') +
 
     '<div class="card-quick-actions" onclick="event.stopPropagation()">' +
-      '<button type="button" class="small card-btn" ' + cardDisabledAttr + (isCardLocked ? cardDisabledStyle + cardDisabledTitle : '') + ' onclick="quickBotAction(event,' + escapeHtml(idArg) + ',\'restart\')">⚡ Restart</button>' +
+      '<button type="button" class="small card-btn" ' + cardDisabledAttr + (isCardLocked ? cardDisabledStyle + cardDisabledTitle : '') + ' onclick="quickBotAction(event,' + escapeHtml(idArg) + ',\'restart\')">↻ Restart</button>' +
       (isOffline ?
         '<button type="button" class="small card-btn primary" ' + cardDisabledAttr + (isCardLocked ? cardDisabledStyle + cardDisabledTitle : '') + ' onclick="quickBotAction(event,' + escapeHtml(idArg) + ',\'start\')">▶ Bật</button>' :
-        '<button type="button" class="small card-btn danger" ' + cardDisabledAttr + (isCardLocked ? cardDisabledStyle + cardDisabledTitle : '') + ' onclick="quickBotAction(event,' + escapeHtml(idArg) + ',\'stop\')">⏹ Dừng</button>'
+        '<button type="button" class="small card-btn danger" ' + cardDisabledAttr + (isCardLocked ? cardDisabledStyle + cardDisabledTitle : '') + ' onclick="quickBotAction(event,' + escapeHtml(idArg) + ',\'stop\')">■ Dừng</button>'
       ) +
-      '<button type="button" class="small card-btn detail-link-btn" ' + (isMaintenanceLocked ? (cardDisabledAttr + cardDisabledStyle + cardDisabledTitle) : '') + ' onclick="openBot(' + escapeHtml(idArg) + ')">⚙ Chi Tiết →</button>' +
+      '<button type="button" class="small card-btn detail-link-btn" ' + (isMaintenanceLocked ? (cardDisabledAttr + cardDisabledStyle + cardDisabledTitle) : '') + ' onclick="openBot(' + escapeHtml(idArg) + ')">Chi tiết →</button>' +
     '</div>' +
 
   '</div>';

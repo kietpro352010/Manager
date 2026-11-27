@@ -81,8 +81,17 @@ function parsePreviousEncryptionKey(env) {
 }
 
 function loadConfig(env = process.env) {
-  const { detectHostRuntime } = require('./host-runtime');
+  const { detectHostRuntime, normalizePublicUrl, isPublicHttpsUrl } = require('./host-runtime');
   const hostRuntime = detectHostRuntime(env);
+
+  const extraManagerUrls = [];
+  const rawExtraUrls = `${String(env.MANAGER_URLS || '').trim()},${String(env.SECONDARY_MANAGER_URL || '').trim()}`;
+  for (const part of rawExtraUrls.split(/[,\s]+/)) {
+    const norm = normalizePublicUrl(part);
+    if (norm && isPublicHttpsUrl(norm) && !extraManagerUrls.includes(norm)) {
+      extraManagerUrls.push(norm);
+    }
+  }
 
   const rawNodeEnv = String(env.NODE_ENV ?? '').trim().toLowerCase();
   const isNodeTestContext = Boolean(env.NODE_TEST_CONTEXT || (!rawNodeEnv && process.env.NODE_TEST_CONTEXT));
@@ -184,6 +193,7 @@ function loadConfig(env = process.env) {
     commandResultTimeoutMs: positiveInt(env.COMMAND_RESULT_TIMEOUT_MS, 35000, 5000, 120000),
     publicBaseUrl: hostRuntime.publicBaseUrl,
     publicUrlSource: hostRuntime.publicUrlSource,
+    managerUrls: Object.freeze(extraManagerUrls),
     link4mApiToken: String(env.LINK4M_API_KEY || env.LINK4M_API_TOKEN || '').trim(),
     link4mSecretKey: String(env.LINK4M_SECRET_KEY || '').trim(),
     link4mRewardEnabled: bool(env.LINK4M_REWARD_ENABLED, false),

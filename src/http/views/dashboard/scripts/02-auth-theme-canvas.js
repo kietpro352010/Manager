@@ -961,6 +961,7 @@ function renderDiscordNotifyControls() {
         : 'Đang TẮT nhận thông báo riêng qua Discord (DM) — bấm để bật lại';
     }
     toolbarBtn.classList.toggle('active', enabled && (linked || isAdmin));
+    toolbarBtn.setAttribute('aria-pressed', (enabled && (linked || isAdmin)) ? 'true' : 'false');
   }
 
   const statusText = document.getElementById('discordNotifyStatusText');
@@ -1225,10 +1226,22 @@ const AUDIT_ACTION_LABELS = {
   BOT_RESPAWN: 'Hồi sinh Bot',
   BOT_RESET: 'Đặt lại dữ liệu Bot',
   BOT_RESET_CUSTOMER: 'Thu hồi & bàn giao Bot mới',
+  BOT_CREATE: 'Thêm Bot mới vào hệ thống',
+  BOT_DELETE: 'Xóa Bot khỏi hệ thống',
+  BOT_PATCH: 'Cập nhật thông tin / cấu hình Bot',
+  BOT_BATCH_IMPORT: 'Nhập hàng loạt danh sách Bot',
+  BOT_REORDER: 'Sắp xếp thứ tự hiển thị Bot',
+  BOT_INVENTORY_MOVE: 'Di chuyển vật phẩm trong túi đồ',
+  BOT_INVENTORY_EQUIP: 'Mặc trang bị / lắp tay phụ',
+  BOT_INVENTORY_UNEQUIP: 'Tháo trang bị về túi đồ',
+  BOT_INVENTORY_DROP: 'Vứt vật phẩm ra ngoài',
+  BOT_WINDOW_CLICK: 'Bấm ô trong cửa sổ GUI',
+  BOT_WINDOW_CLOSE: 'Đóng cửa sổ GUI trong game',
   BOT_ACCOUNT_UPDATE: 'Cập nhật tài khoản Minecraft',
   BOT_SETTINGS_UPDATE: 'Cập nhật cài đặt Bot',
   BOT_PROXY_UPDATE: 'Cập nhật Proxy Bot',
   BOT_CHAT_SEND: 'Gửi lệnh / chat trong game',
+  WORKER_SECRET_UPDATED: 'Cập nhật Secret Key Worker',
   USER_CREATED: 'Tạo tài khoản khách mới',
   USER_UPDATED: 'Cập nhật tài khoản khách',
   USER_DELETED: 'Xóa tài khoản khách',
@@ -1238,6 +1251,12 @@ const AUDIT_ACTION_LABELS = {
   KEY_GENERATED: 'Phát hành Key / Giftcode',
   KEY_REDEEMED: 'Kích hoạt Key gia hạn',
   KEY_DELETED: 'Xóa mã Key',
+  IP_WHITELIST_ADD: 'Thêm IP vào Whitelist',
+  IP_WHITELIST_REMOVE: 'Xóa IP khỏi Whitelist',
+  TRIAL_GIFT_TOGGLED: 'Bật/Tắt quà tặng dùng thử',
+  LINK4M_CONFIG_UPDATED: 'Cập nhật cấu hình Link4M +12h',
+  LINK4M_REWARD_CLAIMED: 'Nhận thưởng +12h từ Link4M',
+  ANNOUNCEMENT_UPDATED: 'Cập nhật thông báo hệ thống',
   BACKUP_CREATED: 'Tạo bản sao lưu dữ liệu',
   BACKUP_RESTORED: 'Khôi phục dữ liệu từ sao lưu',
   MAINTENANCE_TOGGLED: 'Thay đổi trạng thái bảo trì',
@@ -1268,7 +1287,14 @@ const AUDIT_DETAIL_KEY_LABELS = {
   message: 'Thông điệp',
   count: 'Số lượng',
   key: 'Mã Key',
-  code: 'Mã'
+  code: 'Mã',
+  slot: 'Ô',
+  sourceSlot: 'Từ ô',
+  destSlot: 'Đến ô',
+  destination: 'Vị trí mặc',
+  action: 'Thao tác',
+  enabled: 'Trạng thái bật',
+  addedHours: 'Giờ cộng thêm'
 };
 
 function humanizeAuditAction(item) {

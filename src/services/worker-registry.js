@@ -267,6 +267,18 @@ function validateWorkerStatus(rawStatus, source = 'worker') {
     cpuPercent: asNumber(status.cpuPercent, 0, 100),
     rssMb: asNumber(status.rssMb, 0, 65536),
     heapUsedMb: asNumber(status.heapUsedMb, 0, 65536),
+    netDownKb: (() => {
+      const val = status.netDownKb !== undefined
+        ? asNumber(status.netDownKb, 0, 1000000)
+        : (Number(status.bandwidthRxBps) > 0 ? asNumber(Number(status.bandwidthRxBps) / 1024, 0, 1000000) : null);
+      return val !== null ? Math.round(val * 10) / 10 : null;
+    })(),
+    netUpKb: (() => {
+      const val = status.netUpKb !== undefined
+        ? asNumber(status.netUpKb, 0, 1000000)
+        : (Number(status.bandwidthTxBps) > 0 ? asNumber(Number(status.bandwidthTxBps) / 1024, 0, 1000000) : null);
+      return val !== null ? Math.round(val * 10) / 10 : null;
+    })(),
     health: asNumber(status.health, 0, 20),
     food: asNumber(status.food, 0, 20),
     totemCount: asInteger(status.totemCount, 0, 1000),
@@ -288,6 +300,47 @@ function validateWorkerStatus(rawStatus, source = 'worker') {
   if (sanitizedInventory !== undefined) normalized.inventory = sanitizedInventory;
   if (sanitizedWindow !== undefined) normalized.currentWindow = sanitizedWindow;
   return normalized;
+}
+
+const COALESCE_REPEATABLE_EVENT_TYPES = new Set([
+  'connection_error', 'connecting', 'window_open', 'window_close', 'window_click'
+]);
+
+function humanizeWorkerEventLog(eventType, cleanMsg, rawEvent = {}) {
+  const type = String(eventType || '').trim().toLowerCase();
+  const msg = String(cleanMsg || '').replace(/[\r\n\t]+/g, ' ').trim();
+  if (type === 'window_open' && !msg) {
+    const title = extractChatMessage(rawEvent?.title || '');
+    return title ? `Mở cửa sổ menu trong game: ${title}` : 'Mở cửa sổ menu trong game.';
+  }
+  if (type === 'window_close' && !msg) {
+    return 'Đã đóng cửa sổ menu trong game.';
+  }
+  if (type === 'window_click' && !msg) {
+    return 'Đã chọn ô trên menu trong game.';
+  }
+  if (type === 'stopped') {
+    const stopCode = msg.toLowerCase();
+    if (!stopCode || stopCode === 'manager_stop') return 'Đã dừng bot theo lệnh điều khiển.';
+    if (stopCode === 'manager_restart') return 'Tạm dừng bot để khởi động lại...';
+    if (stopCode === 'scheduled_stop') return 'Đã tự động dừng bot theo lịch hẹn giờ.';
+    if (stopCode === 'manager_offline_stop') return 'Đã đồng bộ trạng thái dừng từ bảng điều khiển.';
+    if (stopCode === 'process_shutdown' || stopCode === 'fleet_stop') return 'Bot tạm dừng do tiến trình Worker khởi động lại.';
+  }
+  if (type === 'connection_error' && /^minecraft connection (?:error|timed out)/i.test(msg)) {
+    const paren = msg.match(/\(([^)]{1,40})\)/);
+    return `Tạm mất kết nối tới máy chủ Minecraft${paren ? ` (${paren[1]})` : ''}, đang tự thử lại.`;
+  }
+  if ((type === 'credentials_missing' || /set this worker account/i.test(msg)) && (!msg || /set this worker account/i.test(msg))) {
+    return 'Chưa cài đặt tài khoản Minecraft trước khi khởi chạy.';
+  }
+  if (type === 'maintenance_window' && (!msg || /reconnect is paused until|scheduled stop 04:30/i.test(msg))) {
+    return 'Tạm nghỉ khung giờ bảo trì định kỳ (04:30 – 05:30 VN), sẽ tự kết nối lại lúc 05:30.';
+  }
+  if (type === 'maintenance' && (!msg || /server maintenance notice received/i.test(msg))) {
+    return 'Máy chủ thông báo bảo trì, tạm ngắt kết nối và chờ vào lại.';
+  }
+  return msg;
 }
 
 function isRoutineMinecraftWorkerError(text = '', kickReason = '') {
@@ -393,8 +446,19 @@ class WorkerRegistry {
     const status = worker.status || {};
     const settings = worker.settings || {};
     const invRev = inventory?.revision ?? status.inventory?.revision ?? 0;
-    const logList = Array.isArray(logs) ? logs : this.getLogs(id);
-    const lastLog = logList.length ? logList[logList.length - 1] : null;
+    let logsMeta;
+    if (Array.isArray(logs)) {
+      const lastLog = logs.length ? logs[logs.length - 1] : null;
+      logsMeta = `${logs.length}|${lastLog ? String(lastLog.occurredAt || '') : ''}`;
+    } else {
+      const sysLogs = this.botLogsCache.get(id) || [];
+      const chatLogs = this.botChatLogsCache.get(id) || [];
+      const sysRev = this.botLogRev.get(id) || 0;
+      const chatRev = this.botChatLogRev.get(id) || 0;
+      const lastSysAt = sysLogs.length ? String(sysLogs[sysLogs.length - 1]?.occurredAt || '') : '';
+      const lastChatAt = chatLogs.length ? String(chatLogs[chatLogs.length - 1]?.occurredAt || '') : '';
+      logsMeta = `${sysRev}:${chatRev}:${sysLogs.length}:${chatLogs.length}|${lastSysAt}|${lastChatAt}`;
+    }
     const keyParts = [
       this.workerStateRev.get(id) || 0,
       Boolean(worker.enabled),
@@ -416,8 +480,7 @@ class WorkerRegistry {
       status.position ? `${Math.round(status.position.x)},${Math.round(status.position.y ?? 0)},${Math.round(status.position.z)}` : '',
       status.currentWindow ? `${status.currentWindow.title || ''}:${Array.isArray(status.currentWindow.slots) ? status.currentWindow.slots.length : 0}` : '',
       invRev,
-      logList.length,
-      lastLog ? String(lastLog.occurredAt || '') : '',
+      logsMeta,
       settings.alias || '',
       settings.mcCredentialsCiphertext ? settings.mcCredentialsCiphertext.slice(-16) : '',
       settings.proxyCiphertext ? settings.proxyCiphertext.slice(-16) : '',
@@ -630,8 +693,9 @@ class WorkerRegistry {
     return this.applyLiveTelemetry(record);
   }
 
-  async list() {
-    return (await this.store.list()).map((record) => this.publicView(this.applyLiveTelemetry(record)));
+  async list(opts = {}) {
+    const records = await this.store.list(opts?.omitHeavyFields ? { omitHeavyFields: true } : undefined);
+    return records.map((record) => this.publicView(this.applyLiveTelemetry(record)));
   }
 
   async credential(workerId, { bypassCache = false } = {}) {
@@ -880,8 +944,8 @@ class WorkerRegistry {
         if (!Object.hasOwn(rawStatus, 'locationState') && ex.locationState) {
           safeStatus.locationState = ex.locationState;
         }
-        for (const numKey of ['health', 'food', 'tps', 'pingMs', 'totemCount', 'goldenAppleCount', 'foodCount', 'uptimeSeconds', 'reconnectAttempts', 'reconnectCount', 'cpuPercent', 'rssMb', 'heapUsedMb']) {
-          if (disconnectedNow && ['health', 'food', 'tps', 'pingMs', 'totemCount', 'goldenAppleCount', 'foodCount', 'uptimeSeconds'].includes(numKey)) {
+        for (const numKey of ['health', 'food', 'tps', 'pingMs', 'totemCount', 'goldenAppleCount', 'foodCount', 'uptimeSeconds', 'reconnectAttempts', 'reconnectCount', 'cpuPercent', 'rssMb', 'heapUsedMb', 'netDownKb', 'netUpKb']) {
+          if (disconnectedNow && ['health', 'food', 'tps', 'pingMs', 'totemCount', 'goldenAppleCount', 'foodCount', 'uptimeSeconds', 'netDownKb', 'netUpKb'].includes(numKey)) {
             continue;
           }
           if (!Object.hasOwn(rawStatus, numKey) && ex[numKey] !== undefined && ex[numKey] !== null) {
@@ -946,6 +1010,8 @@ class WorkerRegistry {
         delete safeStatus.food;
         delete safeStatus.tps;
         delete safeStatus.pingMs;
+        delete safeStatus.netDownKb;
+        delete safeStatus.netUpKb;
       } else if ((rawStatus.isLightweight === true || rawStatus.isPartial === true || rawStatus.inventory === undefined) && existing.status) {
         // Preserve rich telemetry if incoming report is lightweight/partial while online
         if (safeStatus.inventory === undefined && existing.status.inventory !== undefined) {
@@ -1177,14 +1243,21 @@ class WorkerRegistry {
 
     const rawMsg = event?.message || event?.reason || '';
     const cleanMsg = extractChatMessage(rawMsg);
+    const safeType = String(event?.type || 'worker_event').slice(0, 48);
+    let safeMessage = humanizeWorkerEventLog(safeType, cleanMsg, event).slice(0, 300);
+    const isChat = safeType === 'chat' || safeType === 'message';
+    const rawSource = isChat && event?.source ? String(event.source).slice(0, 24) : '';
+    if (isChat && ['outgoing', 'spawn_command', 'auto_chat', 'scheduled_chat'].includes(rawSource) && safeMessage && !safeMessage.startsWith('→')) {
+      safeMessage = `→ ${safeMessage}`.slice(0, 300);
+    }
     const safeEvent = {
-      type: String(event?.type || 'worker_event').slice(0, 48),
-      message: cleanMsg.replace(/[\r\n\t]+/g, ' ').slice(0, 300),
+      type: safeType,
+      message: safeMessage,
+      ...(rawSource ? { source: rawSource } : {}),
       occurredAt: event?.occurredAt ? new Date(event.occurredAt) : new Date()
     };
     if (Number.isNaN(safeEvent.occurredAt.getTime())) safeEvent.occurredAt = new Date();
 
-    const isChat = safeEvent.type === 'chat' || safeEvent.type === 'message';
     if (isChat) {
       // Chat messages stay in botChatLogsCache & best-effort persist to Supabase bot_chat_logs
       const chatLogs = this.botChatLogsCache.get(id) || [];
@@ -1197,13 +1270,36 @@ class WorkerRegistry {
         void this.store.addChatLog(stableBotKey, safeEvent).catch(() => {});
       }
     } else {
-      // System events stay in botLogsCache & persist to DB
+      // Coalesce consecutive identical noisy events within 45s to prevent DB write & 100-line log buffer exhaustion
       const logs = this.botLogsCache.get(id) || [];
-      logs.push(safeEvent);
-      if (logs.length > MAX_LOGS_PER_BOT) logs.shift();
-      this.botLogsCache.set(id, logs);
-      this.botLogRev.set(id, (this.botLogRev.get(id) || 0) + 1);
-      await this.store.addEvent(id, safeEvent);
+      const prev = logs.length > 0 ? logs[logs.length - 1] : null;
+      const prevTimeMs = prev?.occurredAt ? new Date(prev.occurredAt).getTime() : NaN;
+      const curTimeMs = safeEvent.occurredAt.getTime();
+      const canCoalesceRepeat = Boolean(
+        COALESCE_REPEATABLE_EVENT_TYPES.has(safeEvent.type) &&
+        prev &&
+        prev.type === safeEvent.type &&
+        prev.message === safeEvent.message &&
+        Number.isFinite(prevTimeMs) &&
+        Math.abs(curTimeMs - prevTimeMs) <= 45000
+      );
+      if (canCoalesceRepeat) {
+        if (!prev.firstOccurredAt) prev.firstOccurredAt = prev.occurredAt;
+        prev.occurredAt = safeEvent.occurredAt;
+        prev.repeatCount = (Number(prev.repeatCount) || 1) + 1;
+        safeEvent.repeatCount = prev.repeatCount;
+        this.botLogsCache.set(id, logs);
+        this.botLogRev.set(id, (this.botLogRev.get(id) || 0) + 1);
+        if (prev.repeatCount % 10 === 0) {
+          await this.store.addEvent(id, { ...prev });
+        }
+      } else {
+        logs.push(safeEvent);
+        if (logs.length > MAX_LOGS_PER_BOT) logs.shift();
+        this.botLogsCache.set(id, logs);
+        this.botLogRev.set(id, (this.botLogRev.get(id) || 0) + 1);
+        await this.store.addEvent(id, safeEvent);
+      }
     }
     this.bumpRevision(id);
 
@@ -1272,7 +1368,7 @@ class WorkerRegistry {
   }
 
   async bootstrap(workerId) {
-    const worker = await this.find(workerId);
+    const worker = await this.find(workerId, { bypassCache: true });
     if (!worker || !worker.enabled) return null;
     const state = worker.status?.state || 'unknown';
     const restriction = worker.status?.restriction || (['ip_limited', 'banned'].includes(state) ? state : null);

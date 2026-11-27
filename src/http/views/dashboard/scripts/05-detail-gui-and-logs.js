@@ -1,5 +1,96 @@
+function recordAndRenderSessionTrail(bot) {
+  if (!bot) return '';
+  const botId = String(bot.workerId || bot.id || selectedBotId || '');
+  if (!botId) return '';
+  const map = (typeof _detailSessionTrailMap !== 'undefined' && _detailSessionTrailMap) ? _detailSessionTrailMap : null;
+  if (!map) return '';
+  const pos = bot.position || bot.roundedLocation;
+  const hasPos = pos && [pos.x, pos.y, pos.z].every(v => v !== null && v !== '' && Number.isFinite(Number(v)));
+  const posText = hasPos ? (Math.round(Number(pos.x)) + ', ' + Math.round(Number(pos.y)) + ', ' + Math.round(Number(pos.z))) : '--';
+  const locText = (typeof humanizeBotLocationVi === 'function' ? humanizeBotLocationVi(bot.locationState || bot.locationKind, bot.dimension) : '') || 'Chưa vào thế giới';
+  const stRaw = String(bot.status || 'offline').toLowerCase();
+  const stLabelMap = {
+    afk: 'Đang treo AFK',
+    online: 'Đang trong game',
+    entering: 'Đang vào cụm',
+    authenticating: 'Đang đăng nhập',
+    connecting: 'Đang kết nối',
+    waking: 'Đang đánh thức',
+    stopped: 'Đã dừng',
+    offline: 'Ngoại tuyến',
+    error: 'Mất kết nối',
+    kicked: 'Vừa bị kick',
+    maintenance: 'Bảo trì'
+  };
+  const stText = stLabelMap[stRaw] || stRaw;
+  const sig = stText + '|' + locText + '|' + posText;
+  const list = map.get(botId) || [];
+  if (!list.length || list[0].sig !== sig) {
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const ss = String(now.getSeconds()).padStart(2, '0');
+    list.unshift({ time: hh + ':' + mm + ':' + ss, status: stText, loc: locText, pos: posText, sig });
+    if (list.length > 10) list.length = 10;
+    map.set(botId, list);
+  }
+  return list;
+}
+
+function renderDetailLifecycleAndTrail() {
+  if (!detailBot) return;
+  const stageInfo = typeof describeBotOperationalStage === 'function'
+    ? describeBotOperationalStage(detailBot)
+    : null;
+  const stepperEl = document.getElementById('detailLifecycleStepper');
+  if (stepperEl && stageInfo && Array.isArray(stageInfo.steps)) {
+    stepperEl.innerHTML = stageInfo.steps.map(step => (
+      '<div class="lifecycle-step is-' + escapeHtml(step.state) + '">' +
+        '<div class="lifecycle-step-head">' +
+          '<span class="lifecycle-step-index">' + (step.state === 'done' ? '✓' : step.state === 'error' ? '!' : step.stepNum) + '</span>' +
+          '<span class="lifecycle-step-label">' + escapeHtml(step.label) + '</span>' +
+        '</div>' +
+        '<div class="lifecycle-step-sub" title="' + escapeHtml(step.sub) + '">' + escapeHtml(step.sub) + '</div>' +
+      '</div>'
+    )).join('');
+  }
+  const explainEl = document.getElementById('detailStatusExplain');
+  if (explainEl && stageInfo) {
+    const canChangeAccount = currentUser?.role === 'admin' || currentUser?.allowAccountChange !== false;
+    const toneClass = stageInfo.tone === 'ok' ? 'is-ok' : (stageInfo.tone === 'error' ? 'is-error' : (stageInfo.tone === 'warn' ? 'is-warn' : ''));
+    explainEl.className = 'detail-status-explain ' + toneClass;
+    explainEl.innerHTML =
+      '<div style="min-width:0;flex:1 1 220px;">' +
+        '<div class="detail-status-explain-title">' + escapeHtml(stageInfo.headlineVi) + '</div>' +
+        (stageInfo.hintVi ? ('<div class="detail-status-explain-hint">' + escapeHtml(stageInfo.hintVi) + '</div>') : '') +
+      '</div>' +
+      (stageInfo.needsAccountSetup && canChangeAccount
+        ? '<button type="button" class="small primary" onclick="document.getElementById(\'detailUsernameInput\')?.scrollIntoView?.({behavior:\'smooth\',block:\'center\'});document.getElementById(\'detailUsernameInput\')?.focus?.();">Cài tài khoản ngay</button>'
+        : '');
+  }
+  const histEl = document.getElementById('detailPositionHistory');
+  if (histEl) {
+    const prots = typeof summarizeBotProtections === 'function' ? summarizeBotProtections(detailBot) : [];
+    const protHtml = prots.length
+      ? ('<div class="session-prot-chips">' + prots.map(p => '<span class="session-prot-chip' + (p.enabled ? ' is-on' : '') + '">' + (p.enabled ? '✓ ' : '• ') + escapeHtml(p.label) + '</span>').join('') + '</div>')
+      : '';
+    const trail = recordAndRenderSessionTrail(detailBot) || [];
+    const trailHtml = trail.length
+      ? ('<div class="session-trail-list">' + trail.map(item => (
+          '<div class="session-trail-row">' +
+            '<span>' + escapeHtml(item.time) + ' • ' + escapeHtml(item.status) + ' (' + escapeHtml(item.loc) + ')</span>' +
+            '<span>' + escapeHtml(item.pos) + '</span>' +
+          '</div>'
+        )).join('') + '</div>')
+      : '<div style="color:var(--text-muted);font-size:11.5px;">Chưa có thay đổi vị trí mới trong phiên xem này.</div>';
+    histEl.innerHTML = protHtml + trailHtml;
+  }
+}
+window.renderDetailLifecycleAndTrail = renderDetailLifecycleAndTrail;
+
 function detailStatusHtml() {
   if(!detailBot) return;
+  if (typeof updateLiveSyncIndicators === 'function') updateLiveSyncIndicators('ok');
   const isAdmin = Boolean(currentUser && currentUser.role === 'admin');
   const numId = detailBot.botNumber || selectedBotId || detailBot.id;
   const workerIdArg = JSON.stringify(String(detailBot.workerId || detailBot.id || selectedBotId || ''));
@@ -103,30 +194,26 @@ function detailStatusHtml() {
 
   if (dimensionEl) {
     const locState = String(detailBot.locationState || detailBot.locationKind || '').trim().toLowerCase();
-    let placeName = '';
-    if (locState === 'login') {
-      placeName = 'Login';
-    } else if (locState === 'lobby') {
-      placeName = 'Sảnh';
-    } else {
-      let rawDim = detailBot.dimension;
-      if (typeof rawDim === 'object' && rawDim !== null) {
-        rawDim = rawDim.name || rawDim.effects || rawDim.id || '';
-      }
-      const dim = String(rawDim || '').trim().replace(/^minecraft:/i, '').toLowerCase();
-      if (dim === 'the_nether' || dim === 'nether') {
-        placeName = 'Nether';
-      } else if (dim === 'the_end' || dim === 'end') {
-        placeName = 'The End';
-      } else if (dim === 'overworld' || dim === 'world') {
-        placeName = 'World';
-      } else if (dim) {
-        placeName = dim.charAt(0).toUpperCase() + dim.slice(1);
-      } else if (locState) {
-        placeName = locState.charAt(0).toUpperCase() + locState.slice(1);
-      }
-    }
+    const placeName = typeof humanizeBotLocationVi === 'function'
+      ? humanizeBotLocationVi(locState, detailBot.dimension)
+      : '';
     dimensionEl.textContent = placeName || '--';
+  }
+  const platformPillEl = document.getElementById('detailPlatformPill');
+  if (platformPillEl) {
+    const prov = String(detailBot.provider || detailBot.platform || 'wispbyte').toLowerCase();
+    platformPillEl.textContent = prov === 'render' ? 'RENDER CLOUD' : 'WISPBYTE';
+  }
+  const lastSeenEl = document.getElementById('detailLastSeen');
+  if (lastSeenEl) {
+    const seenIso = detailBot.lastSeen;
+    const seenMs = seenIso ? Date.parse(seenIso) : NaN;
+    lastSeenEl.textContent = typeof formatRelativeAgeVi === 'function'
+      ? formatRelativeAgeVi(seenIso)
+      : (Number.isFinite(seenMs) ? new Date(seenMs).toLocaleTimeString('vi-VN', { hour12: false }) : 'Chưa ghi nhận');
+    if (Number.isFinite(seenMs)) {
+      lastSeenEl.title = 'Đồng bộ lần cuối: ' + new Date(seenMs).toLocaleString('vi-VN');
+    }
   }
   const rawDetailIp = String(detailBot.ipAddress || '').trim();
   const isDetailLoopback = rawDetailIp === '127.0.0.1' || rawDetailIp === 'localhost' || rawDetailIp === '0.0.0.0' || rawDetailIp === '::1';
@@ -135,6 +222,7 @@ function detailStatusHtml() {
     detailIpEl.textContent = (isAdmin && !isDetailLoopback && rawDetailIp) ? rawDetailIp : (isAdmin && detailBot.host ? detailBot.host : '-');
   }
 
+  const offlineOrStopped = typeof isDetailBotOfflineOrStopped === 'function' ? isDetailBotOfflineOrStopped(detailBot) : !detailBot.available;
   const hw = detailBot.hostHardware;
   const botRamMb = Number(hw?.botRssMb || detailBot.ramRss || detailBot.rssMb || detailBot.memory?.rssMb || 0);
 
@@ -152,8 +240,11 @@ function detailStatusHtml() {
   // 2. CPU Máy Host
   const hostCpuEl = document.getElementById('detailHostCpu');
   if (hostCpuEl) {
-    if (hw) {
-      hostCpuEl.textContent = formatHardwareMetric(hw.cpuPercent) + '% / ' + hw.cpuCores + ' Cores';
+    if (offlineOrStopped) {
+      hostCpuEl.textContent = '-- (Bot đang tắt)';
+      hostCpuEl.style.color = 'var(--muted)';
+    } else if (hw) {
+      hostCpuEl.textContent = formatHardwareMetric(hw.cpuPercent) + '% (' + (hw.cpuCores || 1) + ' vCPU)';
       hostCpuEl.style.color = hw.cpuPercent > 85 ? 'var(--red)' : hw.cpuPercent > 60 ? 'var(--yellow)' : '#38bdf8';
     } else {
       hostCpuEl.textContent = '--';
@@ -163,8 +254,10 @@ function detailStatusHtml() {
   // 3. Lưu lượng mạng
   const hostNetEl = document.getElementById('detailHostNet');
   if (hostNetEl) {
-    if (hw) {
-      hostNetEl.textContent = '↓ ' + formatHardwareMetric(hw.netDownKb) + ' KB/s • ↑ ' + formatHardwareMetric(hw.netUpKb) + ' KB/s (Tổng: ' + formatHardwareMetric(hw.netTotalRxMb) + ' MB)';
+    if (offlineOrStopped) {
+      hostNetEl.textContent = '-- (Bot đang tắt)';
+    } else if (hw) {
+      hostNetEl.textContent = '↓ ' + formatHardwareMetric(hw.netDownKb) + ' KB/s • ↑ ' + formatHardwareMetric(hw.netUpKb) + ' KB/s';
     } else {
       hostNetEl.textContent = '--';
     }
@@ -183,11 +276,19 @@ function detailStatusHtml() {
     const h = Math.floor(sec / 3600);
     const m = Math.floor((sec % 3600) / 60);
     const s = sec % 60;
-    uptimeEl.textContent = h + 'h ' + m + 'm ' + s + 's';
+    uptimeEl.textContent = sec > 0 ? (h + 'h ' + m + 'm ' + s + 's') : (offlineOrStopped ? '-- (Bot đang tắt)' : '0h 0m 0s');
   }
   const recEl = document.getElementById('detailReconnects');
   if (recEl) {
-    recEl.textContent = String(detailBot.reconnectAttempts || detailBot.reconnectCount || 0);
+    const attempts = Number(detailBot.reconnectAttempts || 0);
+    const totalCount = Number(detailBot.reconnectCount || 0);
+    if (attempts > 0) {
+      recEl.textContent = attempts + ' lần (đang thử lại)';
+    } else if (totalCount > 0) {
+      recEl.textContent = totalCount + ' lần';
+    } else {
+      recEl.textContent = offlineOrStopped ? '0 lần' : '0 lần (ổn định)';
+    }
   }
 
   // 6. Phân quyền đổi tài khoản Minecraft theo allowAccountChange
@@ -211,7 +312,6 @@ function detailStatusHtml() {
   }
 
   // 7. Render Remote GUI Inspector (tự ẩn menu GUI khi bot đã dừng/ngoại tuyến)
-  const offlineOrStopped = typeof isDetailBotOfflineOrStopped === 'function' ? isDetailBotOfflineOrStopped(detailBot) : false;
   renderDetailRemoteGui(offlineOrStopped ? null : detailBot.currentWindow);
 
   const lockInfo = (typeof getWorkerLockInfo === 'function')
@@ -235,6 +335,8 @@ function detailStatusHtml() {
       }
     }
   });
+  if (typeof renderDetailLifecycleAndTrail === 'function') renderDetailLifecycleAndTrail();
+  if (typeof syncFormDirtyBadges === 'function') syncFormDirtyBadges();
 }
 
 async function detailGet(path) {
@@ -390,7 +492,7 @@ async function refreshKeysTable() {
         const btn = e.target.closest('button');
         if (!btn) return;
         if (btn.classList.contains('btn-copy-key')) {
-          copyToClipboard(btn.getAttribute('data-key'), 'Mã Key');
+          copyToClipboard(btn.getAttribute('data-key'), 'Mã Key', btn);
         } else if (btn.classList.contains('btn-delete-key')) {
           deleteLicenseKey(btn.getAttribute('data-key'));
         }
@@ -724,6 +826,9 @@ async function clickDetailGuiSlot(slot) {
   }
   if (_inFlightGuiSlotClicks.has(slot)) return;
   _inFlightGuiSlotClicks.add(slot);
+  if (typeof setDetailActionFeedback === 'function') {
+    setDetailActionFeedback({ busy: true, tone: 'info', title: 'Đang bấm ô Menu #' + slot + '...', detail: 'Đang gửi thao tác click cửa sổ GUI tới bot.' });
+  }
   try {
     const res = await requestJson('/api/manager/bot/' + selectedBotId + '/window/click', {
       method: 'POST',
@@ -732,12 +837,21 @@ async function clickDetailGuiSlot(slot) {
       timeoutMs: 8000
     });
     if (!res.ok) {
+      if (typeof setDetailActionFeedback === 'function') {
+        setDetailActionFeedback({ busy: false, tone: 'error', title: 'Không bấm được ô Menu #' + slot, detail: res.data?.error || 'Lỗi click GUI' });
+      }
       showToast(res.data?.error || 'Lỗi click GUI', 'error');
     } else {
+      if (typeof setDetailActionFeedback === 'function') {
+        setDetailActionFeedback({ busy: false, tone: 'success', title: 'Đã bấm ô Menu #' + slot, detail: 'Đang cập nhật giao diện GUI mới nhất.' });
+      }
       showToast('Đã click ô ' + slot, 'success');
       await refreshDetail(true);
     }
   } catch(e) {
+    if (typeof setDetailActionFeedback === 'function') {
+      setDetailActionFeedback({ busy: false, tone: 'error', title: 'Lỗi gửi click ô Menu #' + slot, detail: e?.message || 'Lỗi kết nối.' });
+    }
     showToast('Lỗi gửi click GUI', 'error');
   } finally {
     _inFlightGuiSlotClicks.delete(slot);
@@ -1019,6 +1133,7 @@ async function refreshDetail(force=false) {
         if (force || (snapChatRev !== null && Number.isFinite(snapChatRev) && snapChatRev !== lastChatRevision)) {
           await loadDetailChat(force, requestGeneration, requestBotId);
         }
+        if (typeof updateLiveSyncIndicators === 'function') updateLiveSyncIndicators('ok');
         return;
       }
 
@@ -1081,7 +1196,9 @@ async function refreshDetail(force=false) {
       if (force) {
         await loadDetailPositionHistory(false, requestGeneration, requestBotId);
       }
+      if (typeof updateLiveSyncIndicators === 'function') updateLiveSyncIndicators('ok');
     } catch(err) {
+      if (typeof updateLiveSyncIndicators === 'function') updateLiveSyncIndicators('error', err?.message || 'Không tải được dữ liệu bot');
       if(!isCurrentRequest()) return;
       if(err && (err.status===403 || err.status===401 || err.status===404)){
         showToast(err.data?.error || (err.status===404 ? 'Bot này không còn tồn tại trong Manager.' : 'Bạn không có quyền quản lý bot này.'), 'warning', 4000);
@@ -1120,29 +1237,323 @@ async function refreshDetail(force=false) {
   return runPromise;
 }
 
-function nearBottom(box){return !!(box && (box.scrollHeight-box.scrollTop-box.clientHeight<24));}
+function nearBottom(box){return !!(box && (box.scrollHeight-box.scrollTop-box.clientHeight<48));}
+
+let _rawDetailEventEntries = [];
+let _detailEventFilterType = 'all';
+let _detailEventSearchText = '';
+let _rawDetailChatEntries = [];
+let _detailChatFilterType = 'all';
+let _detailChatSearchText = '';
+let _cachedRawEventsRef = null;
+let _cachedRawEventsLen = -1;
+let _cachedGroupedDetailEvents = [];
+let _cachedRawChatRef = null;
+let _cachedRawChatLen = -1;
+let _cachedChatBotUsername = '';
+let _cachedParsedDetailChats = [];
+let _eventSearchDebounceTimer = null;
+let _chatSearchDebounceTimer = null;
+
+function ensureLogScrollWatcher(boxId, btnId) {
+  if (typeof document === 'undefined') return;
+  const box = document.getElementById(boxId);
+  const btn = document.getElementById(btnId);
+  if (!box || box.dataset?.scrollWatched === '1' || typeof box.addEventListener !== 'function') return;
+  if (box.dataset) box.dataset.scrollWatched = '1';
+  box.addEventListener('scroll', () => {
+    if (btn && btn.classList && nearBottom(box)) {
+      btn.classList.add('hidden');
+    }
+  }, { passive: true });
+}
+
+function resumeLogAutoScroll(kind) {
+  const isChat = kind === 'chat';
+  const box = document.getElementById(isChat ? 'detailChatLogs' : 'detailEventLogs');
+  const btn = document.getElementById(isChat ? 'detailChatScrollBtn' : 'detailEventScrollBtn');
+  if (box) box.scrollTop = box.scrollHeight;
+  if (btn && btn.classList) btn.classList.add('hidden');
+}
+window.resumeLogAutoScroll = resumeLogAutoScroll;
+
+function resetDetailLogFilters() {
+  _rawDetailEventEntries = [];
+  _detailEventFilterType = 'all';
+  _detailEventSearchText = '';
+  _rawDetailChatEntries = [];
+  _detailChatFilterType = 'all';
+  _detailChatSearchText = '';
+  _cachedRawEventsRef = null;
+  _cachedRawEventsLen = -1;
+  _cachedGroupedDetailEvents = [];
+  _cachedRawChatRef = null;
+  _cachedRawChatLen = -1;
+  _cachedChatBotUsername = '';
+  _cachedParsedDetailChats = [];
+  if (_eventSearchDebounceTimer) { clearTimeout(_eventSearchDebounceTimer); _eventSearchDebounceTimer = null; }
+  if (_chatSearchDebounceTimer) { clearTimeout(_chatSearchDebounceTimer); _chatSearchDebounceTimer = null; }
+  if (typeof document === 'undefined') return;
+  const cIn = document.getElementById('detailChatFilterInput'); if (cIn) cIn.value = '';
+  const eIn = document.getElementById('detailEventFilterInput'); if (eIn) eIn.value = '';
+  document.querySelectorAll?.('[data-chat-filter]').forEach?.(btn => {
+    const on = btn.dataset?.chatFilter === 'all';
+    btn.classList?.toggle('active', on);
+    btn.setAttribute?.('aria-pressed', on ? 'true' : 'false');
+  });
+  document.querySelectorAll?.('[data-event-filter]').forEach?.(btn => {
+    const on = btn.dataset?.eventFilter === 'all';
+    btn.classList?.toggle('active', on);
+    btn.setAttribute?.('aria-pressed', on ? 'true' : 'false');
+  });
+  document.getElementById('detailChatScrollBtn')?.classList?.add('hidden');
+  document.getElementById('detailEventScrollBtn')?.classList?.add('hidden');
+}
+window.resetDetailLogFilters = resetDetailLogFilters;
+
+function formatDetailLogTime(rawTs) {
+  if (!rawTs) return '--:--:--';
+  const d = new Date(rawTs);
+  if (Number.isNaN(d.getTime())) return '--:--:--';
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0');
+}
 
 function formatDetailLogEntryText(entry, includeTypeTag = false) {
   if (typeof entry === 'string') return entry;
   if (!entry || typeof entry !== 'object') return '';
-  const msg = String(entry.message || entry.reason || entry.text || entry.line || '').trim();
+  const emptyEventFallback = {
+    window_open: 'Mở cửa sổ menu trong game.',
+    window_close: 'Đã đóng cửa sổ menu trong game.',
+    window_click: 'Đã chọn ô trên menu GUI.',
+    stopped: 'Bot đã dừng hoạt động.',
+    connecting: 'Đang kết nối tới máy chủ Minecraft...',
+    spawn: 'Bot đã vào sảnh máy chủ.',
+    online: 'Đã vào khu vực chơi / AFK.',
+    connection_error: 'Tạm mất kết nối tới máy chủ Minecraft.',
+    kicked: 'Bot bị ngắt kết nối khỏi máy chủ.',
+    maintenance: 'Máy chủ đang bảo trì.',
+    maintenance_window: 'Tạm nghỉ khung giờ bảo trì định kỳ (04:30 – 05:30 VN).'
+  };
+  const typeLower = String(entry.type || '').trim().toLowerCase();
+  const msg = String(entry.message || entry.reason || entry.text || entry.line || '').trim()
+    || (includeTypeTag ? (emptyEventFallback[typeLower] || '') : '');
   if (!msg) return '';
   let timePrefix = '';
   const rawTs = entry.occurredAt || entry.timestamp || entry.createdAt;
   if (rawTs && !/^\d{2}:\d{2}:\d{2}\b/.test(msg)) {
-    const d = new Date(rawTs);
-    if (!Number.isNaN(d.getTime())) {
-      const hh = String(d.getHours()).padStart(2, '0');
-      const mm = String(d.getMinutes()).padStart(2, '0');
-      const ss = String(d.getSeconds()).padStart(2, '0');
-      timePrefix = hh + ':' + mm + ':' + ss;
-    }
+    const formattedTs = formatDetailLogTime(rawTs);
+    if (formattedTs !== '--:--:--') timePrefix = formattedTs;
   }
   const typeTag = includeTypeTag && entry.type && !msg.startsWith('[')
     ? '[' + String(entry.type).trim() + ']'
     : '';
   return [timePrefix, typeTag, msg].filter(Boolean).join(' ');
 }
+
+function classifyEventEntry(entry) {
+  const line = formatDetailLogEntryText(entry, true);
+  if (!line) return null;
+
+  let timeText = '--:--:--';
+  let rest = line;
+  const timeMatch = line.match(/^(\d{2}:\d{2}:\d{2})\s+(.*)$/);
+  if (timeMatch) {
+    timeText = timeMatch[1];
+    rest = timeMatch[2];
+  }
+
+  let rawTag = '';
+  let bodyText = rest;
+  const tagMatch = rest.match(/^\[([^\]]{1,24})\]\s*(.*)$/);
+  if (tagMatch) {
+    rawTag = tagMatch[1].trim();
+    bodyText = tagMatch[2].trim() || rawTag;
+  }
+
+  if (typeof humanizeBotErrorForUser === 'function') {
+    const humanized = humanizeBotErrorForUser(bodyText);
+    if (humanized) bodyText = humanized;
+  }
+
+  const tagLabelMap = {
+    connecting: 'KẾT NỐI',
+    spawn: 'VÀO SẢNH',
+    online: 'VÀO GAME',
+    kicked: 'NGẮT KẾT NỐI',
+    stopped: 'ĐÃ DỪNG',
+    host_switch: 'ĐỔI MÁY CHỦ',
+    window_open: 'MỞ MENU',
+    window_close: 'ĐÓNG MENU',
+    window_click: 'CHỌN MENU',
+    respawn: 'HỒI SINH',
+    totem_popped: 'DÙNG TOTEM',
+    connection_error: 'LỖI KẾT NỐI',
+    credentials_missing: 'THIẾU TÀI KHOẢN',
+    reconnect_exhausted: 'DỪNG THỬ LẠI',
+    afk_kicked: 'VĂNG AFK',
+    afk_recovered: 'VÀO LẠI AFK',
+    maintenance_window: 'BẢO TRÌ',
+    maintenance: 'BẢO TRÌ',
+    bot_death: 'HẠ GỤC',
+    auth_failed: 'ĐĂNG NHẬP',
+    invalid_proxy: 'PROXY',
+    ip_limited: 'GIỚI HẠN IP',
+    banned: 'BỊ KHÓA',
+    info: 'THÔNG TIN',
+    warn: 'CẢNH BÁO',
+    warning: 'CẢNH BÁO',
+    error: 'LỖI',
+    worker_event: 'HỆ THỐNG'
+  };
+  const lowerTag = rawTag.toLowerCase();
+  const mappedPill = tagLabelMap[lowerTag] || '';
+
+  const lower = (rawTag + ' ' + bodyText).toLowerCase();
+  let kind = 'info';
+  let pillLabel = mappedPill || (rawTag ? rawTag.slice(0, 14).toUpperCase() : 'HỆ THỐNG');
+  if (lower.includes('lỗi') || lower.includes('error') || lower.includes('❌') || lower.includes('disconnect') || lower.includes('kicked') || lower.includes('ngắt kết nối') || lower.includes('mất kết nối') || lower.includes('văng afk') || lower.includes('bị khóa')) {
+    kind = 'error';
+    if (!rawTag && !mappedPill) pillLabel = 'LỖI';
+  } else if (lower.includes('cảnh báo') || lower.includes('warn') || lower.includes('⚠') || lower.includes('phản hồi chậm') || lower.includes('bảo trì') || lower.includes('hạ gục')) {
+    kind = 'warn';
+    if (!rawTag && !mappedPill) pillLabel = 'CẢNH BÁO';
+  } else if (lower.includes('totem') || lower.includes('vào cụm') || lower.includes('flow') || lower.includes('gui') || lower.includes('menu') || lower.includes('hồi sinh') || lower.includes('đổi máy chủ')) {
+    kind = 'flow';
+    if (!rawTag && !mappedPill) pillLabel = 'LUỒNG';
+  } else if (lower.includes('thành công') || lower.includes('connected') || lower.includes('spawn') || lower.includes('vào game') || lower.includes('vào sảnh') || lower.includes('✅') || lower.includes('🎉') || lower.includes('bình thường')) {
+    kind = 'success';
+    if (!rawTag && !mappedPill) pillLabel = 'HOÀN TẤT';
+  } else if (lower.includes('chat') || lower.includes('tin nhắn')) {
+    kind = 'chat';
+    if (!rawTag && !mappedPill) pillLabel = 'CHAT';
+  }
+
+  const repeatCount = Math.max(1, Number(entry?.repeatCount) || 1);
+  const firstTimeRaw = entry?.firstOccurredAt ? formatDetailLogTime(entry.firstOccurredAt) : '';
+  const firstTimeText = firstTimeRaw && firstTimeRaw !== '--:--:--' ? firstTimeRaw : '';
+
+  return {
+    kind,
+    timeText,
+    firstTimeText,
+    pillLabel,
+    bodyText,
+    repeatCount,
+    groupKey: kind + '|' + pillLabel + '|' + bodyText,
+    searchBlob: (timeText + ' ' + pillLabel + ' ' + rawTag + ' ' + bodyText).toLowerCase()
+  };
+}
+
+function buildGroupedEventHtml(item) {
+  let repeatBadgeHtml = '';
+  if (item.repeatCount > 1) {
+    const rangeTip = item.firstTimeText && item.firstTimeText !== item.timeText
+      ? ('Lặp lại ' + item.repeatCount + ' lần (' + item.firstTimeText + ' → ' + item.timeText + ')')
+      : ('Lặp lại ' + item.repeatCount + ' lần');
+    repeatBadgeHtml = '<span class="log-repeat-badge" title="' + escapeHtml(rangeTip) + '">×' + item.repeatCount + '</span>';
+  }
+  return '<div class="log-row log-row-' + item.kind + '">' +
+    '<span class="log-time">' + escapeHtml(item.timeText) + '</span>' +
+    '<span class="log-pill log-pill-' + item.kind + '">' + escapeHtml(item.pillLabel) + '</span>' +
+    '<span class="log-body">' + escapeHtml(item.bodyText) + repeatBadgeHtml + '</span>' +
+  '</div>';
+}
+
+function getGroupedDetailEvents() {
+  const list = Array.isArray(_rawDetailEventEntries) ? _rawDetailEventEntries : [];
+  if (_cachedRawEventsRef === list && _cachedRawEventsLen === list.length) {
+    return _cachedGroupedDetailEvents;
+  }
+  const grouped = [];
+  for (let i = 0; i < list.length; i++) {
+    const item = classifyEventEntry(list[i]);
+    if (!item) continue;
+    const prev = grouped.length > 0 ? grouped[grouped.length - 1] : null;
+    if (prev && prev.groupKey === item.groupKey) {
+      if (!prev.firstTimeText) prev.firstTimeText = prev.timeText;
+      prev.timeText = item.timeText;
+      prev.repeatCount += item.repeatCount;
+      if (item.timeText && !prev.searchBlob.includes(item.timeText)) {
+        prev.searchBlob += ' ' + item.timeText.toLowerCase();
+      }
+    } else {
+      grouped.push(item);
+    }
+  }
+  for (let i = 0; i < grouped.length; i++) {
+    grouped[i].html = buildGroupedEventHtml(grouped[i]);
+  }
+  _cachedRawEventsRef = list;
+  _cachedRawEventsLen = list.length;
+  _cachedGroupedDetailEvents = grouped;
+  return grouped;
+}
+
+function renderFilteredDetailEvents(shouldAutoScroll = false) {
+  const box = document.getElementById('detailEventLogs');
+  const countEl = document.getElementById('detailEventCount');
+  const scrollBtn = document.getElementById('detailEventScrollBtn');
+  if (!box) return;
+  ensureLogScrollWatcher('detailEventLogs', 'detailEventScrollBtn');
+
+  const allParsed = getGroupedDetailEvents();
+  const rawTotal = allParsed.reduce((sum, item) => sum + (item.repeatCount || 1), 0);
+  const query = String(_detailEventSearchText || '').toLowerCase().trim();
+  const filtered = allParsed.filter(item => {
+    if (_detailEventFilterType === 'error' && item.kind !== 'error' && item.kind !== 'warn') return false;
+    if (_detailEventFilterType === 'flow' && item.kind !== 'flow' && item.kind !== 'success') return false;
+    if (query && !item.searchBlob.includes(query)) return false;
+    return true;
+  });
+
+  if (countEl) {
+    if (_detailEventFilterType !== 'all' || query) {
+      countEl.textContent = filtered.length + '/' + allParsed.length + ' sự kiện';
+    } else if (rawTotal > allParsed.length) {
+      countEl.textContent = allParsed.length + ' dòng (' + rawTotal + ' lần)';
+    } else {
+      countEl.textContent = allParsed.length + ' sự kiện';
+    }
+  }
+
+  const newHtml = filtered.length > 0
+    ? filtered.map(item => item.html).join('')
+    : ('<div class="log-empty">' + (allParsed.length ? 'Không có sự kiện nào khớp bộ lọc hiện tại.' : 'Chưa có nhật ký sự kiện nào.') + '</div>');
+
+  const changed = box.innerHTML !== newHtml;
+  if (changed) box.innerHTML = newHtml;
+  if (shouldAutoScroll) {
+    box.scrollTop = box.scrollHeight;
+    if (scrollBtn && scrollBtn.classList) scrollBtn.classList.add('hidden');
+  } else if (changed && !nearBottom(box) && scrollBtn && scrollBtn.classList) {
+    scrollBtn.classList.remove('hidden');
+  }
+}
+
+function onDetailEventSearchInput(value) {
+  if (_eventSearchDebounceTimer) clearTimeout(_eventSearchDebounceTimer);
+  _eventSearchDebounceTimer = setTimeout(() => {
+    _eventSearchDebounceTimer = null;
+    setDetailEventFilter(null, value);
+  }, 120);
+}
+window.onDetailEventSearchInput = onDetailEventSearchInput;
+
+function setDetailEventFilter(category, searchText) {
+  if (category !== null && category !== undefined) {
+    _detailEventFilterType = String(category);
+    document.querySelectorAll?.('[data-event-filter]').forEach?.(btn => {
+      const on = btn.dataset?.eventFilter === _detailEventFilterType;
+      btn.classList?.toggle('active', on);
+      btn.setAttribute?.('aria-pressed', on ? 'true' : 'false');
+    });
+  }
+  if (searchText !== null && searchText !== undefined) {
+    _detailEventSearchText = String(searchText);
+  }
+  renderFilteredDetailEvents(true);
+}
+window.setDetailEventFilter = setDetailEventFilter;
 
 let eventLoadingToken = 0;
 async function loadDetailLogs(force=false, expectedGeneration=detailRefreshGeneration, expectedBotId=selectedBotId) {
@@ -1165,101 +1576,164 @@ async function loadDetailLogs(force=false, expectedGeneration=detailRefreshGener
       return;
     }
     const keep=nearBottom(box);
-    function formatLogLineHtml(entry) {
-      const line = formatDetailLogEntryText(entry, true);
-      if (!line) return '';
-
-      let timeText = '--:--:--';
-      let rest = line;
-      const timeMatch = line.match(/^(\d{2}:\d{2}:\d{2})\s+(.*)$/);
-      if (timeMatch) {
-        timeText = timeMatch[1];
-        rest = timeMatch[2];
-      }
-
-      const isAdminUser = Boolean(currentUser && currentUser.role === 'admin');
-      let rawTag = '';
-      let bodyText = rest;
-      const tagMatch = rest.match(/^\[([^\]]{1,24})\]\s*(.*)$/);
-      if (tagMatch) {
-        rawTag = tagMatch[1].trim();
-        bodyText = tagMatch[2].trim() || rawTag;
-      }
-
-      if (typeof humanizeBotErrorForUser === 'function') {
-        const humanized = humanizeBotErrorForUser(bodyText);
-        if (humanized) bodyText = humanized;
-      }
-
-      const tagLabelMap = {
-        connecting: 'KẾT NỐI',
-        spawn: 'VÀO SẢNH',
-        online: 'VÀO GAME',
-        kicked: 'NGẮT KẾT NỐI',
-        stopped: 'ĐÃ DỪNG',
-        host_switch: 'ĐỔI MÁY CHỦ',
-        window_open: 'MỞ MENU',
-        window_close: 'ĐÓNG MENU',
-        window_click: 'CLICK MENU',
-        respawn: 'HỒI SINH',
-        totem_popped: 'DÙNG TOTEM',
-        connection_error: 'LỖI KẾT NỐI',
-        credentials_missing: 'THIẾU TÀI KHOẢN',
-        reconnect_exhausted: 'DỪNG THỬ LẠI',
-        afk_kicked: 'VĂNG AFK',
-        afk_recovered: 'VÀO LẠI AFK',
-        maintenance_window: 'BẢO TRÌ',
-        bot_death: 'HẠ GỤC',
-        auth_failed: 'ĐĂNG NHẬP',
-        invalid_proxy: 'PROXY',
-        worker_event: 'HỆ THỐNG'
-      };
-      const lowerTag = rawTag.toLowerCase();
-      const mappedPill = tagLabelMap[lowerTag] || '';
-
-      const lower = (rawTag + ' ' + bodyText).toLowerCase();
-      let kind = 'info';
-      let pillLabel = mappedPill || (rawTag ? rawTag.slice(0, 14).toUpperCase() : 'HỆ THỐNG');
-      if (lower.includes('lỗi') || lower.includes('error') || lower.includes('❌') || lower.includes('disconnect') || lower.includes('kicked') || lower.includes('ngắt kết nối')) {
-        kind = 'error';
-        if (!rawTag && !mappedPill) pillLabel = 'LỖI';
-      } else if (lower.includes('cảnh báo') || lower.includes('warn') || lower.includes('⚠') || lower.includes('phản hồi chậm')) {
-        kind = 'warn';
-        if (!rawTag && !mappedPill) pillLabel = 'CẢNH BÁO';
-      } else if (lower.includes('totem') || lower.includes('vào cụm') || lower.includes('flow') || lower.includes('gui') || lower.includes('menu') || lower.includes('🎯')) {
-        kind = 'flow';
-        if (!rawTag && !mappedPill) pillLabel = 'LUỒNG';
-      } else if (lower.includes('thành công') || lower.includes('connected') || lower.includes('spawn') || lower.includes('✅') || lower.includes('🎉') || lower.includes('bình thường')) {
-        kind = 'success';
-        if (!rawTag && !mappedPill) pillLabel = 'HOÀN TẤT';
-      } else if (lower.includes('chat') || lower.includes('tin nhắn')) {
-        kind = 'chat';
-        if (!rawTag && !mappedPill) pillLabel = 'CHAT';
-      }
-
-      return '<div class="log-row log-row-' + kind + '">' +
-        '<span class="log-time">' + escapeHtml(timeText) + '</span>' +
-        '<span class="log-pill log-pill-' + kind + '">' + escapeHtml(pillLabel) + '</span>' +
-        '<span class="log-body">' + escapeHtml(bodyText) + '</span>' +
-      '</div>';
-    }
-    const lines = Array.isArray(data?.logs) ? data.logs : [];
-    const countEl = document.getElementById('detailEventCount');
-    if (countEl) countEl.textContent = lines.length + ' sự kiện';
-    const newHtml = lines.length > 0
-      ? lines.map(formatLogLineHtml).join('')
-      : '<div class="log-empty">Chưa có nhật ký sự kiện nào.</div>';
-    if (box && box.innerHTML !== newHtml) {
-      box.innerHTML = newHtml;
-    }
+    _rawDetailEventEntries = Array.isArray(data?.logs) ? data.logs : [];
+    renderFilteredDetailEvents(keep);
     lastEventRevision = (currentBotRev !== null && Number.isFinite(currentBotRev))
       ? currentBotRev
       : Number(data.revision || 0);
-    if(keep && box) box.scrollTop=box.scrollHeight;
   } finally {
     if(reqToken === eventLoadingToken) eventLoading=false;
   }
 }
+
+function classifyChatEntry(entry) {
+  const line = formatDetailLogEntryText(entry, false);
+  if (!line) return null;
+  let cls = 'chat-row-item';
+  let category = 'server';
+  const timeMatch = line.match(/^(\d{2}:\d{2}:\d{2})\s*(.*)$/);
+  const timePart = timeMatch ? timeMatch[1] : '--:--:--';
+  const rest = timeMatch ? timeMatch[2] : line;
+
+  const srcLower = (entry && typeof entry === 'object' && entry.source) ? String(entry.source).trim().toLowerCase() : '';
+  const botNameRaw = (typeof detailBot !== 'undefined' && detailBot?.username) ? String(detailBot.username).trim() : '';
+  const botNameLower = botNameRaw && botNameRaw !== 'Chưa đặt' ? botNameRaw.toLowerCase() : '';
+  const botBracketMatch = botNameLower && rest.toLowerCase().startsWith('[' + botNameLower + '] ');
+  const isOutgoingSource = ['outgoing', 'scheduled_chat', 'spawn_command', 'auto_chat'].includes(srcLower);
+  const SYSTEM_CHAT_TAG_RE = /^(!|server|kingmc|system|hệ thống|he thong|thông báo|thong bao|console|admin|broadcast|cảnh báo|notice)$/i;
+
+  let bodyHtml = '';
+  if (isOutgoingSource || rest.startsWith('→') || rest.includes('→ /') || botBracketMatch) {
+    cls += ' chat-row-outgoing';
+    category = 'outgoing';
+    let cleanCmd = rest.replace(/^→\s*/, '');
+    if (botBracketMatch) {
+      cleanCmd = cleanCmd.slice(botNameRaw.length + 3).replace(/^→\s*/, '');
+    }
+    const isAuto = srcLower === 'auto_chat' || srcLower === 'scheduled_chat';
+    bodyHtml = '<span class="chat-dir-pill' + (isAuto ? ' is-auto' : '') + '">' + (isAuto ? 'AUTO CHAT →' : 'BOT →') + '</span><code class="chat-cmd-text">' + escapeHtml(cleanCmd) + '</code>';
+  } else if (/^\[?([^\]|]+)[\]|]\s*([A-Za-z0-9_]{1,16})\s*[:»]\s*(.+)$/u.test(rest)) {
+    const m = rest.match(/^\[?([^\]|]+)[\]|]\s*([A-Za-z0-9_]{1,16})\s*[:»]\s*(.+)$/u);
+    category = 'player';
+    bodyHtml = '<span class="chat-badge">' + escapeHtml(m[1].trim()) + '</span>' +
+               '<span class="chat-sender">' + escapeHtml(m[2].trim()) + ':</span> ' +
+               '<span class="chat-text">' + escapeHtml(m[3].trim()) + '</span>';
+  } else if (/^<([A-Za-z0-9_]{1,16})>\s*(.+)$/u.test(rest)) {
+    const m = rest.match(/^<([A-Za-z0-9_]{1,16})>\s*(.+)$/u);
+    category = 'player';
+    bodyHtml = '<span class="chat-sender">' + escapeHtml(m[1].trim()) + ':</span> ' +
+               '<span class="chat-text">' + escapeHtml(m[2].trim()) + '</span>';
+  } else if (/^\[([^\]]{1,40})\]\s+(.+)$/u.test(rest)) {
+    const m = rest.match(/^\[([^\]]{1,40})\]\s+(.+)$/u);
+    const tag = m[1].trim();
+    const content = m[2].trim();
+    if (SYSTEM_CHAT_TAG_RE.test(tag)) {
+      cls += ' chat-row-server';
+      category = 'server';
+      bodyHtml = '<span class="chat-server-badge">' + escapeHtml(tag.toUpperCase() === '!' ? 'HỆ THỐNG' : tag.toUpperCase()) + '</span>' +
+                 '<span class="chat-server-text">' + escapeHtml(content) + '</span>';
+    } else {
+      category = 'player';
+      bodyHtml = '<span class="chat-sender">' + escapeHtml(tag) + ':</span> ' +
+                 '<span class="chat-text">' + escapeHtml(content) + '</span>';
+    }
+  } else {
+    cls += ' chat-row-server';
+    category = 'server';
+    const cleanMsg = rest.replace(/^(Server:)\s*/i, '');
+    bodyHtml = '<span class="chat-server-badge">HỆ THỐNG</span>' +
+               '<span class="chat-server-text">' + escapeHtml(cleanMsg) + '</span>';
+  }
+
+  return {
+    category,
+    searchBlob: line.toLowerCase(),
+    html: '<div class="' + cls + '">' +
+      '<span class="log-time">' + escapeHtml(timePart) + '</span>' +
+      '<div class="chat-body">' + bodyHtml + '</div>' +
+    '</div>'
+  };
+}
+
+function getParsedDetailChats() {
+  const list = Array.isArray(_rawDetailChatEntries) ? _rawDetailChatEntries : [];
+  const curBotName = (typeof detailBot !== 'undefined' && detailBot?.username) ? String(detailBot.username) : '';
+  if (_cachedRawChatRef === list && _cachedRawChatLen === list.length && _cachedChatBotUsername === curBotName) {
+    return _cachedParsedDetailChats;
+  }
+  const parsed = [];
+  for (let i = 0; i < list.length; i++) {
+    const item = classifyChatEntry(list[i]);
+    if (item) parsed.push(item);
+  }
+  _cachedRawChatRef = list;
+  _cachedRawChatLen = list.length;
+  _cachedChatBotUsername = curBotName;
+  _cachedParsedDetailChats = parsed;
+  return parsed;
+}
+
+function renderFilteredDetailChat(shouldAutoScroll = false) {
+  const box = document.getElementById('detailChatLogs');
+  const countEl = document.getElementById('detailChatCount');
+  const scrollBtn = document.getElementById('detailChatScrollBtn');
+  if (!box) return;
+  ensureLogScrollWatcher('detailChatLogs', 'detailChatScrollBtn');
+
+  const allParsed = getParsedDetailChats();
+  const query = String(_detailChatSearchText || '').toLowerCase().trim();
+  const filtered = allParsed.filter(item => {
+    if (_detailChatFilterType === 'player' && item.category !== 'player') return false;
+    if (_detailChatFilterType === 'outgoing' && item.category !== 'outgoing') return false;
+    if (_detailChatFilterType === 'server' && item.category !== 'server') return false;
+    if (query && !item.searchBlob.includes(query)) return false;
+    return true;
+  });
+
+  if (countEl) {
+    countEl.textContent = (_detailChatFilterType !== 'all' || query)
+      ? (filtered.length + '/' + allParsed.length + ' tin')
+      : (allParsed.length + ' tin');
+  }
+
+  const newHtml = filtered.length > 0
+    ? filtered.map(item => item.html).join('')
+    : ('<div class="log-empty">' + (allParsed.length ? 'Không có tin nhắn nào khớp bộ lọc hiện tại.' : 'Chưa có tin nhắn chat nào.') + '</div>');
+
+  const changed = box.innerHTML !== newHtml;
+  if (changed) box.innerHTML = newHtml;
+  if (shouldAutoScroll) {
+    box.scrollTop = box.scrollHeight;
+    if (scrollBtn && scrollBtn.classList) scrollBtn.classList.add('hidden');
+  } else if (changed && !nearBottom(box) && scrollBtn && scrollBtn.classList) {
+    scrollBtn.classList.remove('hidden');
+  }
+}
+
+function onDetailChatSearchInput(value) {
+  if (_chatSearchDebounceTimer) clearTimeout(_chatSearchDebounceTimer);
+  _chatSearchDebounceTimer = setTimeout(() => {
+    _chatSearchDebounceTimer = null;
+    setDetailChatFilter(null, value);
+  }, 120);
+}
+window.onDetailChatSearchInput = onDetailChatSearchInput;
+
+function setDetailChatFilter(category, searchText) {
+  if (category !== null && category !== undefined) {
+    _detailChatFilterType = String(category);
+    document.querySelectorAll?.('[data-chat-filter]').forEach?.(btn => {
+      const on = btn.dataset?.chatFilter === _detailChatFilterType;
+      btn.classList?.toggle('active', on);
+      btn.setAttribute?.('aria-pressed', on ? 'true' : 'false');
+    });
+  }
+  if (searchText !== null && searchText !== undefined) {
+    _detailChatSearchText = String(searchText);
+  }
+  renderFilteredDetailChat(true);
+}
+window.setDetailChatFilter = setDetailChatFilter;
 
 let chatLoadingToken = 0;
 async function loadDetailChat(force=false, expectedGeneration=detailRefreshGeneration, expectedBotId=selectedBotId) {
@@ -1282,81 +1756,20 @@ async function loadDetailChat(force=false, expectedGeneration=detailRefreshGener
       return;
     }
     const keep=nearBottom(box);
-    function formatChatLineHtml(entry) {
-      const line = formatDetailLogEntryText(entry, false);
-      if (!line) return '';
-      let cls = 'chat-row-item';
-      const timeMatch = line.match(/^(\d{2}:\d{2}:\d{2})\s*(.*)$/);
-      const timePart = timeMatch ? timeMatch[1] : '--:--:--';
-      const rest = timeMatch ? timeMatch[2] : line;
-
-      let bodyHtml = '';
-      // 1. Tin nhắn lệnh / outgoing do bot gửi: "→ /menu"
-      if (rest.startsWith('→') || rest.includes('→ /')) {
-        cls += ' chat-row-outgoing';
-        const cleanCmd = rest.replace(/^→\s*/, '');
-        bodyHtml = '<span class="chat-dir-pill">BOT →</span><code class="chat-cmd-text">' + escapeHtml(cleanCmd) + '</code>';
-      }
-      // 2. Tin nhắn Role | Player: "VIP | Alex: hello" hoặc "[VIP] Alex: hello"
-      else if (/^\[?([^\]|]+)[\]|]\s*([A-Za-z0-9_]{1,16})\s*[:»]\s*(.+)$/u.test(rest)) {
-        const m = rest.match(/^\[?([^\]|]+)[\]|]\s*([A-Za-z0-9_]{1,16})\s*[:»]\s*(.+)$/u);
-        const role = m[1].trim();
-        const user = m[2].trim();
-        const msg = m[3].trim();
-        bodyHtml = '<span class="chat-badge">' + escapeHtml(role) + '</span>' +
-                   '<span class="chat-sender">' + escapeHtml(user) + ':</span> ' +
-                   '<span class="chat-text">' + escapeHtml(msg) + '</span>';
-      }
-      // 3. Tin nhắn người chơi chuẩn vanilla: "<Player> hello"
-      else if (/^<([A-Za-z0-9_]{1,16})>\s*(.+)$/u.test(rest)) {
-        const m = rest.match(/^<([A-Za-z0-9_]{1,16})>\s*(.+)$/u);
-        const user = m[1].trim();
-        const msg = m[2].trim();
-        bodyHtml = '<span class="chat-sender">' + escapeHtml(user) + ':</span> ' +
-                   '<span class="chat-text">' + escapeHtml(msg) + '</span>';
-      }
-      // 4. Tin nhắn hệ thống server: "[HỆ THỐNG] ..." hoặc "[Server] ..."
-      else if (rest.startsWith('[HỆ THỐNG]') || rest.startsWith('[Server]') || rest.startsWith('Server:')) {
-        cls += ' chat-row-server';
-        const cleanMsg = rest.replace(/^(\[HỆ THỐNG\]|\[Server\]|Server:)\s*/, '');
-        bodyHtml = '<span class="chat-server-badge">HỆ THỐNG</span>' +
-                   '<span class="chat-server-text">' + escapeHtml(cleanMsg) + '</span>';
-      }
-      // 5. Mặc định
-      else {
-        bodyHtml = '<span class="chat-text">' + escapeHtml(rest) + '</span>';
-      }
-
-      return '<div class="' + cls + '">' +
-        '<span class="log-time">' + escapeHtml(timePart) + '</span>' +
-        '<div class="chat-body">' + bodyHtml + '</div>' +
-      '</div>';
-    }
-    const lines = Array.isArray(data?.logs) ? data.logs : [];
-    const countEl = document.getElementById('detailChatCount');
-    if (countEl) countEl.textContent = lines.length + ' tin';
-    const newHtml = lines.length > 0
-      ? lines.map(formatChatLineHtml).join('')
-      : '<div class="log-empty">Chưa có tin nhắn chat nào.</div>';
-    if (box && box.innerHTML !== newHtml) {
-      box.innerHTML = newHtml;
-    }
+    _rawDetailChatEntries = Array.isArray(data?.logs) ? data.logs : [];
+    renderFilteredDetailChat(keep);
     lastChatRevision = (currentChatRev !== null && Number.isFinite(currentChatRev))
       ? currentChatRev
       : Number(data.revision || 0);
-    if(keep && box) box.scrollTop=box.scrollHeight;
   } finally {
     if(reqToken === chatLoadingToken) chatLoading=false;
   }
 }
 
 async function loadDetailPositionHistory(force=false, expectedGeneration=detailRefreshGeneration, expectedBotId=selectedBotId) {
-  const box=document.getElementById('detailPositionHistory');
-  if(!box) return;
   if(!currentUser || (expectedGeneration!==null && (expectedGeneration!==detailRefreshGeneration || expectedBotId!==selectedBotId))) return;
-  // Endpoint /position-logs là stub in-memory; không poll mạng thừa.
   lastPositionHistoryFetchedAt=Date.now();
-  box.textContent='Theo dõi tọa độ trực tiếp ở bảng Trạng thái hiện tại (endpoint lịch sử tọa độ không khả dụng).';
+  if (typeof renderDetailLifecycleAndTrail === 'function') renderDetailLifecycleAndTrail();
 }
 
 function itemLabel(item) {
@@ -1369,39 +1782,167 @@ function itemLabel(item) {
 let selectedDetailMoveSlot = null;
 
 function updateDetailTouchHint() {
-  const hintEl = document.getElementById('detailTouchHint');
-  if (hintEl) hintEl.remove();
+  if (typeof document === 'undefined') return;
+  const hintBox = document.getElementById('detailInventoryInteractHint');
+  const dropZone = document.getElementById('detailDropZone');
+  const isOfflineBot = typeof isDetailBotOfflineOrStopped === 'function' && isDetailBotOfflineOrStopped(detailBot);
+
+  document.querySelectorAll?.('#detailPage .inventory-slot.selected-for-move, #detailPage .equipment-slot.selected-for-move').forEach?.(el => {
+    el.classList?.remove('selected-for-move');
+  });
+  document.querySelectorAll?.('#detailPage .equipment-slot.ready-target').forEach?.(el => {
+    el.classList?.remove('ready-target');
+  });
+  dropZone?.classList?.remove('ready-target');
+
+  if (!selectedDetailMoveSlot || isOfflineBot) {
+    selectedDetailMoveSlot = null;
+    if (hintBox) {
+      hintBox.className = 'inventory-interact-banner';
+      hintBox.innerHTML = '<span>Chạm hoặc bấm 1 lần vào vật phẩm để chọn chuyển ô, mặc giáp, lắp tay phụ hoặc vứt ra ngoài.</span>';
+    }
+    return;
+  }
+
+  if (selectedDetailMoveSlot.kind === 'slot') {
+    const slotNum = Number(selectedDetailMoveSlot.slot);
+    const activeSlotEl = document.querySelector?.('#detailInventoryPanel .inventory-slot[data-slot="' + slotNum + '"]');
+    activeSlotEl?.classList?.add('selected-for-move');
+    document.querySelectorAll?.('#detailPage .equipment-slot').forEach?.(el => el.classList?.add('ready-target'));
+    dropZone?.classList?.add('ready-target');
+    if (hintBox) {
+      const label = itemLabel(selectedDetailMoveSlot.item);
+      const isHotbar = slotNum >= 36 && slotNum <= 44;
+      hintBox.className = 'inventory-interact-banner has-selection';
+      hintBox.innerHTML =
+        '<span><strong>Đang chọn:</strong> ' + escapeHtml(label) + ' — Bấm ô khác để chuyển, bấm Giáp/Tay phụ để mặc, hoặc bấm Vứt đồ.</span>' +
+        '<span style="display:flex;gap:6px;flex-wrap:wrap;">' +
+          (isHotbar ? ('<button type="button" class="small primary" onclick="holdSelectedHotbarSlot(' + (slotNum - 36) + ')">Cầm trên tay</button>') : '') +
+          '<button type="button" class="small" onclick="cancelDetailSlotSelection(event)">Hủy chọn</button>' +
+        '</span>';
+    }
+  } else if (selectedDetailMoveSlot.kind === 'equip') {
+    const boxIdMap = { head: 'equipHeadBox', torso: 'equipTorsoBox', legs: 'equipLegsBox', feet: 'equipFeetBox', 'off-hand': 'equipOffhandBox' };
+    const eqEl = document.getElementById(boxIdMap[selectedDetailMoveSlot.dest] || '');
+    eqEl?.classList?.add('selected-for-move');
+    if (hintBox) {
+      const label = itemLabel(selectedDetailMoveSlot.item);
+      hintBox.className = 'inventory-interact-banner has-selection';
+      hintBox.innerHTML =
+        '<span><strong>Đang chọn trang bị:</strong> ' + escapeHtml(label) + ' — Bấm vào một ô trong Kho đồ để tháo vào ô đó.</span>' +
+        '<span style="display:flex;gap:6px;flex-wrap:wrap;">' +
+          '<button type="button" class="small warning-btn" onclick="unequipSelectedToInventory()">Tháo về kho</button>' +
+          '<button type="button" class="small" onclick="cancelDetailSlotSelection(event)">Hủy chọn</button>' +
+        '</span>';
+    }
+  }
 }
+window.updateDetailTouchHint = updateDetailTouchHint;
+
+async function holdSelectedHotbarSlot(hotbarIndex) {
+  cancelDetailSlotSelection();
+  await selectDetailHotbar(hotbarIndex);
+}
+window.holdSelectedHotbarSlot = holdSelectedHotbarSlot;
+
+async function unequipSelectedToInventory() {
+  if (!selectedDetailMoveSlot || selectedDetailMoveSlot.kind !== 'equip') return;
+  const dest = selectedDetailMoveSlot.dest;
+  cancelDetailSlotSelection();
+  await unequipDetail(dest);
+}
+window.unequipSelectedToInventory = unequipSelectedToInventory;
 
 function cancelDetailSlotSelection(e) {
   if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
   selectedDetailMoveSlot = null;
-  document.querySelectorAll('#detailPage .inventory-slot.selected-for-move, #detailPage .equipment-slot.selected-for-move').forEach(function(el) {
-    el.classList.remove('selected-for-move');
-  });
-  const hintEl = document.getElementById('detailTouchHint');
-  if (hintEl) hintEl.remove();
+  updateDetailTouchHint();
 }
 
 function handleDetailSlotClick(slot, item, e) {
   if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
-  // Chọn các item hoặc ô trống ở hot bar (slots 36-44, tương ứng hotbar 0-8) thì lập tức chuyển tay sang ô đó
-  if (slot >= 36 && slot <= 44) {
-    const hotbarIndex = slot - 36;
-    void selectDetailHotbar(hotbarIndex);
-    document.querySelectorAll('#detailHotbar .inventory-slot').forEach(function(el, idx) {
-      el.classList.toggle('selected', idx === hotbarIndex);
-    });
+  if (typeof isDetailBotOfflineOrStopped === 'function' && isDetailBotOfflineOrStopped(detailBot)) {
+    cancelDetailSlotSelection();
     return;
   }
+  const slotNum = Number(slot);
+  if (selectedDetailMoveSlot) {
+    if (selectedDetailMoveSlot.kind === 'slot' && Number(selectedDetailMoveSlot.slot) === slotNum) {
+      cancelDetailSlotSelection();
+      return;
+    }
+    if (selectedDetailMoveSlot.kind === 'equip') {
+      const dest = selectedDetailMoveSlot.dest;
+      cancelDetailSlotSelection();
+      void unequipAndMove(dest, slotNum);
+      return;
+    }
+    const sourceSlot = Number(selectedDetailMoveSlot.slot);
+    cancelDetailSlotSelection();
+    void moveDetailItem(sourceSlot, slotNum);
+    return;
+  }
+
+  if (!item || !item.name) {
+    if (slotNum >= 36 && slotNum <= 44) {
+      void selectDetailHotbar(slotNum - 36);
+      document.querySelectorAll?.('#detailHotbar .inventory-slot')?.forEach?.(function(el, idx) {
+        el.classList?.toggle('selected', idx === (slotNum - 36));
+      });
+    }
+    return;
+  }
+
+  selectedDetailMoveSlot = { kind: 'slot', slot: slotNum, item };
+  updateDetailTouchHint();
 }
 
-function handleDetailEquipmentClick(dest) {
-  // Thao tác trang bị được thực hiện bằng cách Kéo - Thả vào ô trang bị
+async function handleDetailEquipmentClick(dest) {
+  if (typeof isDetailBotOfflineOrStopped === 'function' && isDetailBotOfflineOrStopped(detailBot)) {
+    cancelDetailSlotSelection();
+    return;
+  }
+  if (selectedDetailMoveSlot && selectedDetailMoveSlot.kind === 'slot') {
+    const sourceSlot = Number(selectedDetailMoveSlot.slot);
+    cancelDetailSlotSelection();
+    await equipDetailItem(sourceSlot, dest);
+    return;
+  }
+  if (selectedDetailMoveSlot && selectedDetailMoveSlot.kind === 'equip' && selectedDetailMoveSlot.dest === dest) {
+    cancelDetailSlotSelection();
+    return;
+  }
+  const armor = detailInventory?.armor || {};
+  const slots = detailInventory?.slots || {};
+  const equipItem = dest === 'off-hand' ? (slots['45'] || null) : (armor[dest] || null);
+  if (!equipItem || !equipItem.name) {
+    showToast('Hãy chọn 1 vật phẩm trong kho đồ trước, rồi bấm vào ô này để mặc / lắp tay phụ.', 'info');
+    return;
+  }
+  selectedDetailMoveSlot = { kind: 'equip', dest, item: equipItem };
+  updateDetailTouchHint();
 }
 
 async function handleDetailDropZoneClick() {
-  // Thao tác vứt đồ được thực hiện bằng cách Kéo - Thả vào ô vứt đồ
+  if (typeof isDetailBotOfflineOrStopped === 'function' && isDetailBotOfflineOrStopped(detailBot)) {
+    cancelDetailSlotSelection();
+    return;
+  }
+  if (!selectedDetailMoveSlot) {
+    showToast('Hãy bấm chọn 1 vật phẩm trong kho đồ trước, rồi bấm vào đây để vứt ra ngoài.', 'info');
+    return;
+  }
+  if (selectedDetailMoveSlot.kind === 'equip') {
+    const dest = selectedDetailMoveSlot.dest;
+    cancelDetailSlotSelection();
+    await unequipDetail(dest);
+    return;
+  }
+  const sourceSlot = Number(selectedDetailMoveSlot.slot);
+  cancelDetailSlotSelection();
+  if (typeof dropDetailSlotDirect === 'function') {
+    await dropDetailSlotDirect(sourceSlot);
+  }
 }
 
 function getMinecraftItemIconUrl(itemName) {

@@ -6,7 +6,7 @@ const { DEFAULT_PUBLIC_MANAGER_URL, normalizePublicUrl, isPublicHttpsUrl } = req
 const SETTING_KEY = 'manager_runtime';
 const ACTIVE_URLS_SETTING_KEY = 'active_manager_urls';
 const ACTIVE_URL_HEARTBEAT_MS = 10 * 60 * 1000;
-const ACTIVE_URL_STALE_MS = 30 * 24 * 60 * 60 * 1000;
+const ACTIVE_URL_STALE_MS = 2 * 60 * 60 * 1000;
 const MAX_ACTIVE_URLS = 8;
 
 class ManagerRuntimeSettings {
@@ -22,6 +22,7 @@ class ManagerRuntimeSettings {
     this._lastUrlRecordAt = new Map();
     this._lastUrlsFetchAt = 0;
     this._urlSyncChain = null;
+    this._heartbeatTimer = null;
     this.values = { publicBaseUrl: '', renderApiKey: '', link4mApiToken: '', link4mSecretKey: '', link4mMode: 'api', link4mUrl: '' };
   }
 
@@ -115,6 +116,13 @@ class ManagerRuntimeSettings {
     if (isPublicHttpsUrl(this.initial?.publicBaseUrl)) {
       void this.recordActiveManagerUrl(this.initial.publicBaseUrl).catch(() => {});
     }
+    if (Array.isArray(this.initial?.managerUrls)) {
+      for (const extraUrl of this.initial.managerUrls) {
+        if (isPublicHttpsUrl(extraUrl)) {
+          void this.recordActiveManagerUrl(extraUrl).catch(() => {});
+        }
+      }
+    }
 
     return this.snapshot();
   }
@@ -169,13 +177,13 @@ class ManagerRuntimeSettings {
     return urls.slice(0, MAX_ACTIVE_URLS);
   }
 
-  recordActiveManagerUrl(candidateUrl) {
+  recordActiveManagerUrl(candidateUrl, { force = false } = {}) {
     if (!isPublicHttpsUrl(candidateUrl)) return Promise.resolve(false);
     const norm = normalizePublicUrl(candidateUrl);
     if (!norm) return Promise.resolve(false);
     const now = Date.now();
     const lastRecorded = this._lastUrlRecordAt.get(norm) || 0;
-    if (lastRecorded && (now - lastRecorded) < ACTIVE_URL_HEARTBEAT_MS) {
+    if (!force && lastRecorded && (now - lastRecorded) < ACTIVE_URL_HEARTBEAT_MS) {
       return Promise.resolve(false);
     }
     this._lastUrlRecordAt.set(norm, now);
@@ -193,9 +201,6 @@ class ManagerRuntimeSettings {
         const nowIso = new Date().toISOString();
         const mergedMap = new Map(this._activeUrlLastSeen);
         mergedMap.set(norm, Date.now());
-        if (isPublicHttpsUrl(DEFAULT_PUBLIC_MANAGER_URL) && !mergedMap.has(DEFAULT_PUBLIC_MANAGER_URL)) {
-          mergedMap.set(DEFAULT_PUBLIC_MANAGER_URL, Date.now() - 1000);
-        }
         const sorted = [...mergedMap.entries()]
           .sort((a, b) => b[1] - a[1])
           .slice(0, MAX_ACTIVE_URLS);
@@ -217,6 +222,35 @@ class ManagerRuntimeSettings {
     const cur = prev.then(task, task);
     this._urlSyncChain = cur.catch(() => {});
     return cur;
+  }
+
+  startHeartbeat(intervalMs = ACTIVE_URL_HEARTBEAT_MS) {
+    this.stopHeartbeat();
+    const effectiveMs = Math.max(60000, Number(intervalMs) || ACTIVE_URL_HEARTBEAT_MS);
+    const pulse = () => {
+      const selfUrl = this.values?.publicBaseUrl || this.initial?.publicBaseUrl || '';
+      if (isPublicHttpsUrl(selfUrl)) {
+        void this.recordActiveManagerUrl(selfUrl, { force: true }).catch(() => {});
+      }
+      if (Array.isArray(this.initial?.managerUrls)) {
+        for (const extraUrl of this.initial.managerUrls) {
+          if (isPublicHttpsUrl(extraUrl)) {
+            void this.recordActiveManagerUrl(extraUrl, { force: true }).catch(() => {});
+          }
+        }
+      }
+      void this.refreshActiveManagerUrls({ maxAgeMs: 0 }).catch(() => {});
+    };
+    this._heartbeatTimer = setInterval(pulse, effectiveMs);
+    this._heartbeatTimer.unref?.();
+    return this._heartbeatTimer;
+  }
+
+  stopHeartbeat() {
+    if (this._heartbeatTimer) {
+      clearInterval(this._heartbeatTimer);
+      this._heartbeatTimer = null;
+    }
   }
 
   snapshot() { return { ...this.values }; }
@@ -295,4 +329,10 @@ class ManagerRuntimeSettings {
   }
 }
 
-module.exports = { ManagerRuntimeSettings, SETTING_KEY };
+module.exports = {
+  ManagerRuntimeSettings,
+  SETTING_KEY,
+  ACTIVE_URLS_SETTING_KEY,
+  ACTIVE_URL_HEARTBEAT_MS,
+  ACTIVE_URL_STALE_MS
+};

@@ -7,7 +7,7 @@ const crypto = require('node:crypto');
 const express = require('express');
 
 const { DEFAULT_PUBLIC_MANAGER_URL, resolveRequestOrigin } = require('../src/config/host-runtime');
-const { ManagerRuntimeSettings } = require('../src/services/manager-runtime-settings');
+const { ManagerRuntimeSettings, ACTIVE_URL_STALE_MS } = require('../src/services/manager-runtime-settings');
 const { Link4mService } = require('../src/services/link4m-service');
 const { DiscordPointsService } = require('../src/services/discord-points-service');
 const { safeDeferReply } = require('../src/discord/handlers/interaction-handler');
@@ -718,5 +718,104 @@ test('Multi-web sync: cross-instance Wispbyte poll wakeup/result, settingsRevisi
     assert.strictEqual(pingedUrls.length, 2, 'Manual checkAll() without skipFreshWithinMs must ping all accounts');
   } finally {
     clearInterval(keepAlive);
+  }
+});
+
+test('Bandwidth & cross-web sync: x-manager-urls-sig dedup, bootstrap cache bypass, and 2h URL stale eviction', async () => {
+  const { workers, supabaseClient, dashboardStore } = createSharedMockBackend();
+  const encKey = crypto.randomBytes(32);
+
+  // 1. Stale active_manager_urls eviction (ACTIVE_URL_STALE_MS = 2h)
+  assert.strictEqual(ACTIVE_URL_STALE_MS, 2 * 60 * 60 * 1000);
+  const oldIso = new Date(Date.now() - (3 * 60 * 60 * 1000)).toISOString();
+  const freshIso = new Date(Date.now() - 60000).toISOString();
+  await dashboardStore.setSetting('active_manager_urls', {
+    urls: ['https://dead-web.onrender.com', 'https://alive-web.onrender.com'],
+    entries: [
+      { url: 'https://dead-web.onrender.com', lastSeenAt: oldIso },
+      { url: 'https://alive-web.onrender.com', lastSeenAt: freshIso }
+    ]
+  });
+
+  const rt1 = new ManagerRuntimeSettings({ store: dashboardStore, encryptionKey: encKey, initial: { publicBaseUrl: 'https://alive-web.onrender.com' } });
+  await rt1.initialize();
+  const activeUrls = rt1.getActiveManagerUrls();
+  assert.ok(!activeUrls.includes('https://dead-web.onrender.com'), 'URLs older than 2h must be evicted');
+  assert.ok(activeUrls.includes('https://alive-web.onrender.com'), 'Fresh URLs within 2h must remain');
+
+  // 2. bootstrap() bypasses 5s worker store cache so edits made on Web #2 take effect immediately on Web #1
+  const storeWeb1 = new SupabaseWorkerStore(supabaseClient, { cacheTtlMs: 5000 });
+  const storeWeb2 = new SupabaseWorkerStore(supabaseClient, { cacheTtlMs: 5000 });
+  const regWeb1 = new WorkerRegistry({ store: storeWeb1, accessStore: dashboardStore, encryptionKey: encKey });
+  const regWeb2 = new WorkerRegistry({ store: storeWeb2, accessStore: dashboardStore, encryptionKey: encKey });
+  await regWeb1.add({ workerId: '01', name: 'Dual Cache Test Bot' });
+  await regWeb1.find('01'); // Prime storeWeb1 5s cache with initial empty settings
+
+  await regWeb2.updateCredentials('01', { username: 'InstantSyncUser', password: 'pw' });
+  const bootImmediate = await regWeb1.bootstrap('01');
+  assert.strictEqual(bootImmediate.credentials.username, 'InstantSyncUser', 'Web #1 bootstrap() must bypass 5s cache and return Web #2 edits immediately');
+  assert.ok(workers.get('01'));
+
+  // 3. x-manager-urls-sig header deduplication on /poll & /heartbeat
+  const cmdStore = { take: async () => null, complete: async () => true, enqueue: async (c) => c, expire: async () => {} };
+  const broker1 = new CommandBroker({
+    registry: regWeb1,
+    commandStore: cmdStore,
+    managerRuntimeSettings: rt1,
+    config: { workerPollWaitMs: 50, commandResultTimeoutMs: 500 },
+    logger: silentLogger
+  });
+  const app = createApp({
+    store: dashboardStore,
+    entitlementService: { gracePeriodMs: 6 * 3600000 },
+    link4mService: { health: () => ({ ok: true, degraded: false }), getDailyQuotaStatus: async () => ({}), createLinkAttempt: async () => ({}) },
+    managerRuntimeSettings: rt1,
+    registry: regWeb1,
+    broker: broker1,
+    workerStore: storeWeb1,
+    config: { sessionSecret: 'test-session-secret-0123456789abcdef', discordToken: 'tok', discordEnabled: false },
+    discordClient: { isReady: () => false },
+    logger: silentLogger
+  });
+
+  const srv = http.createServer(app);
+  await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+  try {
+    const base = `http://127.0.0.1:${srv.address().port}`;
+    // Without sig -> header included
+    const poll1 = await fetch(`${base}/api/v1/workers/01/poll`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-manager-bot-id': '01' },
+      body: JSON.stringify({ waitMs: 0 })
+    });
+    assert.strictEqual(poll1.status, 200);
+    const urlsHeader = poll1.headers.get('x-manager-urls') || '';
+    assert.ok(urlsHeader.length > 0, 'Initial /poll without x-manager-urls-sig must include x-manager-urls');
+    const urlList = urlsHeader.split(',').map((u) => u.trim()).filter(Boolean);
+    const sig = crypto.createHash('sha1').update([...new Set(urlList)].sort().join(',')).digest('hex').slice(0, 8);
+
+    // Matching sig -> x-manager-urls header omitted to save bandwidth
+    const poll2 = await fetch(`${base}/api/v1/workers/01/poll`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-manager-bot-id': '01', 'x-manager-urls-sig': sig },
+      body: JSON.stringify({ waitMs: 0 })
+    });
+    assert.strictEqual(poll2.status, 200);
+    assert.strictEqual(poll2.headers.get('x-manager-urls'), null, 'Matching x-manager-urls-sig must omit redundant x-manager-urls header');
+
+    // Second web comes online -> sig changes -> x-manager-urls sent automatically
+    await rt1.recordActiveManagerUrl('https://brand-new-web2.onrender.com', { force: true });
+    const poll3 = await fetch(`${base}/api/v1/workers/01/poll`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-manager-bot-id': '01', 'x-manager-urls-sig': sig },
+      body: JSON.stringify({ waitMs: 0 })
+    });
+    assert.strictEqual(poll3.status, 200);
+    assert.ok(String(poll3.headers.get('x-manager-urls') || '').includes('https://brand-new-web2.onrender.com'), 'Stale client sig must receive new Manager URL immediately');
+  } finally {
+    broker1.stopOutboxProcessor();
+    rt1.stopHeartbeat();
+    srv.closeAllConnections?.();
+    await new Promise((resolve) => srv.close(resolve));
   }
 });

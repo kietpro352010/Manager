@@ -98,13 +98,13 @@ class SupabaseWorkerStore {
     }
   }
 
-  _cloneWorker(worker) {
+  _cloneWorker(worker, { omitHeavyFields = false } = {}) {
     if (!worker) return null;
     return {
       ...worker,
       ...(worker.settings && typeof worker.settings === 'object' ? { settings: { ...worker.settings } } : {}),
       ...(worker.status && typeof worker.status === 'object' ? { status: { ...worker.status } } : {}),
-      ...(Array.isArray(worker.events) ? { events: worker.events.slice() } : {})
+      ...(!omitHeavyFields && Array.isArray(worker.events) ? { events: worker.events.slice() } : {})
     };
   }
 
@@ -215,13 +215,14 @@ class SupabaseWorkerStore {
     return this._cloneWorker(mapped);
   }
 
-  async list({ bypassCache = false } = {}) {
+  async list({ bypassCache = false, omitHeavyFields = false } = {}) {
+    const cloneOpts = omitHeavyFields ? { omitHeavyFields: true } : undefined;
     if (!bypassCache && this.cacheTtlMs > 0 && this._listCache && Date.now() < this._listCache.expiresAt) {
-      return this._listCache.data.map((w) => this._cloneWorker(w));
+      return this._listCache.data.map((w) => this._cloneWorker(w, cloneOpts));
     }
     if (!bypassCache && this._listInFlight) {
       const shared = await this._listInFlight;
-      return shared.map((w) => this._cloneWorker(w));
+      return shared.map((w) => this._cloneWorker(w, cloneOpts));
     }
     const fetchList = async () => {
       const gen = this._cacheGen;
@@ -239,7 +240,7 @@ class SupabaseWorkerStore {
     };
     if (bypassCache) {
       const mapped = await fetchList();
-      return mapped.map((w) => this._cloneWorker(w));
+      return mapped.map((w) => this._cloneWorker(w, cloneOpts));
     }
     const promise = fetchList()
       .catch((err) => {
@@ -255,7 +256,7 @@ class SupabaseWorkerStore {
       });
     this._listInFlight = promise;
     const mapped = await promise;
-    return mapped.map((w) => this._cloneWorker(w));
+    return mapped.map((w) => this._cloneWorker(w, cloneOpts));
   }
 
   async nextBotNumber() {
